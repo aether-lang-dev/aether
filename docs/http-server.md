@@ -865,6 +865,13 @@ only control frames (a ping, say) between them. A continuation frame with
 no message in progress, or a text or binary frame inside a fragmented
 message, closes the connection with `1002`. Both ends apply these rules.
 
+A text message must be UTF-8 (8.1), and so must a close frame's reason:
+no overlong form, no surrogate, nothing past U+10FFFF, and a message may
+not end inside a code point. It is checked as the bytes arrive and across
+fragments, so a code point split between two fragments is whole. Text that
+is not UTF-8 closes the connection with `1007`, and `ws_recv` returns `-1`.
+A binary message is not checked.
+
 ## Server-Sent Events
 
 ```aether,fragment

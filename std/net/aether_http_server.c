@@ -5158,9 +5158,52 @@ int http_ws_poll(HttpWsConn* ws, int timeout_ms) {
  * by a chatty peer.
  *
  * timeout_ms < 0 blocks indefinitely, which is exactly http_ws_recv. */
+/* Strict UTF-8 (RFC 3629), checked a piece at a time, so a code point may
+ * straddle two pieces (two fragments of one message). `need` is how many
+ * continuation bytes the sequence in progress still wants, and [lo, hi] the
+ * range the next one must fall in: that range is what refuses an overlong
+ * form (E0 then below A0, F0 then below 90), a surrogate (ED then above 9F)
+ * and a code point past U+10FFFF (F4 then above 8F). C0, C1 and F5 to FF
+ * never begin a sequence. */
+typedef struct {
+    int need;
+    unsigned char lo, hi;
+} WsUtf8;
+
+/* 0 while every byte so far is valid UTF-8 (a sequence may be unfinished),
+ * -1 at the first that is not. */
+static int ws_utf8_feed(WsUtf8* u, const unsigned char* p, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = p[i];
+        if (u->need == 0) {
+            if (c < 0x80) continue;
+            u->lo = 0x80;
+            u->hi = 0xBF;
+            if (c >= 0xC2 && c <= 0xDF) u->need = 1;
+            else if (c == 0xE0) { u->need = 2; u->lo = 0xA0; }
+            else if (c == 0xED) { u->need = 2; u->hi = 0x9F; }
+            else if (c >= 0xE1 && c <= 0xEF) u->need = 2;
+            else if (c == 0xF0) { u->need = 3; u->lo = 0x90; }
+            else if (c == 0xF4) { u->need = 3; u->hi = 0x8F; }
+            else if (c >= 0xF1 && c <= 0xF3) u->need = 3;
+            else return -1;
+        } else {
+            if (c < u->lo || c > u->hi) return -1;
+            u->need--;
+            u->lo = 0x80;
+            u->hi = 0xBF;
+        }
+    }
+    return 0;
+}
+
 int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
     if (!ws || !ws->conn || ws->closed) return -1;
     ws->msg_len = 0;  /* reset for this message */
+    /* A text message is UTF-8, checked as its bytes arrive and across its
+     * fragments; one that is not fails the connection with 1007 (RFC 6455
+     * 5.6, 8.1). */
+    WsUtf8 utf8 = { 0, 0x80, 0xBF };
 
     /* Deadline for the whole call, so ping floods or fragmentation cannot
      * extend it. Only consulted before a frame starts. */
@@ -5260,6 +5303,14 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
                 continue;
             }
             if (opcode == WS_OP_PONG) continue;  /* unsolicited pong: discard */
+            /* A close frame's reason, after its two-byte code, is UTF-8
+             * (RFC 6455 5.5.1); one that is not fails with 1007 (8.1)
+             * rather than being echoed back. */
+            if (pl > 2) {
+                WsUtf8 reason = { 0, 0x80, 0xBF };
+                if (ws_utf8_feed(&reason, ctl + 2, (size_t)pl - 2) != 0 || reason.need != 0)
+                    return ws_fail(ws, 1007, "invalid UTF-8 in a close reason");
+            }
             /* Echo the close frame back (RFC 6455 5.5.1) and report it. */
             ws_send_frame_masked(ws->conn, WS_OP_CLOSE, ctl, (int)pl, ws->mask_tx);
             ws->closed = 1;
@@ -5307,11 +5358,19 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
             if (ws_recv_exact(ws->conn, dst, (int)step) != 0) { ws->closed = 1; return -1; }
             if (masked)
                 for (size_t i = 0; i < step; i++) dst[i] ^= (char)mask_key[(done + i) & 3];
+            if (ws->msg_opcode == WS_OP_TEXT &&
+                ws_utf8_feed(&utf8, (const unsigned char*)dst, step) != 0)
+                return ws_fail(ws, 1007, "invalid UTF-8 in a text message");
             done += step;
         }
         ws->msg_len += want;
 
-        if (fin) break;
+        if (fin) {
+            /* A text message that ends inside a code point is not UTF-8. */
+            if (ws->msg_opcode == WS_OP_TEXT && utf8.need != 0)
+                return ws_fail(ws, 1007, "invalid UTF-8 in a text message");
+            break;
+        }
     }
 
     /* NUL-terminate text messages for caller convenience; binary

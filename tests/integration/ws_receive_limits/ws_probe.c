@@ -19,6 +19,12 @@
  *  14. a continuation with no message in progress closes with 1002 (5.4);
  *  15. a new data frame inside a fragmented message closes with 1002;
  *  16. a ping between fragments is answered and the message reassembles.
+ *  17. code points split across fragments reassemble as UTF-8;
+ *  18. a binary message is not checked as UTF-8;
+ *  19-24. text that is not UTF-8 (a byte 0xFF, an overlong form, a
+ *      surrogate, a code point past U+10FFFF, a message ending inside a
+ *      code point) and a close reason that is not UTF-8 close with 1007
+ *      (RFC 6455 8.1).
  *
  * Usage: ws_probe <port>. Prints PASS/FAIL lines; exits 0 when all pass.
  *
@@ -407,6 +413,55 @@ int main(int argc, char** argv) {
     if (n >= 0) buf[n] = '\0';
     check(pong_ok && n >= 0 && op == 0x1 && strcmp((char*)buf, "len=10") == 0,
           "a ping between two fragments is answered and the message reassembles");
+    raw_socket_close(s);
+
+    /* 17. A text message is UTF-8 across its fragments (RFC 6455 8.1): "é"
+     * split between two fragments, "€" between the next two, is whole. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 0, 0x1, (const unsigned char*)"caf\xc3", 4, 4);
+    send_frame(s, 0, 0x0, (const unsigned char*)"\xa9 \xe2\x82", 4, 4);
+    send_frame(s, 1, 0x0, (const unsigned char*)"\xac", 1, 1);
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    if (n >= 0) buf[n] = '\0';
+    check(n >= 0 && op == 0x1 && strcmp((char*)buf, "len=9") == 0,
+          "code points split across fragments reassemble as UTF-8 (len=9)");
+
+    /* 18. Binary is not text: bytes that are not UTF-8 are echoed. */
+    send_frame(s, 1, 0x2, (const unsigned char*)"\xff\xfe\xc0", 3, 3);
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    if (n >= 0) buf[n] = '\0';
+    check(n >= 0 && op == 0x1 && strcmp((char*)buf, "len=3") == 0,
+          "a binary message is not checked as UTF-8");
+    raw_socket_close(s);
+
+    /* 19-24. Text that is not UTF-8 closes with 1007: a byte that never
+     * begins a sequence, an overlong form, a surrogate, a code point past
+     * U+10FFFF, a message ending inside a code point, and a close reason
+     * that is not UTF-8. Each was handed to the program as text. */
+    static const struct { const char* bytes; size_t len; int fragments; const char* what; } bad[] = {
+        { "ok \xff", 4, 1, "a text byte 0xFF closes with 1007" },
+        { "\xc0\xaf", 2, 1, "an overlong form closes with 1007" },
+        { "\xed\xa0\x80", 3, 1, "a surrogate (U+D800) closes with 1007" },
+        { "\xf4\x90\x80\x80", 4, 1, "a code point past U+10FFFF closes with 1007" },
+        { "abc\xe2\x82", 5, 2, "a text message ending inside a code point closes with 1007" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        s = ws_open("/ws");
+        if (s == RAW_SOCK_INVALID) return 1;
+        if (bad[i].fragments == 2) {
+            send_frame(s, 0, 0x1, (const unsigned char*)bad[i].bytes, 3, 3);
+            send_frame(s, 1, 0x0, (const unsigned char*)bad[i].bytes + 3, bad[i].len - 3, bad[i].len - 3);
+        } else {
+            send_frame(s, 1, 0x1, (const unsigned char*)bad[i].bytes, bad[i].len, bad[i].len);
+        }
+        check(close_code(s) == 1007, bad[i].what);
+        raw_socket_close(s);
+    }
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 1, 0x8, (const unsigned char*)"\x03\xe8\xc3(", 4, 4);
+    check(close_code(s) == 1007, "a close reason that is not UTF-8 closes with 1007");
     raw_socket_close(s);
 
     if (failures) {

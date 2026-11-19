@@ -22,27 +22,25 @@
  *   W1  What each http_ws_recv returns is what a reading of RFC 6455 5
  *       written here gives for the same stream: the type and the bytes of
  *       each message, unmasked and reassembled from its fragments, and -1
- *       once the stream ends, the peer closes or a frame breaks a rule (a
- *       frame masked the wrong way for the role, a reserved opcode, a
- *       control frame that is fragmented or longer than 125 bytes, a
- *       message past the cap). A text message is NUL-terminated.
+ *       once the stream ends, the peer closes or a frame breaks a rule: a
+ *       frame masked the wrong way for the role, a reserved opcode or a
+ *       reserved bit set (5.2), a control frame that is fragmented or
+ *       longer than 125 bytes (5.5), a continuation with no message in
+ *       progress or a data frame inside one (5.4), a message past the cap,
+ *       a text message or a close reason that is not UTF-8 (8.1: no
+ *       overlong form, surrogate or code point past U+10FFFF, checked
+ *       across fragments, failing at the frame where the bytes can no
+ *       longer be completed to UTF-8). A text message is NUL-terminated.
  *   W2  The frames the reader sends are exactly the ones the reading gives,
  *       masked as the role requires: a pong with each ping's payload, the
- *       peer's close frame echoed, and a close with 1002 or 1009 when it
- *       fails the connection.
+ *       peer's close frame echoed, and a close with 1002, 1007 or 1009 when
+ *       it fails the connection.
  *   W3  The reassembly buffer grows with what arrived, never with what a
  *       frame declared: it never holds more than the cap and one byte, nor
  *       much more than the bytes received.
  *   W4  A closed handle stays closed: http_ws_recv answers -1 and sends
  *       nothing.
- *   W5  Nothing leaks (LeakSanitizer).
- *
- * Two lenient readings of the reader's are modelled as they are, not as the
- * RFC has them: a continuation frame with no message to continue continues
- * the type of the last message (binary before any), and a text or binary
- * frame in the middle of a fragmented message starts a new message, the
- * fragments before it dropped. Text is not checked to be UTF-8 (RFC 6455
- * 8.1). */
+ *   W5  Nothing leaks (LeakSanitizer). */
 #include "../../../std/net/aether_http_server.c"
 
 #include <stdint.h>
@@ -142,20 +140,59 @@ static void model_result(Model* m, int kind, const uint8_t* d, size_t n) {
     if (n) memcpy(r->data, d, n);
 }
 
+/* UTF-8 as RFC 3629 has it, decoded rather than matched against byte
+ * ranges, so the reading here does not share the reader's method: a lead
+ * byte gives a length and the bits it carries, each continuation byte six
+ * more, and the code points the sequence can still name must reach a valid
+ * one: no less than the least its length may encode (an overlong form
+ * cannot), not a surrogate, not past U+10FFFF. -1 when `b` cannot be
+ * completed to UTF-8, 1 when it ends inside a code point that can still be
+ * completed, 0 when it is whole code points. */
+static int utf8_prefix(const uint8_t* b, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        uint8_t c = b[i];
+        int len;
+        uint32_t cp;
+        if (c < 0x80) { i++; continue; }
+        if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1F; }
+        else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
+        else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
+        else return -1;
+        int have = 1;
+        while (have < len && i + (size_t)have < n) {
+            if ((b[i + (size_t)have] & 0xC0) != 0x80) return -1;
+            cp = (cp << 6) | (b[i + (size_t)have] & 0x3F);
+            have++;
+        }
+        int missing = len - have;
+        uint32_t lo = cp << (6 * missing);
+        uint32_t hi = lo | ((1u << (6 * missing)) - 1);
+        uint32_t least = len == 2 ? 0x80 : len == 3 ? 0x800 : 0x10000;
+        if (lo < least) lo = least;
+        if (hi > 0x10FFFF) hi = 0x10FFFF;
+        if (lo > hi) return -1;
+        /* What is left must not lie wholly among the surrogates. */
+        if (lo >= 0xD800 && hi <= 0xDFFF) return -1;
+        if (missing > 0) return 1;   /* only the last sequence can be unfinished */
+        i += (size_t)len;
+    }
+    return 0;
+}
+
 /* The whole stream, read as the reader must read it: each message it
  * returns, then -1, and every frame it sends. */
 static void model_stream(const uint8_t* s, size_t n, int mask_tx, size_t max, Model* m) {
     size_t p = 0;
-    int msg_opcode = 0;
     uint8_t* msg = NULL;
     size_t msg_len = 0;
     for (;;) {
-        /* one call of http_ws_recv */
+        /* one call of http_ws_recv: a message begins and ends within it */
         msg_len = 0;
-        int done = 0;
+        int in_message = 0, msg_opcode = 0, done = 0;
         while (!done) {
             if (n - p < 2) goto closed;
-            int fin = s[p] >> 7, opcode = s[p] & 15, masked = s[p + 1] >> 7;
+            int fin = s[p] >> 7, rsv = s[p] & 0x70, opcode = s[p] & 15, masked = s[p + 1] >> 7;
             uint64_t pl = s[p + 1] & 127;
             p += 2;
             if (pl == 126) {
@@ -174,42 +211,38 @@ static void model_stream(const uint8_t* s, size_t n, int mask_tx, size_t max, Mo
                 memcpy(key, s + p, 4);
                 p += 4;
             }
-            if (masked == mask_tx) {
-                model_fail(m, 1002);
-                goto closed;
-            }
-            if ((opcode >= 3 && opcode <= 7) || opcode >= 11) {
-                model_fail(m, 1002);
-                goto closed;
-            }
+            if (masked == mask_tx) { model_fail(m, 1002); goto closed; }
+            if ((opcode >= 3 && opcode <= 7) || opcode >= 11) { model_fail(m, 1002); goto closed; }
+            if (rsv) { model_fail(m, 1002); goto closed; }
             if (opcode >= 8) {
-                if (!fin || pl > 125) {
-                    model_fail(m, 1002);
-                    goto closed;
-                }
+                if (!fin || pl > 125) { model_fail(m, 1002); goto closed; }
                 if (n - p < pl) goto closed;
                 uint8_t ctl[125];
                 for (uint64_t i = 0; i < pl; i++) ctl[i] = s[p + i] ^ key[i & 3];
                 p += (size_t)pl;
                 if (opcode == WS_OP_PING) { model_send(m, WS_OP_PONG, ctl, (size_t)pl); continue; }
                 if (opcode == WS_OP_PONG) continue;
+                if (pl > 2 && utf8_prefix(ctl + 2, (size_t)pl - 2) != 0) { model_fail(m, 1007); goto closed; }
                 model_send(m, WS_OP_CLOSE, ctl, (size_t)pl);
                 goto closed;
             }
-            if (opcode == WS_OP_TEXT || opcode == WS_OP_BIN) {
+            if (opcode == WS_OP_CONT && !in_message) { model_fail(m, 1002); goto closed; }
+            if (opcode != WS_OP_CONT && in_message) { model_fail(m, 1002); goto closed; }
+            if (opcode != WS_OP_CONT) {
                 msg_opcode = opcode;
-                msg_len = 0;
+                in_message = 1;
             }
-            if (msg_len > max || pl > (uint64_t)(max - msg_len)) {
-                model_fail(m, 1009);
-                goto closed;
-            }
+            if (msg_len > max || pl > (uint64_t)(max - msg_len)) { model_fail(m, 1009); goto closed; }
             if (n - p < pl) goto closed;
             msg = (uint8_t*)realloc(msg, msg_len + (size_t)pl + 1);
             CHECK(msg != NULL, "out of memory");
             for (uint64_t i = 0; i < pl; i++) msg[msg_len + i] = s[p + i] ^ key[i & 3];
             msg_len += (size_t)pl;
             p += (size_t)pl;
+            if (msg_opcode == WS_OP_TEXT) {
+                int u = utf8_prefix(msg, msg_len);
+                if (u < 0 || (fin && u != 0)) { model_fail(m, 1007); goto closed; }
+            }
             if (fin) done = 1;
         }
         model_result(m, msg_opcode == WS_OP_TEXT ? 1 : 2, msg, msg_len);
