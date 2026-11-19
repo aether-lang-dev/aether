@@ -5,4 +5,9 @@
   `ws_close` (and `http_ws_close` in C) now returns `""`, or why it sent
   nothing: a code a close frame may not carry, or a reason that is not
   UTF-8. A reason past 123 bytes is cut at a whole code point, where it was
-  cut at byte 123 even inside one.
+  cut at byte 123 even inside one. **Behaviour change:** `ws_close` with
+  such a code or reason used to send the close frame anyway and mark the
+  connection closed; it now sends nothing, returns the reason, and leaves
+  the connection open, so a caller that ignored the result and went on as
+  if it were closed should check it and close with an allowed code (1000
+  for a normal close).
