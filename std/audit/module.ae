@@ -16,6 +16,8 @@
 //
 // The buffer holds the most recent 256 checks; older ones roll off.
 // audit.clear() empties it — useful to scope a query to one operation.
+// audit.denied_total() is the one count that never rolls off: every denial
+// since the process started.
 //
 // Typical use:
 //
@@ -32,7 +34,7 @@
 //   }
 
 exports(
-    count, entry, clear, denied_count
+    count, entry, clear, denied_count, denied_total
 )
 
 // Detach a borrowed ring-buffer string into an Aether-owned copy.
@@ -53,6 +55,9 @@ extern aether_audit_entry_allowed(i: int) -> int // 1 allowed, 0 denied, -1 out 
 
 // Drop all buffered entries.
 extern aether_audit_clear()
+
+// Denials since the process started (monotonic; not reset by clear).
+extern aether_audit_denied_total() -> long
 
 // ---- Ergonomic wrappers (audit.* namespace) ----
 
@@ -80,7 +85,9 @@ clear() {
     aether_audit_clear()
 }
 
-// Convenience: how many of the buffered checks were denials.
+// Convenience: how many of the buffered checks were denials. The ring
+// keeps the latest 256 checks, allowed ones included, so a denial rolls off
+// once 256 later checks are recorded; denied_total() does not.
 denied_count() -> int {
     n = aether_audit_count()
     denials = 0
@@ -90,4 +97,12 @@ denied_count() -> int {
         }
     }
     return denials
+}
+
+// Every denial the sandbox has recorded since the process started, on any
+// thread: a monotonic count that does not roll off with the ring and that
+// clear() does not reset. Take it before and after a piece of work to count
+// that work's denials however many checks it made.
+denied_total() -> long {
+    return aether_audit_denied_total()
 }

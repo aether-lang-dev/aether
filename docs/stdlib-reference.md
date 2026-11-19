@@ -15,7 +15,7 @@ header comment is the authoritative description.
 | `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 7 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume; pan, pitch, looping, groups, a queue source and a headless engine for the game-engine mixer. | 46 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
-| `std.audit` | Query the sandbox audit trail. | 4 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
+| `std.audit` | Query the sandbox audit trail. | 5 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 17 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.brotli` | Brotli encoding and capped decoding, streaming and one-shot, for `Content-Encoding: br`. | 34 | [guide](../std/brotli/README.md) · [source](../std/brotli/module.ae) |
@@ -3840,7 +3840,8 @@ denied 2 of 3
 **Functions:**
 - `audit.count()` → `int` - Checks in the buffer
 - `audit.entry(i)` → `(string, string, int)` - Category, resource, and 1 if allowed
-- `audit.denied_count()` → `int`
+- `audit.denied_count()` → `int` - Denials still in the buffer (a denial rolls off after 256 later checks)
+- `audit.denied_total()` → `long` - Every denial since the process started: monotonic, process-wide, not reset by `clear()`
 - `audit.clear()` - Empty the buffer, to scope a query to one operation
 
 ### FreeBSD capability mode (`std.capsicum`)

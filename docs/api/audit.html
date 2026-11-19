@@ -19,6 +19,7 @@
     <li><a href="#entry">entry</a></li>
     <li><a href="#clear">clear</a></li>
     <li><a href="#denied_count">denied_count</a></li>
+    <li><a href="#denied_total">denied_total</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -143,7 +144,12 @@
     <div class="function" id="denied_count" data-name="denied_count">
       <h3 class="function-name">denied_count <span class="kind">fn</span></h3>
       <pre class="usage"><code>denied_count() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Convenience: how many of the buffered checks were denials.</p>
+      <p class="doc">Convenience: how many of the buffered checks were denials. The ring keeps the latest 256 checks, allowed ones included, so a denial rolls off once 256 later checks are recorded; denied_total() does not.</p>
+    </div>
+    <div class="function" id="denied_total" data-name="denied_total">
+      <h3 class="function-name">denied_total <span class="kind">fn</span></h3>
+      <pre class="usage"><code>denied_total() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">Every denial the sandbox has recorded since the process started, on any thread: a monotonic count that does not roll off with the ring and that clear() does not reset. Take it before and after a piece of work to count that work's denials however many checks it made.</p>
     </div>
   </div>
 </main>

@@ -1,0 +1,72 @@
+// std.audit tests: co-located with the module (#1584).
+//
+// The ring keeps the latest 256 checks, allowed ones too, so a denial rolls
+// off it once 256 later checks are recorded and denied_count() no longer
+// sees it. denied_total() counts every denial since the process started and
+// does not roll off, nor does clear() reset it.
+
+import std.spec
+import std.sandbox
+import std.os
+import std.audit
+
+extern exit(code: int)
+
+main() {
+    fw = spec.init()
+    env_err = os.setenv("AE_AUDIT_TEST_OPEN", "visible")
+    if env_err != "" {
+        println("cannot set the test variable: ${env_err}")
+        exit(1)
+    }
+
+    spec.describe(fw, "std.audit") {
+        spec.it("denied_total keeps a denial the ring has rolled off") callback {
+            g = sandbox.new("one-variable") {
+                grant_env("AE_AUDIT_TEST_OPEN")
+            }
+            before = audit.denied_total()
+            audit.clear()
+            sandbox.enforce(g) callback {
+                spec.assert_true(os.getenv("AE_AUDIT_TEST_SECRET") == null, "a refused read")
+                i = 0
+                while i < 300 {
+                    _ = os.getenv("AE_AUDIT_TEST_OPEN")
+                    i = i + 1
+                }
+            }
+            spec.assert_eq(audit.count(), 256, "the ring is full")
+            spec.assert_eq(audit.denied_count(), 0, "the denial rolled off the ring")
+            spec.assert_eq_long(audit.denied_total() - before, 1, "one denial, still counted")
+            sandbox.free(g)
+        }
+
+        spec.it("clear() empties the ring but not denied_total") callback {
+            g = sandbox.new("nothing") {}
+            sandbox.enforce(g) callback {
+                _ = os.getenv("AE_AUDIT_TEST_OPEN")
+                _ = os.getenv("AE_AUDIT_TEST_OPEN")
+            }
+            total = audit.denied_total()
+            audit.clear()
+            spec.assert_eq(audit.denied_count(), 0, "the ring is empty")
+            spec.assert_eq_long(audit.denied_total(), total, "the total is kept")
+            sandbox.free(g)
+        }
+
+        spec.it("allowed checks do not count") callback {
+            before = audit.denied_total()
+            g = sandbox.new("all") {
+                grant_all()
+            }
+            sandbox.enforce(g) callback {
+                _ = os.getenv("AE_AUDIT_TEST_OPEN")
+            }
+            spec.assert_eq_long(audit.denied_total() - before, 0, "no denial")
+            sandbox.free(g)
+        }
+    }
+
+    rc = spec.run_summary(fw)
+    return rc
+}
