@@ -9,6 +9,10 @@
   installed and logged in, refuse on any failure, and say which checks they
   could not make. `SHA256SUMS` is fetched from the release URL, so a spent
   API rate limit no longer blocks an install of a signed release. Releases
-  from before this change are checked by GitHub's digest, as before. The
-  release workflow verifies the previous release before its ABI matrix runs
-  it. See `docs/release-signing.md`.
+  from before 0.926.0, the first signed one, are checked by GitHub's
+  digest, as before; one at or above it without `SHA256SUMS`, or without
+  its signature when `cosign` is installed, is refused, so whoever can edit
+  a release cannot delete them and have its archive taken on the digest
+  alone. The release workflow fails a release that disagrees with that
+  floor, and verifies the previous release before its ABI matrix runs it.
+  See `docs/release-signing.md`.

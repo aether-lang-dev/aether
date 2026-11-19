@@ -49,6 +49,16 @@
 set -eu
 
 REPO="aether-lang-dev/aether"
+# The signing floor (#3752): the first release signed, with SHA256SUMS, its
+# cosign bundle and build provenance. A release at or above it must have
+# SHA256SUMS, and its bundle when cosign is here; one without them is
+# refused, so someone who can edit a release cannot delete them and have its
+# archive taken on GitHub's digest alone. It must be the first release
+# published by a release.yml that has the sign job: release.yml's publish
+# job fails a release that disagrees with it. Equal to AE_SIGNED_SINCE in
+# tools/ae_version.c and signed_since in scripts/verify-release-asset.sh
+# (tests/scripts/check_signing_floor.sh, in make check-tests).
+SIGNED_SINCE="0.926.0"
 PREFIX="${PREFIX:-$HOME/.local}"
 CC="${CC:-cc}"
 FROM_SOURCE="${AETHER_FROM_SOURCE:-0}"
@@ -163,6 +173,22 @@ gh_http() {
     return $_ghh_rc
 }
 
+# release_signed TAG : 0 when TAG (vX.Y.Z, anything after Z ignored) is at or
+# above SIGNED_SINCE, or is not a version at all; 1 when it is older.
+release_signed() {
+    awk -v t="$1" -v f="$SIGNED_SINCE" '
+        function num(s, i,   p) { split(s, p, "."); return p[i] + 0 }
+        BEGIN {
+            sub(/^v/, "", t)
+            if (t !~ /^[0-9]+\.[0-9]+\.[0-9]+/) exit 0
+            for (i = 1; i <= 3; i++) {
+                a = num(t, i); b = num(f, i)
+                if (a != b) exit (a > b) ? 0 : 1
+            }
+            exit 0
+        }'
+}
+
 gh_sha256() {
     if have sha256sum; then sha256sum "$1" | awk '{print $1}'
     elif have shasum; then shasum -a 256 "$1" | awk '{print $1}'
@@ -205,8 +231,9 @@ gh_fetch() {
 #     with cosign installed the signature must verify as the release
 #     workflow's, and with gh installed and logged in `gh attestation verify`
 #     must accept the archive. A missing tool is said, not a refusal;
-#   - an older release has no SHA256SUMS: the archive must match the sha256
-#     digest the API lists for it, as before.
+#   - a release older than SIGNED_SINCE has no SHA256SUMS: the archive must
+#     match the sha256 digest the API lists for it, as before. One at or
+#     above it without SHA256SUMS is refused.
 # 0 when fetched and verified; 1 when it could not be fetched (said: both ways
 # failed); 2 when it was fetched but cannot be verified or does not match
 # (said; DEST is removed).
@@ -274,6 +301,13 @@ gh_release_download() {
     fi
 
     if [ "$_ghd_have_sums" = 0 ]; then
+        # A signed release without SHA256SUMS: someone took it away, and the
+        # digest the same person can rewrite is no check at all.
+        if release_signed "$_ghd_t"; then
+            rm -f "$_ghd_d"
+            say "  $_ghd_a cannot be verified: $_ghd_t is at or above $SIGNED_SINCE, the first signed release, and its SHA256SUMS is missing."
+            return 2
+        fi
         # A release from before #3752: GitHub's digest is all there is.
         if [ -n "$_ghd_why" ]; then
             rm -f "$_ghd_d"

@@ -8,7 +8,9 @@
 #   2. sign runs cosign sign-blob over SHA256SUMS into SHA256SUMS.sigstore.json
 #      and actions/attest-build-provenance over SHA256SUMS;
 #   3. publish needs sign, is gated on it, checks the assets against
-#      SHA256SUMS, and uploads SHA256SUMS and SHA256SUMS.sigstore.json;
+#      SHA256SUMS, checks the release against the signing floor before it
+#      creates the release, and uploads SHA256SUMS and
+#      SHA256SUMS.sigstore.json;
 #   4. the previous release the ABI matrix runs is verified before it is
 #      unpacked, on Unix and on Windows.
 
@@ -49,6 +51,11 @@ printf '%s\n' "$PUBLISH" | grep -q "sha256sum -c --strict SHA256SUMS" || fail "p
 printf '%s\n' "$PUBLISH" | grep -q "^          SHA256SUMS$" || fail "publish does not upload SHA256SUMS"
 printf '%s\n' "$PUBLISH" | grep -q "^          SHA256SUMS.sigstore.json$" || fail "publish does not upload the signature"
 printf '%s\n' "$PUBLISH" | grep -q "id-token" && fail "publish holds an OIDC token"
+# The signing floor is checked before the release is created.
+floor_at=$(printf '%s\n' "$PUBLISH" | grep -n "name: Check the release against the signing floor" | cut -d: -f1)
+create_at=$(printf '%s\n' "$PUBLISH" | grep -n "name: Create GitHub Release" | cut -d: -f1)
+[ -n "$floor_at" ] || fail "publish does not check the release against the signing floor"
+[ -n "$create_at" ] && [ "$floor_at" -lt "$create_at" ] || fail "publish checks the signing floor after creating the release"
 
 n=$(grep -c "sh scripts/verify-release-asset.sh" "$WF")
 [ "$n" = 2 ] || fail "the previous release is verified $n times, not on Unix and Windows both"

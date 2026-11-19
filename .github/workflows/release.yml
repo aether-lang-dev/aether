@@ -1264,6 +1264,45 @@ jobs:
         echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+    # The signing floor (signed_since in scripts/verify-release-asset.sh,
+    # SIGNED_SINCE in get.sh, AE_SIGNED_SINCE in tools/ae_version.c): the
+    # installers refuse a release at or above it that lacks SHA256SUMS or
+    # its bundle, and take one below it on GitHub's digest alone. So a
+    # release at or above it goes out signed, and one below it cannot come
+    # from this workflow, which signs every release: a floor set too high
+    # fails the next release here, instead of leaving signed releases below
+    # it open to the downgrade the floor exists to stop. Read from this workflow's own commit, as the tag checked out can
+    # predate the floor (the rule at the build job's checkout).
+    - name: Check the release against the signing floor
+      env:
+        VERSION: ${{ steps.tag.outputs.version }}
+        WF_SHA: ${{ github.sha }}
+      run: |
+        set -eu
+        git fetch --no-tags --depth=1 origin "$WF_SHA"
+        floor="$(git show "$WF_SHA:scripts/verify-release-asset.sh" | sed -n 's/^signed_since=\([0-9][0-9.]*\)$/\1/p')"
+        if [ -z "$floor" ]; then
+          echo "::error::scripts/verify-release-asset.sh at $WF_SHA sets no signed_since"
+          exit 1
+        fi
+        older="$(awk -v t="$VERSION" -v f="$floor" '
+          function num(s, i,   p) { split(s, p, "."); return p[i] + 0 }
+          BEGIN { for (i = 1; i <= 3; i++) { a = num(t, i); b = num(f, i)
+                  if (a != b) { print (a < b) ? 1 : 0; exit } }
+                  print 0 }')"
+        if [ "$older" = 1 ]; then
+          echo "::error::$VERSION is below the signing floor $floor, and this workflow signs it."
+          echo "::error::Lower signed_since, SIGNED_SINCE and AE_SIGNED_SINCE to the first release this sign job publishes."
+          exit 1
+        fi
+        for f in SHA256SUMS SHA256SUMS.sigstore.json; do
+          if [ ! -s "$f" ]; then
+            echo "::error::$VERSION is at or above the signing floor $floor, and the sign job produced no $f"
+            exit 1
+          fi
+        done
+        echo "$VERSION is at or above the signing floor $floor, and goes out signed"
+
     - name: Build release body
       run: python3 .github/scripts/build_release_body.py ${{ steps.tag.outputs.version }}
 

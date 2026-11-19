@@ -393,12 +393,50 @@ static int gh_download_via_api(const char* owner, const char* repo, const char* 
  *     archive as built by that workflow.
  *
  * What could not be checked is said, never passed over: no cosign, or no
- * gh, is a line on the output, not a refusal. A release from before #3752
- * has neither file; its archive is checked against the API's digest, as
- * #3748 did, so every older version still installs. */
+ * gh, is a line on the output, not a refusal. A release older than
+ * AE_SIGNED_SINCE has neither file; its archive is checked against the API's
+ * digest, as #3748 did, so every older version still installs. One at or
+ * above it without SHA256SUMS is refused. */
 
 #define AE_SUMS_NAME "SHA256SUMS"
 #define AE_SIG_NAME  "SHA256SUMS.sigstore.json"
+
+/* The signing floor: the first release signed. A release at or above it must
+ * have SHA256SUMS, and its bundle when cosign is installed; one without them
+ * is refused, so someone who can edit a release cannot delete them and have
+ * its archive taken on GitHub's digest alone. It must be the first release
+ * published by a release.yml that has the sign job: release.yml's publish
+ * job fails a release that disagrees with it. Equal to SIGNED_SINCE in
+ * get.sh and signed_since in scripts/verify-release-asset.sh
+ * (tests/scripts/check_signing_floor.sh, in make check-tests). */
+#define AE_SIGNED_SINCE "0.926.0"
+
+/* The first three numbers of a version ("v" optional, anything after the
+ * third ignored) into v[3]. 0 when it does not start X.Y.Z. */
+static int version_triple(const char* s, unsigned long v[3]) {
+    if (*s == 'v') s++;
+    for (int i = 0; i < 3; i++) {
+        if (*s < '0' || *s > '9') return 0;
+        char* end;
+        v[i] = strtoul(s, &end, 10);
+        s = end;
+        if (i < 2) {
+            if (*s != '.') return 0;
+            s++;
+        }
+    }
+    return 1;
+}
+
+/* 1 when `tag` is at or above AE_SIGNED_SINCE, or is not a version at all;
+ * 0 when it is older. */
+static int release_is_signed(const char* tag) {
+    unsigned long t[3], f[3];
+    if (!version_triple(tag, t) || !version_triple(AE_SIGNED_SINCE, f)) return 1;
+    for (int i = 0; i < 3; i++)
+        if (t[i] != f[i]) return t[i] > f[i];
+    return 1;
+}
 
 /* Fetch the release file `name` to `dest`: the release URL, then, when the
  * listing gave its id, the API. 0 when fetched. */
@@ -518,8 +556,16 @@ static int gh_verify_release_asset(const char* slug, const char* tag, const char
     }
 
     if (!have_sums) {
-        /* A release from before #3752: GitHub's digest is all there is. */
         free(json);
+        /* A signed release without SHA256SUMS: someone took it away, and the
+         * digest the same person can rewrite is no check at all. */
+        if (release_is_signed(tag)) {
+            snprintf(why, whysz, "%s cannot be verified: %s is at or above %s, the first signed "
+                                 "release, and its %s is missing. Nothing was installed.",
+                     file, tag, AE_SIGNED_SINCE, AE_SUMS_NAME);
+            return 1;
+        }
+        /* A release from before #3752: GitHub's digest is all there is. */
         if (reason[0]) {
             snprintf(why, whysz,
                      "%s cannot be verified: %s, so its sha256 digest is unknown. Nothing was "

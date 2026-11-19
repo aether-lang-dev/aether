@@ -55,6 +55,21 @@ against the sha256 digest GitHub's API lists (#3748), as before, and the
 installer says that the release predates signed checksums. Every older version
 still installs.
 
+Which releases those are is fixed by the **signing floor**, 0.926.0, the first
+release published by a `release.yml` with the `sign` job. A release at or above
+it without `SHA256SUMS` is refused, and so is one without
+`SHA256SUMS.sigstore.json` when `cosign` is installed: whether a release is
+signed is never read from the release itself, so someone who can edit a release
+cannot delete both files and have its archive taken on the digest, which they
+can change too. The floor is written once per language, as `SIGNED_SINCE` in
+`get.sh`, `AE_SIGNED_SINCE` in `tools/ae_version.c` and `signed_since` in
+`scripts/verify-release-asset.sh`; `make check-tests` fails when they differ
+(`tests/scripts/check_signing_floor.sh`). The `publish` job reads it from the
+workflow's own commit and fails, before anything is published, a release at or
+above it that the `sign` job left without either file, and a release below it,
+since this workflow signs every release: a floor set too high is caught at the
+next release.
+
 The release workflow verifies the previous release the same way before its ABI
 matrix runs it (`scripts/verify-release-asset.sh`), since that release runs
 inside the job that builds the next one.

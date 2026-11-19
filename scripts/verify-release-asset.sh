@@ -12,7 +12,9 @@
 #     (SHA256SUMS.sigstore.json) as made by REPO's release workflow when
 #     cosign is installed, and the asset's build provenance with
 #     `gh attestation verify`;
-#   - an older release has neither, and the digest is all there is.
+#   - a release older than signed_since (below) has neither, and the
+#     digest is all there is. One at or above it without SHA256SUMS, or
+#     without its bundle when cosign is installed, is refused.
 #
 # Exits 0 when every check that can be made passed, saying which were made;
 # 1 on a mismatch or a check that fails. release.yml runs it on the previous
@@ -21,12 +23,38 @@
 
 set -eu
 
+# The signing floor: the first release signed. A release at or above it must
+# have SHA256SUMS, and its bundle when cosign is installed, so someone who
+# can edit a release cannot delete them and have its asset taken on GitHub's
+# digest alone. It must be the first release published by a release.yml that
+# has the sign job: release.yml's publish job reads it from here and fails a
+# release that disagrees with it. Equal to SIGNED_SINCE in get.sh and
+# AE_SIGNED_SINCE in tools/ae_version.c (tests/scripts/check_signing_floor.sh,
+# in make check-tests).
+signed_since=0.926.0
+
 [ $# -eq 3 ] || { echo "usage: $0 REPO TAG FILE" >&2; exit 2; }
 repo="$1"; tag="$2"; file="$3"
 name="$(basename "$file")"
 say() { printf 'verify-release-asset: %s\n' "$*"; }
 die() { printf 'verify-release-asset: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# release_signed TAG : 0 when TAG (vX.Y.Z, anything after Z ignored) is at or
+# above signed_since, or is not a version at all; 1 when it is older.
+release_signed() {
+    awk -v t="$1" -v f="$signed_since" '
+        function num(s, i,   p) { split(s, p, "."); return p[i] + 0 }
+        BEGIN {
+            sub(/^v/, "", t)
+            if (t !~ /^[0-9]+\.[0-9]+\.[0-9]+/) exit 0
+            for (i = 1; i <= 3; i++) {
+                a = num(t, i); b = num(f, i)
+                if (a != b) exit (a > b) ? 0 : 1
+            }
+            exit 0
+        }'
+}
 
 have gh || die "the gh CLI is needed"
 [ -f "$file" ] || die "$file does not exist"
@@ -52,7 +80,10 @@ say "$name matches the sha256 digest GitHub lists for it"
 
 has_sums="$(gh release view "$tag" --repo "$repo" --json assets \
     -q '[.assets[] | select(.name == "SHA256SUMS")] | length')"
+[ -n "$has_sums" ] || die "cannot read the assets of the $tag release of $repo"
 if [ "$has_sums" = 0 ]; then
+    release_signed "$tag" &&
+        die "$tag is at or above $signed_since, the first signed release, and its SHA256SUMS is missing"
     say "$tag predates signed checksums (SHA256SUMS): the digest is all it has"
     exit 0
 fi
@@ -69,6 +100,8 @@ want="$(awk -v f="$name" 'length($0) == 66 + length(f) && substr($0, 67) == f { 
 say "$name matches its line in SHA256SUMS"
 
 if have cosign; then
+    [ -s "$work/SHA256SUMS.sigstore.json" ] ||
+        die "the $tag release has no SHA256SUMS.sigstore.json for cosign to check"
     rr="$(printf '%s' "$repo" | sed 's/[.]/\\./g')"
     rt="$(printf '%s' "$tag" | sed 's/[.]/\\./g')"
     cosign verify-blob --bundle "$work/SHA256SUMS.sigstore.json" \

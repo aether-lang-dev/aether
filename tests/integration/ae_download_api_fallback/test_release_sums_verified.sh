@@ -23,8 +23,12 @@
 #      workflow under GitHub's token issuer;
 #   6. cosign that refuses the signature refuses the install;
 #   7. gh that refuses the attestation refuses the install;
-#   8. gh that is not logged in is not asked, and that is said.
-# A release with no SHA256SUMS keeps the digest check of #3748
+#   8. gh that is not logged in is not asked, and that is said;
+#   9. a release at or above the signing floor stripped of SHA256SUMS and
+#      its bundle is refused, and so is one stripped of the bundle alone
+#      with cosign installed;
+#  10. a release below the floor, with no SHA256SUMS, installs on its digest.
+# A release below the floor keeps the digest check of #3748
 # (test_release_digest_verified.sh).
 # HOME and USERPROFILE are redirected so the real ~/.aether is never touched.
 
@@ -92,6 +96,13 @@ SUM="$(sha256sum "$TMP/rel/$ASSET" 2>/dev/null | awk '{print $1}')"
 [ -n "$SUM" ] || SUM="$(shasum -a 256 "$TMP/rel/$ASSET" | awk '{print $1}')"
 [ "${#SUM}" = 64 ] || { echo "  [SKIP] $NAME: no sha256 tool"; exit 0; }
 OTHER="aether-9.9.9-other-platform.tar.gz"
+TAG=v9.9.9
+# The same archive as a release from below the signing floor.
+OLD_ASSET="$(printf '%s' "$ASSET" | sed 's/9\.9\.9/0.925.0/')"
+cp "$TMP/rel/$ASSET" "$TMP/rel/$OLD_ASSET"
+
+# strip_release: SHA256SUMS and its bundle taken off the release.
+strip_release() { rm -f "$TMP/rel/SHA256SUMS" "$TMP/rel/SHA256SUMS.sigstore.json"; }
 
 # write_sums good|bad|missing: SHA256SUMS as the release workflow writes it,
 # with this archive's line right, wrong, or absent; and a bundle beside it.
@@ -159,9 +170,9 @@ run_install() {   # $1 = case name
     H="$TMP/home_$1"; mkdir -p "$H"
     ( env -u GITHUB_TOKEN -u GH_TOKEN PATH="$RUN_PATH" HOME="$H" USERPROFILE="$(native_path "$H")" \
         AE_GITHUB_WEB_BASE="$BASE" AE_GITHUB_API_BASE="$BASE" \
-        "$AE" version install v9.9.9 ) >"$TMP/$1.log" 2>&1
+        "$AE" version install "$TAG" ) >"$TMP/$1.log" 2>&1
 }
-installed() { [ -d "$TMP/home_$1/.aether/versions/v9.9.9/bin" ]; }
+installed() { [ -d "$TMP/home_$1/.aether/versions/$TAG/bin" ]; }
 
 expect_ok() {   # $1 = case, $2 = what
     run_install "$1" || fail "ae refused $2" "$TMP/$1.log"
@@ -225,12 +236,41 @@ grep -q "provenance was not checked: gh is not logged in" "$TMP/nologin.log" \
     || fail "ae did not say gh is not logged in" "$TMP/nologin.log"
 grep -q "^gh attestation" "$TMP/tools.log" && fail "ae asked a gh that is not logged in" "$TMP/tools.log"
 
+# The signing floor (SIGNED_SINCE in get.sh, AE_SIGNED_SINCE in ae): v9.9.9
+# is at or above it, so a release stripped of SHA256SUMS and its bundle, as
+# someone who can edit the release would leave it, is refused, not taken on
+# the digest that person can rewrite; so is one stripped of the bundle alone
+# when cosign is installed. v0.925.0 is below it, a release from before
+# #3752, and installs on its digest.
+strip_release
+start_mock web
+tools none
+expect_refused stripped "a signed release stripped of SHA256SUMS" "the first signed release, and its SHA256SUMS is missing"
+grep -q "Extracting" "$TMP/stripped.log" && fail "ae unpacked a stripped release" "$TMP/stripped.log"
+
+write_sums good
+rm -f "$TMP/rel/SHA256SUMS.sigstore.json"
+start_mock web
+tools 0 0 0
+expect_refused nobundle "a signed release stripped of its bundle, with cosign" "could not be fetched for cosign"
+
+strip_release
+start_mock web
+tools none
+TAG=v0.925.0
+expect_ok presigning "a release from below the signing floor, on its digest"
+grep -q "Verified $OLD_ASSET against its sha256 digest" "$TMP/presigning.log" \
+    || fail "ae did not say it verified the older release by its digest" "$TMP/presigning.log"
+grep -q "predates signed checksums" "$TMP/presigning.log" \
+    || fail "ae did not say the older release predates signed checksums" "$TMP/presigning.log"
+TAG=v9.9.9
+
 # get.sh -----------------------------------------------------------------------
 # get.sh installs prebuilt .tar.gz archives on Linux, macOS and FreeBSD only.
 run_get() {   # $1 = case name
     PFX="$TMP/prefix_$1"
     ( env -u GITHUB_TOKEN -u GH_TOKEN PATH="$RUN_PATH" PREFIX="$PFX" AE_GITHUB_WEB_BASE="$BASE" \
-        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" v9.9.9 ) >"$TMP/get_$1.log" 2>&1
+        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" "$TAG" ) >"$TMP/get_$1.log" 2>&1
 }
 get_ok() {   # $1 = case, $2 = what
     run_get "$1" || fail "get.sh refused $2" "$TMP/get_$1.log"
@@ -277,6 +317,27 @@ if [ "$WIN" = 0 ] && [ -f "$ROOT/get.sh" ]; then
     get_refused badsig "an archive whose SHA256SUMS signature cosign refuses" "does not verify with cosign"
     tools 0 0 1
     get_refused badattest "an archive gh attestation verify refuses" "gh attestation verify' accepts"
+
+    # The signing floor, as for ae above.
+    strip_release
+    start_mock web
+    tools none
+    get_refused stripped "a signed release stripped of SHA256SUMS" "the first signed release, and its SHA256SUMS is missing"
+
+    write_sums good
+    rm -f "$TMP/rel/SHA256SUMS.sigstore.json"
+    start_mock web
+    tools 0 0 0
+    get_refused nobundle "a signed release stripped of its bundle, with cosign" "could not be fetched for cosign"
+
+    strip_release
+    start_mock web
+    tools none
+    TAG=v0.925.0
+    get_ok presigning "a release from below the signing floor, on its digest"
+    grep -q "verified $OLD_ASSET against its sha256 digest" "$TMP/get_presigning.log" \
+        || fail "get.sh did not say it verified the older release by its digest" "$TMP/get_presigning.log"
+    TAG=v9.9.9
 fi
 
 echo "  [PASS] $NAME"
