@@ -1483,6 +1483,32 @@ typedef struct {
                       * dangling */
 } AetherExec;
 
+/* Whether `path` is a file execve may refuse with ENOEXEC, so that the child
+ * falls back to the shell: one that starts with neither "#!" nor the magic
+ * of an executable this kernel family loads (ELF, Mach-O thin or fat, either
+ * byte order). A file whose first bytes cannot be read (execute-only) may.
+ * Asked so that the sandbox check of the shell, which records a refusal in
+ * the audit, is made only for a start that can use the shell: made for every
+ * os.run it put a refused "exec /bin/sh" in the audit for programs that never
+ * went near one. */
+static int aether_exec_may_need_shell(const char* path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 1;
+    unsigned char h[4] = {0, 0, 0, 0};
+    ssize_t n;
+    do { n = read(fd, h, sizeof h); } while (n < 0 && errno == EINTR);
+    close(fd);
+    if (n >= 2 && h[0] == '#' && h[1] == '!') return 0;
+    if (n < 4) return 1;
+    uint32_t be = ((uint32_t)h[0] << 24) | ((uint32_t)h[1] << 16) |
+                  ((uint32_t)h[2] << 8) | (uint32_t)h[3];
+    if (be == 0x7f454c46u) return 0;                         /* ELF */
+    if (be == 0xfeedfaceu || be == 0xfeedfacfu ||            /* Mach-O */
+        be == 0xcefaedfeu || be == 0xcffaedfeu ||
+        be == 0xcafebabeu || be == 0xbebafecau) return 0;    /* fat */
+    return 1;
+}
+
 /* NULL when `x` is ready, else the err the spawn reports. */
 static const char* aether_exec_prepare(AetherExec* x, const char* prog,
                                        void* argv_list, void* env_list) {
@@ -1505,7 +1531,9 @@ static const char* aether_exec_prepare(AetherExec* x, const char* prog,
      * as a command string does (#3735) and as the LD_PRELOAD library's
      * exec_or_script requires. Asked here, in the parent: the check is not
      * a call the child may make between fork and exec (#3755). */
-    x->sh_granted = aether_sandbox_check("exec", x->sh_argv[0]);
+    x->sh_granted = aether_exec_may_need_shell(x->path)
+                        ? aether_sandbox_check("exec", x->sh_argv[0])
+                        : 0;
     x->sh_argv[1] = x->path;
     for (size_t i = 1; i <= n; i++) x->sh_argv[i + 1] = x->argv[i];
     x->envp = build_envp_array(env_list);
