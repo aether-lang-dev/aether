@@ -49,6 +49,7 @@ exports(
     http_server_set_h2_max_age_raw, server_set_h2_max_age,
     http_server_set_loop_max_connections_raw, server_set_loop_max_connections,
     http_server_set_park_max_connections_raw, server_set_park_max_connections,
+    http_server_set_max_connections_per_ip_raw, server_set_max_connections_per_ip,
     http_server_set_h2_raw, server_set_h2,
     http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
@@ -508,7 +509,7 @@ server_set_loop_max_connections(server: ptr, max_connections: int) -> string {
 }
 
 // The most idle keep-alive connections the worker path's parking lot holds
-// (#3750); 0, the default, is the same bound as the event loop's. The lot
+// (#3750); 0, the default, is the process's open-file limit less 64. The lot
 // is where an idle connection waits for its next request without a worker;
 // at the bound the one idle longest is closed to make room. Returns "" or
 // why the value was refused.
@@ -516,6 +517,20 @@ extern http_server_set_park_max_connections_raw(server: ptr, max_connections: in
 
 server_set_park_max_connections(server: ptr, max_connections: int) -> string {
     return http_server_set_park_max_connections_raw(server, max_connections)
+}
+
+// The most connections one client address may hold on the server (#3750),
+// the worker path and the proxy event loop together; 0, the default, for no
+// limit. Past it a new connection is answered 503 and closed (closed alone
+// over TLS). Off by default because behind a load balancer or a NAT every
+// client arrives from one address, and a limit would refuse real traffic,
+// which is why nginx's limit_conn is opt-in too. An IPv6 client counts by
+// its first `ipv6_prefix` bits (1 to 128): 64 counts each /64, the share
+// one host usually holds. Returns "" or why the values were refused.
+extern http_server_set_max_connections_per_ip_raw(server: ptr, max_connections: int, ipv6_prefix: int) -> string
+
+server_set_max_connections_per_ip(server: ptr, max_connections: int, ipv6_prefix: int) -> string {
+    return http_server_set_max_connections_per_ip_raw(server, max_connections, ipv6_prefix)
 }
 
 // Graceful shutdown (#260 Tier 3). Stops accepting new connections,

@@ -1174,7 +1174,17 @@ timeout of `0ns` turns that bound off.
 | HTTP/2 connection with no stream open | the idle timeout | as that | `GOAWAY`; closed |
 | HTTP/2 connection's age | 1 h | `server_set_h2_max_age` | graceful `GOAWAY`; closed when its streams are done |
 | Connections the proxy event loop holds | half the process's open-file limit, less 64 | `server_set_loop_max_connections` | the connection that has waited longest with nothing of a request sent is closed; with none, the new one gets `503` |
-| Idle keep-alive connections the worker path parks (waiting without a worker) | as the event loop's | `server_set_park_max_connections` | the connection idle longest is closed |
+| Idle keep-alive connections the worker path parks (waiting without a worker) | the process's open-file limit, less 64 | `server_set_park_max_connections` | the connection idle longest is closed |
+| Connections from one client address, the worker path and the event loop together | off (0) | `server_set_max_connections_per_ip(server, n, ipv6_prefix)` | `503`; closed (over TLS, closed) |
+
+The per-address limit is off by default on purpose: behind a load
+balancer, a reverse proxy or a NAT every client arrives from one address,
+and any default limit would refuse real traffic there (nginx's `limit_conn`
+is opt-in for the same reason). Turn it on for a server that clients reach
+directly. An IPv4 client counts by its address, an IPv6 client by its first
+`ipv6_prefix` bits, 64 unless set: one host usually holds a whole /64 and
+could otherwise open connections from every address in it.
+
 
 The proxy event loop (Linux and macOS, for a server whose work is a
 reverse proxy to plain upstreams) holds the same head, body and handshake

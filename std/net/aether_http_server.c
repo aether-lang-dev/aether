@@ -114,17 +114,19 @@ const char* http_status_text(int code) {
 #include <sys/resource.h>   /* getrlimit: http_server_default_connection_bound */
 #endif
 
-/* The default bound on the connections a server holds in one place, the
- * proxy event loop (loop_max_connections) or the parking lot of idle
- * connections (park_max_connections), when the program set none: half the
- * process's open-file limit less 64, between 16 and 32768. Half, since a
- * proxied connection takes an upstream descriptor too; less 64 for the
- * server's own. 4096 where there is no such limit to read (Windows). */
-int http_server_default_connection_bound(void) {
+/* The default bound on the connections a server holds in one place, when
+ * the program set none: the process's open-file limit less 64 (the
+ * server's own), divided by the descriptors each connection takes there,
+ * between 16 and 32768. The proxy event loop's (loop_max_connections)
+ * takes two, a proxied connection holding an upstream one too; the parking
+ * lot's (park_max_connections) one. 4096 where there is no such limit to
+ * read (Windows). */
+int http_server_default_connection_bound(int fds_per_connection) {
+    if (fds_per_connection < 1) fds_per_connection = 1;
 #if !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__)
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) return 32768;
-    long long m = ((long long)rl.rlim_cur - 64) / 2;
+    long long m = ((long long)rl.rlim_cur - 64) / fds_per_connection;
     if (m < 16) m = 16;
     if (m > 32768) m = 32768;
     return (int)m;
@@ -149,6 +151,7 @@ void http_server_limits_default(HttpServerLimits* limits) {
     limits->h2_max_concurrent_streams = HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
     limits->h2_max_header_list        = HTTP_H2_DEFAULT_MAX_HEADER_LIST;
     limits->h2_max_age_ms             = HTTP_H2_DEFAULT_MAX_AGE_MS;
+    limits->per_ip_ipv6_prefix        = 64;
 }
 
 #if !AETHER_HAS_NETWORKING
@@ -250,6 +253,9 @@ const char* http_server_set_h2_max_age_raw(HttpServer* s, int64_t t) { (void)s; 
 const char* http_server_set_loop_max_connections_raw(HttpServer* s, int m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
 const char* http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; return "WebSocket unavailable: networking not built in"; }
 const char* http_server_set_park_max_connections_raw(HttpServer* s, int m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_max_connections_per_ip_raw(HttpServer* s, int m, int p) { (void)s; (void)m; (void)p; return "HTTP server unavailable: networking not built in"; }
+int  http_server_ip_acquire(struct HttpServer* s, int fd, HttpIpSlot* slot, int e) { (void)s; (void)fd; (void)e; if (slot) slot->held = 0; return 0; }
+void http_server_ip_release(struct HttpServer* s, HttpIpSlot* slot) { (void)s; (void)slot; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_post(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -741,6 +747,11 @@ typedef struct HttpConn {
     int64_t body_waited_ms;
     int64_t body_got;
     int     body_timed_out;
+    /* This connection's share of its client address's count
+     * (limits.max_connections_per_ip, #3750), given back when the server is
+     * done with the connection: closed, or its descriptor handed away. */
+    HttpIpSlot          ip;
+    struct HttpServer*  ip_server;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -1535,6 +1546,7 @@ static void conn_tls_close(HttpConn* c) {
 #endif
 
 static void conn_close(HttpConn* c) {
+    if (c->ip_server) http_server_ip_release(c->ip_server, &c->ip);
     if (c->pure_tls) {
         pt_server_close(c->pure_tls);
         c->pure_tls = NULL;
@@ -1881,6 +1893,7 @@ HttpServer* http_server_create(int port) {
     pthread_mutex_init(&server->live_lock, NULL);
     pthread_mutex_init(&server->tls_lock, NULL);
     pthread_mutex_init(&server->tls_config_lock, NULL);
+    pthread_mutex_init(&server->ip_lock, NULL);
     pthread_mutex_init(&server->run_lock, NULL);
     pthread_cond_init(&server->run_done, NULL);
     server->serving = 0;
@@ -2039,6 +2052,118 @@ const char* http_server_set_park_max_connections_raw(HttpServer* server, int max
     if (max_connections < 0) return "the parking lot's bound must not be negative";
     server->limits.park_max_connections = max_connections;
     return "";
+}
+
+/* The per-address limit (#3750); 0 for none, the default. */
+const char* http_server_set_max_connections_per_ip_raw(HttpServer* server, int max_connections,
+                                                       int ipv6_prefix) {
+    if (!server) return "server is null";
+    if (max_connections < 0) return "the per-address limit must not be negative";
+    if (ipv6_prefix < 1 || ipv6_prefix > 128) return "the IPv6 prefix must be 1 to 128 bits";
+    server->limits.max_connections_per_ip = max_connections;
+    server->limits.per_ip_ipv6_prefix = ipv6_prefix;
+    return "";
+}
+
+/* ---- connections per client address (#3750) ----
+ *
+ * A count for each address that holds a connection, in a chained table of
+ * HTTP_IP_BUCKETS buckets under ip_lock; a node goes when its count does.
+ * Shared by the worker path and the proxy event loop, which hand
+ * connections to each other. */
+#define HTTP_IP_BUCKETS 1024
+
+typedef struct HttpIpNode {
+    unsigned char      key[16];
+    int                count;
+    struct HttpIpNode* next;
+} HttpIpNode;
+
+/* The address `fd`'s peer counts as: an IPv4 address as an IPv4-mapped IPv6
+ * one, an IPv6 address cut to `prefix` bits, since one host usually holds a
+ * whole /64 and could otherwise open a connection from each address in it.
+ * -1 when the peer has no IP address. */
+static int ip_key_of_fd(int fd, int prefix, unsigned char key[16]) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(fd, (struct sockaddr*)&ss, &len) != 0) return -1;
+    memset(key, 0, 16);
+    if (ss.ss_family == AF_INET) {
+        key[10] = key[11] = 0xff;
+        memcpy(key + 12, &((struct sockaddr_in*)&ss)->sin_addr, 4);
+        return 0;
+    }
+    if (ss.ss_family != AF_INET6) return -1;
+    const unsigned char* a = (const unsigned char*)&((struct sockaddr_in6*)&ss)->sin6_addr;
+    memcpy(key, a, 16);
+    static const unsigned char mapped[12] = { 0,0,0,0, 0,0,0,0, 0,0,0xff,0xff };
+    if (memcmp(a, mapped, 12) == 0) return 0;   /* an IPv4 client, whole */
+    for (int bit = prefix; bit < 128; bit++) key[bit / 8] &= (unsigned char)~(0x80u >> (bit % 8));
+    return 0;
+}
+
+static unsigned ip_bucket_of(const unsigned char key[16]) {
+    unsigned h = 2166136261u;
+    for (int i = 0; i < 16; i++) h = (h ^ key[i]) * 16777619u;
+    return h % HTTP_IP_BUCKETS;
+}
+
+int http_server_ip_acquire(struct HttpServer* server, int fd, HttpIpSlot* slot, int enforce) {
+    slot->held = 0;
+    int limit = server->limits.max_connections_per_ip;
+    if (limit <= 0) return 0;
+    if (ip_key_of_fd(fd, server->limits.per_ip_ipv6_prefix, slot->key) != 0) return 0;
+    pthread_mutex_lock(&server->ip_lock);
+    if (!server->ip_buckets) server->ip_buckets = calloc(HTTP_IP_BUCKETS, sizeof(HttpIpNode*));
+    HttpIpNode** buckets = (HttpIpNode**)server->ip_buckets;
+    if (!buckets) { pthread_mutex_unlock(&server->ip_lock); return 0; }
+    HttpIpNode** at = &buckets[ip_bucket_of(slot->key)];
+    HttpIpNode* node = *at;
+    while (node && memcmp(node->key, slot->key, 16) != 0) node = node->next;
+    if (node && enforce && node->count >= limit) {
+        pthread_mutex_unlock(&server->ip_lock);
+        return -1;
+    }
+    if (!node) {
+        node = (HttpIpNode*)calloc(1, sizeof(HttpIpNode));
+        if (!node) { pthread_mutex_unlock(&server->ip_lock); return 0; }
+        memcpy(node->key, slot->key, 16);
+        node->next = *at;
+        *at = node;
+    }
+    node->count++;
+    slot->held = 1;
+    pthread_mutex_unlock(&server->ip_lock);
+    return 0;
+}
+
+void http_server_ip_release(struct HttpServer* server, HttpIpSlot* slot) {
+    if (!server || !slot || !slot->held) return;
+    slot->held = 0;
+    pthread_mutex_lock(&server->ip_lock);
+    HttpIpNode** buckets = (HttpIpNode**)server->ip_buckets;
+    if (buckets) {
+        HttpIpNode** at = &buckets[ip_bucket_of(slot->key)];
+        while (*at && memcmp((*at)->key, slot->key, 16) != 0) at = &(*at)->next;
+        if (*at && --(*at)->count <= 0) {
+            HttpIpNode* gone = *at;
+            *at = gone->next;
+            free(gone);
+        }
+    }
+    pthread_mutex_unlock(&server->ip_lock);
+}
+
+/* Every count, when the server is freed. */
+static void ip_table_free(HttpServer* server) {
+    HttpIpNode** buckets = (HttpIpNode**)server->ip_buckets;
+    if (!buckets) return;
+    for (int i = 0; i < HTTP_IP_BUCKETS; i++) {
+        HttpIpNode* node = buckets[i];
+        while (node) { HttpIpNode* next = node->next; free(node); node = next; }
+    }
+    free(buckets);
+    server->ip_buckets = NULL;
 }
 
 // =================================================================
@@ -4223,6 +4348,9 @@ void* http_response_accept_tunnel(HttpServerResponse* res) {
     conn->fd = -1;
     res->takeover_taken = 1;
     res->takeover_conn = NULL;
+    /* The descriptor is the program's now, and no longer the server's to
+     * count against its address (#3750). */
+    if (conn->ip_server) http_server_ip_release(conn->ip_server, &conn->ip);
 
     void* sock = tcp_socket_from_fd_owned(fd);
     if (!sock) {
@@ -8232,6 +8360,10 @@ int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ss
     if (!server || client_fd < 0) return -1;
     HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
     if (!conn) return -1;
+    /* Counted against its address again, not refused: the event loop
+     * admitted it and gave its count back as it handed it over (#3750). */
+    conn->ip_server = server;
+    http_server_ip_acquire(server, client_fd, &conn->ip, 0);
     adopt_conn_serve(server, conn);
     return 0;
 }
@@ -8249,6 +8381,10 @@ int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
     HttpMiddlewareNode* proxy = server_proxy_node(server);
     HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
     if (!conn) return -1;
+    /* Counted against its address again, not refused: the event loop
+     * admitted it and gave its count back as it handed it over (#3750). */
+    conn->ip_server = server;
+    http_server_ip_acquire(server, client_fd, &conn->ip, 0);
     /* The responses already sent on the connection count against the
      * server's keep_alive_max wherever the next one is served (#3229). */
     conn->requests_served = requests_served;
@@ -8359,6 +8495,25 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      * indefinitely"; the guard must see "nothing applied yet" instead. */
     conn->applied_recv_timeout_ms = -1;
 
+    /* One address past its limit of connections (#3750): 503 and closed,
+     * or over TLS, where a plaintext answer means nothing, closed. Before
+     * the handshake, which is what such a client would cost. */
+    conn->ip_server = server;
+    if (http_server_ip_acquire(server, client_fd, &conn->ip, 1) != 0) {
+        if (!server->tls_enabled) {
+            static const char full[] =
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n"
+                "Content-Length: 21\r\nRetry-After: 1\r\nConnection: close\r\n\r\n"
+                "too many connections\n";
+            conn_apply_send_timeout(server, conn);
+            conn_send(conn, full, (int)sizeof(full) - 1);
+            conn->linger_on_close = 1;
+        }
+        conn_close(conn);
+        free(conn);
+        return;
+    }
+
     if (server->tls_enabled) {
         /* The handshake is bounded as a request is (#3703): the receive and
          * send timeouts conn_serve puts on the socket, the keep-alive idle
@@ -8398,6 +8553,7 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
             pt_creds_unref(creds);
             if (!pure_conn) {
                 /* pt_server_accept consumes the fd on failure too. */
+                http_server_ip_release(server, &conn->ip);
                 free(conn);
                 return;
             }
@@ -8410,6 +8566,7 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
             SSL_CTX_free(ctx);
             if (rc != 0) {
                 close(client_fd);
+                http_server_ip_release(server, &conn->ip);
                 free(conn);
                 return;
             }
@@ -9078,7 +9235,7 @@ static int http_server_serve(HttpServer* server) {
          * connection idle longest. */
         if (pool) {
             int park_max = server->limits.park_max_connections > 0
-                ? server->limits.park_max_connections : http_server_default_connection_bound();
+                ? server->limits.park_max_connections : http_server_default_connection_bound(1);
             server->park_lot = http_park_create(server, http_park_resume, park_max);
         }
 #endif
@@ -9494,6 +9651,8 @@ static void server_destroy(HttpServer* server) {
     pthread_mutex_destroy(&server->evloop_lock);
     pthread_mutex_destroy(&server->tls_lock);
     pthread_mutex_destroy(&server->tls_config_lock);
+    ip_table_free(server);
+    pthread_mutex_destroy(&server->ip_lock);
 #if !defined(_WIN32) && !defined(__wasi__)
     if (server->wake_fds[0] >= 0) close(server->wake_fds[0]);
     if (server->wake_fds[1] >= 0) close(server->wake_fds[1]);

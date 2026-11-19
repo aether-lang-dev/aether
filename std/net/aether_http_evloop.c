@@ -141,6 +141,9 @@ typedef struct EvConn {
     int64_t  req_started_ms;     /* the request's first byte */
     int64_t  body_started_ms;    /* the end of its head */
     int64_t  req_due_ms;
+    /* Its share of its client address's count (limits.
+     * max_connections_per_ip, #3750), given back on close and on hand-back. */
+    HttpIpSlot ip;
     int64_t  deadline_ms;        /* when the upstream call gives up, 0 = none;
                                   * a `long` before, 32 bits on Windows, where
                                   * the clock went negative after 24.8 days of
@@ -495,6 +498,7 @@ static void ev_lookup_unlink(EvDriver* d, EvConn* c) {
 
 static void ev_conn_close(EvDriver* d, EvConn* c) {
     if (!c) return;
+    http_server_ip_release(d->loop->server, &c->ip);
     ev_lookup_unlink(d, c);
     if (c->up.t.sockfd >= 0) {
         aether_io_poller_remove(&d->poller, c->up.t.sockfd);
@@ -1275,6 +1279,8 @@ static int ev_dial(EvDriver* d, EvConn* c, int next_addr) {
  * session, if any, goes to *ssl.
  */
 static int ev_release_client(EvDriver* d, EvConn* c, void** ssl) {
+    /* The worker path counts it again as it adopts it (#3750). */
+    http_server_ip_release(d->loop->server, &c->ip);
     int fd = c->client_fd;
     aether_io_poller_remove(&d->poller, fd);
     ev_untrack(d, fd);
@@ -1432,6 +1438,9 @@ static const char EV_BODY_TIMEOUT[] =
 static const char EV_AT_CAPACITY[] =
     "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n"
     "Content-Length: 19\r\nRetry-After: 1\r\nConnection: close\r\n\r\nserver at capacity\n";
+static const char EV_PER_IP_FULL[] =
+    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n"
+    "Content-Length: 21\r\nRetry-After: 1\r\nConnection: close\r\n\r\ntoo many connections\n";
 
 /* How long a refused connection is read and dropped before it closes. */
 #define EV_LINGER_MS 2000
@@ -1463,7 +1472,7 @@ static void ev_refuse(EvDriver* d, EvConn* c, const char* msg, size_t len, int l
  * process had no descriptor left, for anything. */
 static int ev_max_connections(HttpServer* server) {
     int n = server->limits.loop_max_connections;
-    return n > 0 ? n : http_server_default_connection_bound();
+    return n > 0 ? n : http_server_default_connection_bound(2);
 }
 
 /* At the bound, make room for `fresh`: close this driver's connection that
@@ -2157,6 +2166,17 @@ static void ev_take_submissions(EvDriver* d) {
         /* Watched once, for as long as this driver owns it. Every later wait
          * on this descriptor is then free. */
         if (ev_watch(d, fd, c) != 0) { ev_conn_close(d, c); continue; }
+
+        /* One address past its limit of connections (#3750): 503 and a
+         * short linger, or over TLS closed. */
+        if (http_server_ip_acquire(d->loop->server, fd, &c->ip, 1) != 0) {
+#ifdef AETHER_HAS_OPENSSL
+            if (c->ssl) { ev_conn_close(d, c); continue; }
+#endif
+            ev_refuse(d, c, EV_PER_IP_FULL, sizeof(EV_PER_IP_FULL) - 1, EV_LINGER_FULL_MS);
+            if (ev_advance(d, c) < 0) ev_conn_close(d, c);
+            continue;
+        }
 
         /* Past the loop's connection bound (#3750): room is made by closing
          * the oldest connection that has sent nothing of a request; with

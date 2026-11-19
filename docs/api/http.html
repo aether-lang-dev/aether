@@ -74,6 +74,10 @@
     <li><a href="#server_set_h2_max_age">server_set_h2_max_age</a></li>
     <li><a href="#server_set_loop_max_connections_raw">server_set_loop_max_connections_raw</a></li>
     <li><a href="#server_set_loop_max_connections">server_set_loop_max_connections</a></li>
+    <li><a href="#server_set_park_max_connections_raw">server_set_park_max_connections_raw</a></li>
+    <li><a href="#server_set_park_max_connections">server_set_park_max_connections</a></li>
+    <li><a href="#server_set_max_connections_per_ip_raw">server_set_max_connections_per_ip_raw</a></li>
+    <li><a href="#server_set_max_connections_per_ip">server_set_max_connections_per_ip</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
     <li><a href="#server_set_h2">server_set_h2</a></li>
     <li><a href="#server_set_multi_accept_raw">server_set_multi_accept_raw</a></li>
@@ -602,6 +606,28 @@
       <h3 class="function-name">server_set_loop_max_connections <span class="kind">fn</span></h3>
       <pre class="usage"><code>server_set_loop_max_connections(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
+    </div>
+    <div class="function" id="server_set_park_max_connections_raw" data-name="server_set_park_max_connections_raw">
+      <h3 class="function-name">server_set_park_max_connections_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_park_max_connections_raw(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
+      <p class="doc">The most idle keep-alive connections the worker path's parking lot holds (#3750); 0, the default, is the process's open-file limit less 64. The lot is where an idle connection waits for its next request without a worker; at the bound the one idle longest is closed to make room. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_park_max_connections" data-name="server_set_park_max_connections">
+      <h3 class="function-name">server_set_park_max_connections <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_park_max_connections(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
+    </div>
+    <div class="function" id="server_set_max_connections_per_ip_raw" data-name="server_set_max_connections_per_ip_raw">
+      <h3 class="function-name">server_set_max_connections_per_ip_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_max_connections_per_ip_raw(server, max_connections, ipv6_prefix) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int, ipv6_prefix: int</span></p>
+      <p class="doc">The most connections one client address may hold on the server (#3750), the worker path and the proxy event loop together; 0, the default, for no limit. Past it a new connection is answered 503 and closed (closed alone over TLS). Off by default because behind a load balancer or a NAT every client arrives from one address, and a limit would refuse real traffic, which is why nginx's limit_conn is opt-in too. An IPv6 client counts by its first `ipv6_prefix` bits (1 to 128): 64 counts each /64, the share one host usually holds. Returns &quot;&quot; or why the values were refused.</p>
+    </div>
+    <div class="function" id="server_set_max_connections_per_ip" data-name="server_set_max_connections_per_ip">
+      <h3 class="function-name">server_set_max_connections_per_ip <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_max_connections_per_ip(server, max_connections, ipv6_prefix) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int, ipv6_prefix: int</span></p>
     </div>
     <div class="function" id="server_set_h2_raw" data-name="server_set_h2_raw">
       <h3 class="function-name">server_set_h2_raw <span class="kind">extern</span></h3>

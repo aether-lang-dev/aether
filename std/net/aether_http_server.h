@@ -229,6 +229,8 @@ struct HttpConn;
 //   h2_max_age_ms             1 h      server_set_h2_max_age             GOAWAY, then closed
 //   loop_max_connections      derived  server_set_loop_max_connections   oldest silent one closed, else 503
 //   park_max_connections      derived  server_set_park_max_connections   longest idle one closed
+//   max_connections_per_ip    0 (off)  server_set_max_connections_per_ip 503, connection closed
+//   per_ip_ipv6_prefix        64       server_set_max_connections_per_ip (an IPv6 client counts by this prefix)
 //
 // The proxy event loop (Linux and macOS, a server whose work is a reverse
 // proxy) holds the same head, body and handshake budgets, by the clock. Its
@@ -304,9 +306,18 @@ typedef struct HttpServerLimits {
     // the process's open-file limit less 64, read when the loop starts.
     int     loop_max_connections;
     // The most idle keep-alive connections the parking lot holds (the
-    // worker path waits on them there, not on a worker); 0 for the same
-    // default as loop_max_connections. At it the one idle longest is closed.
+    // worker path waits on them there, not on a worker); 0 for the process's
+    // open-file limit less 64. At it the one idle longest is closed.
     int     park_max_connections;
+    // The most connections one client address may hold on the server,
+    // the worker path and the event loop together; 0, the default, for no
+    // limit. Off by default: behind a load balancer or a NAT every client
+    // arrives from one address, and a limit would refuse real traffic (as
+    // nginx's limit_conn is opt-in). An IPv6 client counts by its first
+    // per_ip_ipv6_prefix bits (64 by default: one host usually holds a
+    // whole /64), an IPv4 one by its address.
+    int     max_connections_per_ip;
+    int     per_ip_ipv6_prefix;
     // How long an HTTP/2 connection may live: past it the server sends
     // GOAWAY, lets the streams it has finish, and closes, no later than
     // idle_timeout_ms after. An HTTP/2 connection with no stream open
@@ -317,10 +328,28 @@ typedef struct HttpServerLimits {
 // The defaults above, as a struct.
 void http_server_limits_default(HttpServerLimits* limits);
 
-// The default bound for loop_max_connections and park_max_connections:
-// half the process's open-file limit less 64, between 16 and 32768; 4096
-// where there is no such limit to read (Windows).
-int http_server_default_connection_bound(void);
+// One connection's share of its client address's count, for
+// limits.max_connections_per_ip: the address (an IPv4 one as an IPv4-mapped
+// IPv6 address, an IPv6 one cut to per_ip_ipv6_prefix bits), and whether it
+// is counted.
+typedef struct HttpIpSlot {
+    unsigned char key[16];
+    int           held;
+} HttpIpSlot;
+
+// Count the connection on `fd` against its client address. With `enforce`,
+// one past limits.max_connections_per_ip is refused: -1, nothing counted.
+// 0 otherwise; with no limit set, or no address to read (a Unix socket),
+// nothing is counted. http_server_ip_release gives the count back.
+int  http_server_ip_acquire(struct HttpServer* server, int fd, HttpIpSlot* slot, int enforce);
+void http_server_ip_release(struct HttpServer* server, HttpIpSlot* slot);
+
+// The default bound for loop_max_connections (fds_per_connection 2, a
+// proxied connection holds an upstream descriptor too) and
+// park_max_connections (1): the process's open-file limit less 64, divided
+// by that, between 16 and 32768; 4096 where there is no such limit to read
+// (Windows).
+int http_server_default_connection_bound(int fds_per_connection);
 
 typedef struct HttpServer {
     int socket_fd;
@@ -573,6 +602,11 @@ typedef struct HttpServer {
     // Every resource limit, in one place (#3750): see HttpServerLimits.
     // Set before the server starts; the request paths read it unlocked.
     HttpServerLimits limits;
+    // The connections each client address holds, for
+    // limits.max_connections_per_ip: buckets of counts under ip_lock, made
+    // when the first is counted (http_server_ip_acquire).
+    void* ip_buckets;
+    pthread_mutex_t ip_lock;
 } HttpServer;
 
 // ============================================================================
@@ -1276,11 +1310,22 @@ const char* http_server_set_h2_max_age_raw(HttpServer* server, int64_t timeout_n
 const char* http_server_set_loop_max_connections_raw(HttpServer* server, int max_connections);
 
 // The most idle keep-alive connections the worker path's parking lot holds
-// (limits.park_max_connections); 0 for the default (as the event loop's).
+// (limits.park_max_connections); 0 for the default, the process's open-file
+// limit less 64 (a parked connection holds one descriptor).
 // At it the connection idle longest is closed to make room. It was a fixed
 // 4096, and a connection the full lot declined waited on its worker, so
 // idle clients past it held the workers. Returns "" or why it was refused.
 const char* http_server_set_park_max_connections_raw(HttpServer* server, int max_connections);
+
+// The most connections one client address may hold (limits.
+// max_connections_per_ip), 0 for no limit, the default; past it a new
+// connection is answered 503 and closed (closed alone over TLS). An IPv6
+// client counts by its first ipv6_prefix bits (1 to 128; 64, one host's
+// usual share, by default). Off by default because behind a load balancer
+// or a NAT every client arrives from one address. Returns "" or why the
+// values were refused.
+const char* http_server_set_max_connections_per_ip_raw(HttpServer* server, int max_connections,
+                                                       int ipv6_prefix);
 
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,

@@ -520,6 +520,7 @@ void aether_proxy_pool_free(void* pool);
 int http_server_evloop_connections(HttpServer* server);
 
 static HttpServer* g_upstream;
+static int g_loop_per_ip;   /* a per-address limit for the next gateway */
 static int g_upstream_port;
 
 /* The upstream every gateway proxies to: a worker-path server. */
@@ -550,6 +551,7 @@ static Gateway loop_gateway(const char* label, int tls, int max_conns) {
     if (!*err) err = http_server_set_body_timeout_raw(s, (int64_t)BUDGET_MS * 1000000LL, MIN_RATE);
     if (!*err) err = http_server_set_tls_handshake_timeout_raw(s, (int64_t)BUDGET_MS * 1000000LL);
     if (!*err && max_conns) err = http_server_set_loop_max_connections_raw(s, max_conns);
+    if (!*err && g_loop_per_ip) err = http_server_set_max_connections_per_ip_raw(s, g_loop_per_ip, 64);
     if (*err) {
         printf("FAIL: [%s] a limit setter refused: %s\n", label, err);
         g_fail++;
@@ -761,7 +763,94 @@ static void round_park(void) {
     report(label, served == 4 && first_closed && others_open, 0, 0, note);
 }
 
+/* A connection to `port` on ::1, or CLIENT_BAD. */
+static client_sock client_connect6(int port) {
+    client_sock s = socket(AF_INET6, SOCK_STREAM, 0);
+    if (s == CLIENT_BAD) return CLIENT_BAD;
+    struct sockaddr_in6 addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons((unsigned short)port);
+    addr.sin6_addr.s6_addr[15] = 1;   /* ::1 */
+    if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        client_close(s);
+        return CLIENT_BAD;
+    }
+    return s;
+}
+
+/* The per-address limit, 2 here, on a server bound to `host`: two
+ * connections from the address, each asking one request and kept, then a
+ * third answered 503; once the first closes, a fourth is served again. On
+ * ::1 the address counts by its /64. */
+static void round_per_ip_on(HttpServer* server, const char* label, int v6) {
+    int port = http_server_port(server);
+    static const char req[] = "GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    client_sock held[2];
+    int served = 0;
+    for (int i = 0; i < 2; i++) {
+        held[i] = v6 ? client_connect6(port) : client_connect(port);
+        if (held[i] == CLIENT_BAD) continue;
+        send_all(held[i], req, (int)sizeof(req) - 1);
+        if (readable(held[i], 3000) && read_status(held[i], NULL, NULL, 0) == 200) served++;
+    }
+    client_sock s = v6 ? client_connect6(port) : client_connect(port);
+    int third = -1;
+    if (s != CLIENT_BAD) {
+        send_all(s, req, (int)sizeof(req) - 1);
+        third = readable(s, 3000) ? read_status(s, NULL, NULL, 0) : -1;
+        client_close(s);
+    }
+    if (held[0] != CLIENT_BAD) client_close(held[0]);
+    sleep_ms(300);   /* the server saw it go */
+    s = v6 ? client_connect6(port) : client_connect(port);
+    int fourth = -1;
+    if (s != CLIENT_BAD) {
+        send_all(s, req, (int)sizeof(req) - 1);
+        fourth = readable(s, 3000) ? read_status(s, NULL, NULL, 0) : -1;
+        client_close(s);
+    }
+    if (held[1] != CLIENT_BAD) client_close(held[1]);
+    char note[96];
+    snprintf(note, sizeof(note), "%d served, a third %d, after one closed %d", served, third, fourth);
+    report(label, served == 2 && third == 503 && fourth == 200, 0, third, note);
+}
+
+static void round_per_ip(int v6) {
+    const char* label = v6 ? "per ip ::1" : "per ip 127.0.0.1";
+    HttpServer* server = http_server_create(0);
+    if (!server) { report(label, 0, -1, -1, "server_create"); return; }
+    http_server_get(server, "/ping", ping_handler, NULL);
+    const char* err = http_server_set_keepalive_raw(server, 1, 0, 10000LL * 1000000LL);
+    if (!*err) err = http_server_set_max_connections_per_ip_raw(server, 2, 64);
+    if (!*err && *http_server_set_max_connections_per_ip_raw(server, 2, 129) == '\0')
+        err = "a 129 bit prefix was accepted";
+    if (*err) { report(label, 0, -1, -1, err); http_server_free(server); return; }
+    int bound = v6 ? http_server_bind_raw(server, "::1", 0)
+                   : http_server_bind_raw(server, "127.0.0.1", 0);
+    if (bound < 0 || http_server_start_background_raw(server) < 0) {
+        if (v6) printf("round[%s]: skipped, no IPv6 loopback here\n", label);
+        else report(label, 0, -1, -1, "bind or start");
+        http_server_free(server);
+        return;
+    }
+    round_per_ip_on(server, label, v6);
+    http_server_free(server);
+}
+
 #ifndef _WIN32
+/* The same on the proxy event loop: a gateway with the per-address limit. */
+static void round_loop_per_ip(void) {
+    const char* label = "loop per ip";
+    g_loop_per_ip = 2;
+    Gateway g = loop_gateway(label, 0, 0);
+    g_loop_per_ip = 0;
+    if (!g.server) return;
+    round_per_ip_on(g.server, label, 0);
+    on_loop(g, label);
+    loop_gateway_free(g);
+}
+
 /* Out of descriptors. The process's descriptor limit is lowered to just past
  * what is open, clients connect until socket() fails, and then one more
  * connects on a descriptor held back for it, so its connection waits in the
@@ -858,6 +947,7 @@ int http_slow_clients_probe(void) {
     if (WANT("rate")) for (int b = PLAIN; b <= AETHER; b++) round_rate(b);
     if (WANT("sleep")) round_sleep();
     if (WANT("park")) round_park();
+    if (WANT("perip")) { round_per_ip(0); round_per_ip(1); }
 #ifndef _WIN32
     if (WANT("loop")) {
         round_loop_slow("head");
@@ -866,6 +956,7 @@ int http_slow_clients_probe(void) {
         round_loop_rate();
         round_loop_slots();
     }
+    if (WANT("perip")) round_loop_per_ip();
     if (WANT("descriptors")) round_descriptors();
     if (g_upstream) http_server_free(g_upstream);
 #else
