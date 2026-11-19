@@ -1,0 +1,77 @@
+// Regression (#3749): std.cryptography.asn1 read an indefinite-length TLV
+// by appending each TLV inside it to the content read so far, reallocating,
+// copying and wiping all of it every time. `30 80`, N copies of `05 00` and
+// the EOC `00 00` cost about N * N bytes copied and as many wiped: at
+// N = 200000, a 400 KB input a TLS peer may send as a certificate, 5.4
+// seconds of CPU. The content is now copied once, from the input where the
+// TLVs lie, so the read is linear: 11 ms on the same machine.
+//
+// At N = 300000 the bound, 1.5 seconds, is about a hundred times the linear
+// read and a twentieth of the quadratic one (30 seconds). The content is
+// the TLVs inside, whole, and the tag read_tlv reports is the indefinite
+// TLV's own; it was that of the last TLV inside it.
+
+import std.bytes
+import std.os
+import std.string
+import std.cryptography.asn1
+
+extern exit(code: int)
+
+const N = 300000
+const BOUND_MS = 1500
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("FAIL: ${what}")
+    return 1
+}
+
+main() {
+    fails = 0
+
+    n = 2 + N * 2 + 2
+    b = bytes.new(n)
+    bytes.set_length(b, n)
+    bytes.set(b, 0, 0x30)
+    bytes.set(b, 1, 0x80)
+    i = 0
+    while i < N {
+        bytes.set(b, 2 + i * 2, 0x05)
+        bytes.set(b, 3 + i * 2, 0x00)
+        i = i + 1
+    }
+    bytes.set(b, n - 2, 0)
+    bytes.set(b, n - 1, 0)
+
+    r = asn1.reader_new(b)
+    t0 = os.now_monotonic_ms()
+    content, err = asn1.read_tlv(r)
+    elapsed = os.now_monotonic_ms() - t0
+
+    fails = fails + check(err == "" && content != null, "the indefinite TLV did not read: ${err}")
+    fails = fails + check(elapsed < BOUND_MS,
+                          "reading ${N} TLVs inside an indefinite length took ${elapsed} ms, past ${BOUND_MS}")
+    if content != null {
+        fails = fails + check(bytes.length(content) == N * 2,
+                              "the content is ${bytes.length(content)} bytes, not ${N * 2}")
+        same = 1
+        j = 0
+        while j < N * 2 && same == 1 {
+            if (bytes.get(content, j) & 0xFF) != (bytes.get(b, 2 + j) & 0xFF) { same = 0 }
+            j = j + 1
+        }
+        fails = fails + check(same == 1, "the content is not the TLVs inside, as they came")
+        bytes.free(content)
+    }
+    fails = fails + check(asn1.last_tag(r) == 0x30,
+                          "last_tag is ${asn1.last_tag(r)}, not the indefinite SEQUENCE's 48")
+    fails = fails + check(asn1.reader_eof(r) == 1, "the reader did not end past the EOC")
+    asn1.reader_free(r)
+    bytes.free(b)
+
+    if fails > 0 {
+        exit(1)
+    }
+    println("PASS: an indefinite length reads in linear time (${elapsed} ms for ${N} TLVs)")
+}

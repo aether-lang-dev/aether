@@ -8,8 +8,9 @@
 // P-256, P-384 and P-521, RSA, Ed25519; roots, intermediates and leaves,
 // with and without SANs and basicConstraints), each as DER, as PEM and as
 // DER for the TLV reader. Beside them, DER the reader must survive:
-// indefinite lengths nested deep, a high tag number that does not end, the
-// longest length forms, contents past the end; and OCSP responses.
+// indefinite lengths nested deep and many TLVs inside one, a high tag
+// number that does not end, the longest length forms, contents past the
+// end; and OCSP responses.
 import std.os
 import std.io
 import std.fs
@@ -131,6 +132,21 @@ main() {
     put(b, 0x00)
     put(b, 0x00)
     laid(dir, "indefinite_one", 1, b)
+
+    // Many TLVs side by side inside one indefinite length, up to the
+    // target's 16 KB: the read that was quadratic in their number (#3749).
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x80)
+    i = 0
+    while i < 4000 {
+        put(b, 0x05)
+        put(b, 0x00)
+        i = i + 1
+    }
+    put(b, 0x00)
+    put(b, 0x00)
+    laid(dir, "indefinite_flat", 1, b)
 
     b = strbuilder.new(0)
     put(b, 0x1f)
