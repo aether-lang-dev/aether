@@ -54,4 +54,4 @@ if ! echo "$OUT" | grep -q "^PASS"; then
     fail "a line ending reached the request head"
 fi
 
-echo "  [PASS] http_header_injection: value, name and URL all refuse a line ending"
+echo "  [PASS] http_header_injection: value, name, URL and content type all refuse a line ending"

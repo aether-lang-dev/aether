@@ -4,35 +4,17 @@
  * nothing else in the tree asserts it: the keep-alive test passes even when
  * the client sends `Connection: close`, because that upstream holds the
  * socket open regardless of what it is told.
+ *
+ * It answers one connection after another until the test stops it, one
+ * request each, and says `Connection: close` so the client does not try to
+ * reuse a socket this side has already closed.
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "raw_socket.h"
 
-int main(void) {
-    if (raw_socket_start() != 0) return 1;
-    raw_sock ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls == RAW_SOCK_INVALID) return 1;
-    int one = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
-
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(ls, (struct sockaddr*)&a, sizeof(a)) != 0) return 1;
-    if (listen(ls, 8) != 0) return 1;
-
-    socklen_t al = sizeof(a);
-    if (getsockname(ls, (struct sockaddr*)&a, &al) != 0) return 1;
-    printf("%d\n", ntohs(a.sin_port));
-    fflush(stdout);
-
-    raw_sock cs = accept(ls, NULL, NULL);
-    if (cs == RAW_SOCK_INVALID) return 1;
-
+static void answer(raw_sock cs) {
     char req[8192];
     size_t got = 0;
     while (got < sizeof(req) - 1) {
@@ -58,10 +40,37 @@ int main(void) {
                       "HTTP/1.1 200 OK\r\n"
                       "Content-Type: text/plain\r\n"
                       "Content-Length: %d\r\n"
+                      "Connection: close\r\n"
                       "\r\n%s", (int)head_len, head);
     send(cs, resp, (size_t)rl, 0);
+}
 
-    raw_socket_close(cs);
+int main(void) {
+    if (raw_socket_start() != 0) return 1;
+    raw_sock ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls == RAW_SOCK_INVALID) return 1;
+    int one = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
+
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(ls, (struct sockaddr*)&a, sizeof(a)) != 0) return 1;
+    if (listen(ls, 8) != 0) return 1;
+
+    socklen_t al = sizeof(a);
+    if (getsockname(ls, (struct sockaddr*)&a, &al) != 0) return 1;
+    printf("%d\n", ntohs(a.sin_port));
+    fflush(stdout);
+
+    for (;;) {
+        raw_sock cs = accept(ls, NULL, NULL);
+        if (cs == RAW_SOCK_INVALID) break;
+        answer(cs);
+        raw_socket_close(cs);
+    }
     raw_socket_close(ls);
     return 0;
 }
