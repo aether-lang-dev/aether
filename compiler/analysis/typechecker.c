@@ -70,6 +70,7 @@ SymbolTable* create_symbol_table(SymbolTable* parent) {
     table->hidden_names = NULL;
     table->seal_whitelist = NULL;
     table->is_sealed = 0;
+    table->binds_body = 0;
     // Inherit the merged-body origin so nested scopes (loops, blocks,
     // closures inside a merged function) resolve qualified names against
     // the same module's imports.
@@ -174,6 +175,19 @@ static void scope_apply_visibility_directives(SymbolTable* table, ASTNode* block
     }
 }
 
+// A name a `seal except` on `t` admits although the list does not give it:
+// one the function whose body `t` is binds itself (a parameter, a local
+// hoisted to the function's top). A closure's parameters and hoisted locals
+// share its sealed scope, so they were always visible; a function's sit one
+// scope out, and every one of them had to be listed (`seal except p` for a
+// parameter `p`), which is no containment: the body's own names are not
+// ambient. NULL for every other name, and for a hoisted local not bound yet.
+static Symbol* seal_admits_own(SymbolTable* t, const char* name) {
+    if (!t || !t->is_sealed || !t->parent || !t->parent->binds_body) return NULL;
+    Symbol* s = lookup_symbol_local(t->parent, name);
+    return s && !s->hoist_pending ? s : NULL;
+}
+
 // Returns 1 if `name` was blocked by a `hide` or `seal except` directive
 // somewhere in the scope chain AND a real binding for it exists farther
 // up (above the blocking scope). Used to give a better error message than
@@ -183,7 +197,8 @@ static int name_blocked_by_hide(SymbolTable* table, const char* name) {
     SymbolTable* t = table;
     while (t) {
         int blocked_here = scope_name_is_hidden(t, name) ||
-                           (t->is_sealed && !scope_name_in_whitelist(t, name));
+                           (t->is_sealed && !scope_name_in_whitelist(t, name) &&
+                            !seal_admits_own(t, name));
         if (blocked_here) {
             // Walk upward from the parent looking for a real binding.
             for (SymbolTable* check = t->parent; check; check = check->parent) {
@@ -205,7 +220,8 @@ static int name_blocked_by_hide(SymbolTable* table, const char* name) {
 static int qualified_prefix_blocked(SymbolTable* table, const char* prefix) {
     for (SymbolTable* t = table; t; t = t->parent) {
         int blocked_here = scope_name_is_hidden(t, prefix) ||
-                           (t->is_sealed && !scope_name_in_whitelist(t, prefix));
+                           (t->is_sealed && !scope_name_in_whitelist(t, prefix) &&
+                            !seal_admits_own(t, prefix));
         if (blocked_here) {
             for (SymbolTable* c = table; c; c = c->parent) {
                 if (lookup_symbol_local(c, prefix)) return 0;
@@ -647,7 +663,7 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
         return NULL;
     }
     if (obey_directives && table->is_sealed && !scope_name_in_whitelist(table, name)) {
-        return NULL;
+        return seal_admits_own(table, name);
     }
 
     // Issue #333 DSL block receiver fallback: when this scope is the
@@ -8282,6 +8298,7 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
             g_tc_fn_body = node->child_count > 0 ? node->children[0] : NULL;
             g_tc_return_owner = node;
             SymbolTable* main_table = create_symbol_table(table);
+            main_table->binds_body = 1;
             if (g_tc_fn_body) declare_if_branch_hoists(g_tc_fn_body, main_table);
             int ok = typecheck_statement(node, main_table);
             free_symbol_table(main_table);
@@ -13129,6 +13146,7 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     if (!func || (func->type != AST_FUNCTION_DEFINITION && func->type != AST_BUILDER_FUNCTION)) return 0;
 
     SymbolTable* func_table = create_symbol_table(table);
+    func_table->binds_body = 1;
 
     // Issue #243 sealed scopes, #2614: a function cloned in from a module
     // resolves qualified calls against that module's imports. The origin

@@ -625,6 +625,48 @@ main() { println(f1(1)) }
 EOF
 run_reject_hidden "hide ns.member refuses that constant" $AE_TMP/sealmod/module_const_hidden.ae
 
+# A function's own names: a seal on its body admits its parameters and the
+# locals hoisted to its top (an arm's local read after the `if`), as a
+# closure's seal always admitted its parameters. They had to be listed
+# (`seal except p`), and an arm local could not be listed in any useful
+# way. A seal on a block nested deeper does not admit them, and `hide`
+# still hides a parameter.
+cat > $AE_TMP/ae_seal_own_names.ae << 'EOF'
+helper(x: int) -> int { return x + 1 }
+f1(p: int, q: int) -> int {
+    seal except helper
+    if p > 0 { x = helper(p) } else { x = q }
+    q = q + x
+    return q
+}
+main() {
+    seal except f1, println
+    println("${f1(1, 2)}")
+}
+EOF
+run_accept "seal except admits the function's parameters and hoisted locals" $AE_TMP/ae_seal_own_names.ae
+
+cat > $AE_TMP/ae_seal_nested_param.ae << 'EOF'
+f1(p: int) -> int {
+    {
+        seal except println
+        println("${p}")
+    }
+    return 0
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_hidden "seal except in a nested block still refuses the function's parameter" $AE_TMP/ae_seal_nested_param.ae
+
+cat > $AE_TMP/ae_hide_param.ae << 'EOF'
+f1(p: int) -> int {
+    hide p
+    return p
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_hidden "hide still hides a parameter" $AE_TMP/ae_hide_param.ae
+
 # Cleanup
 rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out $AE_TMP/ae_hide_log
 

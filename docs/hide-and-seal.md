@@ -214,6 +214,32 @@ actor Server {
 This is particularly useful for actors with multiple state variables
 where individual receive arms should only touch a subset of state.
 
+### A function's own names need no listing
+
+A `seal except` on a function's body admits the function's parameters and
+every local of the body, including one an `if` arm binds and the body reads
+after it, without listing them:
+
+```aether
+helper(x: int) -> int { return x + 1 }
+
+f(p: int, q: int) -> int {
+    seal except helper
+    if p > 0 { x = helper(p) } else { x = q }
+    return q + x
+}
+
+main() { println("${f(1, 2)}") }
+```
+
+They are the body's own names, handed in or made there, not ambient state;
+a closure's seal always admitted its parameters. Listing them is allowed
+and changes nothing (the examples further down do). A seal on a block
+nested deeper in the function is a block of its own: the function's
+parameters are outer names there and need listing. `hide p` still hides a
+parameter. (Through 0.923.0 a function's parameters, and an arm local read
+after its `if`, had to be on the list; the arm local could not usefully be.)
+
 ### Closures see the block's own locals
 
 A closure written in a sealed block sees that block's locals, as any nested
@@ -336,7 +362,7 @@ This is consistent with normal lexical shadowing and means
 | Form | Effect |
 |---|---|
 | `hide a, b, c` | Names `a`, `b`, `c` from outer scopes are not in this block (or any nested block within it). |
-| `seal except a, b, c` | EVERY name from outer scopes is invisible in this block, except `a`, `b`, `c`. Local bindings inside the block are still visible. |
+| `seal except a, b, c` | EVERY name from outer scopes is invisible in this block, except `a`, `b`, `c`. Local bindings inside the block are still visible, and on a function's body so are its parameters. |
 | `hide x` followed by `var x = …` in the same scope | Compile error, cannot redeclare a hidden name. |
 | `hide x` then a nested block declaring `var x = …` | OK, fresh binding in the child scope. |
 | `hide x` then calling a visible function that reads `x` from its own scope | OK, name resolution at the call site doesn't touch `x`. |
