@@ -6584,6 +6584,19 @@ static int g_binimport_stubdir_count = 0;
 
 void ae_remove_tree(const char* path) {
 #ifdef _WIN32
+    /* A junction or a directory symlink carries FILE_ATTRIBUTE_DIRECTORY as
+     * well as FILE_ATTRIBUTE_REPARSE_POINT. Descending into one deleted what
+     * it points at: a toolchain directory that was a junction to a Zig the
+     * user installed elsewhere had that Zig emptied when `ae toolchain zig`
+     * replaced it. A reparse point is removed as the link it is
+     * (RemoveDirectory on a directory link, DeleteFile on a file link),
+     * which leaves its target alone, as lstat does on POSIX. */
+    DWORD top = GetFileAttributesA(path);
+    if (top != INVALID_FILE_ATTRIBUTES && (top & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        if (top & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryA(path);
+        else DeleteFileA(path);
+        return;
+    }
     char* pattern = ae_path_printf("%s/*", path);
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
@@ -6592,8 +6605,14 @@ void ae_remove_tree(const char* path) {
         do {
             if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
             char* child = ae_path_printf("%s/%s", path, fd.cFileName);
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ae_remove_tree(child);
-            else DeleteFileA(child);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryA(child);
+                else DeleteFileA(child);
+            } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                ae_remove_tree(child);
+            } else {
+                DeleteFileA(child);
+            }
             free(child);
         } while (FindNextFileA(h, &fd));
         FindClose(h);

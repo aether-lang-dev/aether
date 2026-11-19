@@ -191,7 +191,8 @@ int cmd_version_use(const char* version);
 int cmd_install(int argc, char** argv);
 int cmd_upgrade(void);
 
-/* Delete a directory tree. Symlinks are removed, not followed (ae.c). */
+/* Delete a directory tree. Symlinks, and on Windows junctions, are removed
+ * as links, never followed (ae.c). */
 void ae_remove_tree(const char* path);
 
 /* ae_toolchain.c: `ae toolchain zig` fetches and verifies the pinned Zig

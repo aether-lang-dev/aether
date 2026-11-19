@@ -138,4 +138,33 @@ AETHER_HOME="$(native "$AH")" "$AE" toolchain zig --check >"$TMP/out" 2>"$TMP/er
     && fail "--check passed an install with no stamp"
 grep -q "is missing" "$TMP/err" || fail "--check did not say the stamp is missing" "$TMP/err"
 
+# 6. Windows: a junction inside a tree ae deletes is removed as a link, and
+# what it points at is left alone. ae_remove_tree followed junctions (they
+# carry the directory attribute), so a toolchain directory that was a
+# junction to a Zig installed elsewhere had that Zig emptied on reinstall.
+# Driven through the sweep of stale staging directories, which deletes a
+# stage older than a day before an install starts; the install then fails
+# on the missing mirror, which is beside the point.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*)
+        JR="$TMP/junction_home/toolchains"
+        STAGE="$JR/.zig-$VER-stage-old"
+        mkdir -p "$STAGE" "$TMP/junction_target"
+        echo keep > "$TMP/junction_target/keep.txt"
+        if powershell.exe -NoProfile -Command \
+            "New-Item -ItemType Junction -Path '$(cygpath -w "$STAGE/link")' -Target '$(cygpath -w "$TMP/junction_target")' | Out-Null" \
+            >/dev/null 2>&1 && [ -f "$STAGE/link/keep.txt" ]; then
+            touch -d "3 days ago" "$STAGE"
+            AETHER_HOME="$(native "$TMP/junction_home")" \
+                AE_ZIG_BASE_URL="file:///$(native "$TMP")/no_mirror" \
+                "$AE" toolchain zig >/dev/null 2>&1
+            [ -e "$STAGE" ] && fail "the stale stage holding a junction was not swept"
+            [ -f "$TMP/junction_target/keep.txt" ] \
+                || fail "deleting a stage followed its junction and emptied the target"
+        else
+            echo "  [note] ae_toolchain_zig: no junction could be made here; case 6 not run"
+        fi
+        ;;
+esac
+
 echo "  [PASS] ae_toolchain_zig"
