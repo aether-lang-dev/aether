@@ -521,4 +521,26 @@ char* aether_sandbox_grant_pattern(const char* category, const char* pattern) {
     }
     return strdup(pattern);
 }
+
+// ---------------------------------------------------------------------------
+// A staged write (fs.write_atomic)
+// ---------------------------------------------------------------------------
+
+/* The temporary fs.write_atomic is about to create, and the file it stands
+ * for, whose fs_write the caller has checked. Thread-local, set around that
+ * one open: the LD_PRELOAD library asks aether_sandbox_staged_for and checks
+ * the file instead of the temporary's own name (libaether_sandbox_preload.c,
+ * staged_write_target). Borrowed: the caller keeps both alive while set. */
+static AETHER_TLS_SHARED const char* t_stage_tmp;
+static AETHER_TLS_SHARED const char* t_stage_path;
+
+void aether_sandbox_stage(const char* tmp, const char* path) {
+    t_stage_tmp = tmp && path ? tmp : NULL;
+    t_stage_path = tmp && path ? path : NULL;
+}
+
+const char* aether_sandbox_staged_for(const char* tmp) {
+    if (!tmp || !t_stage_tmp || strcmp(tmp, t_stage_tmp) != 0) return NULL;
+    return t_stage_path;
+}
 #endif

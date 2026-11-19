@@ -19,6 +19,7 @@ main() {
     // short-circuits before the audit hook.
     println("count: ${audit.count()}")
     println("denied: ${audit.denied_count()}")
+    println("denied since start: ${audit.denied_total()}")
 
     // An out-of-range entry is ("", "", -1) rather than a crash, so a
     // loop that runs past the end gets an unmistakable value.
@@ -29,6 +30,7 @@ main() {
 ```output
 count: 0
 denied: 0
+denied since start: 0
 entry(0): cat='' res='' allowed=-1
 ```
 
@@ -39,10 +41,25 @@ work that follows it.
 The strings from `entry` are Aether-owned copies, safe to keep after further
 audit activity: the ring buffer's own slots are overwritten as it wraps.
 
+`denied_count()` counts the denials still in the buffer. The buffer keeps the
+latest 256 checks, allowed ones included, so a denial rolls off it once 256
+later checks are recorded, and `denied_count()` then misses it.
+`denied_total()` is the count that does not: every denial the in-process
+sandbox has recorded since the process started, as a `long`, never reset (not
+by `clear()` either). The buffer and the total are both one per process,
+shared by every thread. Take the total before and after a piece of work to
+count that work's denials, however many checks it made:
+
+```aether,fragment
+before = audit.denied_total()
+sandbox.enforce(g) callback { run_plugin() }
+if audit.denied_total() > before { println("the plugin was refused something") }
+```
+
 `examples/05-containment/03-audit.ae` is a worked example that grants one environment
 variable and lists the allowed and refused checks a plugin made.
 
 ## Exports
 
-`count`, `entry`, `clear`, `denied_count`, plus the `aether_audit_*` raw
-forms.
+`count`, `entry`, `clear`, `denied_count`, `denied_total`, plus the
+`aether_audit_*` raw forms.

@@ -81,6 +81,9 @@ static void* (*real_dlopen)(const char*, int) = NULL;
 // leaving its enforce cleared under another).
 extern int aether_sandbox_check_resolved(const char* category, const char* resource) __attribute__((weak));
 extern int aether_sandbox_levels_here(void) __attribute__((weak));
+// The file a temporary std's fs.write_atomic is creating stands for, on this
+// thread (aether_sandbox.h, aether_sandbox_stage); NULL for any other name.
+extern const char* aether_sandbox_staged_for(const char* tmp) __attribute__((weak));
 
 static void log_deny(const char* category, const char* resource) {
     if (log_mode == LOG_NONE) return;
@@ -378,6 +381,31 @@ char* getenv(const char* name) {
     return real_getenv(name);
 }
 
+// fs.write_atomic(path) writes a new file `<path>.tmp.<pid>.<n>` and renames
+// it over `path`. std checks `path` and says, on this thread, which file the
+// temporary it is about to create stands for (aether_sandbox_stage); the
+// open is then checked as a write of that file, under the in-process levels
+// and the grant file alike, so a grant on `path` covers write_atomic(path)
+// here as it does in std. Only for that shape, with `path` the file staged,
+// this process's pid, and an open that creates a new file (O_CREAT|O_EXCL):
+// any other open of any other name is checked as it is, so the stage can
+// never be used to open an existing file or one that is not beside `path`.
+static const char* staged_write_target(const char* path, int flags) {
+    if ((flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL)) return path;
+    const char* target = aether_sandbox_staged_for ? aether_sandbox_staged_for(path) : NULL;
+    if (!target) return path;
+    size_t n = strlen(target);
+    if (strncmp(path, target, n) != 0 || strncmp(path + n, ".tmp.", 5) != 0) return path;
+    const char* p = path + n + 5;
+    char* end = NULL;
+    long pid = strtol(p, &end, 10);
+    if (end == p || *end != '.' || pid != (long)getpid()) return path;
+    p = end + 1;
+    if (*p < '0' || *p > '9') return path;
+    while (*p >= '0' && *p <= '9') p++;
+    return *p ? path : target;
+}
+
 // What an open() asks of the file (#3742): a read when its access mode is
 // O_RDONLY or O_RDWR, a write when it is O_WRONLY or O_RDWR or when it
 // creates, appends to or truncates the file. O_RDWR needs both grants, as
@@ -389,7 +417,9 @@ static int open_flags_allowed(const char* path, int flags) {
     int reads = acc == O_RDONLY || acc == O_RDWR;
     int writes = acc != O_RDONLY || (flags & (O_CREAT | O_APPEND | O_TRUNC));
     if (reads && !check_grant("fs_read", path)) return 0;
-    if (writes && !check_grant("fs_write", path)) return 0;
+    // A staged write_atomic temporary is checked as a write of the file it
+    // stands for (staged_write_target); every other open as itself.
+    if (writes && !check_grant("fs_write", staged_write_target(path, flags))) return 0;
     return 1;
 }
 
@@ -1462,67 +1492,639 @@ void* dlopen(const char* filename, int flags) {
     return h;
 }
 
-// syscall — block direct syscall() which bypasses all libc interception
-// This is the nuclear escape hatch: Perl's syscall(), Python's os.syscall()
+// syscall(): the raw escape hatch (Perl's syscall(), Python's ctypes
+// syscall, a library that issues a call libc has no wrapper for).
+//
+// The interposer is there so syscall() cannot be used to go round this
+// library: a raw call skips the argument checks the wrappers make, and most
+// calls have no wrapper here at all (unlink, rename, mkdir, sendto, kill,
+// ptrace, ... are not intercepted as libc calls). So:
+//
+//   - With nothing in force (no grant source, no in-process level on the
+//     calling thread) every call is forwarded.
+//
+//   - With a policy in force it is default-deny. Forwarded are only the calls
+//     on the allowlist below, each of which reaches no file, socket, program
+//     or other process (each entry says why), and which the code a sandbox
+//     runs makes through syscall() as a matter of course: GLib's futex
+//     waits, gettid and sched_getattr/sched_setattr; the Aether scheduler's
+//     sched_getaffinity and membarrier; FreeBSD libthr's getpid and
+//     sigreturn (lib/libthr/thread/thr_rtld.c, thr_sig.c). Traced on an idle
+//     GTK4 program, sae-driver and Aether actor programs (glibc 2.35 and
+//     2.42), those are all the calls that arrive here.
+//
+//   - Calls that create a process (fork, vfork, a clone or clone3 that is
+//     not a thread, FreeBSD's rfork with RFPROC and pdfork) get fork()'s
+//     rule: the fork grant under a grant file. A thread passes. libthr makes
+//     every threaded FreeBSD program's fork() and system() this way.
+//   - mmap and mprotect / pkey_mprotect get mmap()'s and mprotect()'s rule:
+//     executable memory is refused under a grant file, the rest forwarded.
+//
+//   - Anything else is refused (EPERM) and logged
+//     (`AETHER_DENIED: native syscall:<name>`, or the number for a call this
+//     table does not name), unless a native grant names it:
+//     native:syscall:unlinkat, or native:* / grant_all for all of them.
+//     A conditional allowlist entry whose condition fails (a kill of another
+//     process) falls through to the same rule.
 //
 // The prototype differs by platform and must match the libc declaration
 // exactly or the override is a compile error: glibc declares
 // `long syscall(long, ...)`, FreeBSD and NetBSD declare
 // `int syscall(int, ...)`. OpenBSD's libc no longer has syscall(), so the
-// definition there is the only one.
+// definition there is the only one, and it can forward nothing (ENOSYS).
 #if defined(__FreeBSD__) || defined(__NetBSD__)
 typedef int aether_syscall_arg_t;
+#define AETHER_SYSCALL_NARGS 8     /* the most a BSD syscall takes */
 #else
 typedef long aether_syscall_arg_t;
+#define AETHER_SYSCALL_NARGS 6     /* the most a Linux syscall takes */
 #endif
-static aether_syscall_arg_t (*real_syscall)(aether_syscall_arg_t, ...) = NULL;
-aether_syscall_arg_t syscall(aether_syscall_arg_t number, ...) {
-    if (!real_syscall) real_syscall = dlsym(RTLD_NEXT, "syscall");
-#if defined(__FreeBSD__)
-    // libthr's fork, which every threaded program's fork() and system()
-    // reach through libc's interposing table, makes the process with
-    // syscall(SYS_fork) itself. Refused here as every raw syscall is, no
-    // threaded program could fork under the preload, fork grant or not
-    // (ENOSYS from fork() and system(); posix_spawn and vfork, which do not
-    // go that way, worked). It is fork, so it gets fork()'s rule, and it
-    // takes no arguments, so it forwards as it is.
-    if (number == SYS_fork) {
-        if (!new_process_allowed()) {
-            errno = EPERM;
-            return -1;
-        }
-        return real_syscall(SYS_fork);
-    }
+
+#if !defined(__FreeBSD__)
+#include <sys/syscall.h>
 #endif
-    if (sandbox_active) {
 #if defined(__linux__)
-        // Block dangerous syscalls: open(2), openat(257), connect(42),
-        // execve(59), socket(41). Numbers are the Linux x86-64 ABI;
-        // FreeBSD's syscall table differs, so this named-deny branch is
-        // Linux-only. The catch-all block below still denies every raw
-        // syscall() when sandboxed, on every platform.
-        if (number == 2 || number == 257 || number == 42 ||
-            number == 59 || number == 41) {
-            char num_str[32];
-            snprintf(num_str, sizeof(num_str), "syscall_%ld", (long)number);
-            log_deny("native", num_str);
-            errno = EPERM;
-            return -1;
-        }
-#endif // __linux__
+#include <sys/prctl.h>            /* PR_SET_NAME, PR_GET_NAME */
+#endif
+
+/* Allowed with a policy in force: */
+#define SC_FREE      1   /* reaches nothing outside this process's own state */
+#define SC_SELF      2   /* the same, when the first argument names this process
+                            or thread (0, our pid, our tid) */
+#define SC_KILL_SELF 3   /* a signal to this process (pid or tgid argument) */
+#define SC_TKILL_SELF 4  /* a signal to the calling thread */
+#define SC_PRCTL_NAME 5  /* prctl of the thread's name only */
+/* Held to a wrapper's rule: */
+#define SC_PROCESS   6   /* a new process unless a thread: fork()'s rule */
+#define SC_MMAP      7   /* anonymous PROT_EXEC: mmap()'s rule */
+#define SC_MPROTECT  8   /* adds PROT_EXEC: mprotect()'s rule */
+/* Named so the log and the grant read the same on every architecture; refused
+ * under a policy without a native grant, as is every call not listed. */
+#define SC_GRANT     9
+
+#define SC(name, kind) { SYS_##name, "syscall:" #name, kind },
+static const struct { long nr; const char* name; int kind; } aether_raw_calls[] = {
+    /* Waiting and waking on this process's own memory (GLib's GCond, GMutex,
+     * GThreadPool; libc's own locks). */
+#ifdef SYS_futex
+    SC(futex, SC_FREE)
+#endif
+#ifdef SYS_futex_time64
+    SC(futex_time64, SC_FREE)
+#endif
+#ifdef SYS_futex_waitv
+    SC(futex_waitv, SC_FREE)
+#endif
+#ifdef SYS_futex_wake
+    SC(futex_wake, SC_FREE)
+#endif
+#ifdef SYS_futex_wait
+    SC(futex_wait, SC_FREE)
+#endif
+#ifdef SYS_futex_requeue
+    SC(futex_requeue, SC_FREE)
+#endif
+#ifdef SYS__umtx_op
+    SC(_umtx_op, SC_FREE)               /* FreeBSD's futex */
+#endif
+#ifdef SYS_set_robust_list
+    SC(set_robust_list, SC_FREE)        /* this thread's futex list */
+#endif
+#ifdef SYS_get_robust_list
+    SC(get_robust_list, SC_SELF)
+#endif
+#ifdef SYS_rseq
+    SC(rseq, SC_FREE)                   /* this thread's restartable sequences */
+#endif
+    /* Memory ordering across this process's own threads (the Aether
+     * scheduler's membarrier). */
+#ifdef SYS_membarrier
+    SC(membarrier, SC_FREE)
+#endif
+    /* Scheduling of this process's own threads (the Aether scheduler's CPU
+     * count; GLib's thread attributes). */
+#ifdef SYS_sched_yield
+    SC(sched_yield, SC_FREE)
+#endif
+#ifdef SYS_getcpu
+    SC(getcpu, SC_FREE)
+#endif
+#ifdef SYS_sched_getaffinity
+    SC(sched_getaffinity, SC_SELF)
+#endif
+#ifdef SYS_sched_setaffinity
+    SC(sched_setaffinity, SC_SELF)
+#endif
+#ifdef SYS_sched_getattr
+    SC(sched_getattr, SC_SELF)
+#endif
+#ifdef SYS_sched_setattr
+    SC(sched_setattr, SC_SELF)
+#endif
+    /* Who this process is: no resource reached. */
+#ifdef SYS_gettid
+    SC(gettid, SC_FREE)
+#endif
+#ifdef SYS_getpid
+    SC(getpid, SC_FREE)
+#endif
+#ifdef SYS_getppid
+    SC(getppid, SC_FREE)
+#endif
+#ifdef SYS_getuid
+    SC(getuid, SC_FREE)
+#endif
+#ifdef SYS_geteuid
+    SC(geteuid, SC_FREE)
+#endif
+#ifdef SYS_getgid
+    SC(getgid, SC_FREE)
+#endif
+#ifdef SYS_getegid
+    SC(getegid, SC_FREE)
+#endif
+#ifdef SYS_getresuid
+    SC(getresuid, SC_FREE)
+#endif
+#ifdef SYS_getresgid
+    SC(getresgid, SC_FREE)
+#endif
+#ifdef SYS_thr_self
+    SC(thr_self, SC_FREE)
+#endif
+    /* Randomness and time: no resource reached. */
+#ifdef SYS_getrandom
+    SC(getrandom, SC_FREE)
+#endif
+#ifdef SYS_clock_gettime
+    SC(clock_gettime, SC_FREE)
+#endif
+#ifdef SYS_clock_gettime64
+    SC(clock_gettime64, SC_FREE)
+#endif
+#ifdef SYS_clock_getres
+    SC(clock_getres, SC_FREE)
+#endif
+#ifdef SYS_clock_nanosleep
+    SC(clock_nanosleep, SC_FREE)
+#endif
+#ifdef SYS_nanosleep
+    SC(nanosleep, SC_FREE)
+#endif
+#ifdef SYS_gettimeofday
+    SC(gettimeofday, SC_FREE)
+#endif
+    /* This process's own mappings, no new executable memory: mremap keeps
+     * a mapping's protection, madvise and munmap only drop or hint. */
+#ifdef SYS_munmap
+    SC(munmap, SC_FREE)
+#endif
+#ifdef SYS_mremap
+    SC(mremap, SC_FREE)
+#endif
+#ifdef SYS_madvise
+    SC(madvise, SC_FREE)
+#endif
+    /* I/O on a descriptor this process already holds. Holding it is the
+     * authority: it was opened through the wrappers (or handed over by the
+     * host that started this process), and reading or writing it reaches
+     * nothing new. A socket's peer was checked at connect; sendto and
+     * sendmsg, which name a peer of their own, are not here. */
+#ifdef SYS_read
+    SC(read, SC_FREE)
+#endif
+#ifdef SYS_write
+    SC(write, SC_FREE)
+#endif
+#ifdef SYS_pread64
+    SC(pread64, SC_FREE)
+#endif
+#ifdef SYS_pwrite64
+    SC(pwrite64, SC_FREE)
+#endif
+#ifdef SYS_readv
+    SC(readv, SC_FREE)
+#endif
+#ifdef SYS_writev
+    SC(writev, SC_FREE)
+#endif
+#ifdef SYS_lseek
+    SC(lseek, SC_FREE)
+#endif
+#ifdef SYS_close
+    SC(close, SC_FREE)
+#endif
+#ifdef SYS_close_range
+    SC(close_range, SC_FREE)
+#endif
+    /* Waiting on descriptors already held, and descriptors that name no
+     * resource (an event counter, a timer, an epoll set). */
+#ifdef SYS_epoll_create1
+    SC(epoll_create1, SC_FREE)
+#endif
+#ifdef SYS_epoll_ctl
+    SC(epoll_ctl, SC_FREE)
+#endif
+#ifdef SYS_epoll_wait
+    SC(epoll_wait, SC_FREE)
+#endif
+#ifdef SYS_epoll_pwait
+    SC(epoll_pwait, SC_FREE)
+#endif
+#ifdef SYS_epoll_pwait2
+    SC(epoll_pwait2, SC_FREE)
+#endif
+#ifdef SYS_poll
+    SC(poll, SC_FREE)
+#endif
+#ifdef SYS_ppoll
+    SC(ppoll, SC_FREE)
+#endif
+#ifdef SYS_eventfd2
+    SC(eventfd2, SC_FREE)
+#endif
+#ifdef SYS_timerfd_create
+    SC(timerfd_create, SC_FREE)
+#endif
+#ifdef SYS_timerfd_settime
+    SC(timerfd_settime, SC_FREE)
+#endif
+#ifdef SYS_timerfd_gettime
+    SC(timerfd_gettime, SC_FREE)
+#endif
+    /* This thread's signal state, and signals to itself. */
+#ifdef SYS_rt_sigaction
+    SC(rt_sigaction, SC_FREE)
+#endif
+#ifdef SYS_rt_sigprocmask
+    SC(rt_sigprocmask, SC_FREE)
+#endif
+#ifdef SYS_rt_sigreturn
+    SC(rt_sigreturn, SC_FREE)
+#endif
+#ifdef SYS_rt_sigpending
+    SC(rt_sigpending, SC_FREE)
+#endif
+#ifdef SYS_rt_sigtimedwait
+    SC(rt_sigtimedwait, SC_FREE)
+#endif
+#ifdef SYS_rt_sigsuspend
+    SC(rt_sigsuspend, SC_FREE)
+#endif
+#ifdef SYS_sigaltstack
+    SC(sigaltstack, SC_FREE)
+#endif
+#ifdef SYS_sigaction
+    SC(sigaction, SC_FREE)
+#endif
+#ifdef SYS_sigprocmask
+    SC(sigprocmask, SC_FREE)
+#endif
+#ifdef SYS_sigreturn
+    SC(sigreturn, SC_FREE)              /* libthr's signal return */
+#endif
+#ifdef SYS_tgkill
+    SC(tgkill, SC_KILL_SELF)
+#endif
+#ifdef SYS_rt_tgsigqueueinfo
+    SC(rt_tgsigqueueinfo, SC_KILL_SELF)
+#endif
+#ifdef SYS_kill
+    SC(kill, SC_KILL_SELF)
+#endif
+#ifdef SYS_tkill
+    SC(tkill, SC_TKILL_SELF)
+#endif
+    /* The thread's own name, and on x86_64 its own TLS registers. */
+#ifdef SYS_prctl
+    SC(prctl, SC_PRCTL_NAME)
+#endif
+#ifdef SYS_arch_prctl
+    SC(arch_prctl, SC_FREE)
+#endif
+#ifdef SYS_exit
+    SC(exit, SC_FREE)
+#endif
+#ifdef SYS_exit_group
+    SC(exit_group, SC_FREE)
+#endif
+#ifdef SYS_restart_syscall
+    SC(restart_syscall, SC_FREE)
+#endif
+
+    /* New processes: fork()'s rule. */
+#ifdef SYS_fork
+    SC(fork, SC_PROCESS)
+#endif
+#ifdef SYS_vfork
+    SC(vfork, SC_PROCESS)
+#endif
+#ifdef SYS_clone
+    SC(clone, SC_PROCESS)
+#endif
+#ifdef SYS_clone3
+    SC(clone3, SC_PROCESS)
+#endif
+#ifdef SYS_rfork
+    SC(rfork, SC_PROCESS)
+#endif
+#ifdef SYS_pdfork
+    SC(pdfork, SC_PROCESS)
+#endif
+    /* Memory protection: mmap()'s and mprotect()'s rules. */
+#ifdef SYS_mmap
+    SC(mmap, SC_MMAP)
+#endif
+#ifdef SYS_mmap2
+    SC(mmap2, SC_MMAP)
+#endif
+#ifdef SYS_mprotect
+    SC(mprotect, SC_MPROTECT)
+#endif
+#ifdef SYS_pkey_mprotect
+    SC(pkey_mprotect, SC_MPROTECT)
+#endif
+
+    /* Named only for the log and the grant: refused under a policy. Files and
+     * sockets past the wrappers' checks, and the rest of the file system,
+     * other processes, the kernel. */
+#ifdef SYS_open
+    SC(open, SC_GRANT)
+#endif
+#ifdef SYS_openat
+    SC(openat, SC_GRANT)
+#endif
+#ifdef SYS_openat2
+    SC(openat2, SC_GRANT)
+#endif
+#ifdef SYS_creat
+    SC(creat, SC_GRANT)
+#endif
+#ifdef SYS_open_by_handle_at
+    SC(open_by_handle_at, SC_GRANT)
+#endif
+#ifdef SYS_name_to_handle_at
+    SC(name_to_handle_at, SC_GRANT)
+#endif
+#ifdef SYS_unlink
+    SC(unlink, SC_GRANT)
+#endif
+#ifdef SYS_unlinkat
+    SC(unlinkat, SC_GRANT)
+#endif
+#ifdef SYS_rename
+    SC(rename, SC_GRANT)
+#endif
+#ifdef SYS_renameat
+    SC(renameat, SC_GRANT)
+#endif
+#ifdef SYS_renameat2
+    SC(renameat2, SC_GRANT)
+#endif
+#ifdef SYS_mkdir
+    SC(mkdir, SC_GRANT)
+#endif
+#ifdef SYS_mkdirat
+    SC(mkdirat, SC_GRANT)
+#endif
+#ifdef SYS_rmdir
+    SC(rmdir, SC_GRANT)
+#endif
+#ifdef SYS_link
+    SC(link, SC_GRANT)
+#endif
+#ifdef SYS_linkat
+    SC(linkat, SC_GRANT)
+#endif
+#ifdef SYS_symlink
+    SC(symlink, SC_GRANT)
+#endif
+#ifdef SYS_symlinkat
+    SC(symlinkat, SC_GRANT)
+#endif
+#ifdef SYS_truncate
+    SC(truncate, SC_GRANT)
+#endif
+#ifdef SYS_chmod
+    SC(chmod, SC_GRANT)
+#endif
+#ifdef SYS_fchmodat
+    SC(fchmodat, SC_GRANT)
+#endif
+#ifdef SYS_chown
+    SC(chown, SC_GRANT)
+#endif
+#ifdef SYS_fchownat
+    SC(fchownat, SC_GRANT)
+#endif
+#ifdef SYS_mount
+    SC(mount, SC_GRANT)
+#endif
+#ifdef SYS_socket
+    SC(socket, SC_GRANT)
+#endif
+#ifdef SYS_socketcall
+    SC(socketcall, SC_GRANT)
+#endif
+#ifdef SYS_connect
+    SC(connect, SC_GRANT)
+#endif
+#ifdef SYS_bind
+    SC(bind, SC_GRANT)
+#endif
+#ifdef SYS_listen
+    SC(listen, SC_GRANT)
+#endif
+#ifdef SYS_accept
+    SC(accept, SC_GRANT)
+#endif
+#ifdef SYS_accept4
+    SC(accept4, SC_GRANT)
+#endif
+#ifdef SYS_sendto
+    SC(sendto, SC_GRANT)
+#endif
+#ifdef SYS_sendmsg
+    SC(sendmsg, SC_GRANT)
+#endif
+#ifdef SYS_sendmmsg
+    SC(sendmmsg, SC_GRANT)
+#endif
+#ifdef SYS_execve
+    SC(execve, SC_GRANT)
+#endif
+#ifdef SYS_execveat
+    SC(execveat, SC_GRANT)
+#endif
+#ifdef SYS_fexecve
+    SC(fexecve, SC_GRANT)
+#endif
+#ifdef SYS_memfd_create
+    SC(memfd_create, SC_GRANT)
+#endif
+#ifdef SYS_io_uring_setup
+    SC(io_uring_setup, SC_GRANT)
+#endif
+#ifdef SYS_io_uring_enter
+    SC(io_uring_enter, SC_GRANT)
+#endif
+#ifdef SYS_io_uring_register
+    SC(io_uring_register, SC_GRANT)
+#endif
+#ifdef SYS_ptrace
+    SC(ptrace, SC_GRANT)
+#endif
+#ifdef SYS_process_vm_readv
+    SC(process_vm_readv, SC_GRANT)
+#endif
+#ifdef SYS_process_vm_writev
+    SC(process_vm_writev, SC_GRANT)
+#endif
+#ifdef SYS_pidfd_open
+    SC(pidfd_open, SC_GRANT)
+#endif
+#ifdef SYS_pidfd_send_signal
+    SC(pidfd_send_signal, SC_GRANT)
+#endif
+#ifdef SYS_pidfd_getfd
+    SC(pidfd_getfd, SC_GRANT)
+#endif
+#ifdef SYS_setns
+    SC(setns, SC_GRANT)
+#endif
+#ifdef SYS_unshare
+    SC(unshare, SC_GRANT)
+#endif
+#ifdef SYS_bpf
+    SC(bpf, SC_GRANT)
+#endif
+#ifdef SYS_keyctl
+    SC(keyctl, SC_GRANT)
+#endif
+#ifdef SYS_init_module
+    SC(init_module, SC_GRANT)
+#endif
+#ifdef SYS_finit_module
+    SC(finit_module, SC_GRANT)
+#endif
+};
+#undef SC
+
+static aether_syscall_arg_t (*real_syscall)(aether_syscall_arg_t, ...) = NULL;
+
+static long aether_own_tid(void) {
+#if defined(__linux__) && defined(SYS_gettid)
+    if (real_syscall) return real_syscall(SYS_gettid);
+#endif
+    return -1;
+}
+
+// Is a process-creating raw call a thread? clone's flags are its first
+// argument on every Linux ABI; clone3's are in the struct it points at;
+// rfork makes a process only with RFPROC.
+static int aether_raw_call_is_thread(long nr, const long a[]) {
+#if defined(__linux__)
+#ifdef SYS_clone
+    if (nr == SYS_clone) return (a[0] & CLONE_THREAD) != 0;
+#endif
+#ifdef SYS_clone3
+    if (nr == SYS_clone3) {
+        const struct clone_args* ca = (const struct clone_args*)a[0];
+        return ca && (ca->flags & CLONE_THREAD);
     }
-    // For allowed syscalls, we can't easily forward varargs.
-    // Block all when sandboxed as a safety measure.
-    if (sandbox_active) {
+#endif
+#endif
+#if defined(__FreeBSD__) && defined(SYS_rfork) && defined(RFPROC)
+    if (nr == SYS_rfork) return (a[0] & RFPROC) == 0;
+#endif
+    (void)nr;
+    (void)a;
+    return 0;
+}
+
+// 1 when the raw call may go to the kernel, 0 when it is refused (logged,
+// errno EPERM).
+static int aether_raw_call_allowed(long nr, const long a[]) {
+    if (!policy_in_force()) return 1;
+    const char* name = NULL;
+    int kind = 0;
+    size_t n = sizeof(aether_raw_calls) / sizeof(aether_raw_calls[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (aether_raw_calls[i].nr == nr) {
+            name = aether_raw_calls[i].name;
+            kind = aether_raw_calls[i].kind;
+            break;
+        }
+    }
+    long pid = (long)getpid();
+    switch (kind) {
+    case SC_FREE:
+        return 1;
+    case SC_SELF:
+        if (a[0] == 0 || a[0] == pid || a[0] == aether_own_tid()) return 1;
+        break;
+    case SC_KILL_SELF:
+        if (a[0] == pid) return 1;
+        break;
+    case SC_TKILL_SELF:
+        if (a[0] == aether_own_tid()) return 1;
+        break;
+    case SC_PRCTL_NAME:
+#if defined(__linux__)
+        if (a[0] == PR_SET_NAME || a[0] == PR_GET_NAME) return 1;
+#endif
+        break;
+    case SC_PROCESS:
+        if (aether_raw_call_is_thread(nr, a) || new_process_allowed()) return 1;
+        log_deny("native", name);
+        return 0;
+    case SC_MMAP:
+        if (!sandbox_active || !(a[2] & PROT_EXEC) || (int)a[4] != -1) return 1;
+        log_deny("native", name);
+        return 0;
+    case SC_MPROTECT:
+        if (!sandbox_active || !(a[2] & PROT_EXEC)) return 1;
+        log_deny("native", name);
+        return 0;
+    default:
+        break;
+    }
+    // Not on the allowlist (or its condition failed): a native grant naming
+    // it, by name where the table has one, else by number.
+    char numbered[40];
+    if (!name) {
+        snprintf(numbered, sizeof numbered, "syscall:%ld", nr);
+        name = numbered;
+    }
+    return check_grant("native", name);   // logs a refusal itself
+}
+
+aether_syscall_arg_t syscall(aether_syscall_arg_t number, ...) {
+    // The arguments as the caller passed them, every one a full register or
+    // stack slot wide (a long: a BSD libc declares the arguments int, but a
+    // pointer argument is still passed whole), as libc's own syscall()
+    // reads them; the call is made with the same count, so each reaches the
+    // kernel where it was. Reading a slot the caller left unset reads
+    // whatever is there, which libc's own syscall() also hands the kernel.
+    long args[AETHER_SYSCALL_NARGS];
+    va_list ap;
+    va_start(ap, number);
+    for (int i = 0; i < AETHER_SYSCALL_NARGS; i++) args[i] = va_arg(ap, long);
+    va_end(ap);
+
+    if (!real_syscall) real_syscall = dlsym(RTLD_NEXT, "syscall");
+    if (!aether_raw_call_allowed((long)number, args)) {
         errno = EPERM;
         return -1;
     }
-    // Not sandboxed — we can't forward varargs generically from here
-    // either. Policy: raw syscall() always returns -1/ENOSYS through
-    // this interception point. Every syscall must go through a libc
-    // wrapper (open, connect, execve, getenv, ...) that this preload
-    // library can see. Bypassing libc with syscall(SYS_xxx) is out of
-    // scope for cooperative containment.
-    errno = ENOSYS;
-    return -1;
+    if (!real_syscall) {
+        errno = ENOSYS;
+        return -1;
+    }
+#if AETHER_SYSCALL_NARGS == 8
+    return real_syscall(number, args[0], args[1], args[2], args[3], args[4], args[5],
+                        args[6], args[7]);
+#else
+    return real_syscall(number, args[0], args[1], args[2], args[3], args[4], args[5]);
+#endif
 }

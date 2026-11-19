@@ -1,0 +1,188 @@
+// sandbox.enter / sandbox.leave: each statement of their contract
+// (std/sandbox/module.ae), checked through os.getenv as contained code
+// meets it.
+
+import std.spec
+import std.sandbox
+import std.os
+
+extern exit(code: int)
+// The levels in force on this thread (runtime/aether_sandbox.c).
+extern aether_sandbox_depth() -> int
+
+fn visible(name: string) -> int {
+    if os.getenv(name) == null { return 0 }
+    return 1
+}
+
+fn enter_and_panic(g: sandbox.Grants) {
+    sandbox.enter(g)
+    panic("inside the level")
+}
+
+fn enter_deferred(g: sandbox.Grants) -> int {
+    sandbox.enter(g)
+    defer sandbox.leave()
+    return visible("AE_ENTER_SECRET")
+}
+
+main() {
+    fw = spec.init()
+    e1 = os.setenv("AE_ENTER_OPEN", "visible")
+    e2 = os.setenv("AE_ENTER_SECRET", "hidden")
+    e3 = os.setenv("AE_ENTER_LATE", "late")
+    if e1 != "" || e2 != "" || e3 != "" {
+        println("cannot set the test variables")
+        exit(1)
+    }
+
+    spec.describe(fw, "sandbox.enter / sandbox.leave") {
+        spec.it("puts the grants in force until leave") callback {
+            g = sandbox.new("open") {
+                grant_env("AE_ENTER_OPEN")
+            }
+            d = aether_sandbox_depth()
+            sandbox.enter(g)
+            spec.assert_eq(aether_sandbox_depth(), d + 1, "one level")
+            spec.assert_true(visible("AE_ENTER_OPEN"), "granted")
+            spec.assert_false(visible("AE_ENTER_SECRET"), "not granted")
+            sandbox.leave()
+            spec.assert_eq(aether_sandbox_depth(), d, "paired: back where it was")
+            spec.assert_true(visible("AE_ENTER_SECRET"), "visible again after leave")
+            sandbox.free(g)
+        }
+
+        spec.it("lends the list: a grant added after enter applies") callback {
+            g = sandbox.new("growing") {
+                grant_env("AE_ENTER_OPEN")
+            }
+            sandbox.enter(g)
+            spec.assert_false(visible("AE_ENTER_LATE"), "not granted yet")
+            sandbox.grant_env(g, "AE_ENTER_LATE")
+            spec.assert_true(visible("AE_ENTER_LATE"), "granted later, no second enter")
+            sandbox.leave()
+            sandbox.free(g)
+        }
+
+        spec.it("nests by intersection") callback {
+            outer = sandbox.new("outer") {
+                grant_env("AE_ENTER_OPEN")
+                grant_env("AE_ENTER_SECRET")
+            }
+            inner = sandbox.new("inner") {
+                grant_env("AE_ENTER_OPEN")
+            }
+            sandbox.enter(outer)
+            spec.assert_true(visible("AE_ENTER_SECRET"), "outer grants it")
+            sandbox.enter(inner)
+            spec.assert_true(visible("AE_ENTER_OPEN"), "both grant it")
+            spec.assert_false(visible("AE_ENTER_SECRET"), "inner does not: refused")
+            sandbox.leave()
+            spec.assert_true(visible("AE_ENTER_SECRET"), "outer alone again")
+            all = sandbox.new("all") {
+                grant_all()
+            }
+            sandbox.enter(all)
+            spec.assert_false(visible("AE_ENTER_LATE"), "an inner grant_all widens nothing")
+            sandbox.leave()
+            sandbox.leave()
+            spec.assert_true(visible("AE_ENTER_LATE"), "nothing in force")
+            sandbox.free(all)
+            sandbox.free(inner)
+            sandbox.free(outer)
+        }
+
+        spec.it("nests inside an enforce block, and leave takes only its own") callback {
+            only_open = sandbox.new("open") {
+                grant_env("AE_ENTER_OPEN")
+            }
+            nothing = sandbox.new("none") {}
+            sandbox.enforce(only_open) callback {
+                sandbox.enter(nothing)
+                spec.assert_false(visible("AE_ENTER_OPEN"), "the entered level refuses it")
+                sandbox.leave()
+                spec.assert_true(visible("AE_ENTER_OPEN"), "the block's grant again")
+                spec.assert_false(visible("AE_ENTER_SECRET"), "still held to the block")
+            }
+            sandbox.free(nothing)
+            sandbox.free(only_open)
+        }
+
+        spec.it("holds 64 levels on a thread, and the 65th panics") callback {
+            g = sandbox.new("open") {
+                grant_env("AE_ENTER_OPEN")
+            }
+            d = aether_sandbox_depth()
+            i = d
+            while i < 64 {
+                sandbox.enter(g)
+                i = i + 1
+            }
+            spec.assert_eq(aether_sandbox_depth(), 64, "64 levels")
+            spec.assert_false(visible("AE_ENTER_SECRET"), "all in force")
+            panicked = 0
+            try {
+                sandbox.enter(g)
+            } catch e {
+                panicked = 1
+            }
+            spec.assert_true(panicked, "the 65th panics")
+            spec.assert_eq(aether_sandbox_depth(), 64, "and was not added")
+            while i > d {
+                sandbox.leave()
+                i = i - 1
+            }
+            spec.assert_eq(aether_sandbox_depth(), d, "all left")
+            sandbox.free(g)
+        }
+
+        spec.it("leave with no level in force is a no-op") callback {
+            spec.assert_eq(aether_sandbox_depth(), 0, "nothing in force")
+            sandbox.leave()
+            sandbox.leave()
+            spec.assert_eq(aether_sandbox_depth(), 0, "still nothing")
+            spec.assert_true(visible("AE_ENTER_SECRET"), "everything allowed")
+            g = sandbox.new("none") {}
+            sandbox.enter(g)
+            spec.assert_false(visible("AE_ENTER_OPEN"), "a later enter still applies")
+            sandbox.leave()
+            sandbox.free(g)
+        }
+
+        spec.it("null allows everything, an empty list denies everything") callback {
+            sandbox.enter(null as sandbox.Grants)
+            spec.assert_true(visible("AE_ENTER_SECRET"), "null: allowed")
+            sandbox.leave()
+            g = sandbox.new("empty") {}
+            sandbox.enter(g)
+            spec.assert_false(visible("AE_ENTER_OPEN"), "empty: refused")
+            sandbox.leave()
+            sandbox.free(g)
+        }
+
+        spec.it("defer sandbox.leave() pairs it on the way out") callback {
+            g = sandbox.new("open") {
+                grant_env("AE_ENTER_OPEN")
+            }
+            d = aether_sandbox_depth()
+            spec.assert_false(enter_deferred(g), "held inside")
+            spec.assert_eq(aether_sandbox_depth(), d, "left on return")
+            sandbox.free(g)
+        }
+
+        spec.it("a caught panic takes the level off as it unwinds") callback {
+            g = sandbox.new("none") {}
+            d = aether_sandbox_depth()
+            try {
+                enter_and_panic(g)
+            } catch e {
+                spec.assert_eq(aether_sandbox_depth(), d, "unwound")
+            }
+            spec.assert_true(visible("AE_ENTER_SECRET"), "nothing left in force")
+            sandbox.free(g)
+        }
+    }
+
+    rc = spec.run_summary(fw)
+    return rc
+}

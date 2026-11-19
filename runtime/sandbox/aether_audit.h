@@ -1,6 +1,8 @@
 #ifndef AETHER_AUDIT_H
 #define AETHER_AUDIT_H
 
+#include <stdint.h>
+
 // aether_audit.h — sandbox audit trail for the in-process permission layer.
 //
 // The LD_PRELOAD layer (libaether_sandbox_preload.c) already logs denied
@@ -39,7 +41,12 @@ const char* aether_audit_entry_category(int i);
 const char* aether_audit_entry_resource(int i);
 int         aether_audit_entry_allowed(int i);   // 1 allowed, 0 denied
 
-// Drop all buffered entries. Does not affect the live sink.
+// Denials recorded since the process started, by every thread: monotonic,
+// it never wraps with the ring and aether_audit_clear does not reset it.
+int64_t aether_audit_denied_total(void);
+
+// Drop all buffered entries. Does not affect the live sink or the
+// denied total.
 void aether_audit_clear(void);
 
 #endif // AETHER_AUDIT_H

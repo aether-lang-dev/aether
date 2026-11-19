@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 /* The Win32-aware pthread shim (CRITICAL_SECTION on Windows) rather than raw
  * <pthread.h> — zig's MinGW target has no pthread.h. Portable across the
  * native POSIX, MSYS2, and zig-cross-Windows builds. */
@@ -39,6 +40,11 @@ typedef struct {
 static audit_entry ring[AUDIT_RING_CAP];
 static int ring_head  = 0;   // index of next write
 static int ring_count = 0;   // entries currently held (<= AUDIT_RING_CAP)
+
+// Denials since the process started, under audit_lock like the ring and,
+// like it, one count for the whole process. Never wraps with the ring and
+// is not reset by aether_audit_clear.
+static int64_t denied_total = 0;
 
 /* Field accessors form one entry read in category/resource/allowed order.
  * Keep that read in thread-local storage so a concurrent append cannot move
@@ -137,6 +143,7 @@ void aether_sandbox_audit(const char* category, const char* resource,
     e->allowed = allowed ? 1 : 0;
     ring_head = (ring_head + 1) % AUDIT_RING_CAP;
     if (ring_count < AUDIT_RING_CAP) ring_count++;
+    if (!allowed) denied_total++;
 
     pthread_mutex_unlock(audit_lock_get());
 }
@@ -196,6 +203,13 @@ int aether_audit_entry_allowed(int i) {
     int allowed = query_snapshot.allowed;
     query_phase = QUERY_NONE;
     return allowed;
+}
+
+int64_t aether_audit_denied_total(void) {
+    pthread_mutex_lock(audit_lock_get());
+    int64_t n = denied_total;
+    pthread_mutex_unlock(audit_lock_get());
+    return n;
 }
 
 void aether_audit_clear(void) {

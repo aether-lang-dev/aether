@@ -18,6 +18,8 @@
     <li><a href="#Grants">Grants</a></li>
     <li><a href="#new">new</a></li>
     <li><a href="#enforce">enforce</a></li>
+    <li><a href="#enter">enter</a></li>
+    <li><a href="#leave">leave</a></li>
     <li><a href="#free">free</a></li>
     <li><a href="#spawn_socket">spawn_socket</a></li>
     <li><a href="#spawn_socket_uncontained">spawn_socket_uncontained</a></li>
@@ -155,6 +157,17 @@
       <pre class="usage"><code>enforce(perms, code)</code></pre>
       <p class="signature"><span class="sig-params">perms: Grants, code: fn</span></p>
       <p class="doc">Run `code` with `perms` in force: every sandbox-checked operation inside it, and in anything it calls, must match one of the grants. The grants stop applying when `code` returns. Trusted names: `sandbox.enforce(perms, audit_log, db) callback { ... }`. A call written in the block to a named function (`audit_log(...)`), or into a named module (`db.query(...)`), runs with the authority of the code that wrote the enforce instead of the block's grants. The compiler handles the extra names (compiler/analysis/sandbox_trust.c): it checks them, routes those calls through wrappers, and leaves this two-argument function to do the rest. Trust is lexical and narrow on purpose: - a trusted call's arguments are still evaluated inside the sandbox; - a function called from somewhere else, even one that calls a trusted name, stays sandboxed; - the names cannot be used as values in the block; - only Aether functions can be trusted, not C externs; - an enforce written by contained code records the sandboxed authority it runs under, so trusting a name there gains nothing. The grants are frozen when the block starts: enforce checks against its own copy, which nothing else can reach, so changing `perms` afterwards (or a grant_* call made with it from inside the block, by code it was passed to) does not widen what the running block may do. For the same reason the block is not given the list: its parameter is null. The grants apply to the thread that runs the block, and to every program and library on the same runtime the block calls into on that thread: an export of another library called from inside the block (through a host service, say) is held to these grants too, and an enforce of its own can only narrow them. A message the block sends is handled with no grants, as an actor's thread handles it: also when the send steps an idle receiver of the same core inline, on this thread, since a step puts the thread's levels aside until it ends (#3393). A library built without --shared-runtime on macOS or Windows has a runtime of its own and cannot read these grants: called from inside the block, its checked operations are refused, with a message naming --shared-runtime (docs/containment-sandbox.md).</p>
+    </div>
+    <div class="function" id="enter" data-name="enter">
+      <h3 class="function-name">enter <span class="kind">fn</span></h3>
+      <pre class="usage"><code>enter(perms)</code></pre>
+      <p class="signature"><span class="sig-params">perms: Grants</span></p>
+      <p class="doc">enter / leave: enforce's two halves, for code whose sandboxed stretch is not one block (a host's entry helper that puts a page's grants in force, runs code it does not hold as a closure, and takes them off later): sandbox.enter(worker) run_guest_entry()          // checked against worker's grants sandbox.leave() enter(perms) adds a level holding `perms` to this thread's levels, and leave() takes the innermost level off again. Precisely: - enter LENDS the list: no copy is made, unlike enforce. A grant added to `perms` after enter applies at once, without entering again, and the list must stay alive (not freed) until the matching leave(). Use enforce when the code inside must not be able to widen its own grants through the list. - Levels nest by intersection: inside an enforce block or another enter, an operation must match a grant of every level in force, so an inner level only narrows. null perms is a level that allows everything (narrows nothing); an empty list denies everything. - A thread holds at most 64 levels (enforce blocks, enter, trusted calls and host run_sandboxed calls together). The 65th panics rather than leave a level out. - leave() with no level in force on this thread is a no-op. - leave() takes off the innermost level whoever pushed it, so the caller must pair each enter with one leave on the same thread, on every path out (`defer sandbox.leave()` after the enter does it). An unpaired leave inside an enforce block takes that block's level off. - A panic caught by a try outside the enter takes the level off as it unwinds, as it does an enforce block's. - The levels are the calling thread's: an actor or a worker thread is not held by them (see enforce).</p>
+    </div>
+    <div class="function" id="leave" data-name="leave">
+      <h3 class="function-name">leave <span class="kind">fn</span></h3>
+      <pre class="usage"><code>leave()</code></pre>
+      <p class="doc">Take off the innermost level this thread entered (see enter). A no-op when none is in force.</p>
     </div>
     <div class="function" id="free" data-name="free">
       <h3 class="function-name">free <span class="kind">fn</span></h3>

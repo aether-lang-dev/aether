@@ -73,6 +73,19 @@ int aether_sandbox_levels_here(void);
 // resolved the same way; malloc'd.
 char* aether_sandbox_grant_pattern(const char* category, const char* pattern);
 
+// fs.write_atomic writes `path` by creating a temporary beside it,
+// `<path>.tmp.<pid>.<n>`, and renaming that over it. The temporary is a name
+// of its own, which a grant on `path` does not cover, so around the one open
+// that creates it, std says which file it stands for:
+// aether_sandbox_stage(tmp, path) before, aether_sandbox_stage(NULL, NULL)
+// after. Only the LD_PRELOAD library reads it (aether_sandbox_staged_for:
+// `path` when `tmp` is the name staged on this thread, else NULL), and it then
+// checks `path`'s fs_write under all its policies instead of the temporary's,
+// for an open that creates a new file (O_CREAT|O_EXCL) of exactly that shape.
+// The in-process check is std's own, of `path`.
+void aether_sandbox_stage(const char* tmp, const char* path);
+const char* aether_sandbox_staged_for(const char* tmp);
+
 // Threads with a level in force, in this runtime image and every other one
 // it found in the process (aether_sandbox.c); NULL until the first check or
 // push looks for them. Zero is the common case and costs two loads.
@@ -107,6 +120,7 @@ const char* aether_sandbox_shell_path(void);
 // their side effects only, so a resource built in a local buffer
 // (aether_net_resource) does not leave that buffer unused.
 #define aether_sandbox_check(category, resource) ((void)(category), (void)(resource), 1)
+#define aether_sandbox_stage(tmp, path) ((void)(tmp), (void)(path))
 #define aether_sandbox_check_shell(cmd) ((void)(cmd), 1)
 
 #endif // AETHER_HAS_SANDBOX

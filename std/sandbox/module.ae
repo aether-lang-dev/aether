@@ -68,7 +68,7 @@ extern aether_sandbox_spawn_socket_raw(perms: ptr, prog: string, argv: ptr, env:
 extern os_run_socket_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
 
 exports(
-    Grants, new, enforce, free, spawn_socket, spawn_socket_uncontained,
+    Grants, new, enforce, enter, leave, free, spawn_socket, spawn_socket_uncontained,
     grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec, grant_shell,
     grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native, grant_fork,
     grant_without_landlock, grant_runtime
@@ -157,6 +157,47 @@ enforce(perms: Grants, code: fn) {
     defer free_list(frozen)
     sandbox_push(frozen)
     call(code, null)
+    sandbox_pop()
+}
+
+// enter / leave: enforce's two halves, for code whose sandboxed stretch is
+// not one block (a host's entry helper that puts a page's grants in force,
+// runs code it does not hold as a closure, and takes them off later):
+//
+//   sandbox.enter(worker)
+//   run_guest_entry()          // checked against worker's grants
+//   sandbox.leave()
+//
+// enter(perms) adds a level holding `perms` to this thread's levels, and
+// leave() takes the innermost level off again. Precisely:
+//   - enter LENDS the list: no copy is made, unlike enforce. A grant added
+//     to `perms` after enter applies at once, without entering again, and
+//     the list must stay alive (not freed) until the matching leave().
+//     Use enforce when the code inside must not be able to widen its own
+//     grants through the list.
+//   - Levels nest by intersection: inside an enforce block or another
+//     enter, an operation must match a grant of every level in force, so
+//     an inner level only narrows. null perms is a level that allows
+//     everything (narrows nothing); an empty list denies everything.
+//   - A thread holds at most 64 levels (enforce blocks, enter, trusted
+//     calls and host run_sandboxed calls together). The 65th panics rather
+//     than leave a level out.
+//   - leave() with no level in force on this thread is a no-op.
+//   - leave() takes off the innermost level whoever pushed it, so the
+//     caller must pair each enter with one leave on the same thread, on
+//     every path out (`defer sandbox.leave()` after the enter does it). An
+//     unpaired leave inside an enforce block takes that block's level off.
+//   - A panic caught by a try outside the enter takes the level off as it
+//     unwinds, as it does an enforce block's.
+//   - The levels are the calling thread's: an actor or a worker thread is
+//     not held by them (see enforce).
+enter(perms: Grants) {
+    sandbox_push(perms as ptr)
+}
+
+// Take off the innermost level this thread entered (see enter). A no-op
+// when none is in force.
+leave() {
     sandbox_pop()
 }
 

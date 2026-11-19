@@ -15,7 +15,7 @@ header comment is the authoritative description.
 | `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 7 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume; pan, pitch, looping, groups, a queue source and a headless engine for the game-engine mixer. | 46 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
-| `std.audit` | Query the sandbox audit trail. | 4 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
+| `std.audit` | Query the sandbox audit trail. | 5 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 17 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.brotli` | Brotli encoding and capped decoding, streaming and one-shot, for `Content-Encoding: br`. | 34 | [guide](../std/brotli/README.md) · [source](../std/brotli/module.ae) |
@@ -73,7 +73,7 @@ header comment is the authoritative description.
 | `std.quote` | The tree a `quote` trailing block hands to a function: typed nodes, captures read through their cells, and a printer. | 66 | [guide](../std/quote/README.md) · [source](../std/quote/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 27 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
-| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 20 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
+| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 22 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.sed` | FreeBSD's sed as a library: compile a script once, run it over strings, streams or granted files. | 23 | [guide](../std/sed/README.md) · [source](../std/sed/module.ae) |
 | `std.set` | Unordered set of unique strings. | 14 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |

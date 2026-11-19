@@ -16,9 +16,9 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-AE="$ROOT/build/ae"
+SHARED_AE="$ROOT/build/ae"
 
-if [ ! -x "$AE" ] && [ ! -x "$AE.exe" ]; then
+if [ ! -x "$SHARED_AE" ] && [ ! -x "$SHARED_AE.exe" ]; then
     echo "  [SKIP] cache_c_compiler_identity: ae not built"
     exit 0
 fi
@@ -41,6 +41,39 @@ trap 'rm -rf "$TMP"' EXIT
 AETHER_CACHE_DIR="$TMP/cache"
 export AETHER_CACHE_DIR
 unset AE_CC CC
+
+# The key folds in every module archive beside libaether.a and under
+# build/contrib, and other tests in the sweep create and rebuild those while
+# this one runs (the stunt bridge is built at the first test that needs it),
+# so the key moved between two builds with nothing changed and the "unchanged
+# rebuild" missed. This test builds against a toolchain of its own: a tree
+# whose build/ holds copies of ae, aetherc, libaether.a and a snapshot of the
+# archives, and whose sources are links to this tree's. Nothing outside can
+# change the key.
+PRIV="$TMP/tc"
+mkdir -p "$PRIV/build"
+for e in "$ROOT"/* "$ROOT"/.[!.]*; do
+    [ -e "$e" ] || continue
+    [ "$(basename "$e")" = build ] && continue
+    ln -s "$e" "$PRIV/$(basename "$e")"
+done
+for f in ae aetherc libaether.a; do
+    for g in "$ROOT/build/$f" "$ROOT/build/$f.exe"; do
+        [ -f "$g" ] && cp "$g" "$PRIV/build/"
+    done
+done
+for a in "$ROOT"/build/*.a; do
+    [ -f "$a" ] || continue
+    [ "$(basename "$a")" = libaether_compiler.a ] && continue
+    [ -f "$PRIV/build/$(basename "$a")" ] || cp "$a" "$PRIV/build/"
+done
+if [ -d "$ROOT/build/contrib" ]; then
+    mkdir -p "$PRIV/build/contrib"
+    for a in "$ROOT"/build/contrib/*.a; do
+        [ -f "$a" ] && cp "$a" "$PRIV/build/contrib/"
+    done
+fi
+AE="$PRIV/build/ae"
 
 # The path a native ae.exe can open; the MSYS spelling elsewhere is the same.
 native_path() {
