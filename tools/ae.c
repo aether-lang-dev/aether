@@ -13145,6 +13145,9 @@ static int cmd_cflags(int argc, char** argv) {
          * mistake and warns about (-Wstring-plus-int); the intent is the same
          * and this spelling states it. */
         fputs(&AETHER_WRAP_CFLAGS[1], stdout);
+        /* The defines the archive was built with, for a build that compiles
+         * runtime or std sources beside it (AETHER_REQUIRED_DEFINES). */
+        fputs(" " AETHER_REQUIRED_DEFINES, stdout);
         wrote_anything = 1;
         if (tc.include_flags[0]) {
             fputc(' ', stdout);

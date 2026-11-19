@@ -759,7 +759,7 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
      * do not ship the Apple-licensed CoreAudio framework headers, so
      * miniaudio (always compiled into the runtime) must fall back to its null
      * backend or ANY macos cross-compile fails. */
-    char feature_defs[512] = "-DAETHER_HAS_SANDBOX";
+    char feature_defs[512] = AETHER_REQUIRED_DEFINES;
     if (strstr(ztriple, "macos") || strstr(ztriple, "-apple-ios")) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
@@ -1222,7 +1222,7 @@ int run_cross_build(const char* c_file, const char* out_file,
      * Tier-2 lib staged: each such lib both LINKS (crossbuild_libs) and
      * COMPILES REAL (its -DAETHER_HAS_* here). Sized for the base defs plus
      * every Tier-2 macro. */
-    char feature_defs[2048] = "-DAETHER_HAS_SANDBOX";
+    char feature_defs[2048] = AETHER_REQUIRED_DEFINES;
     /* iOS needs the same treatment for a different reason: miniaudio's Apple
      * backend is CoreAudio on macOS but AVAudioSession (Objective-C) on iOS,
      * so aether_audio.c stops being valid C there and fails the compile for

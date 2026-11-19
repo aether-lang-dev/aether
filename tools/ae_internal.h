@@ -41,6 +41,18 @@
  * bug rather than a defined operation. */
 #define AETHER_WRAP_CFLAGS " -fwrapv"
 
+/* The defines libaether.a is always built with (the Makefile's
+ * AETHER_REQUIRED_CFLAGS) that change what a runtime or std file compiles to.
+ * Without AETHER_HAS_SANDBOX, runtime/aether_sandbox.c compiles to nothing and
+ * aether_sandbox.h's check becomes a macro that allows everything
+ * (docs/install-layout.md). A cross build compiles the runtime with them, and
+ * `ae cflags` prints them, so a build that compiles the runtime from the
+ * MANIFEST against the archive's std (the cross-language benchmarks, aeb) gets
+ * the archive's configuration: the benchmarks' link failed on
+ * aether_sandbox_check_slow, called from the archive's std.os and compiled out
+ * of their runtime. */
+#define AETHER_REQUIRED_DEFINES "-DAETHER_HAS_SANDBOX"
+
 /* #3574: Clang refuses C nested past a fixed bracket depth, 256 unless
  * -fbracket-depth raises it, and blocks nest in the C as deep as in the
  * source, which the parser takes 512 levels deep. AETHER_C_BRACKET_DEPTH is
