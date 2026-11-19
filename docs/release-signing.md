@@ -78,7 +78,8 @@ since this workflow signs every release: a floor set too high is caught at the
 next release.
 
 The release workflow verifies the previous release the same way before its ABI
-matrix runs it (`scripts/verify-release-asset.sh`), since that release runs
+matrix runs it (`scripts/verify-release-asset.sh`, taken from the workflow's
+own commit, since the release's tag can predate it), since that release runs
 inside the job that builds the next one.
 
 ## Verifying by hand

@@ -57,8 +57,40 @@ create_at=$(printf '%s\n' "$PUBLISH" | grep -n "name: Create GitHub Release" | c
 [ -n "$floor_at" ] || fail "publish does not check the release against the signing floor"
 [ -n "$create_at" ] && [ "$floor_at" -lt "$create_at" ] || fail "publish checks the signing floor after creating the release"
 
-n=$(grep -c "sh scripts/verify-release-asset.sh" "$WF")
-[ "$n" = 2 ] || fail "the previous release is verified $n times, not on Unix and Windows both"
+n=$(grep -c 'git show "\$WF_SHA:scripts/verify-release-asset.sh" > "\$vra"' "$WF")
+[ "$n" = 2 ] || fail "the previous release is verified $n times by the workflow's own script, not on Unix and Windows both"
 [ -f "$ROOT/scripts/verify-release-asset.sh" ] || fail "scripts/verify-release-asset.sh is missing"
+
+# 5. A job that checks out the release's tag runs steps against a tree that
+# can predate this workflow file (the note at the build job's checkout;
+# 0.757.0 failed every leg on a step calling a script its tag did not have).
+# Such a step names a file of the tree only if every tag it can build has it:
+# one in TREE_OK, all of them in v0.925.0. Anything newer is read from the
+# workflow's own commit (git show "$WF_SHA:path"), never skipped when absent.
+TREE_OK="
+.github/scripts/build_release_body.py
+scripts/check_archive_exports.sh
+scripts/check_regex_engine.sh
+scripts/check_yaml_engine.sh
+scripts/fetch-sqlite-amalgamation.sh
+scripts/get-zig.sh
+scripts/stage-release.sh
+tests/integration/abi_matrix/test_abi_matrix.sh
+scripts/fetch-freebsd-base.sh
+"
+# (scripts/fetch-freebsd-base.sh is aether-crossbuild's, run in its checkout.)
+TAG_JOBS="$(awk '
+    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { j = $1; sub(/:$/, "", j) }
+    /ref: \$\{\{ needs\.tag\.outputs\.tag \|\| github\.ref \}\}/ { print j }' "$WF" | sort -u)"
+[ -n "$TAG_JOBS" ] || fail "no job checks out the release's tag; this check reads nothing"
+for j in $TAG_JOBS; do
+    named="$(job "$j" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*echo ' | grep -v 'git show "\$WF_SHA:' |
+        grep -oE '(\./|\$GITHUB_WORKSPACE/)?(scripts|tests|\.github/scripts)/[A-Za-z0-9_./-]*[A-Za-z0-9_]' |
+        sed 's#^\./##; s#^\$GITHUB_WORKSPACE/##' | sort -u)"
+    for p in $named; do
+        printf '%s\n' "$TREE_OK" | grep -qxF "$p" ||
+            fail "the $j job, which runs on the release's tag, names $p from the tree; an older tag may lack it: read it with git show \"\$WF_SHA:$p\", or add it to TREE_OK once every tag has it"
+    done
+done
 
 echo "  [PASS] $NAME: SHA256SUMS signed keyless and attested; only sign holds the OIDC token"

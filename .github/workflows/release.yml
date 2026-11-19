@@ -691,10 +691,15 @@ jobs:
     # latest published one, since this one is published only after every
     # build leg. The tree names the script, so an older tag that lacks it
     # skips the step (the rule at the checkout above).
+    #
+    # The previous release is verified by scripts/verify-release-asset.sh as
+    # of this workflow's own commit (WF_SHA), not the tag's tree: the tag can
+    # predate the script, and verification is never skipped for that.
     - name: ABI matrix against the previous release (Unix)
       if: matrix.os != 'windows-latest'
       env:
         GH_TOKEN: ${{ github.token }}
+        WF_SHA: ${{ github.sha }}
       run: |
         [ -f tests/integration/abi_matrix/test_abi_matrix.sh ] || exit 0
         # The previous release's shared runtime links a system libfyaml
@@ -714,24 +719,32 @@ jobs:
         # since #3752 its SHA256SUMS, signature and build provenance.
         prev_tag="$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName)"
         gh release download "$prev_tag" --repo "${{ github.repository }}" --pattern "aether-*-${{ matrix.target }}.tar.gz" --dir "$RUNNER_TEMP"
-        sh scripts/verify-release-asset.sh "${{ github.repository }}" "$prev_tag" "$RUNNER_TEMP"/aether-*-${{ matrix.target }}.tar.gz
+        vra="$RUNNER_TEMP/verify-release-asset.sh"
+        git cat-file -e "$WF_SHA^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$WF_SHA"
+        git show "$WF_SHA:scripts/verify-release-asset.sh" > "$vra"
+        sh "$vra" "${{ github.repository }}" "$prev_tag" "$RUNNER_TEMP"/aether-*-${{ matrix.target }}.tar.gz
         tar -xzf "$RUNNER_TEMP"/aether-*-${{ matrix.target }}.tar.gz -C "$prev"
         echo "against $(cat "$prev/VERSION")"
         AETHER_ABI_OLD_HOME="$prev" sh tests/integration/abi_matrix/test_abi_matrix.sh
 
     # Git Bash, which has gh and sha256sum, to verify it before it is
-    # unpacked (#3752), as the Unix step does.
+    # unpacked (#3752), as the Unix step does, with the script as of this
+    # workflow's own commit.
     - name: Download and verify the previous release (Windows, ABI matrix)
       if: matrix.os == 'windows-latest'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        WF_SHA: ${{ github.sha }}
       run: |
         [ -f tests/integration/abi_matrix/test_abi_matrix.sh ] || exit 0
         tmp="$(cygpath -u "$RUNNER_TEMP")"
         prev_tag="$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName)"
         gh release download "$prev_tag" --repo "${{ github.repository }}" --pattern "aether-*-windows-x86_64.zip" --dir "$tmp"
-        sh scripts/verify-release-asset.sh "${{ github.repository }}" "$prev_tag" "$tmp"/aether-*-windows-x86_64.zip
+        vra="$tmp/verify-release-asset.sh"
+        git cat-file -e "$WF_SHA^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$WF_SHA"
+        git show "$WF_SHA:scripts/verify-release-asset.sh" > "$vra"
+        sh "$vra" "${{ github.repository }}" "$prev_tag" "$tmp"/aether-*-windows-x86_64.zip
 
     - name: Unpack the previous release (Windows, ABI matrix)
       if: matrix.os == 'windows-latest'
