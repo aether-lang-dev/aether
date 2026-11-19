@@ -368,3 +368,5 @@ tests/integration/crypto_tls13_socket_verify_mtls/
 tests/integration/heap_new_qualified/
 tests/integration/posix_regex_system/
 tests/integration/sed_parity/
+# atomic.ae takes its mode and paths from its driver, which runs it under the sandbox preload.
+tests/integration/sandbox_preload_write_atomic/

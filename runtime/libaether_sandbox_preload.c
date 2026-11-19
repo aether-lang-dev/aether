@@ -81,6 +81,9 @@ static void* (*real_dlopen)(const char*, int) = NULL;
 // leaving its enforce cleared under another).
 extern int aether_sandbox_check_resolved(const char* category, const char* resource) __attribute__((weak));
 extern int aether_sandbox_levels_here(void) __attribute__((weak));
+// The file a temporary std's fs.write_atomic is creating stands for, on this
+// thread (aether_sandbox.h, aether_sandbox_stage); NULL for any other name.
+extern const char* aether_sandbox_staged_for(const char* tmp) __attribute__((weak));
 
 static void log_deny(const char* category, const char* resource) {
     if (log_mode == LOG_NONE) return;
@@ -378,12 +381,42 @@ char* getenv(const char* name) {
     return real_getenv(name);
 }
 
+// fs.write_atomic(path) writes a new file `<path>.tmp.<pid>.<n>` and renames
+// it over `path`. std checks `path` and says, on this thread, which file the
+// temporary it is about to create stands for (aether_sandbox_stage); the
+// open is then checked as a write of that file, under the in-process levels
+// and the grant file alike, so a grant on `path` covers write_atomic(path)
+// here as it does in std. Only for that shape, with `path` the file staged,
+// this process's pid, and an open that creates a new file (O_CREAT|O_EXCL):
+// any other open of any other name is checked as it is, so the stage can
+// never be used to open an existing file or one that is not beside `path`.
+static const char* staged_write_target(const char* path, int flags) {
+    if ((flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL)) return path;
+    const char* target = aether_sandbox_staged_for ? aether_sandbox_staged_for(path) : NULL;
+    if (!target) return path;
+    size_t n = strlen(target);
+    if (strncmp(path, target, n) != 0 || strncmp(path + n, ".tmp.", 5) != 0) return path;
+    const char* p = path + n + 5;
+    char* end = NULL;
+    long pid = strtol(p, &end, 10);
+    if (end == p || *end != '.' || pid != (long)getpid()) return path;
+    p = end + 1;
+    if (*p < '0' || *p > '9') return path;
+    while (*p >= '0' && *p <= '9') p++;
+    return *p ? path : target;
+}
+
+// The category and resource an open of `path` with `flags` is checked as.
+static int open_allowed(const char* path, int flags) {
+    if (!(flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND))) return check_grant("fs_read", path);
+    return check_grant("fs_write", staged_write_target(path, flags));
+}
+
 // open
 int open(const char* path, int flags, ...) {
     if (!real_open) real_open = dlsym(RTLD_NEXT, "open");
     if (path) {
-        const char* cat = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND)) ? "fs_write" : "fs_read";
-        if (!check_grant(cat, path)) {
+        if (!open_allowed(path, flags)) {
             errno = EACCES;
             return -1;
         }
@@ -479,8 +512,7 @@ static int (*real_openat)(int, const char*, int, ...) = NULL;
 int openat(int dirfd, const char* path, int flags, ...) {
     if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
     if (path) {
-        const char* cat = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND)) ? "fs_write" : "fs_read";
-        if (!check_grant(cat, path)) {
+        if (!open_allowed(path, flags)) {
             errno = EACCES;
             return -1;
         }
@@ -505,8 +537,7 @@ int openat(int dirfd, const char* path, int flags, ...) {
 int open64(const char* path, int flags, ...) {
     if (!real_open) real_open = dlsym(RTLD_NEXT, "open64");
     if (path) {
-        const char* cat = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND)) ? "fs_write" : "fs_read";
-        if (!check_grant(cat, path)) { errno = EACCES; return -1; }
+        if (!open_allowed(path, flags)) { errno = EACCES; return -1; }
     }
     if (flags & O_CREAT) {
         va_list ap; __builtin_va_start(ap, flags);
@@ -521,8 +552,7 @@ int open64(const char* path, int flags, ...) {
 int openat64(int dirfd, const char* path, int flags, ...) {
     if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat64");
     if (path) {
-        const char* cat = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND)) ? "fs_write" : "fs_read";
-        if (!check_grant(cat, path)) {
+        if (!open_allowed(path, flags)) {
             errno = EACCES;
             return -1;
         }

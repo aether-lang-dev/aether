@@ -860,6 +860,19 @@ to answer every call `ENOSYS` with no policy and `EPERM` under one, so under
 the preload GLib's futex waits returned at once and its threads spun, and
 the Aether scheduler's `sched_getaffinity` and `membarrier` failed.)
 
+### `fs.write_atomic` under the preload
+
+`fs.write_atomic(path, data)` writes a new file beside `path`,
+`<path>.tmp.<pid>.<n>`, and renames it over `path`. A grant on `path`
+covers it in both layers: std checks `path`, and for the one open that
+creates the temporary it tells the preload which file the temporary stands
+for (`aether_sandbox_stage` in `runtime/aether_sandbox.h`), so the preload
+checks `path` too, under an in-process level and a grant file alike. It does
+that only for an open that creates a new file (`O_CREAT|O_EXCL`) named
+exactly `<path>.tmp.<this pid>.<digits>` on the thread that staged it; any
+other open is checked under its own name, so the stage cannot open an
+existing file or reach past that one sibling. `rename` is not intercepted.
+
 ### Kernel layer: Landlock
 
 `LD_PRELOAD` sees only calls that go through libc. Python's `ctypes`,

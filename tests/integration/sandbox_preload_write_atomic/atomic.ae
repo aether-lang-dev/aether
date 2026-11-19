@@ -1,0 +1,38 @@
+// fs.write_atomic(path) under the sandbox preload.
+//
+//   atomic enforce <path> <other>   inside an enforce block granting only
+//                                   fs_write <path>: write_atomic(<path>),
+//                                   then write_atomic(<other>), refused
+//   atomic plain <path>             write_atomic(<path>) with no level
+//
+// Prints one line per write: "<label> ok" or "<label> <error>".
+import std.fs
+import std.os
+import std.sandbox
+import std.string
+
+report(label: string, err: string) {
+    if err == "" {
+        println("${label} ok")
+    } else {
+        println("${label} ${err}")
+    }
+}
+
+main() {
+    mode = os.args_get(1)
+    path = os.args_get(2)
+    if mode == "plain" {
+        report("plain", fs.write_atomic(path, string.bytes("plain")))
+        return
+    }
+    other = os.args_get(3)
+    g = sandbox.new("atomic") {
+        grant_fs_write(path)
+    }
+    sandbox.enforce(g) callback {
+        report("granted", fs.write_atomic(path, string.bytes("granted")))
+        report("other", fs.write_atomic(other, string.bytes("other")))
+    }
+    sandbox.free(g)
+}

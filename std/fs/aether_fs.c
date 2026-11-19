@@ -1502,9 +1502,14 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
 #else
     mode_t um = umask(0);
     umask(um);
+    // The temporary stands for `path`, checked above: say so to the
+    // LD_PRELOAD library for this one open, so a grant on `path` covers it
+    // there as it does here (aether_sandbox.h, aether_sandbox_stage).
+    aether_sandbox_stage(tmp, path);
     int fd = open(tmp,
                   O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
                   0666 & ~um);
+    aether_sandbox_stage(NULL, NULL);   // sets no errno
 #endif
     if (fd < 0) return 0;
 #ifdef _WIN32
