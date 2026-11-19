@@ -42,7 +42,9 @@ grep -q "^all freed$" "$TMP/out.txt" || {
 
 # Where a leak checker exists, assert the actual property rather than only the
 # generated text -- the tracker could be set and still not be read at free.
-if command -v valgrind >/dev/null 2>&1; then
+# Not under ASan: its shadow memory cannot be set up under valgrind, and
+# LeakSanitizer checks the program's own run for leaks (#3539).
+if command -v valgrind >/dev/null 2>&1 && [ "${AETHER_SANITIZER:-}" != asan ]; then
     if ! valgrind --error-exitcode=9 --leak-check=full --errors-for-leak-kinds=definite \
             "$TMP/prog" > "$TMP/vg.txt" 2>&1; then
         echo "  [FAIL] heap_nested_path_ownership: valgrind reported a definite leak"

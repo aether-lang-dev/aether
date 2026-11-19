@@ -29,7 +29,9 @@ AE
     --extra "$ROOT/tests/integration/https_pure_tls_vertical/ownership.c" \
     -o "$TMP/probe" >"$TMP/build.log" 2>&1 || { cat "$TMP/build.log"; exit 1; }
 CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" "$TMP/probe"
-if command -v valgrind >/dev/null 2>&1; then
+# Not under ASan: its shadow memory cannot be set up under valgrind, and
+# LeakSanitizer checks the same run for leaks (#3539).
+if command -v valgrind >/dev/null 2>&1 && [ "${AETHER_SANITIZER:-}" != asan ]; then
     CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" \
     valgrind --leak-check=full --show-leak-kinds=definite \
         --errors-for-leak-kinds=definite --error-exitcode=1 \
