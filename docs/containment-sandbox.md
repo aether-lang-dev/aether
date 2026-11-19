@@ -455,9 +455,19 @@ that cannot be searched) is refused, not matched as written.
 An fs grant's pattern is resolved the same way when it is made
 (`grant_fs_read("/var/x/*")` covers `/private/var/x/...` on macOS, and a
 grant named through a symlink covers where the symlink leads); `*` and
-suffix patterns such as `*.log` are kept as written. On Windows paths are
-made absolute and normalised with `_fullpath`; symlinks there are not
-followed.
+suffix patterns such as `*.log` are kept as written.
+
+On Windows `.` and `..` are resolved by the text first, as Windows itself
+resolves them before the file system sees a path (`GetFullPathNameW`). The
+deepest part of the result that exists is then opened and
+`GetFinalPathNameByHandleW` says where it really is, every junction and
+symbolic link on the way followed; the names below it that do not exist yet
+are kept as written. So a junction in a granted directory that points
+outside it is refused, as a symlink is on POSIX, and a name that exists but
+cannot be followed (a link whose target is gone) is refused rather than
+matched as written. Until #3763 the path was only normalised with
+`_fullpath`, which follows nothing, and a junction in a granted `C:\box` reached
+anything it pointed at.
 
 Non-fs categories (`tcp`, `env`, `exec`) carry no path semantics;
 their resources are matched verbatim.

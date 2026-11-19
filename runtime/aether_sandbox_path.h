@@ -22,8 +22,18 @@
 //
 // Shared by the in-process checks (aether_sandbox.c) and the LD_PRELOAD
 // library (libaether_sandbox_preload.c), which is built on its own, so this
-// is header-only. On Windows the path is made absolute and normalised with
-// _fullpath; symlinks there are not followed.
+// is header-only.
+//
+// On Windows "." and ".." are resolved by the text, as Windows itself
+// resolves them before the file system sees a path (GetFullPathNameW), and
+// the result is then asked of the file system: the deepest part of it that
+// exists is opened and GetFinalPathNameByHandleW says where it really is,
+// every junction and symbolic link on the way followed, in the case the
+// volume stores; the names below it that do not exist yet are kept as
+// written. A name that exists but cannot be followed (a link whose target
+// is missing) is a failure, as a dangling symlink is on POSIX. It used to be
+// _fullpath alone, which follows nothing, so a junction inside a granted
+// directory reached anything outside it (#3763).
 #ifndef AETHER_SANDBOX_PATH_H
 #define AETHER_SANDBOX_PATH_H
 
@@ -38,9 +48,115 @@
 
 #ifdef _WIN32
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+// The longest path, in UTF-16 units, the Windows resolution works with.
+#define AETHER_SANDBOX_WPATH 4096
+
+// Where an existing path leads. 1 with its final path in `out` (in the
+// "\\?\" namespace), 0 when nothing is there, -1 when something is there that
+// cannot be followed or opened: refused rather than taken as missing, so a
+// dangling link cannot be matched as the name it is.
+static int aether_sandbox_final_w(const wchar_t* p, wchar_t* out, DWORD cap) {
+    HANDLE h = CreateFileW(p, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND && e != ERROR_INVALID_NAME &&
+            e != ERROR_DIRECTORY && e != ERROR_BAD_PATHNAME)
+            return -1;
+        // Not there through the link, if any: the name itself may still
+        // be (GetFileAttributesW does not follow a link).
+        if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) return -1;
+        e = GetLastError();
+        return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_INVALID_NAME ||
+                e == ERROR_DIRECTORY || e == ERROR_BAD_PATHNAME) ? 0 : -1;
+    }
+    DWORD n = GetFinalPathNameByHandleW(h, out, cap, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(h);
+    return (n == 0 || n >= cap) ? -1 : 1;
+}
+
+// The length of the root of an absolute path, its separator included:
+// "C:\" 3, "\\server\share\" up to the separator after the share, the same
+// behind a "\\?\" or "\\?\UNC\" prefix. 0 when there is none.
+static size_t aether_sandbox_wroot(const wchar_t* p) {
+    size_t at = 0;
+    if (p[0] == L'\\' && p[1] == L'\\' && (p[2] == L'?' || p[2] == L'.') && p[3] == L'\\') {
+        at = 4;
+        if ((p[4] == L'U' || p[4] == L'u') && (p[5] == L'N' || p[5] == L'n') &&
+            (p[6] == L'C' || p[6] == L'c') && p[7] == L'\\') {
+            at = 8;
+            goto unc;
+        }
+    } else if (p[0] == L'\\' && p[1] == L'\\') {
+        at = 2;
+        goto unc;
+    }
+    if (p[at] && p[at + 1] == L':' && p[at + 2] == L'\\') return at + 3;
+    return 0;
+unc:
+    // server, then share, each ended by a separator (the share's may be the end)
+    for (int part = 0; part < 2; part++) {
+        size_t s = at;
+        while (p[at] && p[at] != L'\\') at++;
+        if (at == s) return 0;
+        if (p[at] == L'\\') at++;
+        else if (part == 0) return 0;
+    }
+    return at;
+}
+
+// Returns 1 with the resolved absolute path (UTF-8) in out, or 0 if it
+// cannot be resolved (out is then unspecified).
 static int aether_sandbox_canon_path(const char* in, char* out, size_t out_size) {
-    if (!in || !*in || !out) return 0;
-    return _fullpath(out, in, out_size) != NULL;
+    if (!in || !*in || !out || out_size < 4) return 0;
+    wchar_t win[AETHER_SANDBOX_WPATH];
+    wchar_t full[AETHER_SANDBOX_WPATH];
+    wchar_t fin[AETHER_SANDBOX_WPATH];
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, in, -1, win, AETHER_SANDBOX_WPATH)) return 0;
+    DWORD fl = GetFullPathNameW(win, AETHER_SANDBOX_WPATH, full, NULL);
+    if (fl == 0 || fl >= AETHER_SANDBOX_WPATH) return 0;
+    size_t root = aether_sandbox_wroot(full);
+    if (root == 0) return 0;
+    size_t len = fl;
+    while (len > root && full[len - 1] == L'\\') len--;   // "C:\box\" is "C:\box"
+    full[len] = L'\0';
+    // full[0..cut) is the part asked of the file system; full[cut..len) the
+    // names below it that do not exist yet, kept as written.
+    size_t cut = len;
+    for (;;) {
+        wchar_t saved = full[cut];
+        full[cut] = L'\0';
+        int r = aether_sandbox_final_w(full, fin, AETHER_SANDBOX_WPATH);
+        full[cut] = saved;
+        if (r < 0) return 0;
+        if (r > 0) break;
+        if (cut <= root) return 0;   // not even the root is there
+        size_t c = cut;
+        while (c > root && full[c - 1] != L'\\') c--;
+        cut = c > root ? c - 1 : root;
+    }
+    // \\?\D:\p is D:\p, and \\?\UNC\server\share\p is \\server\share\p.
+    wchar_t* res = fin;
+    if (wcsncmp(fin, L"\\\\?\\UNC\\", 8) == 0) {
+        res = fin + 6;
+        res[0] = L'\\';
+        res[1] = L'\\';
+    } else if (wcsncmp(fin, L"\\\\?\\", 4) == 0) {
+        res = fin + 4;
+    }
+    size_t rl = wcslen(res);
+    const wchar_t* tail = full + cut;   // "" or "\name..." (or "name..." after a root)
+    size_t tl = wcslen(tail);
+    int sep = tl > 0 && tail[0] != L'\\' && !(rl > 0 && res[rl - 1] == L'\\');
+    if ((size_t)(res - fin) + rl + (size_t)sep + tl + 1 > AETHER_SANDBOX_WPATH) return 0;
+    if (sep) res[rl++] = L'\\';
+    memcpy(res + rl, tail, (tl + 1) * sizeof(wchar_t));
+    return WideCharToMultiByte(CP_UTF8, 0, res, -1, out, (int)out_size, NULL, NULL) > 0;
 }
 
 #else

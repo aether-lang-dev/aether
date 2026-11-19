@@ -16,12 +16,28 @@ import std.os
 import std.fs
 import std.worker
 import std.string
+import std.list
 
 extern exit(code: int)
 
 // What the worker thread saw, written there and read on the main thread
 // after worker.wait().
 var thread_saw: int = 0 - 1
+
+// A Windows junction at `link` to the directory `target`: 1 when made.
+fn make_junction(link: string, target: string) -> int {
+    l = string.replace_all(link, "/", "\\")
+    t = string.replace_all(target, "/", "\\")
+    argv = list.new()
+    list.add(argv, "-NoProfile")
+    list.add(argv, "-NonInteractive")
+    list.add(argv, "-Command")
+    list.add(argv, "New-Item -ItemType Junction -Path '${l}' -Target '${t}' | Out-Null")
+    _o, code, err = os.run_capture("powershell.exe", argv, null)
+    list.free(argv)
+    if err != "" || code != 0 { return 0 }
+    return 1
+}
 
 main() {
     fw = spec.init()
@@ -39,9 +55,10 @@ main() {
     _l2 = fs.symlink("${outside}/new.txt", "${box}/dangling")
     _l3 = fs.symlink(box, "${tmp}/boxlink")
     // Symlinks are followed where the kernel follows them. On Windows a
-    // symlink needs Developer Mode or an administrator to create, and the
-    // resolver there normalises with _fullpath without following links, so
-    // the symlink cases run only where links exist and are followed.
+    // symlink needs Developer Mode or an administrator to create, and ".."
+    // is resolved by the text before any link is followed (as Windows
+    // resolves it), so "link/.." stays in the box there: these cases run on
+    // POSIX, and Windows has its junction cases below (#3763).
     have_links = 0
     if os.platform() != "windows" && fs.is_symlink("${box}/link") == 1 && fs.is_symlink("${tmp}/boxlink") == 1 {
         have_links = 1
@@ -114,6 +131,66 @@ main() {
         }
     }
 
+    // #3763: on Windows a path was resolved with _fullpath, which follows no
+    // junction, so a junction in the box let the block reach outside it. A
+    // junction needs no privilege; it is made with PowerShell's New-Item.
+    have_junctions = 0
+    if os.platform() == "windows" {
+        _w = fs.write("${outside}/secret.txt", "secret")
+        if make_junction("${box}/jout", outside) == 1 && make_junction("${box}/jin", "${box}/sub") == 1 &&
+           make_junction("${tmp}/boxj", box) == 1 {
+            have_junctions = 1
+        }
+    }
+    no_junctions = "Windows junctions only"
+    via_junction = sandbox.new("box, through a junction") {
+        grant_fs_write("${tmp}/boxj/*")
+    }
+
+    spec.describe(fw, "std.sandbox fs grants follow Windows junctions") {
+        spec.it_when(have_junctions, "refuses a write through a junction in the box that points out", no_junctions) callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.write("${box}/jout/leak.txt", "no")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.exists("${outside}/leak.txt"), 0, "nothing written outside")
+        }
+        spec.it_when(have_junctions, "refuses a read through a junction in the box that points out", no_junctions) callback {
+            got = ""
+            err = ""
+            sandbox.enforce(in_box) callback {
+                got, err = fs.read("${box}/jout/secret.txt")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_true(got != "secret", "the file behind the junction was not read")
+        }
+        spec.it_when(have_junctions, "refuses mkdir -p under a junction that points out", no_junctions) callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.mkdir_p("${box}/jout/made/x")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.exists("${outside}/made"), 0, "nothing made outside")
+        }
+        spec.it_when(have_junctions, "allows a junction in the box that stays in it", no_junctions) callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.write("${box}/jin/via_jin.txt", "ok")
+            }
+            spec.assert_str_eq(err, "", "written")
+            spec.assert_eq(fs.exists("${box}/sub/via_jin.txt"), 1, "into the directory it leads to")
+        }
+        spec.it_when(have_junctions, "allows a file in the box, the grant written through a junction", no_junctions) callback {
+            err = ""
+            sandbox.enforce(via_junction) callback {
+                err = fs.write("${box}/inside_j.txt", "ok")
+            }
+            spec.assert_str_eq(err, "", "written")
+            spec.assert_eq(fs.exists("${box}/inside_j.txt"), 1, "and there")
+        }
+    }
+
     spec.describe(fw, "std.sandbox enforce leaves nothing behind") {
         spec.it_when(have_links, "after a block, a dangling symlink is one again, and resolves as before", no_links) callback {
             before = fs.is_symlink("${box}/dangling")
@@ -157,6 +234,7 @@ main() {
 
     sandbox.free(in_box)
     sandbox.free(via_link)
+    sandbox.free(via_junction)
     sandbox.free(nothing)
     worker.pool_shutdown()
     _r = fs.remove_tree(tmp)
