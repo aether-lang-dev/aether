@@ -72,4 +72,4 @@ case "$OUT" in
     *) fail "the probe did not report PASS" ;;
 esac
 
-echo "  [PASS] http_server_body_limit: 413 past the limit, streaming unbounded"
+echo "  [PASS] http_server_body_limit: 413 past the limit, streaming unbounded, 64-bit declared lengths (#3761)"

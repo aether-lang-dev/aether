@@ -981,7 +981,7 @@
     <div class="function" id="request_body_read_raw" data-name="request_body_read_raw">
       <h3 class="function-name">request_body_read_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>request_body_read_raw(req, offset, max) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">req: ptr, offset: int, max: int</span></p>
+      <p class="signature"><span class="sig-params">req: ptr, offset: long, max: int</span></p>
     </div>
     <div class="function" id="get_request_body_read" data-name="get_request_body_read">
       <h3 class="function-name">get_request_body_read <span class="kind">extern</span></h3>
@@ -998,8 +998,8 @@
     <div class="function" id="request_body_read" data-name="request_body_read">
       <h3 class="function-name">request_body_read <span class="kind">fn</span></h3>
       <pre class="usage"><code>request_body_read(req, offset, max) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">req: ptr, offset: int, max: int</span></p>
-      <p class="doc">Chunked-read access to the request body (#626). Reads up to `max` bytes from `offset` into an owned AetherString. Returns (bytes, n, &quot;&quot;) on success — `n` may be less than `max` at EOF. Returns (&quot;&quot;, 0, error) on failure. RAM-bounded for large uploads (#626). A body larger than the 16 KiB connection buffer is NOT buffered whole: the server parses headers, then this accessor pulls each window straight off the socket. Reads must be sequential (offset advances by the returned `n`, which the loop below does naturally). Small bodies stay fully buffered and support random-access offsets. Either way the loop below is identical — peak server memory for a large PUT is one window per connection, not the whole object. Pair with `request_body_length` to drive the loop: total = http.request_body_length(req) off = 0 while off &lt; total { chunk, n, err = http.request_body_read(req, off, 65536) if err != &quot;&quot; { ...handle... break } if n == 0 { break } fs.pwrite(out_file, string.bytes(chunk)[0..n], off)   // stream to disk off = off + n }</p>
+      <p class="signature"><span class="sig-params">req: ptr, offset: long, max: int</span></p>
+      <p class="doc">Chunked-read access to the request body (#626). Reads up to `max` bytes from `offset` into an owned AetherString. Returns (bytes, n, &quot;&quot;) on success — `n` may be less than `max` at EOF. Returns (&quot;&quot;, 0, error) on failure. RAM-bounded for large uploads (#626). A body larger than the 16 KiB connection buffer is NOT buffered whole: the server parses headers, then this accessor pulls each window straight off the socket. Reads must be sequential (offset advances by the returned `n`, which the loop below does naturally). Small bodies stay fully buffered and support random-access offsets. Either way the loop below is identical — peak server memory for a large PUT is one window per connection, not the whole object. Pair with `request_body_length` to drive the loop. Both it and `offset` are longs, so a body past 2 GiB is read whole when `off` starts as a long (#3761): total = http.request_body_length(req) off = 0 as long while off &lt; total { chunk, n, err = http.request_body_read(req, off, 65536) if err != &quot;&quot; { ...handle... break } if n == 0 { break } fs.pwrite(out_file, string.bytes(chunk)[0..n], off)   // stream to disk off = off + n }</p>
     </div>
     <div class="function" id="request_body_complete" data-name="request_body_complete">
       <h3 class="function-name">request_body_complete <span class="kind">fn</span></h3>
@@ -1042,8 +1042,9 @@
     </div>
     <div class="function" id="request_body_length" data-name="request_body_length">
       <h3 class="function-name">request_body_length <span class="kind">fn</span></h3>
-      <pre class="usage"><code>request_body_length(req) <span class="arrow">-&gt;</span> int</code></pre>
+      <pre class="usage"><code>request_body_length(req) <span class="arrow">-&gt;</span> long</code></pre>
       <p class="signature"><span class="sig-params">req: ptr</span></p>
+      <p class="doc">The body's length in bytes, a long: a streamed upload may declare more than an int holds, and its Content-Length is reported whole (#3761).</p>
     </div>
     <div class="function" id="request_body_bytes" data-name="request_body_bytes">
       <h3 class="function-name">request_body_bytes <span class="kind">fn</span></h3>

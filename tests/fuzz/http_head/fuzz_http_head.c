@@ -85,32 +85,33 @@ typedef struct {
 
 typedef struct {
     int   rc;
-    long  content_length;
+    int64_t content_length;
     int   chunked;
     int   te_count;        /* Transfer-Encoding fields */
     int   count;
     Field f[H_MAX_HEADERS];
 } HeadModel;
 
-/* The digits of LONG_MAX: a longer Content-Length is refused even when the
- * extra digits are leading zeros (http_parse_count's contract). */
-static size_t long_max_digits(void) {
+/* The digits of INT64_MAX: a longer Content-Length is refused even when the
+ * extra digits are leading zeros (http_parse_count's contract). INT64_MAX on
+ * every platform, not LONG_MAX, which is 32 bits on Windows (#3761). */
+static size_t int64_max_digits(void) {
     size_t d = 1;
-    for (long m = LONG_MAX; m >= 10; m /= 10) d++;
+    for (int64_t m = INT64_MAX; m >= 10; m /= 10) d++;
     return d;
 }
 
-/* A Content-Length value: 1*DIGIT, no more digits than LONG_MAX has, at
- * most LONG_MAX. 0 with the value, or -1. */
-static int model_count(const char* s, size_t n, long* out) {
-    if (n == 0 || n > long_max_digits()) return -1;
+/* A Content-Length value: 1*DIGIT, no more digits than INT64_MAX has, at
+ * most INT64_MAX. 0 with the value, or -1. */
+static int model_count(const char* s, size_t n, int64_t* out) {
+    if (n == 0 || n > int64_max_digits()) return -1;
     unsigned long long v = 0;
     for (size_t i = 0; i < n; i++) {
         if (s[i] < '0' || s[i] > '9') return -1;
         v = v * 10 + (unsigned long long)(s[i] - '0');
-        if (v > (unsigned long long)LONG_MAX) return -1;
+        if (v > (unsigned long long)INT64_MAX) return -1;
     }
-    *out = (long)v;
+    *out = (int64_t)v;
     return 0;
 }
 
@@ -273,14 +274,15 @@ static size_t one_request(const char* in, size_t n) {
     if (header_size >= HTTP_CONN_BUF_CAP) return 0;
 
     /* H2 */
-    long cl = -7;
+    int64_t cl = -7;
     int chunked = -7;
     int rc = http_request_head_check(in, hdr_end, &cl, &chunked);
     HeadModel m;
     model_head(in, (size_t)(hdr_end - in), &m);
     CHECK(rc == m.rc, "http_request_head_check answered %d, the contract says %d", rc, m.rc);
     if (rc != HTTP_HEAD_OK) return 0;
-    CHECK(cl == m.content_length, "Content-Length read as %ld, it says %ld", cl, m.content_length);
+    CHECK(cl == m.content_length, "Content-Length read as %lld, it says %lld",
+          (long long)cl, (long long)m.content_length);
     CHECK(chunked == m.chunked, "chunked read as %d, the head says %d", chunked, m.chunked);
     /* The client's reader of a response's Transfer-Encoding fields
      * (http_te_in_block, #3670) reads the same header lines the same way. */
@@ -368,13 +370,13 @@ static size_t one_request(const char* in, size_t n) {
         }
         if (!chunked && m.content_length > 0) {
             const char* clv = http_get_header(req, "Content-Length");
-            long back = -1;
+            int64_t back = -1;
             CHECK(clv && model_count(clv, strlen(clv), &back) == 0 && back == cl,
-                  "the parsed Content-Length '%s' is not %ld", clv ? clv : "(none)", cl);
+                  "the parsed Content-Length '%s' is not %lld", clv ? clv : "(none)", (long long)cl);
         }
-        int bl = http_request_body_length(req);
+        int64_t bl = http_request_body_length(req);
         const char* b = http_request_body(req);
-        CHECK(bl >= 0 && (size_t)bl == body_len, "the body is %d bytes, the framing says %zu", bl, body_len);
+        CHECK(bl >= 0 && (size_t)bl == body_len, "the body is %lld bytes, the framing says %zu", (long long)bl, body_len);
         CHECK(body_len == 0 || memcmp(b, decoded ? decoded : body, body_len) == 0,
               "the body's bytes differ from those framed");
         http_request_free(req);

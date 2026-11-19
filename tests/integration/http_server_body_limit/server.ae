@@ -1,7 +1,8 @@
 // The server for http_server_body_limit (#3740). Its body limit is 100000
 // bytes. POST /whole answers with the length of request_body; POST /stream
-// reads its body with request_body_read and answers with the count. The
-// driver, test_http_server_body_limit.sh, sends the requests.
+// reads its body with request_body_read and answers with the count; POST
+// /declared answers with request_body_length without reading the body
+// (#3761). The driver, test_http_server_body_limit.sh, sends the requests.
 
 import std.http
 
@@ -29,6 +30,14 @@ stream_handler(req: ptr, res: ptr, ud: ptr) {
     http.http_response_set_body(res, "streamed ${off}")
 }
 
+// The declared length of a streamed body, read whole: past 2 GiB it was cut
+// to 32 bits on every platform, and refused before the handler on Windows
+// (#3761). The body itself is never sent.
+declared_handler(req: ptr, res: ptr, ud: ptr) {
+    http.http_response_set_status(res, 200)
+    http.http_response_set_body(res, "declared ${http.request_body_length(req)}")
+}
+
 message StartSrv { raw: ptr }
 actor SrvActor {
     state s = 0
@@ -47,6 +56,7 @@ main() {
     if merr != "" { println("FAIL: server_set_max_body: ${merr}"); exit(1) }
     http.http_server_post(raw, "/whole", whole_handler, null)
     http.http_server_post(raw, "/stream", stream_handler, null)
+    http.http_server_post(raw, "/declared", declared_handler, null)
     if http.server_bind(raw, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)

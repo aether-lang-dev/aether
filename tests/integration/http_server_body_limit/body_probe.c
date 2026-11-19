@@ -6,6 +6,9 @@
  *      once, without the server waiting for (or allocating) the body;
  *   3. POST /stream with 1000000 bytes sent: the streaming reader is not
  *      bounded by the limit, 200 "streamed 1000000".
+ *   4. POST /declared declaring 3000000000 and then 6442450944 bytes, with
+ *      only the head sent: request_body_length reports each exactly
+ *      (#3761), 200 "declared <n>".
  *
  * Usage: body_probe <port>. Prints PASS/FAIL lines; exits 0 when all pass.
  */
@@ -39,15 +42,16 @@ static raw_sock dial(void) {
     return s;
 }
 
-/* POST `path` declaring `declared` body bytes and sending `sent` of them;
- * the response's status line and body go into `out`. Returns the status,
- * or -1 when no response came. */
-static int post(const char* path, long declared, long sent, char* out, size_t cap) {
+/* POST `path` declaring `declared` body bytes (its decimal text, so a
+ * length past 2^31 needs no 64-bit printf on Windows) and sending `sent` of
+ * them; the response's status line and body go into `out`. Returns the
+ * status, or -1 when no response came. */
+static int post_text(const char* path, const char* declared, long sent, char* out, size_t cap) {
     out[0] = '\0';
     raw_sock s = dial();
     if (s == RAW_SOCK_INVALID) return -1;
     raw_sendf(s, "POST %s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/octet-stream\r\n"
-                 "Content-Length: %ld\r\nConnection: close\r\n\r\n", path, declared);
+                 "Content-Length: %s\r\nConnection: close\r\n\r\n", path, declared);
     if (sent > 0) {
         char* body = (char*)malloc((size_t)sent);
         if (!body) { raw_socket_close(s); return -1; }
@@ -65,6 +69,12 @@ static int post(const char* path, long declared, long sent, char* out, size_t ca
     raw_socket_close(s);
     if (n < 12 || strncmp(out, "HTTP/1.1 ", 9) != 0) return -1;
     return atoi(out + 9);
+}
+
+static int post(const char* path, long declared, long sent, char* out, size_t cap) {
+    char text[24];
+    snprintf(text, sizeof(text), "%ld", declared);
+    return post_text(path, text, sent, out, cap);
 }
 
 static const char* body_of(const char* resp) {
@@ -90,6 +100,19 @@ int main(int argc, char** argv) {
     check(st == 200 && strcmp(body_of(resp), "streamed 1000000") == 0,
           "a 1000000-byte body read with request_body_read is streamed whole");
     if (st != 200) printf("  (status %d: %.200s)\n", st, resp);
+
+    /* 4. A declared length past 2^31 (and past 2^32) reaches the handler
+     * whole. Only the head is sent. */
+    st = post_text("/declared", "3000000000", 0, resp, sizeof(resp));
+    check(st == 200 && strcmp(body_of(resp), "declared 3000000000") == 0,
+          "a body declared as 3000000000 bytes reports that length");
+    if (st != 200 || strcmp(body_of(resp), "declared 3000000000") != 0)
+        printf("  (status %d: %.200s)\n", st, resp);
+    st = post_text("/declared", "6442450944", 0, resp, sizeof(resp));
+    check(st == 200 && strcmp(body_of(resp), "declared 6442450944") == 0,
+          "a body declared as 6442450944 bytes reports that length");
+    if (st != 200 || strcmp(body_of(resp), "declared 6442450944") != 0)
+        printf("  (status %d: %.200s)\n", st, resp);
 
     if (failures) {
         printf("FAIL: %d case(s)\n", failures);

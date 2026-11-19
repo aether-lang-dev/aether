@@ -421,7 +421,7 @@ TEST(http_server_request_line_without_version_is_refused_once) {
 }
 
 /* The head check's answer for `head` followed by the blank line. */
-static int head_check_of(const char* head, long* cl, int* chunked) {
+static int head_check_of(const char* head, int64_t* cl, int* chunked) {
     char buf[512];
     int n = snprintf(buf, sizeof buf, "%s\r\n\r\n", head);
     const char* end = http_find_header_end(buf, (size_t)n);
@@ -437,7 +437,7 @@ TEST(http_request_head_check_refuses_a_bare_cr_or_lf) {
      * A bare CR stayed in a value the proxy forwards, to an upstream that
      * may end the line there (RFC 9112 2.2; found by tests/fuzz/http_head).
      * Both are a head that is not a request, answered 400 like a NUL. */
-    long cl = -1;
+    int64_t cl = -1;
     int chunked = -1;
     ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("POST / HTTP/1.1\r\nHost: a\nContent-Length: 2", &cl, &chunked));
     ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("GET / HTTP/1.1\nHost: a", &cl, &chunked));
@@ -453,13 +453,30 @@ TEST(http_request_head_check_refuses_a_bare_cr_or_lf) {
     ASSERT_EQ(0, (int)cl);
 }
 
+/* #3761: a Content-Length is read into 64 bits on every platform. It was a
+ * `long`, bounded by LONG_MAX, which is 2^31 - 1 on Windows: a body
+ * declared past 2 GiB was refused there as bad framing, where Linux took it
+ * and streamed it. The largest value a 64-bit count holds is taken; one past
+ * it is still refused. */
+TEST(http_request_head_check_reads_a_64_bit_content_length) {
+    int64_t cl = -1;
+    int chunked = -1;
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("POST / HTTP/1.1\r\nContent-Length: 3000000000", &cl, &chunked));
+    ASSERT_TRUE(cl == INT64_C(3000000000));
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("POST / HTTP/1.1\r\nContent-Length: 6442450944", &cl, &chunked));
+    ASSERT_TRUE(cl == INT64_C(6442450944));
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("POST / HTTP/1.1\r\nContent-Length: 9223372036854775807", &cl, &chunked));
+    ASSERT_TRUE(cl == INT64_MAX);
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nContent-Length: 9223372036854775808", &cl, &chunked));
+}
+
 TEST(http_request_head_check_reads_transfer_encoding_as_one_list) {
     /* The check searched the first Transfer-Encoding field for the word
      * "chunked", so a coding that only contains it, chunked ahead of another
      * coding, and chunked undone by a second field were all decoded as
      * chunked, where a front end that reads the codings as RFC 9112 6.3 does
      * finds no length (found by tests/fuzz/http_head). */
-    long cl = -1;
+    int64_t cl = -1;
     int chunked = -1;
     ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: xchunked", &cl, &chunked));
     ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip", &cl, &chunked));

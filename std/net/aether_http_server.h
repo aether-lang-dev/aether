@@ -62,10 +62,12 @@ typedef struct {
      * `stream_consumed` advances as the accessor / post-handler drain
      * pulls bytes. Trailing fields → same ABI-stable promise as the
      * connection-metadata block above; a C consumer that leaves them
-     * NULL/0 just gets the legacy fully-buffered behaviour. */
-    void* stream_conn;
-    long  stream_total;
-    long  stream_consumed;
+     * NULL/0 just gets the legacy fully-buffered behaviour. Both are 64
+     * bits on every platform: a `long` was 32 bits on Windows, where a
+     * body past 2 GiB was refused that Linux streamed (#3761). */
+    void*   stream_conn;
+    int64_t stream_total;
+    int64_t stream_consumed;
 
     /* An arena the caller owns, for the strings a parse fills in. Set through
      * http_request_parse_arena before parsing; NULL means the ordinary
@@ -1142,8 +1144,9 @@ const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout
 // gzip-compressed bodies) without strlen() truncating at the first
 // embedded zero. Returns 0 if req is NULL or has no body. On a
 // streaming request this is the declared Content-Length until the
-// body is materialized, then the actual received count.
-int         http_request_body_length(HttpRequest* req);
+// body is materialized, then the actual received count. 64 bits, so a
+// body past 2 GiB reports its length (#3761).
+int64_t     http_request_body_length(HttpRequest* req);
 
 // #626 / #644 — Chunked-read request body. TLS split-accessor: the
 // bytes live in a per-thread buffer until the next call or explicit
@@ -1157,7 +1160,8 @@ int         http_request_body_length(HttpRequest* req);
 // Transfer-Encoding: chunked request bodies remain unsupported (as
 // before the reshape): with no Content-Length the body length is 0
 // and no body is read — the deliberate v1 semantics decision of #644.
-int         http_request_body_read_raw(HttpRequest* req, int offset, int max);
+// `offset` is 64 bits so a streamed body can be read past 2 GiB (#3761).
+int         http_request_body_read_raw(HttpRequest* req, int64_t offset, int max);
 int         http_request_body_complete(HttpRequest* req);
 const char* http_get_request_body_read(void);
 int         http_get_request_body_read_length(void);
@@ -1262,7 +1266,7 @@ enum {
     HTTP_HEAD_TOO_LARGE    = 431
 };
 int http_request_head_check(const char* head, const char* hdr_end,
-                            long* content_length, int* chunked);
+                            int64_t* content_length, int* chunked);
 // The worker path's per-connection read buffer: a request head has to end
 // within it, or the connection is closed, and a body larger than it is
 // streamed rather than buffered (#626). The proxy event loop bounds the head

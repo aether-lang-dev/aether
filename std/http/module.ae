@@ -1044,8 +1044,9 @@ extern http_request_body(req: ptr) -> string
 // Returns 0 if the request has no body (or is null). Use this when
 // the body may contain embedded NULs (binary uploads, gzipped JSON,
 // svn PUT) — `string.length` on the body would `strlen` and truncate.
-extern http_request_body_length(req: ptr) -> int
-extern http_request_body_read_raw(req: ptr, offset: int, max: int) -> int
+// A long, as the offset below is: a streamed body can pass 2 GiB (#3761).
+extern http_request_body_length(req: ptr) -> long
+extern http_request_body_read_raw(req: ptr, offset: long, max: int) -> int
 // #644: 1 once the whole body has arrived (streaming request: every
 // declared byte pulled off the wire; buffered request: always 1 — the
 // dispatcher had the payload before the handler ran). Lets a chunked-
@@ -1123,7 +1124,9 @@ request_body(req: ptr) -> string {
     return http_request_body(req)
 }
 
-request_body_length(req: ptr) -> int {
+// The body's length in bytes, a long: a streamed upload may declare more
+// than an int holds, and its Content-Length is reported whole (#3761).
+request_body_length(req: ptr) -> long {
     return http_request_body_length(req)
 }
 
@@ -1153,10 +1156,12 @@ request_body_bytes(req: ptr) -> byte[] {
 // identical — peak server memory for a large PUT is one window per
 // connection, not the whole object.
 //
-// Pair with `request_body_length` to drive the loop:
+// Pair with `request_body_length` to drive the loop. Both it and `offset`
+// are longs, so a body past 2 GiB is read whole when `off` starts as a long
+// (#3761):
 //
 //   total = http.request_body_length(req)
-//   off = 0
+//   off = 0 as long
 //   while off < total {
 //       chunk, n, err = http.request_body_read(req, off, 65536)
 //       if err != "" { ...handle... break }
@@ -1164,7 +1169,7 @@ request_body_bytes(req: ptr) -> byte[] {
 //       fs.pwrite(out_file, string.bytes(chunk)[0..n], off)   // stream to disk
 //       off = off + n
 //   }
-request_body_read(req: ptr, offset: int, max: int) -> {
+request_body_read(req: ptr, offset: long, max: int) -> {
     ok = http_request_body_read_raw(req, offset, max)
     if ok == 0 {
         return "", 0, "request_body_read failed"

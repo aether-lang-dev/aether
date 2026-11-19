@@ -5634,7 +5634,7 @@ static int request_body_unread(const HttpRequest* req) {
 static void request_body_settle(HttpConn* conn, HttpRequest* req) {
     if (!req->stream_conn) return;
     HttpConn* sconn = (HttpConn*)req->stream_conn;
-    long left = req->stream_total - req->stream_consumed;
+    int64_t left = req->stream_total - req->stream_consumed;
     if (left > 0 && left <= HTTP_BODY_DRAIN_MAX) {
         /* What is already buffered first, then off the socket in small reads
          * (no buffer the body's size); a client that stops sending ends it at
@@ -5648,7 +5648,7 @@ static void request_body_settle(HttpConn* conn, HttpRequest* req) {
         }
         while (left > 0) {
             char scratch[4096];
-            int chunk = left < (long)sizeof(scratch) ? (int)left : (int)sizeof(scratch);
+            int chunk = left < (int64_t)sizeof(scratch) ? (int)left : (int)sizeof(scratch);
             int n = conn_recv(sconn, scratch, chunk);
             if (n <= 0) break;
             req->stream_consumed += n;
@@ -6043,7 +6043,7 @@ static int head_line_value(const char* line, size_t line_len,
  *                         value ends.
  */
 int http_request_head_check(const char* head, const char* hdr_end,
-                            long* content_length, int* chunked) {
+                            int64_t* content_length, int* chunked) {
     *content_length = 0;
     *chunked = 0;
     /* A NUL makes the head something other than a request (RFC 9110 5.5),
@@ -6129,12 +6129,14 @@ int http_request_head_check(const char* head, const char* hdr_end,
          * disagree about where one request stops and the next begins. A
          * Content-Length is a plain count of digits, read whole by the one
          * reader std.net has for it: a sign, a spelled number, or a value
-         * that does not fit has no length in it. */
+         * that does not fit has no length in it. The bound is INT64_MAX on
+         * every platform: LONG_MAX is 2^31 - 1 on Windows, where a body past
+         * 2 GiB was refused as bad framing (#3761). */
         uint64_t declared = 0;
         if (cl_differing ||
-            http_parse_count(cl_value, cl_len, 10, (uint64_t)LONG_MAX, &declared) != 0)
+            http_parse_count(cl_value, cl_len, 10, (uint64_t)INT64_MAX, &declared) != 0)
             return HTTP_HEAD_BAD_FRAMING;
-        *content_length = (long)declared;
+        *content_length = (int64_t)declared;
     }
 
     /* Transfer-Encoding decides where the body ends, and when it is present
@@ -6484,7 +6486,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * head has passed the checks the proxy event loop makes too (#3236). */
     const char* head_start = conn->buf + conn->read_pos;
     size_t head_have = (size_t)(conn->write_pos - conn->read_pos);
-    long content_length = 0;
+    int64_t content_length = 0;
     int te_chunked = 0;
     switch (http_request_head_check(head_start, hdr_end, &content_length, &te_chunked)) {
     case HTTP_HEAD_MALFORMED:    conn_send_bad_request_line(conn, head_start, head_have); return 0;
@@ -6564,7 +6566,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         conn->write_pos = conn->read_pos + header_size
                         + (int)decoded_len + (int)tail_len;
         conn->buf[conn->write_pos] = '\0';
-        content_length = (long)decoded_len;
+        content_length = (int64_t)decoded_len;
         request_total  = header_size + (int)decoded_len;
         stream_body    = 0;
     }
@@ -9204,19 +9206,19 @@ const char* http_request_body(HttpRequest* req) {
     if (req->stream_conn && !req->body && req->stream_consumed == 0 &&
         req->stream_total > 0) {
         HttpConn* conn = (HttpConn*)req->stream_conn;
-        long total = req->stream_total;
+        int64_t total = req->stream_total;
         /* The buffer grows as the bytes arrive, from the connection
          * buffer's size, rather than starting at the declared length: a
          * client that declares the limit and sends little of it holds
          * memory in proportion to what it sent (#3740). */
-        long cap = total < HTTP_CONN_BUF_CAP ? total : HTTP_CONN_BUF_CAP;
+        int64_t cap = total < HTTP_CONN_BUF_CAP ? total : HTTP_CONN_BUF_CAP;
         char* buf = (char*)malloc((size_t)cap + 1);
         if (!buf) return "";
-        long got = 0;
+        int64_t got = 0;
         /* (a) body bytes that arrived in the same recv as the headers. */
         int buffered = conn->write_pos - conn->read_pos;
         if (buffered > 0) {
-            long take = ((long)buffered < total) ? (long)buffered : total;
+            int64_t take = ((int64_t)buffered < total) ? (int64_t)buffered : total;
             if (take > cap) {
                 char* nb = (char*)realloc(buf, (size_t)take + 1);
                 if (!nb) { free(buf); return ""; }
@@ -9233,13 +9235,14 @@ const char* http_request_body(HttpRequest* req) {
          * peer-close. */
         while (got < total) {
             if (got == cap) {
-                long next = cap > total / 2 ? total : cap * 2;
+                int64_t next = cap > total / 2 ? total : cap * 2;
                 char* nb = (char*)realloc(buf, (size_t)next + 1);
                 if (!nb) break;
                 buf = nb;
                 cap = next;
             }
-            int n = conn_recv(conn, buf + got, (int)(cap - got));
+            int64_t room = cap - got;
+            int n = conn_recv(conn, buf + got, room < INT_MAX ? (int)room : INT_MAX);
             if (n <= 0) break;
             got += n;
         }
@@ -9251,7 +9254,7 @@ const char* http_request_body(HttpRequest* req) {
     return (req->body) ? req->body : "";
 }
 
-int http_request_body_length(HttpRequest* req) {
+int64_t http_request_body_length(HttpRequest* req) {
     if (!req) return 0;
     /* A refused body has no length to report: http_request_body gave "",
      * and a caller slicing that by the declared length would read past it
@@ -9259,12 +9262,12 @@ int http_request_body_length(HttpRequest* req) {
     if (req->body_refused) return 0;
     /* A materialized (or originally buffered) body reports its actual
      * byte count; after a short read this is what request_body holds. */
-    if (req->body) return (int)req->body_length;
+    if (req->body) return (int64_t)req->body_length;
     /* Streaming request not yet materialized: `body` is NULL but the
      * declared length is the Content-Length we stashed. The canonical
      * upload loop reads this to know how many bytes to pull via
      * http_request_body_read. */
-    if (req->stream_conn) return (int)req->stream_total;
+    if (req->stream_conn) return req->stream_total;
     return 0;
 }
 
@@ -9347,7 +9350,7 @@ static int rbr_yield_eof(void) {
     return 1;
 }
 
-int http_request_body_read_raw(HttpRequest* req, int offset, int max) {
+int http_request_body_read_raw(HttpRequest* req, int64_t offset, int max) {
     release_rbr_locked();
     if (!req || offset < 0 || max < 0) return 0;
 
@@ -9363,20 +9366,20 @@ int http_request_body_read_raw(HttpRequest* req, int offset, int max) {
      * always bounded by `max`. */
     if (req->stream_conn) {
         HttpConn* conn = (HttpConn*)req->stream_conn;
-        long remaining = req->stream_total - req->stream_consumed;
+        int64_t remaining = req->stream_total - req->stream_consumed;
         if (remaining <= 0) return rbr_yield_eof();
-        if ((long)offset != req->stream_consumed) {
+        if (offset != req->stream_consumed) {
             /* Out-of-order read against an unbuffered stream — refuse. */
             return rbr_yield_eof();
         }
 
-        long want = (max < remaining) ? (long)max : remaining;
+        int64_t want = ((int64_t)max < remaining) ? (int64_t)max : remaining;
         if (want <= 0) return rbr_yield_eof();
         g_rbr_buf = (unsigned char*)aether_caps_malloc((size_t)want);
         if (!g_rbr_buf) return 0;
         g_rbr_cap = (size_t)want;
 
-        long got = 0;
+        int64_t got = 0;
         /* (a) drain any body bytes already in the connection buffer. */
         int buffered = conn->write_pos - conn->read_pos;
         if (buffered > 0) {
