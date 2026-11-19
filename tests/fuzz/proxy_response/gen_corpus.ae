@@ -7,7 +7,8 @@
 // pass-through (no headers, only hop-by-hop ones, a repeated header, a CR
 // inside a value, an empty value), and the framings the event loop tells
 // apart (Content-Length, chunked, to the close, no body by status, interim
-// responses, conflicting lengths), answers to GET and to HEAD.
+// responses, conflicting lengths), answers to GET and to HEAD; and the
+// reproducers fuzzing found, kept as regression seeds (crash_*).
 import std.os
 import std.io
 import std.fs
@@ -86,4 +87,10 @@ main() {
     }
     both(dir, "many_fields", "${many}Content-Length: 2\r\n\r\nok")
     both(dir, "two_equal_lengths", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-A: 1\r\nContent-Length: 2\r\n\r\nok")
+
+    // Reproducers fuzzing found, kept as regression seeds: a bare CR and a
+    // bare LF in the status line, which the pass-through and the copying
+    // path read differently; and a bare CR inside a field.
+    both(dir, "crash_bare_lf_status", "HTTP/1.1 200 OK\rtimeout\nContent-Length: 20\r\n\r\nshort")
+    both(dir, "bare_cr_field", "HTTP/1.1 200 OK\r\nX-Bad: a\rb\r\nContent-Length: 2\r\n\r\nok")
 }

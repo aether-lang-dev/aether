@@ -1037,6 +1037,27 @@ static int dh_put(char** buf, size_t* cap, size_t* len, const char* s, size_t n)
     return 0;
 }
 
+/* Is every line of the head ended by CR LF, with no bare CR, bare LF or NUL
+ * anywhere in it? The copying path reads a head through the client, which
+ * turns each bare CR and NUL into a space (#3572) and ends lines only at
+ * CR LF, so a bare LF stays inside its line; the pass-through ended the
+ * status line at the first LF and stopped reading fields at a bare CR. On
+ * `HTTP/1.1 200 OK\rtimeout\nContent-Length: 20\r\n\r\n` the two answered
+ * differently: the pass-through kept the Content-Length, the copying path
+ * read it as part of the status line (#3749, found by the proxy-response
+ * fuzzer). A head like that is the copying path's to answer, so the two
+ * cannot disagree; a clean one, which is every head a conforming upstream
+ * sends, still goes straight through. */
+static int direct_head_clean(const char* raw, size_t header_bytes) {
+    for (size_t i = 0; i < header_bytes; i++) {
+        char c = raw[i];
+        if (c == '\0') return 0;
+        if (c == '\r' && (i + 1 >= header_bytes || raw[i + 1] != '\n')) return 0;
+        if (c == '\n' && (i == 0 || raw[i - 1] != '\r')) return 0;
+    }
+    return 1;
+}
+
 /* The status a response line carries, or 0 when it does not carry one. Same
  * shape as the copying path's check: exactly three digits after the version. */
 static int direct_status_of(const char* raw, size_t raw_len) {
@@ -1083,6 +1104,7 @@ int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
                              size_t header_bytes, AetherProxyDirect* out) {
     if (!px || !px->opts || !raw || !out) return -1;
     if (header_bytes < 4 || header_bytes > raw_len) return -1;
+    if (!direct_head_clean(raw, header_bytes)) return -1;
 
     int status = direct_status_of(raw, header_bytes);
     if (status == 0) return -1;      /* no status line: not ours to pass on */
