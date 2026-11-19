@@ -575,6 +575,17 @@ else
 endif
 ifneq ($(NGHTTP2_LDFLAGS),)
   NGHTTP2_CFLAGS += -DAETHER_HAS_NGHTTP2
+  # #3738: the HTTP/2 server leans on libnghttp2 for two floods, rapid reset
+  # (CVE-2023-44487, fixed in 1.57.0) and CONTINUATION (CVE-2024-28182, fixed
+  # in 1.61.0). An older library still builds, with a warning, rather than
+  # being refused: distributions backport both fixes under the old version
+  # number (Ubuntu 24.04's 1.59.0 carries them), so the number alone cannot
+  # say a library is unsafe. docs/http-server.md, "HTTP/2", says what to check.
+  ifeq ($(shell pkg-config --exists libnghttp2 2>/dev/null && echo yes),yes)
+    ifneq ($(shell pkg-config --atleast-version=1.61.0 libnghttp2 2>/dev/null && echo yes),yes)
+      $(warning libnghttp2 $(shell pkg-config --modversion libnghttp2 2>/dev/null) is older than 1.61.0, which fixes the HTTP/2 CONTINUATION flood (CVE-2024-28182; 1.57.0 fixes rapid reset, CVE-2023-44487). Unless your distribution backported both fixes, upgrade it before serving HTTP/2: see docs/http-server.md)
+    endif
+  endif
   # #1896: nghttp2.h declares its API __declspec(dllimport) unless
   # NGHTTP2_STATICLIB is defined (nghttp2.h:58-65). Without it every call
   # compiles to an __imp_nghttp2_* reference, which the static libnghttp2.a

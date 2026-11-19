@@ -192,6 +192,42 @@ whole until the stream ends, under the limit `server_set_max_body` sets
 (64 MiB by default, #3740); past it the stream is reset with
 `RST_STREAM` (`CANCEL`) and its handler never runs.
 
+An HTTP/2 connection runs on a worker for its whole life, so it is bounded
+the way a run of HTTP/1.1 requests is (#3738):
+
+- **The connection holds no more than `max_body` of request bodies** at
+  once, as one HTTP/1.1 connection holds one body: a stream that would take
+  it past that is reset with `REFUSED_STREAM`, which tells the client the
+  request was not processed and can be sent again.
+- **A header list is at most 32 KiB**, counted as
+  `SETTINGS_MAX_HEADER_LIST_SIZE` counts it and advertised there. Past it
+  the stream is answered `431` and never dispatched. HPACK lets a few bytes
+  on the wire stand for a large field, over and over.
+- **A stream's request must arrive whole in time**: within the head and
+  body budgets (`server_set_head_timeout`, `server_set_body_timeout`) of
+  its first HEADERS, the body's extended by its minimum rate. Late, it is
+  reset with `CANCEL`.
+- **Idle connections close.** With no stream open for the idle timeout
+  (`server_set_keepalive`), the server sends `GOAWAY` and closes; PINGs and
+  SETTINGS do not count as activity. With streams open but none being
+  handled, nothing arriving for the idle timeout closes it too.
+- **Connections age out.** Past `server_set_h2_max_age` (1 h by default)
+  the server sends a graceful `GOAWAY`: the streams already open finish,
+  no new ones start, and the connection closes within the idle timeout.
+  The same graceful `GOAWAY` is what a server stop sends; it used to end
+  the session at once and drop the streams it meant to let finish.
+
+nghttp2's own protections (against `SETTINGS` and `PING` ack floods, rapid
+reset and `CONTINUATION` floods) are set explicitly when the session is
+made, at nghttp2's defaults, so they do not depend on a library version's
+choice. Two of them live in libnghttp2 itself: the rapid reset fix
+(CVE-2023-44487) is in 1.57.0 and the `CONTINUATION` flood fix
+(CVE-2024-28182) in 1.61.0. A build against an older libnghttp2 succeeds
+with a warning rather than failing, since distributions backport both
+fixes under the old version number (Ubuntu 24.04's 1.59.0 carries them).
+If the warning appears, check that your libnghttp2 has both fixes, or
+upgrade it, before serving HTTP/2 to untrusted clients.
+
 ### Per-stream concurrent dispatch
 
 By default, h2 streams within one connection dispatch sequentially

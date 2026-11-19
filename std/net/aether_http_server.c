@@ -124,6 +124,8 @@ void http_server_limits_default(HttpServerLimits* limits) {
     limits->max_chunked_body          = HTTP_DEFAULT_MAX_CHUNKED_BODY;
     limits->ws_max_message            = HTTP_WS_DEFAULT_MAX_MESSAGE;
     limits->h2_max_concurrent_streams = HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
+    limits->h2_max_header_list        = HTTP_H2_DEFAULT_MAX_HEADER_LIST;
+    limits->h2_max_age_ms             = HTTP_H2_DEFAULT_MAX_AGE_MS;
 }
 
 #if !AETHER_HAS_NETWORKING
@@ -221,6 +223,7 @@ const char* http_server_set_max_body_raw(HttpServer* s, int64_t m) { (void)s; (v
 const char* http_server_set_head_timeout_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_body_timeout_raw(HttpServer* s, int64_t t, int64_t r) { (void)s; (void)t; (void)r; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_tls_handshake_timeout_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_h2_max_age_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
 void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -1982,6 +1985,16 @@ const char* http_server_set_tls_handshake_timeout_raw(HttpServer* server, int64_
     if (!server) return "server is null";
     if (timeout_ns < 0) return "TLS handshake timeout must not be negative";
     server->limits.tls_handshake_timeout_ms = limits_timeout_ms(timeout_ns);
+    return "";
+}
+
+/* How long an HTTP/2 connection may live (#3738): past it the server sends
+ * GOAWAY and closes once its streams finish, no later than the idle timeout
+ * after. 0 for no bound. */
+const char* http_server_set_h2_max_age_raw(HttpServer* server, int64_t timeout_ns) {
+    if (!server) return "server is null";
+    if (timeout_ns < 0) return "HTTP/2 connection age must not be negative";
+    server->limits.h2_max_age_ms = limits_timeout_ms(timeout_ns);
     return "";
 }
 
@@ -7528,6 +7541,21 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
      * an unused variable (an error under -Werror with nghttp2 enabled). */
     int wake_fd = aether_h2_session_wake_fd(sess);  /* -1 when no pool */
 #endif
+    /* The connection's clocks (#3738). It runs on a worker for its whole
+     * life, so it must end: when no stream has been open for the idle
+     * timeout (frames that open none, PINGs or SETTINGS, do not keep it),
+     * when streams are open but nothing has arrived for the idle timeout
+     * and no handler is running, and h2_max_age_ms after it began, by a
+     * GOAWAY that lets its streams finish within the idle timeout. Each
+     * stream's request has its own deadline (aether_h2_session_expire).
+     * The loop waited for the client with no bound, and on the dispatch
+     * pool's path went round its one-second poll for ever. */
+    const HttpServerLimits* lim = &server->limits;
+    int idle_ms = lim->idle_timeout_ms > 0 ? lim->idle_timeout_ms : HTTP_DEFAULT_IDLE_TIMEOUT_MS;
+    int64_t started = aether_h2_now_ms();
+    int64_t idle_since = started;   /* when the last stream closed; 0 while one is open */
+    int64_t last_rx = started;      /* when bytes last arrived from the client */
+    int64_t close_by = 0;           /* past max age: the end, whatever is left */
     while (1) {
         /* Graceful shutdown bridge (#260 Tier 3 + h2). When
          * http_server_stop / http_server_shutdown_graceful flips
@@ -7551,34 +7579,92 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
 
         if (aether_h2_session_want_close(sess)) break;
 
-#if !defined(_WIN32)
-        /* When concurrent dispatch is on, poll the socket AND the
-         * wake pipe so a worker finishing mid-recv doesn't have to
-         * wait for the next byte from the peer to get its response
-         * onto the wire. wake_fd == -1 when the pool is off — fall
-         * through to the plain blocking recv path. */
-        if (wake_fd >= 0) {
-            struct pollfd pfds[2];
-            pfds[0].fd = conn->fd;       pfds[0].events = POLLIN; pfds[0].revents = 0;
-            pfds[1].fd = wake_fd;         pfds[1].events = POLLIN; pfds[1].revents = 0;
-            /* 1s timeout so the graceful-shutdown / is_running flag
-             * gets re-checked at least once per second even when the
-             * connection is otherwise idle. */
-            int pr = poll(pfds, 2, 1000);
-            if (pr < 0) { if (errno == EINTR) continue; break; }
-            if (pr == 0) continue;  /* timeout — re-loop */
-            if (pfds[1].revents & POLLIN) {
-                /* drain_ready will run at the top of the next loop
-                 * iteration (it also drains the pipe). */
-                continue;
-            }
-            if (!(pfds[0].revents & POLLIN)) continue;
-            /* fall through to recv */
+        /* The deadlines (#3738): streams late with their requests are
+         * reset, and the connection's own clocks are read. */
+        int64_t now = aether_h2_now_ms();
+        int64_t next = aether_h2_session_expire(sess, now);
+        int busy = aether_h2_session_busy(sess);
+        int64_t idle_due = 0;
+        if (busy == 0) {
+            /* Idle since the last stream closed: one opened and answered
+             * within a turn of this loop is never seen open here. */
+            int64_t active = aether_h2_session_last_active(sess);
+            if (idle_since == 0) idle_since = now;
+            if (active > idle_since) idle_since = active;
+            idle_due = idle_since + idle_ms;
+        } else {
+            idle_since = 0;
+            if (busy == 1) idle_due = last_rx + idle_ms;
         }
-#endif
+        if (idle_due && now >= idle_due) {
+            /* Idle past the timeout: say so with a GOAWAY, and close. */
+            if (!goaway_sent) {
+                aether_h2_session_initiate_goaway(sess);
+                goaway_sent = 1;
+            }
+            break;   /* the final drain below sends it */
+        }
+        if (idle_due && (!next || idle_due < next)) next = idle_due;
+        if (lim->h2_max_age_ms > 0 && !close_by) {
+            int64_t age_due = started + lim->h2_max_age_ms;
+            if (now >= age_due) {
+                /* Old enough: no new streams, and the ones open get the
+                 * idle timeout to finish. */
+                if (!goaway_sent) {
+                    aether_h2_session_initiate_goaway(sess);
+                    goaway_sent = 1;
+                }
+                close_by = now + idle_ms;
+                continue;   /* the drain at the top sends the GOAWAY */
+            }
+            if (!next || age_due < next) next = age_due;
+        }
+        if (close_by) {
+            if (now >= close_by) break;
+            if (!next || close_by < next) next = close_by;
+        }
 
+        /* Wait for the client, or for a worker's response, no later than
+         * the next deadline, and no more than a second, so a stop is seen
+         * (the GOAWAY above). What a TLS backend already holds is ready
+         * without a wait. */
+        int wait = 1000;
+        if (next) {
+            int64_t w = next - now;
+            if (w < wait) wait = w > 0 ? (int)w : 0;
+        }
+        if (!conn_tls_buffered(conn)) {
+#if !defined(_WIN32)
+            struct pollfd pfds[2];
+            nfds_t npfd = 1;
+            pfds[0].fd = conn->fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
+            if (wake_fd >= 0) {
+                /* A worker finishing mid-wait gets its response onto the
+                 * wire without waiting for the client's next byte. */
+                pfds[1].fd = wake_fd; pfds[1].events = POLLIN; pfds[1].revents = 0;
+                npfd = 2;
+            }
+            int pr = poll(pfds, npfd, wait);
+            if (pr < 0) { if (errno == EINTR) continue; break; }
+            if (pr == 0) continue;   /* a deadline or the stop check: re-loop */
+            /* drain_ready runs at the top of the next iteration (it also
+             * drains the pipe). */
+            if (npfd == 2 && (pfds[1].revents & POLLIN)) continue;
+            if (!(pfds[0].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+#else
+            int pr = conn_poll_fd(conn->fd, POLLIN, wait);
+            if (pr < 0) break;
+            if (pr == 0) continue;
+#endif
+        }
+
+        /* One read, as a whole within the idle timeout: a TLS record that
+         * arrives a byte at a time is cut off (#3737). */
+        conn_read_due_set(conn, conn_now_ms() + idle_ms);
         int n = conn_recv(conn, inbuf, (int)sizeof(inbuf));
+        conn_read_due_clear(conn);
         if (n <= 0) break;  /* EOF / timeout / error */
+        last_rx = aether_h2_now_ms();
         if (aether_h2_session_feed(sess, inbuf, (size_t)n) < 0) break;
     }
 

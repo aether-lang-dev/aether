@@ -46,6 +46,7 @@ exports(
     http_server_set_head_timeout_raw, server_set_head_timeout,
     http_server_set_body_timeout_raw, server_set_body_timeout,
     http_server_set_tls_handshake_timeout_raw, server_set_tls_handshake_timeout,
+    http_server_set_h2_max_age_raw, server_set_h2_max_age,
     http_server_set_h2_raw, server_set_h2,
     http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
@@ -478,6 +479,17 @@ extern http_server_set_tls_handshake_timeout_raw(server: ptr, timeout_ns: long) 
 
 server_set_tls_handshake_timeout(server: ptr, timeout: Duration) -> string {
     return http_server_set_tls_handshake_timeout_raw(server, timeout.ns)
+}
+
+// How long an HTTP/2 connection may live (#3738); 1 h unless set here. Past
+// it the server sends GOAWAY, lets the streams it has finish, and closes no
+// later than the idle timeout after. An HTTP/2 connection with no stream
+// open closes after the idle timeout (server_set_keepalive) whatever this
+// is. 0ns turns the bound off. Returns "" or why the value was refused.
+extern http_server_set_h2_max_age_raw(server: ptr, timeout_ns: long) -> string
+
+server_set_h2_max_age(server: ptr, timeout: Duration) -> string {
+    return http_server_set_h2_max_age_raw(server, timeout.ns)
 }
 
 // Graceful shutdown (#260 Tier 3). Stops accepting new connections,

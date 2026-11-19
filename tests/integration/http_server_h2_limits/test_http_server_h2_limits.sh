@@ -1,12 +1,19 @@
 #!/bin/sh
-# Regression (#3738, the two parts fixed so far): an HTTP/2 connection
-# could open streams without bound and send each an unbounded body.
+# Regression (#3738): an HTTP/2 connection could open streams without bound
+# and send each an unbounded body, and lived on its worker for ever.
 # SETTINGS_MAX_CONCURRENT_STREAMS went out only when the program set it, and
 # nghttp2's own local default is unlimited; a stream's DATA was appended
 # with no cap while nghttp2's automatic WINDOW_UPDATE kept it flowing. The
 # server now advertises 100 streams unless told otherwise, and resets a
 # stream (RST_STREAM, CANCEL) whose body passes the server's body limit
 # (server_set_max_body, the one request_body applies, #3740).
+#
+# The rest of #3738: the connection as a whole holds no more than that limit
+# of request bodies (a stream past it is refused); a header list past
+# 32 KiB is answered 431; a stream whose request does not arrive whole in
+# time is reset; a connection with no stream open closes after the idle
+# timeout, PINGs or not; and one past its age (server_set_h2_max_age) gets
+# GOAWAY and closes once its streams are done.
 #
 # h2_probe.c speaks raw HTTP/2 frames over cleartext prior knowledge, so
 # it can leave a stream open with its body past the limit. Skips when the
@@ -78,4 +85,4 @@ case "$OUT" in
     *) fail "the probe did not report PASS" ;;
 esac
 
-echo "  [PASS] http_server_h2_limits: MAX_CONCURRENT_STREAMS 100 by default, a stream body past the limit reset"
+echo "  [PASS] http_server_h2_limits: streams, header lists and bodies bounded per stream and per connection; late requests reset; idle and old connections closed"

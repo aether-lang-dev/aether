@@ -225,6 +225,8 @@ struct HttpConn;
 //   max_chunked_body          8 MiB    none (clamped to max_body)   413, connection closed
 //   ws_max_message            64 MiB   server_set_ws_max_message    close 1009
 //   h2_max_concurrent_streams 100      server_set_h2                the new stream is reset
+//   h2_max_header_list        32 KiB   none                         431, the stream reset
+//   h2_max_age_ms             1 h      server_set_h2_max_age        GOAWAY, then closed
 //
 // The body's budget: the server waits on the client for a body no longer
 // than body_timeout_ms plus one second for every body_min_rate bytes it has
@@ -249,6 +251,8 @@ struct HttpConn;
 // http_server_set_h2_raw was given 0 (#3738). nghttp2's own local default is
 // unlimited, so without it a client could open streams without bound.
 #define HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS 100
+#define HTTP_H2_DEFAULT_MAX_HEADER_LIST 32768
+#define HTTP_H2_DEFAULT_MAX_AGE_MS     3600000
 
 typedef struct HttpServerLimits {
     // How long a connection may wait on its client with nothing arriving
@@ -276,6 +280,15 @@ typedef struct HttpServerLimits {
     size_t  ws_max_message;
     // SETTINGS_MAX_CONCURRENT_STREAMS on an HTTP/2 connection.
     int     h2_max_concurrent_streams;
+    // The largest header list an HTTP/2 request may have, counted as
+    // SETTINGS_MAX_HEADER_LIST_SIZE counts one (name, value and 32 bytes a
+    // field); advertised in that setting.
+    int     h2_max_header_list;
+    // How long an HTTP/2 connection may live: past it the server sends
+    // GOAWAY, lets the streams it has finish, and closes, no later than
+    // idle_timeout_ms after. An HTTP/2 connection with no stream open
+    // closes after idle_timeout_ms; frames that open none do not keep it.
+    int     h2_max_age_ms;
 } HttpServerLimits;
 
 // The defaults above, as a struct.
@@ -1215,6 +1228,13 @@ const char* http_server_set_body_timeout_raw(HttpServer* server, int64_t timeout
 // backends; past it the connection is closed. 0 leaves only the idle
 // timeout on each of its reads. Returns "" or why the value was refused.
 const char* http_server_set_tls_handshake_timeout_raw(HttpServer* server, int64_t timeout_ns);
+
+// How long an HTTP/2 connection may live (#3738), 1 h by default: past it
+// the server sends GOAWAY, lets the streams it has finish, and closes no
+// later than the idle timeout after. 0 for no bound. An HTTP/2 connection
+// with no stream open closes after the idle timeout whatever this is.
+// Returns "" or why the value was refused.
+const char* http_server_set_h2_max_age_raw(HttpServer* server, int64_t timeout_ns);
 
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,
