@@ -63,6 +63,24 @@
 static int aether_sandbox_final_w(const wchar_t* p, wchar_t* out, DWORD cap) {
     HANDLE h = CreateFileW(p, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_CANT_ACCESS_FILE) {
+        // A reparse point the system will not follow. One that is not a
+        // name surrogate (an AF_UNIX socket's, a deduplicated or cloud
+        // file's) redirects no name: it is the file itself, so its own
+        // final path is where the name leads. A symlink or a junction that
+        // cannot be followed stays a failure, as a dangling link is.
+        h = CreateFileW(p, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                        NULL);
+        FILE_ATTRIBUTE_TAG_INFO ti;
+        if (h != INVALID_HANDLE_VALUE &&
+            (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &ti, sizeof ti) ||
+             !(ti.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || IsReparseTagNameSurrogate(ti.ReparseTag))) {
+            CloseHandle(h);
+            return -1;
+        }
+        if (h == INVALID_HANDLE_VALUE) return -1;
+    }
     if (h == INVALID_HANDLE_VALUE) {
         DWORD e = GetLastError();
         if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND && e != ERROR_INVALID_NAME &&
