@@ -855,14 +855,15 @@ static HANDLE win_open_entry(const char* path, DWORD access, char resolved[PATH_
     return h;
 }
 
-/* What `h` is: 1 a directory that is not a symlink (a junction counts as a
- * directory, as RemoveDirectoryW takes it), 2 a symlink to a directory, 0
- * anything else; -1 when it cannot be asked. */
+/* What `h` is: 1 a directory that is not a link, 2 a link to a directory
+ * (any name surrogate: a symlink or a junction, both of which std's
+ * fs.is_symlink counts as a link, and which an unlink removes, leaving what
+ * it points at), 0 anything else; -1 when it cannot be asked. */
 static int win_entry_kind(HANDLE h) {
     FILE_ATTRIBUTE_TAG_INFO ti;
     if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &ti, sizeof ti)) return -1;
     if (!(ti.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return 0;
-    if ((ti.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && ti.ReparseTag == IO_REPARSE_TAG_SYMLINK)
+    if ((ti.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && IsReparseTagNameSurrogate(ti.ReparseTag))
         return 2;
     return 1;
 }

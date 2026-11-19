@@ -252,6 +252,23 @@ main() {
             spec.assert_eq(is_link, 1, "is_symlink answers for the link itself")
             spec.assert_contains(target, "gone.txt", "and readlink reads it")
         }
+        // A junction is a link to Windows' name resolution and to fs.is_symlink:
+        // fs.unlink removes it inside a block as outside one, and what it points
+        // at stays.
+        spec.it_when(windows, "unlinks a junction in the box, and leaves what it points at", "Windows junctions") callback {
+            made = make_junction("${box}/j", outside)
+            uerr = "not tried"
+            if made == 1 {
+                sandbox.enforce(in_box) callback {
+                    _u, _k, e = fs.unlink("${box}/j")
+                    uerr = e
+                }
+            }
+            spec.assert_eq(made, 1, "the junction is made")
+            spec.assert_str_eq(uerr, "", "unlink removes it")
+            spec.assert_eq(fs.exists("${box}/j"), 0, "it is gone")
+            spec.assert_eq(fs.exists("${outside}/secret.txt"), 1, "what it pointed at is not")
+        }
         spec.it("refuses a hard link that would put a file outside the box under its grants") callback {
             err = ""
             sandbox.enforce(in_box) callback {
