@@ -3714,7 +3714,7 @@ static const char* bracket_depth_flags(const char* cc) {
         return answer;
     }
     char probe_c[1100];
-    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "bracket_probe.c")) return answer;   /* #3745 */
+    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "ae_bracket_probe.c")) return answer;   /* #3745 */
     FILE* f = fopen(probe_c, "w");
     if (!f) return answer;
     fputs("int ae_bracket_probe;\n", f);
@@ -3945,9 +3945,9 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
 
     char probe_c[1100], probe_out[1100], probe_o[1100], cmd[4096];
     /* Compiled and read back: in the private temp directory (#3745). */
-    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "avx_probe.c") ||
-        !ae_private_temp_path(probe_out, sizeof(probe_out), "avx_probe.txt") ||
-        !ae_private_temp_path(probe_o, sizeof(probe_o), "avx_probe.o")) return flags;
+    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "ae_avx_probe.c") ||
+        !ae_private_temp_path(probe_out, sizeof(probe_out), "ae_avx_probe.txt") ||
+        !ae_private_temp_path(probe_o, sizeof(probe_o), "ae_avx_probe.o")) return flags;
     FILE* f = fopen(probe_c, "w");
     if (!f) return flags;
     fclose(f);
