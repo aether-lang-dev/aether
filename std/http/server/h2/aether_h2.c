@@ -939,11 +939,13 @@ static void submit_response_for_stream(AetherH2Session* s,
     char status_str[8];
     snprintf(status_str, sizeof(status_str), "%d", str->response_status);
 
-    int hdr_count = res->header_count;
-    if (hdr_count < 0) hdr_count = 0;
-    if (hdr_count > 256) hdr_count = 256;  /* sanity */
+    /* Every field the handler set, plus :status. There is no cap here: the
+     * response's arrays grow as fields are set (d5b4cc3ad), and a clamp at
+     * 256 dropped every field past it without a word. calloc refuses a
+     * count whose size overflows. */
+    size_t hdr_count = res->header_count > 0 ? (size_t)res->header_count : 0;
 
-    str->response_headers = calloc((size_t)(hdr_count + 1), sizeof(nghttp2_nv));
+    str->response_headers = calloc(hdr_count + 1, sizeof(nghttp2_nv));
     if (!str->response_headers) {
         http_request_free(req);
         http_server_response_free(res);
@@ -967,8 +969,8 @@ static void submit_response_for_stream(AetherH2Session* s,
     str->response_headers[0].valuelen  = strlen(status_str);
     str->response_headers[0].flags     = NGHTTP2_NV_FLAG_NONE;
 
-    int real_count = 1;
-    for (int i = 0; i < hdr_count; i++) {
+    size_t real_count = 1;
+    for (size_t i = 0; i < hdr_count; i++) {
         const char* hname  = res->header_keys   ? res->header_keys[i]   : NULL;
         const char* hvalue = res->header_values ? res->header_values[i] : NULL;
         if (!hname) continue;

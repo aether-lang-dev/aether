@@ -88,6 +88,12 @@ main() {
     headers(b, 0, 1, "", 1, field)
     write_seed(dir, "get", b)
 
+    // A GET on the last stream index, whose response carries 300 fields.
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 15, 1, "", 0, "")
+    write_seed(dir, "many_fields", b)
+
     b = strbuilder.new(0)
     b8(b, 0)
     headers(b, 0, 0, "\x05\x0d\x03", 2, "${field}\x04\x02abcdeQQ")

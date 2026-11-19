@@ -34,8 +34,9 @@
  *       script, is dispatched.
  *   G3  What the server writes is HTTP/2 frames: each header is whole, no
  *       frame is longer than 16384 bytes, and every dispatched stream gets a
- *       HEADERS frame with :status 200 and DATA that is its body (none for
- *       HEAD).
+ *       HEADERS frame with :status 200 and every field the middleware set,
+ *       in order (k of them on stream index k, 300 on the last, past the 256
+ *       the glue once kept), and DATA that is its body (none for HEAD).
  *   G4  Nothing leaks (LeakSanitizer). */
 #include <stdint.h>
 #include <stddef.h>
@@ -96,6 +97,10 @@ static int stream_index(int32_t id) {
     return k < MAX_STREAMS ? k : -1;
 }
 
+/* How many fields the response to stream index k carries beside :status:
+ * k of them, and 300 on the last, past the 256 the glue used to keep. */
+static int extra_fields(int k) { return k == MAX_STREAMS - 1 ? 300 : k; }
+
 /* The server's only middleware: G1 for each request, then the echo. */
 static int record_and_echo(HttpRequest* req, HttpServerResponse* res, void* ud) {
     (void)ud;
@@ -128,6 +133,18 @@ static int record_and_echo(HttpRequest* req, HttpServerResponse* res, void* ud) 
     }
     http_response_set_status(res, 200);
     if (req->body_length > 0) http_response_set_body_n(res, req->body, (int)req->body_length);
+    /* G3's fields: x-f<i> on the response, as many as extra_fields says. */
+    if (g_scripted) {
+        int k = -1;
+        if (req->path && sscanf(req->path, "/s%d/", &k) == 1 && k >= 0 && k < MAX_STREAMS) {
+            for (int i = 0; i < extra_fields(k); i++) {
+                char name[16], value[16];
+                snprintf(name, sizeof name, "x-f%d", i);
+                snprintf(value, sizeof value, "v%d", i);
+                http_response_set_header(res, name, value);
+            }
+        }
+    }
     return 0;
 }
 
@@ -291,6 +308,8 @@ static void check_output(int standing) {
     nghttp2_hd_inflater* inflater = NULL;
     CHECK(nghttp2_hd_inflate_new(&inflater) == 0, "nghttp2_hd_inflate_new failed");
     int got_headers[MAX_STREAMS] = {0};
+    int got_fields[MAX_STREAMS] = {0};   /* x-f<i>: v<i>, in order */
+    int bad_field[MAX_STREAMS] = {0};
     Buf got_body[MAX_STREAMS];
     memset(got_body, 0, sizeof got_body);
     size_t p = 0;
@@ -319,6 +338,15 @@ static void check_output(int standing) {
                 if (fl & NGHTTP2_HD_INFLATE_EMIT) {
                     if (nv.namelen == 7 && memcmp(nv.name, ":status", 7) == 0)
                         got_headers[k] = (nv.valuelen == 3 && memcmp(nv.value, "200", 3) == 0) ? 200 : -1;
+                    if (nv.namelen > 3 && memcmp(nv.name, "x-f", 3) == 0) {
+                        char want_n[16], want_v[16];
+                        int wn = snprintf(want_n, sizeof want_n, "x-f%d", got_fields[k]);
+                        int wv = snprintf(want_v, sizeof want_v, "v%d", got_fields[k]);
+                        if (nv.namelen != (size_t)wn || memcmp(nv.name, want_n, (size_t)wn) != 0 ||
+                            nv.valuelen != (size_t)wv || memcmp(nv.value, want_v, (size_t)wv) != 0)
+                            bad_field[k] = 1;
+                        got_fields[k]++;
+                    }
                 }
                 if (fl & NGHTTP2_HD_INFLATE_FINAL) { nghttp2_hd_inflate_end_headers(inflater); break; }
                 if (r == 0 && off >= end) break;
@@ -337,6 +365,9 @@ static void check_output(int standing) {
         Stream* s = &g_streams[k];
         if (!s->dispatched || !hpack_ok) continue;
         CHECK(got_headers[k] == 200, "dispatched stream %d got no :status 200 (%d)", k, got_headers[k]);
+        CHECK(got_fields[k] == extra_fields(k) && !bad_field[k],
+              "stream %d: the response carries %d of its %d fields%s", k, got_fields[k], extra_fields(k),
+              bad_field[k] ? ", or not as they were set" : "");
         size_t want = s->head ? 0 : s->body.n;
         CHECK(got_body[k].n == want && (want == 0 || memcmp(got_body[k].p, s->body.p, want) == 0),
               "stream %d: the response body is %zu bytes, the request's %zu", k, got_body[k].n, want);
