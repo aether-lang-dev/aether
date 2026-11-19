@@ -2,6 +2,7 @@
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_count.h"
+#include "../../runtime/aether_closure_abi.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -227,15 +228,10 @@ StringSeq* string_seq_drop(StringSeq* s, int n) {
 
 /* ---- Closure-bearing combinators (issue #421) -----------------------
  *
- * Layout-compatible view of the codegen's `_AeClosure` box. The fields
- * mirror the prologue typedef
- *     typedef struct { void (*fn)(void); void* env; } _AeClosure;
- * exactly; this TU never sees that typedef (it lives in the generated
- * program's prologue), so we name our own. A function pointer and a
- * data pointer are the same width on every target we build for, so the
- * by-value layout matches byte-for-byte. Same approach as
- * `AeClosureBox` in aether_collections.c. */
-typedef struct { void (*fn)(void); void* env; } AeSeqClosure;
+ * A closure box, as generated code lays it out: _AeClosureBox from
+ * runtime/aether_closure_abi.h, the header the generated prologue
+ * includes too (#3622), so the two cannot drift. */
+typedef _AeClosureBox AeSeqClosure;
 
 /* The callback parameters are declared `@noescape` (#2523): the box and
  * the env it points at are the caller's, read here only during the call

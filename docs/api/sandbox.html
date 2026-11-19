@@ -26,6 +26,7 @@
     <li><a href="#grant_fs_write">grant_fs_write</a></li>
     <li><a href="#grant_fs">grant_fs</a></li>
     <li><a href="#grant_exec">grant_exec</a></li>
+    <li><a href="#grant_shell">grant_shell</a></li>
     <li><a href="#grant_env">grant_env</a></li>
     <li><a href="#grant_tcp">grant_tcp</a></li>
     <li><a href="#grant_tcp_listen">grant_tcp_listen</a></li>
@@ -201,7 +202,13 @@
       <h3 class="function-name">grant_exec <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_exec(_ctx, cmd)</code></pre>
       <p class="signature"><span class="sig-params">_ctx: Grants, cmd: string</span></p>
-      <p class="doc">Running commands whose command line matches `cmd` (&quot;echo *&quot;).</p>
+      <p class="doc">Running commands whose command line matches `cmd`: a program os.run and its family start (&quot;echo&quot;, &quot;/usr/bin/git&quot;), or a command string os.system and os.exec hand to the shell (&quot;echo *&quot;). A command string also needs grant_shell, below.</p>
+    </div>
+    <div class="function" id="grant_shell" data-name="grant_shell">
+      <h3 class="function-name">grant_shell <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_shell(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: Grants</span></p>
+      <p class="doc">Running the shell: /bin/sh, or on Windows the program COMSPEC names (cmd.exe). os.system and os.exec run their command string through it, and the shell runs all of the string, not only the part an exec grant matched: with grant_exec(&quot;echo *&quot;), &quot;echo hi; rm -rf ~&quot; matches too. So a command string needs this grant as well as its own, and the pair allows whatever the shell can be told to run. Grant it only to code you would let run any command; give the rest os.run with an argv, which runs no shell. A file with no #! line that os.run starts also runs through the shell, and needs this grant too (#3755).</p>
     </div>
     <div class="function" id="grant_env" data-name="grant_env">
       <h3 class="function-name">grant_env <span class="kind">fn</span></h3>

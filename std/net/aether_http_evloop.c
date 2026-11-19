@@ -528,7 +528,7 @@ static long ev_head_verdict(EvConn* c, size_t body_limit) {
      * took Content-Length bytes as the body of a request with both (#3228);
      * the worker path decodes it and bounds it, which keeps one decoder
      * rather than two for a framing proxied clients rarely use. */
-    long declared = 0;
+    int64_t declared = 0;
     int chunked = 0;
     if (http_request_head_check(c->in, hdr_end, &declared, &chunked) != HTTP_HEAD_OK || chunked)
         return -1;
@@ -537,8 +537,8 @@ static long ev_head_verdict(EvConn* c, size_t body_limit) {
      * set out to buffer 2 GiB (#3237). One longer than the proxy forwards
      * goes to the worker path, which streams a body that size and where the
      * proxy refuses it, 502, without reading it. */
-    if ((size_t)declared > body_limit) return -1;
-    return declared;
+    if ((uint64_t)declared > (uint64_t)body_limit) return -1;
+    return (long)declared;   /* at most body_limit */
 }
 
 /* Is a whole request in the buffer yet?

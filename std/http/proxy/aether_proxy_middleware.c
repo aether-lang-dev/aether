@@ -263,6 +263,41 @@ static char* build_upstream_url(const char* base_url,
     return out;
 }
 
+/* What the cache keys a request by: everything that decides which upstream
+ * resource it names (#3736). That is the forwarded path, the query the
+ * upstream is sent with it, and, when the client's Host is forwarded
+ * (preserve_host), that Host, since an upstream serving several names
+ * answers each differently. Keyed by the path alone, `/x?a=1` and `/x?a=2`
+ * shared an entry, so one client could be served another's response.
+ *
+ * The query is added exactly as build_upstream_url adds it, so two requests
+ * share a key only when the upstream would be sent the same target. The
+ * Host goes after a line feed, which neither a request target nor a header
+ * value can hold, so no path and Host pair can spell another pair's key.
+ * Returns a malloc'd string, or NULL when the allocator refuses. */
+static char* cache_target(const AetherProxyOpts* opts, const HttpRequest* req,
+                          const char* forward_path) {
+    const char* query = req->query_string;
+    const char* host = opts->preserve_host ? http_get_header((HttpRequest*)req, "Host") : NULL;
+    size_t pl = strlen(forward_path);
+    size_t ql = (query && *query) ? strlen(query) : 0;
+    size_t hl = host ? strlen(host) : 0;
+    char* out = (char*)malloc(pl + (ql ? ql + 1 : 0) + (host ? hl + 1 : 0) + 1);
+    if (!out) return NULL;
+    size_t pos = 0;
+    memcpy(out, forward_path, pl); pos += pl;
+    if (ql) {
+        out[pos++] = '?';
+        memcpy(out + pos, query, ql); pos += ql;
+    }
+    if (host) {
+        out[pos++] = '\n';
+        memcpy(out + pos, host, hl); pos += hl;
+    }
+    out[pos] = '\0';
+    return out;
+}
+
 /* Extract the host:port piece of a URL ("http://host:port/...") for
  * Host: rewriting. Returns malloc'd string, caller frees. NULL on
  * malformed.
@@ -319,7 +354,9 @@ static void proxy_set_body(HttpServerResponse* res, const HttpRequest* req,
     }
 }
 
-/* Apply a cache hit's snapshot to the inbound HttpServerResponse. */
+/* Apply a cache hit's snapshot to the inbound HttpServerResponse. The caller
+ * holds a reference to `e` (aether_proxy_cache_lookup's), which is what lets
+ * this read it without the cache lock. */
 static void serve_from_cache(HttpServerResponse* res, const HttpRequest* req,
                              AetherProxyCacheEntry* e) {
     http_response_set_status(res, e->status_code);
@@ -506,6 +543,11 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
      * with 504 (#3238). A client that stops short is refused rather than
      * having part of its body forwarded as if it were all of it. */
     if (req->stream_conn && !req->body) {
+        /* The proxy's own cap, checked above, is the limit on what it buffers
+         * (opts_set_body_cap), as on the event-loop path; the server's
+         * max_body (#3740) is the default for handlers, and refused a body a
+         * proxy configured past 64 MiB was meant to forward. */
+        if (opts->max_body_bytes > 0) req->body_max = (int64_t)opts->max_body_bytes;
         http_request_body(req);
         if (!http_request_body_complete(req)) {
             http_response_set_status(res, 400);
@@ -532,11 +574,16 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
     if (opts->cache &&
         req->method &&
         (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0)) {
-        AetherProxyCacheEntry* hit = aether_proxy_cache_lookup(
-            opts->cache, req->method, forward_path, req);
+        char* target = cache_target(opts, req, forward_path);
+        AetherProxyCacheEntry* hit = target ? aether_proxy_cache_lookup(
+            opts->cache, req->method, target, req) : NULL;
+        free(target);
         if (hit) {
             atomic_fetch_add(&opts->pool->metric_cache_hits, 1);
+            /* The lookup's reference keeps the entry alive while it is
+             * copied out, whatever another worker's store evicts (#3756). */
             serve_from_cache(res, req, hit);
+            aether_proxy_cache_release(hit);
             return 0;
         }
         atomic_fetch_add(&opts->pool->metric_cache_misses, 1);
@@ -916,9 +963,13 @@ static int px_copy(AetherProxyExchange* px) {
     /* ---- Cache store ---- */
     if (opts->cache && headers_block && req->method &&
         (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0)) {
-        aether_proxy_cache_store(opts->cache, req->method, px->forward_path, req,
-                                 px->status, headers_block,
-                                 body, body_length);
+        char* target = cache_target(opts, req, px->forward_path);
+        if (target) {
+            aether_proxy_cache_store(opts->cache, req->method, target, req,
+                                     px->status, headers_block,
+                                     body, body_length);
+            free(target);
+        }
     }
 
     http_response_free(px->resp);

@@ -74,7 +74,7 @@ jobs:
         shard: [ '1/2', '2/2' ]
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     # From a cache of the packages' .deb files (#3602): the mirror served
     # some legs at 39 kB/s in one run in three, six minutes or more.
@@ -114,7 +114,7 @@ jobs:
 
     - name: Upload the TSan reports
       if: failure()
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: tsan-reports-${{ strategy.job-index }}
         path: |

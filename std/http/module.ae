@@ -42,6 +42,8 @@ exports(
     http_server_set_tls_raw, server_set_tls, http_server_set_tls_pem_raw, server_set_tls_pem,
     http_server_set_tls_backend_raw, server_set_tls_backend,
     http_server_set_keepalive_raw, server_set_keepalive,
+    http_server_set_max_body_raw, server_set_max_body,
+    http_server_set_head_timeout_raw, server_set_head_timeout,
     http_server_set_h2_raw, server_set_h2,
     http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
@@ -64,6 +66,8 @@ exports(
     ws_send_text, ws_send_binary, ws_recv,
     ws_recv_timeout, ws_poll, ws_fd,
     ws_message, ws_message_bytes, ws_close,
+    http_ws_set_max_message_raw, ws_set_max_message,
+    http_server_set_ws_max_message_raw, server_set_ws_max_message,
     server_bind, server_start, server_start_background,
     http_server_add_route, http_server_get, http_server_post,
     http_server_put, http_server_delete,
@@ -354,7 +358,9 @@ server_set_tls_backend(server: ptr, backend: string) -> string {
 //     HTTP/1.1 and HTTP/2 traffic.
 //
 // max_concurrent_streams advertises SETTINGS_MAX_CONCURRENT_STREAMS
-// to the peer. Pass 0 for libnghttp2's default (100). Negative
+// to the peer. Pass 0 for the default, 100, which is sent too: nghttp2's
+// own is unlimited (#3738). A stream whose request body passes the
+// server's limit (server_set_max_body) is reset (RST_STREAM). Negative
 // values return an error.
 //
 // Returns "" on success or an error string when the build doesn't
@@ -420,6 +426,30 @@ extern http_server_set_keepalive_raw(server: ptr, enabled: int, max_requests: in
 
 server_set_keepalive(server: ptr, enabled: int, max_requests: int, idle_timeout: Duration) -> {
     return http_server_set_keepalive_raw(server, enabled, max_requests, idle_timeout.ns)
+}
+
+// The largest request body request_body buffers, in bytes (#3740); 64 MiB
+// unless set here. Past it request_body returns "", request_body_length
+// reports 0, and the server answers 413 whatever the handler set. The
+// limit is on buffering, not on uploads: a handler that reads its body with
+// request_body_read streams a body of any size. Returns "" or why the value
+// was refused (not positive).
+extern http_server_set_max_body_raw(server: ptr, max_bytes: long) -> string
+
+server_set_max_body(server: ptr, max_bytes: long) -> string {
+    return http_server_set_max_body_raw(server, max_bytes)
+}
+
+// The longest a request head may take to arrive whole, from its first byte
+// (#3737); 30 s unless set here. Past it the server answers 408 and closes
+// the connection. The idle timeout (server_set_keepalive) bounds each read
+// on its own, so without this a client that sent one byte of its head just
+// inside that bound, over and over, held a worker for as long as it liked.
+// 0ns turns the bound off. Returns "" or why the value was refused.
+extern http_server_set_head_timeout_raw(server: ptr, timeout_ns: long) -> string
+
+server_set_head_timeout(server: ptr, timeout: Duration) -> string {
+    return http_server_set_head_timeout_raw(server, timeout.ns)
 }
 
 // Graceful shutdown (#260 Tier 3). Stops accepting new connections,
@@ -678,7 +708,10 @@ chunked_end(stream: ptr) -> int {
 //   ws_send_binary(ws, data) -> int        // data: byte[]
 //   ws_close(ws, code, reason) — 1000 = normal, 1001 = going away, ...
 //
-// Control frames (ping/pong) are auto-handled inside ws_recv.
+// Control frames (ping/pong) are auto-handled inside ws_recv. A control
+// frame over 125 bytes or fragmented closes the connection with 1002, and a
+// message past the cap (server_set_ws_max_message) with 1009; ws_recv
+// returns -1 for both.
 extern http_server_websocket(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
 extern http_ws_send_text(ws: ptr, text: string) -> int
 extern http_ws_send_binary(ws: ptr, data: ptr, length: int) -> int
@@ -691,9 +724,28 @@ extern http_ws_message_length(ws: ptr) -> int
 extern http_ws_close(ws: ptr, code: int, reason: string)
 extern http_ws_connect(url: string) -> ptr
 extern http_ws_client_free(ws: @frees ptr)
+extern http_ws_set_max_message_raw(ws: ptr, max_bytes: long) -> string
+extern http_server_set_ws_max_message_raw(server: ptr, max_bytes: long) -> string
 
 server_websocket(server: ptr, path: string, handler: @keep ptr, user_data: ptr) {
     http_server_websocket(server, path, handler, user_data)
+}
+
+// The cap on one WebSocket message, in bytes (#3739). Every handle this
+// server upgrades starts with it; 64 MiB unless set here. A message past
+// it closes the connection with 1009 (message too big), checked against
+// the length each frame declares before any of it is read, so a peer
+// cannot make the server hold more than the cap. Returns "" or why the
+// value was refused (not positive, or past the 2 GiB a message length can
+// report).
+server_set_ws_max_message(server: ptr, max_bytes: long) -> string {
+    return http_server_set_ws_max_message_raw(server, max_bytes)
+}
+
+// The cap on one message for this handle alone, server or client, from the
+// next ws_recv on. A client handle from ws_connect starts at 64 MiB.
+ws_set_max_message(ws: ptr, max_bytes: long) -> string {
+    return http_ws_set_max_message_raw(ws, max_bytes)
 }
 
 // WebSocket CLIENT: dial a ws:// endpoint and complete the upgrade.
@@ -992,8 +1044,9 @@ extern http_request_body(req: ptr) -> string
 // Returns 0 if the request has no body (or is null). Use this when
 // the body may contain embedded NULs (binary uploads, gzipped JSON,
 // svn PUT) — `string.length` on the body would `strlen` and truncate.
-extern http_request_body_length(req: ptr) -> int
-extern http_request_body_read_raw(req: ptr, offset: int, max: int) -> int
+// A long, as the offset below is: a streamed body can pass 2 GiB (#3761).
+extern http_request_body_length(req: ptr) -> long
+extern http_request_body_read_raw(req: ptr, offset: long, max: int) -> int
 // #644: 1 once the whole body has arrived (streaming request: every
 // declared byte pulled off the wire; buffered request: always 1 — the
 // dispatcher had the payload before the handler ran). Lets a chunked-
@@ -1064,11 +1117,16 @@ request_path(req: ptr) -> string {
     return http_request_path(req)
 }
 
+// The whole request body. A body past the server's limit (server_set_max_body,
+// 64 MiB by default) is refused: "" here, and the server answers 413
+// (#3740). Stream a larger upload with request_body_read.
 request_body(req: ptr) -> string {
     return http_request_body(req)
 }
 
-request_body_length(req: ptr) -> int {
+// The body's length in bytes, a long: a streamed upload may declare more
+// than an int holds, and its Content-Length is reported whole (#3761).
+request_body_length(req: ptr) -> long {
     return http_request_body_length(req)
 }
 
@@ -1098,10 +1156,12 @@ request_body_bytes(req: ptr) -> byte[] {
 // identical — peak server memory for a large PUT is one window per
 // connection, not the whole object.
 //
-// Pair with `request_body_length` to drive the loop:
+// Pair with `request_body_length` to drive the loop. Both it and `offset`
+// are longs, so a body past 2 GiB is read whole when `off` starts as a long
+// (#3761):
 //
 //   total = http.request_body_length(req)
-//   off = 0
+//   off = 0 as long
 //   while off < total {
 //       chunk, n, err = http.request_body_read(req, off, 65536)
 //       if err != "" { ...handle... break }
@@ -1109,7 +1169,7 @@ request_body_bytes(req: ptr) -> byte[] {
 //       fs.pwrite(out_file, string.bytes(chunk)[0..n], off)   // stream to disk
 //       off = off + n
 //   }
-request_body_read(req: ptr, offset: int, max: int) -> {
+request_body_read(req: ptr, offset: long, max: int) -> {
     ok = http_request_body_read_raw(req, offset, max)
     if ok == 0 {
         return "", 0, "request_body_read failed"

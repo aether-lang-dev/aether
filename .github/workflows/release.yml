@@ -34,6 +34,12 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Least privilege for every job that does not ask for more (#3746). The
+# repository default is read, but a workflow says so itself, so a change
+# of that default cannot widen what its jobs hold.
+permissions:
+  contents: read
+
 jobs:
   # ================================================================== #
   # PREPARE — decide whether to bump or tag based on repo state        #
@@ -57,7 +63,7 @@ jobs:
       tag:     ${{ steps.decide.outputs.tag }}
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
         fetch-tags: true
@@ -173,7 +179,7 @@ jobs:
       pull-requests: write
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
         fetch-tags: true
@@ -393,7 +399,7 @@ jobs:
       version: ${{ steps.t.outputs.version }}
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
         fetch-tags: true
@@ -494,7 +500,7 @@ jobs:
             timeout: 80
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
         # Full history + all tags. A shallow checkout of a tag does not
@@ -544,7 +550,7 @@ jobs:
     # MSYS2's libfyaml has no static archive (Makefile #1896).
     - name: Setup (Windows)
       if: matrix.os == 'windows-latest'
-      uses: msys2/setup-msys2@v2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
       with:
         msystem: MINGW64
         update: true
@@ -755,7 +761,7 @@ jobs:
         cd release && TZ=UTC+12 zip -r ../aether-${VERSION}-${{ matrix.target }}.zip *
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: aether-${{ matrix.target }}
         path: |
@@ -792,7 +798,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
         # Full history + all tags. A shallow checkout of a tag does not
@@ -810,7 +816,7 @@ jobs:
     # libc) comes from the sibling aether-crossbuild repo, which fetches
     # FreeBSD's published base.txz (BSD-licensed, freely redistributable).
     - name: Checkout aether-crossbuild
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         repository: aether-lang-dev/aether-crossbuild
         path: crossbuild
@@ -997,7 +1003,7 @@ jobs:
           || { echo "::error::the sysroot probe did not produce a FreeBSD binary"; exit 1; }
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: aether-freebsd-x86_64
         path: |
@@ -1031,7 +1037,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
         fetch-depth: 0
@@ -1097,7 +1103,7 @@ jobs:
         ls -la "aether-${VERSION}-android-aarch64-sysroot.tar.xz"
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: aether-android-aarch64
         path: |
@@ -1123,12 +1129,12 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         merge-multiple: true
 
@@ -1147,7 +1153,7 @@ jobs:
       run: python3 .github/scripts/build_release_body.py ${{ steps.tag.outputs.version }}
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
       with:
         tag_name:   ${{ steps.tag.outputs.tag }}
         name:       Aether ${{ steps.tag.outputs.version }}

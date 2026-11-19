@@ -1636,6 +1636,12 @@ int http_request_set_header_raw(HttpClientRequest* req, const char* name, const 
 
 int http_request_set_body_raw(HttpClientRequest* req, const char* body, int len, const char* content_type) {
     if (!req || len < 0) return -1;
+    /* The content type is written into the request head as a header value,
+     * so it gets the check every other header value gets (#3741). A CR or LF
+     * in it would end the Content-Type line and start another header, or a
+     * second request. Refused before anything changes, so a refused call
+     * leaves the request as it was. */
+    if (content_type && !http_header_value_ok(content_type)) return -1;
     /* Replace any prior body. Cap-aware (#343): req->body_len holds
      * the original allocation size and is reset to 0 below before
      * the next aether_caps_malloc. */
@@ -5056,8 +5062,12 @@ HttpResponse* http_get_with_timeout_ns_raw(const char* url, int64_t timeout_ns) 
 HttpResponse* http_post_raw(const char* url, const char* body, const char* content_type) {
     HttpClientRequest* req = http_request_raw("POST", url);
     if (!req) return NULL;
-    if (body) {
-        http_request_set_body_raw(req, body, (int)strlen(body), content_type);
+    /* A body the request refused (a content type with a line ending in it,
+     * #3741) fails the call: sending the request without its body would
+     * answer as though the POST had gone through. */
+    if (body && http_request_set_body_raw(req, body, (int)strlen(body), content_type) != 0) {
+        http_request_free_raw(req);
+        return http_response_alloc_failed("invalid request body or content type");
     }
     HttpResponse* resp = http_send_raw(req);
     http_request_free_raw(req);
@@ -5067,8 +5077,10 @@ HttpResponse* http_post_raw(const char* url, const char* body, const char* conte
 HttpResponse* http_put_raw(const char* url, const char* body, const char* content_type) {
     HttpClientRequest* req = http_request_raw("PUT", url);
     if (!req) return NULL;
-    if (body) {
-        http_request_set_body_raw(req, body, (int)strlen(body), content_type);
+    /* Same as http_post_raw: a refused body fails the call (#3741). */
+    if (body && http_request_set_body_raw(req, body, (int)strlen(body), content_type) != 0) {
+        http_request_free_raw(req);
+        return http_response_alloc_failed("invalid request body or content type");
     }
     HttpResponse* resp = http_send_raw(req);
     http_request_free_raw(req);

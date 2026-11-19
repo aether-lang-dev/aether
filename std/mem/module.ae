@@ -424,13 +424,18 @@ thread_epoch() -> long {
 // The growth heap_in_use() shows for one run of `round`, once the work has
 // reached its steady state: `round` is compared up to `tries` times, each
 // run between two reads, and the answer is 0 as soon as one run leaves the
-// count exactly as it found it. A run during which a thread started or
-// ended (thread_epoch) is not compared, and does not use up a try: it is
-// run again, up to 8 such runs in all, so `tries` 1 still compares one run
-//. A leak grows every run, so then the answer is the growth of the
-// last run compared (of the last run, if none could be); a one-time
-// allocation, or a buffer still growing to its high-water mark, lands in
-// some runs and then settles. Meaningful where heap_in_use_exact() is true.
+// count exactly as it found it, whatever threads did meanwhile: a leak
+// grows every run, and a thread's blocks only add to the count. A run
+// during which a thread started or ended (thread_epoch) that does not leave
+// the count as it found it is not compared, and does not use up a try: it
+// is run again, up to 8 such runs in all, so `tries` 1 still compares one
+// run. A round that starts and joins a thread of its own (a probe thread, a
+// worker) is such a run every time, and is answered by the runs that leave
+// the count as they found it. A leak grows every run, so then the answer is
+// the growth of the last run compared (of the last run, if none could be);
+// a one-time allocation, or a buffer still growing to its high-water mark,
+// lands in some runs and then settles. Meaningful where heap_in_use_exact()
+// is true.
 steady_growth(round: fn, tries: int) -> long {
     long last = 0
     compared = 0
@@ -442,8 +447,8 @@ steady_growth(round: fn, tries: int) -> long {
         call(round)
         h1 = aether_heap_in_use()
         e1 = aether_thread_epoch()
+        if h1 == h0 { return 0 }
         if e0 == e1 {
-            if h1 == h0 { return 0 }
             last = h1 - h0
             compared = 1
             i = i + 1

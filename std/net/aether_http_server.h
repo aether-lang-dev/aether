@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <stddef.h>  // size_t
 #include <stdint.h>  // int64_t (HttpRequestHook)
+#include <limits.h>  // INT_MAX (HTTP_WS_MAX_MESSAGE_LIMIT)
 #include <time.h>    // struct tm (http_format_clf_time)
 
 // HTTP Request
@@ -61,10 +62,12 @@ typedef struct {
      * `stream_consumed` advances as the accessor / post-handler drain
      * pulls bytes. Trailing fields → same ABI-stable promise as the
      * connection-metadata block above; a C consumer that leaves them
-     * NULL/0 just gets the legacy fully-buffered behaviour. */
-    void* stream_conn;
-    long  stream_total;
-    long  stream_consumed;
+     * NULL/0 just gets the legacy fully-buffered behaviour. Both are 64
+     * bits on every platform: a `long` was 32 bits on Windows, where a
+     * body past 2 GiB was refused that Linux streamed (#3761). */
+    void*   stream_conn;
+    int64_t stream_total;
+    int64_t stream_consumed;
 
     /* An arena the caller owns, for the strings a parse fills in. Set through
      * http_request_parse_arena before parsing; NULL means the ordinary
@@ -80,6 +83,13 @@ typedef struct {
      * (http_request_set_header) grows them and never shrinks them. Trailing,
      * as the fields above. */
     int   header_cap;
+    /* The largest body http_request_body buffers for this request, copied
+     * from the server's max_body when the request is dispatched; 0 means
+     * HTTP_DEFAULT_MAX_BODY (#3740). `body_refused` is set when
+     * http_request_body refused a body past it, and the server then
+     * answers 413. Trailing, as the fields above. */
+    int64_t body_max;
+    int     body_refused;
 } HttpRequest;
 
 // HTTP Response
@@ -189,6 +199,11 @@ typedef void (*HttpRequestHook)(HttpRequest* req,
 // HTTP Server
 struct HttpConn;
 
+// The SETTINGS_MAX_CONCURRENT_STREAMS an HTTP/2 server advertises when
+// http_server_set_h2_raw was given 0 (#3738). nghttp2's own local default is
+// unlimited, so without it a client could open streams without bound.
+#define HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS 100
+
 typedef struct HttpServer {
     int socket_fd;
     /* The port: read by any thread (http_server_port) while the thread that
@@ -250,7 +265,7 @@ typedef struct HttpServer {
     //     apply uniformly.
     // Off by default; enable via http_server_set_h2_raw().
     int h2_enabled;
-    int h2_max_concurrent_streams;  /* nghttp2 SETTINGS; 0 → 100 default */
+    int h2_max_concurrent_streams;  /* SETTINGS_MAX_CONCURRENT_STREAMS; 0 → HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS (#3738) */
 
     // Per-stream concurrent dispatch worker count. When > 0, the
     // stream-level dispatch runs on the shared std.worker pool,
@@ -439,6 +454,20 @@ typedef struct HttpServer {
     // setup), so a driver recomputes its cached plan only then
     // (http_server_loop_plan, #3269).
     _Atomic int loop_plan_gen;
+    // The cap on one WebSocket message reassembled by a handle this server
+    // upgrades (#3739): HTTP_WS_DEFAULT_MAX_MESSAGE unless
+    // http_server_set_ws_max_message_raw set another.
+    size_t ws_max_message;
+    // The largest request body http_request_body buffers, in bytes (#3740):
+    // HTTP_DEFAULT_MAX_BODY unless http_server_set_max_body_raw set another.
+    // A handler that reads its body with http_request_body_read streams it
+    // and is not bounded by this. HTTP/2 holds every stream's body whole, so
+    // there a stream whose DATA passes it is reset (#3738).
+    int64_t max_body;
+    // The longest a request head may take to arrive whole, in ms from its
+    // first byte, answered 408 past it (#3737): HTTP_DEFAULT_HEAD_TIMEOUT_MS
+    // unless http_server_set_head_timeout_raw set another; 0 for none.
+    int head_timeout_ms;
 } HttpServer;
 
 // ============================================================================
@@ -844,7 +873,28 @@ int http_ws_send_binary(HttpWsConn* ws, const void* data, int len);
 //
 // The message data lives in the connection's internal buffer and
 // is valid until the next ws_recv / ws_send / ws_close call.
+//
+// A message past the handle's cap (HTTP_WS_DEFAULT_MAX_MESSAGE unless set)
+// closes the connection with 1009, checked before the frame is read. A
+// control frame over 125 bytes, or a fragmented one, closes it with 1002
+// (RFC 6455 5.5). Both return -1.
 int http_ws_recv(HttpWsConn* ws);
+
+// The cap on one reassembled WebSocket message, by default (#3739). A
+// server applies its own (http_server_set_ws_max_message_raw) to the
+// handles it upgrades, and a handle can be given another with
+// http_ws_set_max_message_raw. The limit is what a message length (an int)
+// can report.
+#define HTTP_WS_DEFAULT_MAX_MESSAGE ((size_t)64 * 1024 * 1024)
+#define HTTP_WS_MAX_MESSAGE_LIMIT   ((size_t)INT_MAX - 1)
+
+// The largest message `ws` reassembles from now on, in bytes. Returns ""
+// or why the value was refused (not positive, or past the limit).
+const char* http_ws_set_max_message_raw(HttpWsConn* ws, int64_t max_bytes);
+
+// The cap every WebSocket this server upgrades starts with. Returns "" or
+// why the value was refused.
+const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_bytes);
 
 // Bounded receive, for a multiplexed reader that cannot park a thread in a
 // blocking recv (a WebDriver-BiDi style demux is the motivating case).
@@ -1065,14 +1115,38 @@ const char* http_request_path(HttpRequest* req);
 // asked for. Mixed usage — calling this after http_request_body_read
 // already consumed part of the stream — returns "" (the prefix is
 // gone; a silent tail-as-whole would corrupt).
+//
+// A body past the server's max_body (HTTP_DEFAULT_MAX_BODY unless
+// http_server_set_max_body_raw set another) is refused (#3740): this
+// returns "", http_request_body_length reports 0, and the server answers
+// 413 whatever the handler set. http_request_body_read streams a body of
+// any size and is not bounded by it.
 const char* http_request_body(HttpRequest* req);
+
+// The largest request body http_request_body buffers by default (#3740).
+#define HTTP_DEFAULT_MAX_BODY ((int64_t)64 * 1024 * 1024)
+
+// The largest request body http_request_body buffers on this server, in
+// bytes. Returns "" or why the value was refused (not positive).
+const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes);
+
+// The longest a request head may take to arrive whole, from its first byte,
+// by default (#3737).
+#define HTTP_DEFAULT_HEAD_TIMEOUT_MS 30000
+
+// The longest a request head may take to arrive whole, from its first byte;
+// past it the server answers 408 and closes. 0 turns the bound off, leaving
+// only the per-read idle timeout. Returns "" or why the value was refused.
+const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout_ns);
+
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,
 // gzip-compressed bodies) without strlen() truncating at the first
 // embedded zero. Returns 0 if req is NULL or has no body. On a
 // streaming request this is the declared Content-Length until the
-// body is materialized, then the actual received count.
-int         http_request_body_length(HttpRequest* req);
+// body is materialized, then the actual received count. 64 bits, so a
+// body past 2 GiB reports its length (#3761).
+int64_t     http_request_body_length(HttpRequest* req);
 
 // #626 / #644 — Chunked-read request body. TLS split-accessor: the
 // bytes live in a per-thread buffer until the next call or explicit
@@ -1086,7 +1160,8 @@ int         http_request_body_length(HttpRequest* req);
 // Transfer-Encoding: chunked request bodies remain unsupported (as
 // before the reshape): with no Content-Length the body length is 0
 // and no body is read — the deliberate v1 semantics decision of #644.
-int         http_request_body_read_raw(HttpRequest* req, int offset, int max);
+// `offset` is 64 bits so a streamed body can be read past 2 GiB (#3761).
+int         http_request_body_read_raw(HttpRequest* req, int64_t offset, int max);
 int         http_request_body_complete(HttpRequest* req);
 const char* http_get_request_body_read(void);
 int         http_get_request_body_read_length(void);
@@ -1191,7 +1266,7 @@ enum {
     HTTP_HEAD_TOO_LARGE    = 431
 };
 int http_request_head_check(const char* head, const char* hdr_end,
-                            long* content_length, int* chunked);
+                            int64_t* content_length, int* chunked);
 // The worker path's per-connection read buffer: a request head has to end
 // within it, or the connection is closed, and a body larger than it is
 // streamed rather than buffered (#626). The proxy event loop bounds the head

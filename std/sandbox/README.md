@@ -44,7 +44,8 @@ after:     PATH visible = true
 | `grant_fs_read(path)` | opening files for reading |
 | `grant_fs_write(path)` | opening, creating and writing files |
 | `grant_fs(path)` | both of those, plus directory operations such as `os.chdir` |
-| `grant_exec(cmd)` | running commands whose command line matches |
+| `grant_exec(cmd)` | running commands whose command line matches (`os.run`'s program, or `os.system`/`os.exec`'s command string) |
+| `grant_shell()` | running the shell (`/bin/sh`; on Windows what `COMSPEC` names), which a command string for `os.system` or `os.exec` also needs |
 | `grant_env(name)` | reading environment variables |
 | `grant_tcp(host, port)` | outbound TCP to matching hosts on `port`, or any port when `port` is 0 |
 | `grant_tcp_listen()` | listening for and accepting TCP connections |
@@ -56,6 +57,15 @@ after:     PATH visible = true
 A pattern is `"*"` (anything), a prefix ending in `*` (`"/etc/*"`, `"echo *"`),
 a suffix starting with `*` (`"*.example.com"`), or an exact string. A grant
 list with no grants denies everything.
+
+A command string runs through the shell, which runs all of it, not only the
+part a grant matched: `grant_exec("echo *")` matches `"echo hi; rm -rf ~"`
+too. So `os.system` and `os.exec` need `grant_shell()` as well as the
+command's own grant, and that pair allows anything the shell can be told to
+run. For untrusted code, grant the program (`grant_exec("echo")`) and call
+`os.run` or `os.run_capture` with an argv, which runs no shell. A program
+file with no `#!` line is the exception: it runs through the shell, and so
+needs `grant_shell()` too (#3755).
 
 `sandbox.new` returns a `sandbox.Grants`, an opaque type: it can be passed to
 `enforce`, to `free`, and to a host bridge's `run_sandboxed` calls, but
@@ -164,5 +174,5 @@ with other sandboxes, is in `docs/containment-sandbox.md`.
 
 `new`, `enforce` (with optional trusted names), `free`, and the grants
 `grant_all`, `grant_fs_read`, `grant_fs_write`, `grant_fs`, `grant_exec`,
-`grant_env`, `grant_tcp`, `grant_tcp_listen`, `grant_udp`, `grant_native`,
+`grant_shell`, `grant_env`, `grant_tcp`, `grant_tcp_listen`, `grant_udp`, `grant_native`,
 `grant_fork`.

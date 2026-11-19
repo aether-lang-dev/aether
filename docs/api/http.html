@@ -62,6 +62,10 @@
     <li><a href="#server_set_tls_backend">server_set_tls_backend</a></li>
     <li><a href="#server_set_keepalive_raw">server_set_keepalive_raw</a></li>
     <li><a href="#server_set_keepalive">server_set_keepalive</a></li>
+    <li><a href="#server_set_max_body_raw">server_set_max_body_raw</a></li>
+    <li><a href="#server_set_max_body">server_set_max_body</a></li>
+    <li><a href="#server_set_head_timeout_raw">server_set_head_timeout_raw</a></li>
+    <li><a href="#server_set_head_timeout">server_set_head_timeout</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
     <li><a href="#server_set_h2">server_set_h2</a></li>
     <li><a href="#server_set_multi_accept_raw">server_set_multi_accept_raw</a></li>
@@ -110,6 +114,10 @@
     <li><a href="#ws_message">ws_message</a></li>
     <li><a href="#ws_message_bytes">ws_message_bytes</a></li>
     <li><a href="#ws_close">ws_close</a></li>
+    <li><a href="#ws_set_max_message_raw">ws_set_max_message_raw</a></li>
+    <li><a href="#ws_set_max_message">ws_set_max_message</a></li>
+    <li><a href="#server_set_ws_max_message_raw">server_set_ws_max_message_raw</a></li>
+    <li><a href="#server_set_ws_max_message">server_set_ws_max_message</a></li>
     <li><a href="#server_bind">server_bind</a></li>
     <li><a href="#server_start">server_start</a></li>
     <li><a href="#server_start_background">server_start_background</a></li>
@@ -521,11 +529,33 @@
       <pre class="usage"><code>server_set_keepalive(server, enabled, max_requests, idle_timeout) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, enabled: int, max_requests: int, idle_timeout: Duration</span></p>
     </div>
+    <div class="function" id="server_set_max_body_raw" data-name="server_set_max_body_raw">
+      <h3 class="function-name">server_set_max_body_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_max_body_raw(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
+      <p class="doc">The largest request body request_body buffers, in bytes (#3740); 64 MiB unless set here. Past it request_body returns &quot;&quot;, request_body_length reports 0, and the server answers 413 whatever the handler set. The limit is on buffering, not on uploads: a handler that reads its body with request_body_read streams a body of any size. Returns &quot;&quot; or why the value was refused (not positive).</p>
+    </div>
+    <div class="function" id="server_set_max_body" data-name="server_set_max_body">
+      <h3 class="function-name">server_set_max_body <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_max_body(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
+    </div>
+    <div class="function" id="server_set_head_timeout_raw" data-name="server_set_head_timeout_raw">
+      <h3 class="function-name">server_set_head_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_head_timeout_raw(server, timeout_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long</span></p>
+      <p class="doc">The longest a request head may take to arrive whole, from its first byte (#3737); 30 s unless set here. Past it the server answers 408 and closes the connection. The idle timeout (server_set_keepalive) bounds each read on its own, so without this a client that sent one byte of its head just inside that bound, over and over, held a worker for as long as it liked. 0ns turns the bound off. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_head_timeout" data-name="server_set_head_timeout">
+      <h3 class="function-name">server_set_head_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_head_timeout(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
+    </div>
     <div class="function" id="server_set_h2_raw" data-name="server_set_h2_raw">
       <h3 class="function-name">server_set_h2_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_set_h2_raw(server, max_concurrent_streams) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, max_concurrent_streams: int</span></p>
-      <p class="doc">HTTP/2 (#260 Tier 2). When enabled: - the TLS context advertises &quot;h2&quot; via ALPN with &quot;http/1.1&quot; as the fallback, so HTTP/2-capable clients (curl --http2, browsers, fan-out gateways) negotiate the framed protocol while older clients stay on HTTP/1.1 transparently; - plain (non-TLS) connections honour h2c upgrade requests per RFC 7540 §3.2 (Upgrade: h2c + HTTP2-Settings header); - per-stream dispatch reuses the existing route table, so all middleware / metrics / access logs / health probes / response transformers (gzip, error_pages) apply uniformly across HTTP/1.1 and HTTP/2 traffic. max_concurrent_streams advertises SETTINGS_MAX_CONCURRENT_STREAMS to the peer. Pass 0 for libnghttp2's default (100). Negative values return an error. Returns &quot;&quot; on success or an error string when the build doesn't link libnghttp2 (the rest of the server keeps working in HTTP/1.1-only mode). Example (h2 over TLS): server = http.server_create(443) err1 = http.server_set_tls(server, &quot;cert.pem&quot;, &quot;key.pem&quot;) err2 = http.server_set_h2(server, 0)          // 0 = nghttp2 default if err1 != &quot;&quot; { println(&quot;TLS: ${err1}&quot;); exit(1) } if err2 != &quot;&quot; { println(&quot;h2:  ${err2}&quot;); exit(1) } http.server_start(server)</p>
+      <p class="doc">HTTP/2 (#260 Tier 2). When enabled: - the TLS context advertises &quot;h2&quot; via ALPN with &quot;http/1.1&quot; as the fallback, so HTTP/2-capable clients (curl --http2, browsers, fan-out gateways) negotiate the framed protocol while older clients stay on HTTP/1.1 transparently; - plain (non-TLS) connections honour h2c upgrade requests per RFC 7540 §3.2 (Upgrade: h2c + HTTP2-Settings header); - per-stream dispatch reuses the existing route table, so all middleware / metrics / access logs / health probes / response transformers (gzip, error_pages) apply uniformly across HTTP/1.1 and HTTP/2 traffic. max_concurrent_streams advertises SETTINGS_MAX_CONCURRENT_STREAMS to the peer. Pass 0 for the default, 100, which is sent too: nghttp2's own is unlimited (#3738). A stream whose request body passes the server's limit (server_set_max_body) is reset (RST_STREAM). Negative values return an error. Returns &quot;&quot; on success or an error string when the build doesn't link libnghttp2 (the rest of the server keeps working in HTTP/1.1-only mode). Example (h2 over TLS): server = http.server_create(443) err1 = http.server_set_tls(server, &quot;cert.pem&quot;, &quot;key.pem&quot;) err2 = http.server_set_h2(server, 0)          // 0 = nghttp2 default if err1 != &quot;&quot; { println(&quot;TLS: ${err1}&quot;); exit(1) } if err2 != &quot;&quot; { println(&quot;h2:  ${err2}&quot;); exit(1) } http.server_start(server)</p>
     </div>
     <div class="function" id="server_set_h2" data-name="server_set_h2">
       <h3 class="function-name">server_set_h2 <span class="kind">fn</span></h3>
@@ -785,6 +815,28 @@
       <pre class="usage"><code>ws_close(ws, code, reason)</code></pre>
       <p class="signature"><span class="sig-params">ws: ptr, code: int, reason: string</span></p>
     </div>
+    <div class="function" id="ws_set_max_message_raw" data-name="ws_set_max_message_raw">
+      <h3 class="function-name">ws_set_max_message_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>ws_set_max_message_raw(ws, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, max_bytes: long</span></p>
+    </div>
+    <div class="function" id="ws_set_max_message" data-name="ws_set_max_message">
+      <h3 class="function-name">ws_set_max_message <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_set_max_message(ws, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, max_bytes: long</span></p>
+      <p class="doc">The cap on one message for this handle alone, server or client, from the next ws_recv on. A client handle from ws_connect starts at 64 MiB.</p>
+    </div>
+    <div class="function" id="server_set_ws_max_message_raw" data-name="server_set_ws_max_message_raw">
+      <h3 class="function-name">server_set_ws_max_message_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_ws_max_message_raw(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
+    </div>
+    <div class="function" id="server_set_ws_max_message" data-name="server_set_ws_max_message">
+      <h3 class="function-name">server_set_ws_max_message <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_ws_max_message(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
+      <p class="doc">The cap on one WebSocket message, in bytes (#3739). Every handle this server upgrades starts with it; 64 MiB unless set here. A message past it closes the connection with 1009 (message too big), checked against the length each frame declares before any of it is read, so a peer cannot make the server hold more than the cap. Returns &quot;&quot; or why the value was refused (not positive, or past the 2 GiB a message length can report).</p>
+    </div>
     <div class="function" id="server_bind" data-name="server_bind">
       <h3 class="function-name">server_bind <span class="kind">fn</span></h3>
       <pre class="usage"><code>server_bind(server, host, port)</code></pre>
@@ -929,7 +981,7 @@
     <div class="function" id="request_body_read_raw" data-name="request_body_read_raw">
       <h3 class="function-name">request_body_read_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>request_body_read_raw(req, offset, max) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">req: ptr, offset: int, max: int</span></p>
+      <p class="signature"><span class="sig-params">req: ptr, offset: long, max: int</span></p>
     </div>
     <div class="function" id="get_request_body_read" data-name="get_request_body_read">
       <h3 class="function-name">get_request_body_read <span class="kind">extern</span></h3>
@@ -946,8 +998,8 @@
     <div class="function" id="request_body_read" data-name="request_body_read">
       <h3 class="function-name">request_body_read <span class="kind">fn</span></h3>
       <pre class="usage"><code>request_body_read(req, offset, max) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
-      <p class="signature"><span class="sig-params">req: ptr, offset: int, max: int</span></p>
-      <p class="doc">Chunked-read access to the request body (#626). Reads up to `max` bytes from `offset` into an owned AetherString. Returns (bytes, n, &quot;&quot;) on success — `n` may be less than `max` at EOF. Returns (&quot;&quot;, 0, error) on failure. RAM-bounded for large uploads (#626). A body larger than the 16 KiB connection buffer is NOT buffered whole: the server parses headers, then this accessor pulls each window straight off the socket. Reads must be sequential (offset advances by the returned `n`, which the loop below does naturally). Small bodies stay fully buffered and support random-access offsets. Either way the loop below is identical — peak server memory for a large PUT is one window per connection, not the whole object. Pair with `request_body_length` to drive the loop: total = http.request_body_length(req) off = 0 while off &lt; total { chunk, n, err = http.request_body_read(req, off, 65536) if err != &quot;&quot; { ...handle... break } if n == 0 { break } fs.pwrite(out_file, string.bytes(chunk)[0..n], off)   // stream to disk off = off + n }</p>
+      <p class="signature"><span class="sig-params">req: ptr, offset: long, max: int</span></p>
+      <p class="doc">Chunked-read access to the request body (#626). Reads up to `max` bytes from `offset` into an owned AetherString. Returns (bytes, n, &quot;&quot;) on success — `n` may be less than `max` at EOF. Returns (&quot;&quot;, 0, error) on failure. RAM-bounded for large uploads (#626). A body larger than the 16 KiB connection buffer is NOT buffered whole: the server parses headers, then this accessor pulls each window straight off the socket. Reads must be sequential (offset advances by the returned `n`, which the loop below does naturally). Small bodies stay fully buffered and support random-access offsets. Either way the loop below is identical — peak server memory for a large PUT is one window per connection, not the whole object. Pair with `request_body_length` to drive the loop. Both it and `offset` are longs, so a body past 2 GiB is read whole when `off` starts as a long (#3761): total = http.request_body_length(req) off = 0 as long while off &lt; total { chunk, n, err = http.request_body_read(req, off, 65536) if err != &quot;&quot; { ...handle... break } if n == 0 { break } fs.pwrite(out_file, string.bytes(chunk)[0..n], off)   // stream to disk off = off + n }</p>
     </div>
     <div class="function" id="request_body_complete" data-name="request_body_complete">
       <h3 class="function-name">request_body_complete <span class="kind">fn</span></h3>
@@ -986,11 +1038,13 @@
       <h3 class="function-name">request_body <span class="kind">fn</span></h3>
       <pre class="usage"><code>request_body(req) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">req: ptr</span></p>
+      <p class="doc">The whole request body. A body past the server's limit (server_set_max_body, 64 MiB by default) is refused: &quot;&quot; here, and the server answers 413 (#3740). Stream a larger upload with request_body_read.</p>
     </div>
     <div class="function" id="request_body_length" data-name="request_body_length">
       <h3 class="function-name">request_body_length <span class="kind">fn</span></h3>
-      <pre class="usage"><code>request_body_length(req) <span class="arrow">-&gt;</span> int</code></pre>
+      <pre class="usage"><code>request_body_length(req) <span class="arrow">-&gt;</span> long</code></pre>
       <p class="signature"><span class="sig-params">req: ptr</span></p>
+      <p class="doc">The body's length in bytes, a long: a streamed upload may declare more than an int holds, and its Content-Length is reported whole (#3761).</p>
     </div>
     <div class="function" id="request_body_bytes" data-name="request_body_bytes">
       <h3 class="function-name">request_body_bytes <span class="kind">fn</span></h3>

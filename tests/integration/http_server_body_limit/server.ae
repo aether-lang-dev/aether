@@ -1,0 +1,71 @@
+// The server for http_server_body_limit (#3740). Its body limit is 100000
+// bytes. POST /whole answers with the length of request_body; POST /stream
+// reads its body with request_body_read and answers with the count; POST
+// /declared answers with request_body_length without reading the body
+// (#3761). The driver, test_http_server_body_limit.sh, sends the requests.
+
+import std.http
+
+extern exit(code: int)
+
+whole_handler(req: ptr, res: ptr, ud: ptr) {
+    body = http.request_body(req)
+    n = http.request_body_length(req)
+    http.http_response_set_status(res, 200)
+    http.http_response_set_body(res, "got ${n}")
+}
+
+stream_handler(req: ptr, res: ptr, ud: ptr) {
+    off = 0
+    done = 0
+    while done == 0 {
+        chunk, n, err = http.request_body_read(req, off, 65536)
+        if err != "" || n == 0 {
+            done = 1
+        } else {
+            off = off + n
+        }
+    }
+    http.http_response_set_status(res, 200)
+    http.http_response_set_body(res, "streamed ${off}")
+}
+
+// The declared length of a streamed body, read whole: past 2 GiB it was cut
+// to 32 bits on every platform, and refused before the handler on Windows
+// (#3761). The body itself is never sent.
+declared_handler(req: ptr, res: ptr, ud: ptr) {
+    http.http_response_set_status(res, 200)
+    http.http_response_set_body(res, "declared ${http.request_body_length(req)}")
+}
+
+message StartSrv { raw: ptr }
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
+}
+
+main() {
+    raw = http.server_create(0)
+    if raw == 0 { println("FAIL: server_create"); exit(1) }
+    http.server_set_host(raw, "127.0.0.1")
+    if http.server_set_max_body(raw, 0) == "" {
+        println("FAIL: server_set_max_body accepted 0")
+        exit(1)
+    }
+    merr = http.server_set_max_body(raw, 100000)
+    if merr != "" { println("FAIL: server_set_max_body: ${merr}"); exit(1) }
+    http.http_server_post(raw, "/whole", whole_handler, null)
+    http.http_server_post(raw, "/stream", stream_handler, null)
+    http.http_server_post(raw, "/declared", declared_handler, null)
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    println("READY ${http.server_port(raw)}")
+
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+
+    sleep(60000)
+    exit(0)
+}

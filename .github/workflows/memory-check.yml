@@ -38,6 +38,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Least privilege for every job that does not ask for more (#3746). The
+# repository default is read, but a workflow says so itself, so a change
+# of that default cannot widen what its jobs hold.
+permissions:
+  contents: read
+
 jobs:
   valgrind-test:
     name: Valgrind Memory Leak Check
@@ -51,7 +57,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Install dependencies
       uses: ./.github/actions/apt-install
@@ -134,7 +140,7 @@ jobs:
 
     - name: Upload Valgrind report
       if: always()
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: valgrind-report
         path: |
@@ -152,7 +158,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Setup GCC
       if: matrix.os == 'ubuntu-26.04'
@@ -227,7 +233,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - name: Install dependencies
       uses: ./.github/actions/apt-install
@@ -271,7 +277,7 @@ jobs:
         echo "SUCCESS: Peak memory usage acceptable"
 
     - name: Upload profiling report
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: memory-profile
         path: |
@@ -288,7 +294,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     # Linux only, as the setup steps above. The macOS runner already has
     # clang and make; the brew fallback that ran there installed nothing the

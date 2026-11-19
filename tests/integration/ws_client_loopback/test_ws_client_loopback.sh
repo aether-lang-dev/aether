@@ -73,5 +73,9 @@ case "$OUT" in
     *"PASS: ws round-trip"*) ;;
     *) echo "$OUT" | sed 's/^/         /'; fail "round-trip did not report PASS" ;;
 esac
+case "$OUT" in
+    *"PASS: ws_client_free returns the message buffer to the cap"*) ;;
+    *) echo "$OUT" | sed 's/^/         /'; fail "freed client handles stayed counted (#3758)" ;;
+esac
 
-echo "  [PASS] ws_client_loopback: ws:// handshake, masked send, echo round-trip"
+echo "  [PASS] ws_client_loopback: ws:// handshake, masked send, echo round-trip, free returns the buffer (#3758)"

@@ -1,7 +1,8 @@
 // A CR LF in anything that is written into a head must not become a new line
-// of that head. Three ways in: a header value, a header name, and the URL,
-// which lands in the request line.
+// of that head. Four ways in: a header value, a header name, the URL, which
+// lands in the request line, and the content type given with a body.
 
+import std.http
 import std.http.client
 import std.io
 import std.string
@@ -54,5 +55,52 @@ main() {
         exit(1)
     }
 
-    println("PASS: header value, header name and URL all refuse a line ending")
+    // 4. A content type given with a body is a header value too (#3741). The
+    // request refuses it and keeps no body; sent anyway, its head carries no
+    // injected line.
+    req4 = client.request("POST", base)
+    client.set_timeout(req4, 5s)
+    rc4 = client.set_body(req4, string.bytes("payload"), "text/plain\r\nX-Injected: yes")
+    if rc4 == "" {
+        println("FAIL: set_body accepted a content type containing CRLF")
+        exit(1)
+    }
+    resp4, err4 = client.send_request(req4)
+    client.request_free(req4)
+    if err4 != "" {
+        println("FAIL: transport ${err4}")
+        exit(1)
+    }
+    head4 = string.concat(client.response_body(resp4), "")
+    client.response_free(resp4)
+    if string.contains(head4, "X-Injected") != 0 {
+        println("FAIL: a content type injected a header. Head was:")
+        println(head4)
+        exit(1)
+    }
+
+    // 5. http.post and http.put fail with such a content type rather than
+    // sending the request, with or without its body.
+    pbody, perr = http.post(base, "payload", "text/plain\r\nX-Injected: yes")
+    if perr == "" {
+        println("FAIL: http.post sent a request with a CRLF content type. Head was:")
+        println(pbody)
+        exit(1)
+    }
+    ubody, uerr = http.put(base, "payload", "text/plain\r\nX-Injected: yes")
+    if uerr == "" {
+        println("FAIL: http.put sent a request with a CRLF content type. Head was:")
+        println(ubody)
+        exit(1)
+    }
+
+    // 6. client.post_with_status reports the refusal too.
+    sbody, sstatus, serr = client.post_with_status(base, "payload", "text/plain\r\nX-Injected: yes")
+    if serr == "" {
+        println("FAIL: post_with_status sent a request with a CRLF content type (status ${sstatus}). Body was:")
+        println(sbody)
+        exit(1)
+    }
+
+    println("PASS: header value, header name, URL and content type all refuse a line ending")
 }

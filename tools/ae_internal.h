@@ -41,6 +41,18 @@
  * bug rather than a defined operation. */
 #define AETHER_WRAP_CFLAGS " -fwrapv"
 
+/* The defines libaether.a is always built with (the Makefile's
+ * AETHER_REQUIRED_CFLAGS) that change what a runtime or std file compiles to.
+ * Without AETHER_HAS_SANDBOX, runtime/aether_sandbox.c compiles to nothing and
+ * aether_sandbox.h's check becomes a macro that allows everything
+ * (docs/install-layout.md). A cross build compiles the runtime with them, and
+ * `ae cflags` prints them, so a build that compiles the runtime from the
+ * MANIFEST against the archive's std (the cross-language benchmarks, aeb) gets
+ * the archive's configuration: the benchmarks' link failed on
+ * aether_sandbox_check_slow, called from the archive's std.os and compiled out
+ * of their runtime. */
+#define AETHER_REQUIRED_DEFINES "-DAETHER_HAS_SANDBOX"
+
 /* #3574: Clang refuses C nested past a fixed bracket depth, 256 unless
  * -fbracket-depth raises it, and blocks nest in the C as deep as in the
  * source, which the parser takes 512 levels deep. AETHER_C_BRACKET_DEPTH is
@@ -142,6 +154,15 @@ bool dir_exists(const char* path);
 void macos_prepare_binary(const char* path);
 
 const char* get_temp_dir(void);
+/* This process's private temp directory (mode 0700, a name no one can
+ * guess, removed at exit) and a file name inside it (#3745). Every temp
+ * file ae writes and then reads, compiles or runs goes there. */
+const char* ae_private_temp_dir(void);
+int ae_private_temp_path(char* out, size_t out_size, const char* name);
+/* A release tag or version: letters, digits, '.', '-', '_' and '+', and
+ * not "." or "..". Anything that reaches a URL, a path or a command line
+ * as a version is checked against it first (#3744). */
+int ae_version_ok(const char* v);
 int aetherc_capture_stdout(const char* arg1, const char* in_path,
                            const char* extra_flag,
                            char* out, size_t out_sz);
@@ -169,6 +190,15 @@ int ae_extract(const char* archive, const char* dest_dir);
 int cmd_version_use(const char* version);
 int cmd_install(int argc, char** argv);
 int cmd_upgrade(void);
+
+/* Delete a directory tree. Symlinks, and on Windows junctions, are removed
+ * as links, never followed (ae.c). */
+void ae_remove_tree(const char* path);
+
+/* ae_toolchain.c: `ae toolchain zig` fetches and verifies the pinned Zig
+ * (#3623). */
+int  cmd_toolchain(int argc, char** argv);
+void ae_toolchain_usage(FILE* out);
 
 /* ae_repl.c — the interactive REPL. */
 int cmd_repl(void);

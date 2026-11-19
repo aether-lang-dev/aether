@@ -80,6 +80,51 @@ static inline int aether_grant_match(const char* category, const char* pat, cons
     return aether_grant_glob(pat, resource);
 }
 
+// What an fopen() mode asks of the file, for the fs checks on it (#3742):
+// AETHER_ACCESS_READ when it reads ("r", or any "+"), AETHER_ACCESS_WRITE
+// when it writes, creates, truncates or appends ("w", "a", "x" or any "+").
+// "r+" is both, so it needs fs_read and fs_write; checking it as a read let
+// a read-only grant open a file for writing. The mode is read up to a ','
+// (glibc's and the Windows CRT's ",ccs=..." suffix). 'D' (Windows: delete
+// the file when it is closed) counts as a write. A mode that starts with
+// none of r, w and a is one fopen refuses; it counts as both, so a check
+// never allows more than the open could do.
+#define AETHER_ACCESS_READ  1
+#define AETHER_ACCESS_WRITE 2
+static inline int aether_fopen_access(const char* mode) {
+    const int both = AETHER_ACCESS_READ | AETHER_ACCESS_WRITE;
+    if (!mode) return both;
+    int access;
+    if (mode[0] == 'r') access = AETHER_ACCESS_READ;
+    else if (mode[0] == 'w' || mode[0] == 'a') access = AETHER_ACCESS_WRITE;
+    else return both;
+    for (const char* m = mode + 1; *m && *m != ','; m++) {
+        if (*m == '+') access = both;
+        else if (*m == 'w' || *m == 'a' || *m == 'x' || *m == 'D') access |= AETHER_ACCESS_WRITE;
+    }
+    return access;
+}
+
+// The shell a command string runs through, for the exec check on it. An exec
+// grant is matched against a command string as a whole, and "echo *" matches
+// any string that starts with "echo ", whatever shell syntax follows. The
+// shell then runs all of it. So a command run through a shell needs an exec
+// grant for the shell as well as for the command: std.os's os.system and
+// os.exec check both (aether_sandbox_check_shell), and the LD_PRELOAD
+// library's system(), popen() and wordexp() check the shell. On POSIX that
+// is /bin/sh. On Windows the CRT's system() and _popen() run the program
+// COMSPEC names, or cmd.exe when it is unset or empty, so that is the
+// resource checked there.
+#ifdef _WIN32
+static inline const char* aether_sandbox_shell(void) {
+    const char* comspec = getenv("COMSPEC");
+    return (comspec && *comspec) ? comspec : "cmd.exe";
+}
+#else
+#define AETHER_SANDBOX_SHELL "/bin/sh"
+static inline const char* aether_sandbox_shell(void) { return AETHER_SANDBOX_SHELL; }
+#endif
+
 // The resource a tcp/udp check names: "host:port", with an IPv6 address in
 // brackets so its own colons cannot be read as the port's.
 static inline const char* aether_net_resource(char* buf, size_t cap, const char* host, int port) {

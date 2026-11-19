@@ -4,6 +4,7 @@ import std.os
 import std.string
 
 extern exit(code: int)
+extern aether_caps_used_bytes() -> long
 
 main() {
     w = http.ws_connect("ws://127.0.0.1:${os_getenv("AE_TEST_PORT")}/echo")
@@ -38,5 +39,35 @@ main() {
     http.ws_close(w, 1000, "done")
     http.ws_client_free(w)
     println("PASS: ws round-trip")
+
+    // #3758: a client handle's message buffer is grown through the runtime's
+    // capped allocator, and ws_client_free released it with plain free(), so
+    // the cap's byte counter kept every freed handle's buffer: a program
+    // under a memory cap ran into it holding nothing. Each handle here
+    // receives a message, which grows its buffer, and is freed; the counter
+    // must end where it started.
+    before = aether_caps_used_bytes()
+    i = 0
+    while i < 20 {
+        c = http.ws_connect("ws://127.0.0.1:${os_getenv("AE_TEST_PORT")}/echo")
+        if c == null {
+            println("FAIL: ws_connect ${i} returned null")
+            exit(1)
+        }
+        http.ws_send_text(c, "round ${i}")
+        if http.ws_recv(c) != 1 {
+            println("FAIL: ws_recv ${i}")
+            exit(1)
+        }
+        http.ws_close(c, 1000, "done")
+        http.ws_client_free(c)
+        i = i + 1
+    }
+    after = aether_caps_used_bytes()
+    if after != before {
+        println("FAIL: the capped allocator counts ${after - before} bytes after 20 handles were freed")
+        exit(1)
+    }
+    println("PASS: ws_client_free returns the message buffer to the cap")
     exit(0)
 }

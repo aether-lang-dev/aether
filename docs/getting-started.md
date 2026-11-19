@@ -266,6 +266,11 @@ no-op when you are already on the latest release.
 
 Versions are stored in `~/.aether/versions/`. The active version is symlinked to `~/.aether/current` (Linux/macOS) or copied to `~/.aether/bin/` (Windows).
 
+Before a release archive is unpacked, `ae install`, `ae upgrade` and `get.sh`
+check it against the sha256 digest GitHub's API lists for it, and refuse it
+when the digest does not match or cannot be had (no network to the API, or its
+rate limit of 60 requests an hour; set `GITHUB_TOKEN` to raise that).
+
 `ae version` tells you when a newer release exists, naming it and pointing at
 `ae upgrade`. It matters more than it sounds: `ae run` resolves the standard
 library from the install rather than from a checkout, so on a toolchain that has

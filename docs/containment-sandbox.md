@@ -69,7 +69,8 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_fs_read(path)` | `fs_read` | path being opened for reading |
 | `grant_fs_write(path)` | `fs_write` | path being opened, created or written |
 | `grant_fs(path)` | `fs_read`, `fs_write` and `fs` | reads, writes and directory operations such as `os.chdir` |
-| `grant_exec(cmd)` | `exec` | command line |
+| `grant_exec(cmd)` | `exec` | program (`os.run` and its family) or command string (`os.system`, `os.exec`) |
+| `grant_shell()` | `exec` | the shell a command string runs through: `/bin/sh`, or on Windows what `COMSPEC` names (`cmd.exe`) |
 | `grant_env(name)` | `env` | environment variable name |
 | `grant_tcp(host)` | `tcp` | host name (std.net) or resolved IP (LD_PRELOAD); ports are not checked |
 | `grant_tcp_listen()` | `tcp_listen` | any listening socket |
@@ -113,14 +114,15 @@ This maps directly to the container/contained boundary:
 
 ## Working example
 
-The contained code below calls ordinary `os.getenv`, `fs.read` and
-`os.exec`. It does not know it is sandboxed; a refused call looks like a
-missing variable, an unreadable file or a failed command.
+The contained code below calls ordinary `os.getenv`, `fs.read`,
+`os.run_capture` and `os.exec`. It does not know it is sandboxed; a refused
+call looks like a missing variable, an unreadable file or a failed command.
 
 ```aether
 import std.sandbox
 import std.os
 import std.fs
+import std.list
 
 try_env(name: string) {
     if os.getenv(name) != null {
@@ -136,6 +138,17 @@ try_read(path: string) {
         println("  [ALLOW] read ${path}")
     } else {
         println("  [DENY]  read ${path}")
+    }
+}
+
+try_run(prog: string, arg: string) {
+    argv = list.new()
+    _a = list.add(argv, arg)
+    _out, _status, err = os.run_capture(prog, argv, null)
+    if err == "" {
+        println("  [ALLOW] run ${prog} ${arg}")
+    } else {
+        println("  [DENY]  run ${prog} ${arg}")
     }
 }
 
@@ -155,9 +168,10 @@ main() {
         grant_env("HOME")
     }
 
-    // An untrusted plugin that may only run echo
+    // An untrusted plugin that may only run echo, with an argv: no shell
+    // reads its arguments, so they cannot become a second command.
     plugin = sandbox.new("plugin") {
-        grant_exec("echo *")
+        grant_exec("echo")
     }
 
     println("=== db-worker ===")
@@ -171,8 +185,9 @@ main() {
 
     println("=== plugin ===")
     sandbox.enforce(plugin) callback {
+        try_run("echo", "hi; uname")
+        try_run("uname", "-a")
         try_exec("echo hi")
-        try_exec("uname")
         try_env("HOME")
         try_read("/etc/passwd")
     }
@@ -192,10 +207,44 @@ main() {
   [DENY]  env PATH
   [DENY]  exec echo hi
 === plugin ===
-  [ALLOW] exec echo hi
-  [DENY]  exec uname
+  [ALLOW] run echo hi; uname
+  [DENY]  run uname -a
+  [DENY]  exec echo hi
   [DENY]  env HOME
   [DENY]  read /etc/passwd
+```
+
+The plugin's `echo` gets `hi; uname` as one argument and prints it; no
+shell reads it. `os.exec("echo hi")` is refused because a command string
+runs through the shell, which the plugin is not granted.
+
+### What a command-string grant allows
+
+`os.system` and `os.exec` hand their command string to the shell (`/bin/sh
+-c`, or on Windows the program `COMSPEC` names, `cmd.exe`), and the shell runs
+all of it. An exec grant is matched against the string as a whole, so
+`grant_exec("echo *")` matches `"echo hi; rm -rf ~"` and `"echo $(id)"` as
+well as `"echo hi"`. For that reason a command string needs two exec grants:
+its own and the shell's, `grant_shell()`. The pair allows anything the shell
+can be told to run, so give it only to code you would let run any command.
+The LD_PRELOAD library applies the same rule to `system()` and `popen()`.
+
+A file with no `#!` line is a script too. `os.run` and its siblings run one
+through `/bin/sh`, as `execvp` does, and the shell runs whatever the file
+holds, so it needs `grant_shell()` as well as the file's own grant. Without
+it the start fails with "permission denied" (#3755). A script that names its
+interpreter on a `#!` line needs no shell grant, since the kernel starts the
+interpreter itself. The LD_PRELOAD library asks the same of `execvp` and
+`execlp`.
+
+```aether,fragment
+// Untrusted code: name the program and pass an argv. No shell runs.
+grant_exec("echo")              // os.run_capture("echo", argv, null)
+
+// Trusted code that needs the shell: both grants, and the shell can run
+// anything after "echo ".
+grant_exec("echo *")            // os.exec("echo hi")
+grant_shell()
 ```
 
 ## How containment works
@@ -319,12 +368,25 @@ direct calls to the raw extern (`tcp_connect_raw`) are enforced.
 | `tcp.listen(port)` | `tcp_listen_raw` | `"tcp_listen"` | Yes, wrapper returns `(null, "listen failed")` if denied |
 | `file.open(path, "r")` | `file_open_raw` | `"fs_read"` | Yes, wrapper returns `(null, "cannot open file")` if denied |
 | `file.open(path, "w")` | `file_open_raw` | `"fs_write"` | Yes, wrapper returns `(null, "cannot open file")` if denied |
+| `file.open(path, "r+")` (and `"w+"`, `"a+"`) | `file_open_raw` | `"fs_read"` and `"fs_write"` | Yes, wrapper returns `(null, "cannot open file")` if either is denied |
 | `file.exists(path)` | `file_exists` | `"fs_read"` | Yes, returns 0 if denied |
 | `file.delete(path)` | `file_delete_raw` | `"fs_write"` | Yes, wrapper returns `"cannot delete file"` if denied |
 | `file.size(path)` | `file_size_raw` | `"fs_read"` | Yes, wrapper returns `(0, "cannot stat file")` if denied |
-| `os.system(cmd)` | `os_system` | `"exec"` | Yes, returns -1 if denied |
-| `os.exec(cmd)` | `os_exec_raw` | `"exec"` | Yes, wrapper returns `("", "command failed")` if denied |
+| `fs.mtime(path)`, `file_mtime(path)` | `file_mtime_raw`, `file_mtime` | `"fs_read"` | Yes, wrapper returns `(0, "cannot stat file")` if denied |
+| `fs.list_dir(path)`, `dir.list(path)` | `dir_list_raw` | `"fs_read"` on the directory | Yes, wrapper returns `(null, "cannot list directory")` if denied |
+| `fs.glob(pattern)`, `fs.glob_multi(patterns)` | `fs_glob_raw`, `fs_glob_multi_raw` | `"fs_read"` on the directory the pattern starts in, and on each path it reports | Yes, wrapper returns `(null, "glob failed")` if denied; a path the caller may not read is left out of the result |
+| `dir_exists(path)` | `dir_exists` | `"fs_read"` | Yes, returns 0 if denied |
+| `fs.statvfs(path)` | `fs_try_statvfs` | `"fs_read"` | Yes, wrapper returns `"cannot statvfs path"` if denied |
+| `fs.create_dir(path)`, `fs.create_dir_with_mode(path, mode)` | `dir_create_raw`, `dir_create_mode_raw` | `"fs_write"` | Yes, wrapper returns `"cannot create directory"` (or a permission-denied kind) if denied |
+| `fs.delete_dir(path)` | `dir_delete_raw` | `"fs_write"` | Yes, wrapper returns `"cannot delete directory"` if denied |
+| `os.system(cmd)` | `os_system` | `"exec"`, for the shell and for `cmd` | Yes, returns -1 if denied |
+| `os.exec(cmd)` | `os_exec_raw` | `"exec"`, for the shell and for `cmd` | Yes, wrapper returns `("", "command failed")` if denied |
 | `os.getenv(name)` | `os_getenv` | `"env"` | Yes, returns null if denied |
+
+Listing, globbing or walking a directory reads the directory itself, so it
+needs a grant that matches the directory's path: `grant_fs_read("/data/*")`
+covers what is under `/data`, and `grant_fs_read("/data")` lets it be
+listed.
 
 Nested sandboxes are intersected, an inner sandbox cannot escalate
 beyond what the outer sandbox grants.
@@ -735,8 +797,12 @@ grant_exec("*")
 
 // Good:
 grant_exec("python3")
-grant_exec("echo *")
 ```
+
+A command-string grant such as `grant_exec("echo *")` allows nothing
+without `grant_shell()`, and with it the shell runs whatever follows the
+matched prefix (see "What a command-string grant allows" above). Name the
+program instead and spawn it with an argv.
 
 ### 3. No statically linked binaries in granted paths
 
@@ -1209,7 +1275,7 @@ spawn_sandboxed(worker,            os.getenv("AWS_SECRET_KEY")          → deni
    | libc call | Checks | On deny |
    |-----------|--------|---------|
    | `connect()` | `grant_tcp` against resolved hostname | Returns `EACCES` |
-   | `open()` | `grant_fs_read` or `grant_fs_write` by path + mode | Returns `EACCES` |
+   | `open()`, `fopen()`, `freopen()` | `grant_fs_read` when the mode reads, `grant_fs_write` when it writes, creates, truncates or appends; both for `O_RDWR` and `"r+"`, `"w+"`, `"a+"` | Returns `EACCES` |
    | `execve()` | `grant_exec` against command path | Returns `EPERM` |
    | `getenv()` | `grant_env` against variable name | Returns `NULL` |
 
@@ -1287,10 +1353,13 @@ int connect(int fd, const struct sockaddr* addr, socklen_t len) {
     return real_connect(fd, addr, len);  // dlsym(RTLD_NEXT, "connect")
 }
 
-// Intercept open()
+// Intercept open(): a read needs fs_read, a write fs_write, O_RDWR both
 int open(const char* path, int flags, ...) {
-    const char* cat = (flags & O_WRONLY || flags & O_RDWR) ? "fs_write" : "fs_read";
-    if (!check_grant(grants, cat, path)) {
+    int acc = flags & O_ACCMODE;
+    int reads = acc == O_RDONLY || acc == O_RDWR;
+    int writes = acc != O_RDONLY || (flags & (O_CREAT | O_APPEND | O_TRUNC));
+    if ((reads && !check_grant(grants, "fs_read", path)) ||
+        (writes && !check_grant(grants, "fs_write", path))) {
         errno = EACCES;
         return -1;
     }

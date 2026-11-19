@@ -139,7 +139,7 @@ extern http_request_path(req: ptr) -> string
 extern http_request_body(req: ptr) -> string
 // See std/http/module.ae for the rationale; body_length avoids
 // strlen-truncation on binary bodies.
-extern http_request_body_length(req: ptr) -> int
+extern http_request_body_length(req: ptr) -> long
 extern http_request_query(req: ptr) -> string
 
 // Static file serving

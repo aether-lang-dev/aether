@@ -35,7 +35,9 @@
 # Release ASSET downloads at /releases/download/<tag>/<file> are likewise
 # unauthenticated and un-throttled (they 302 to a signed CDN URL curl follows).
 # When that URL fails (it did, alone, on 2026-11-09), the asset is fetched
-# through the REST API instead; see "release assets" below.
+# through the REST API instead; see "release assets" below. Either way the
+# archive is checked against the sha256 digest the API lists for it before it
+# is unpacked, which costs one API request per install (#3748).
 #
 # Prebuilt binaries need only a libc at runtime — no C compiler, no make. A
 # source build (fallback / forced / non-release ref) needs a C compiler and
@@ -120,7 +122,9 @@ detect_slug() {
 # the asset's id in /releases/tags/<tag>, then GET /releases/assets/<id> with
 # Accept: application/octet-stream (a redirect to the CDN). Unauthenticated use
 # is allowed; GITHUB_TOKEN or GH_TOKEN, when set, is sent as a Bearer token.
-# The API lists a sha256 `digest` per asset; the fallback verifies against it.
+# The API lists a sha256 `digest` per asset, and the archive is verified
+# against it on every path, before anything in it is unpacked (#3748). A
+# digest that cannot be had, or that does not match, refuses the prebuilt.
 # AE_GITHUB_WEB_BASE / AE_GITHUB_API_BASE move the two endpoints (for tests).
 GH_WEB="${AE_GITHUB_WEB_BASE:-https://github.com}"
 GH_API="${AE_GITHUB_API_BASE:-https://api.github.com}"
@@ -158,52 +162,80 @@ gh_http() {
 gh_sha256() {
     if have sha256sum; then sha256sum "$1" | awk '{print $1}'
     elif have shasum; then shasum -a 256 "$1" | awk '{print $1}'
+    elif have sha256; then sha256 -q "$1"
+    elif have openssl; then openssl dgst -sha256 "$1" | awk '{print $NF}'
     fi
 }
 
 # gh_release_download REPO TAG ASSET DEST : fetch a release asset, trying the
-# normal URL and then the API. 0 on success; on failure says that both failed.
+# normal URL and then the API, and verify it against the sha256 digest the API
+# lists for it (#3748). 0 when fetched and verified; 1 when it could not be
+# fetched (said: both ways failed); 2 when it was fetched but cannot be
+# verified or does not match (said; DEST is removed).
 gh_release_download() {
     _ghd_r="$1"; _ghd_t="$2"; _ghd_a="$3"; _ghd_d="$4"
-    gh_http "$GH_WEB/$_ghd_r/releases/download/$_ghd_t/$_ghd_a" "$_ghd_d" && return 0
-    rm -f "$_ghd_d"
-    say "  $GH_WEB/$_ghd_r/releases/download/$_ghd_t/$_ghd_a failed; trying the GitHub API"
+    # The listing first: its digest is what the archive is checked against,
+    # whichever way the archive comes, and its id is the API's way to it.
     _ghd_j="$_ghd_d.release.json"
-    if ! gh_http "$GH_API/repos/$_ghd_r/releases/tags/$_ghd_t" "$_ghd_j" "" auth; then
-        rm -f "$_ghd_j"
-        say "  both the release URL and the GitHub API failed for $_ghd_a ($_ghd_t): the API could not be read (no network, no such release, or its rate limit)"
-        return 1
+    _ghd_l=""; _ghd_why=""
+    if gh_http "$GH_API/repos/$_ghd_r/releases/tags/$_ghd_t" "$_ghd_j" "" auth; then
+        # No jq: split the JSON at commas, one field per line, and take the id
+        # of the asset whose "name" is exactly $_ghd_a, plus its sha256 digest.
+        _ghd_l="$(tr ',' '\n' < "$_ghd_j" | awk -v f="$_ghd_a" '
+            /"id"[[:space:]]*:/ && !hit { s=$0; sub(/.*"id"[[:space:]]*:[[:space:]]*/,"",s); sub(/[^0-9].*/,"",s); lastid=s }
+            /"name"[[:space:]]*:/ { if (hit) exit
+                n=$0; sub(/.*"name"[[:space:]]*:[[:space:]]*"/,"",n); sub(/".*/,"",n)
+                if (n==f) { hit=1; id=lastid } }
+            hit && /"digest"[[:space:]]*:/ { d=$0; sub(/.*sha256:/,"",d); sub(/[^0-9a-f].*/,"",d); dig=d }
+            END { if (hit) print id, dig }')"
+        [ -n "$_ghd_l" ] || _ghd_why="the $_ghd_t release lists no asset by that name"
+    else
+        _ghd_why="the API could not be read (no network, no such release, or its rate limit)"
     fi
-    # No jq: split the JSON at commas, one field per line, and take the id of
-    # the asset whose "name" is exactly $_ghd_a, plus its sha256 digest if listed.
-    _ghd_l="$(tr ',' '\n' < "$_ghd_j" | awk -v f="$_ghd_a" '
-        /"id"[[:space:]]*:/ && !hit { s=$0; sub(/.*"id"[[:space:]]*:[[:space:]]*/,"",s); sub(/[^0-9].*/,"",s); lastid=s }
-        /"name"[[:space:]]*:/ { if (hit) exit
-            n=$0; sub(/.*"name"[[:space:]]*:[[:space:]]*"/,"",n); sub(/".*/,"",n)
-            if (n==f) { hit=1; id=lastid } }
-        hit && /"digest"[[:space:]]*:/ { d=$0; sub(/.*sha256:/,"",d); sub(/[^0-9a-f].*/,"",d); dig=d }
-        END { if (hit) print id, dig }')"
     rm -f "$_ghd_j"
     _ghd_id="${_ghd_l%% *}"; _ghd_dig=""
     case "$_ghd_l" in *" "*) _ghd_dig="${_ghd_l#* }" ;; esac
-    if [ -z "$_ghd_id" ]; then
-        say "  both the release URL and the GitHub API failed for $_ghd_a ($_ghd_t): the release lists no asset by that name"
-        return 1
-    fi
-    if ! gh_http "$GH_API/repos/$_ghd_r/releases/assets/$_ghd_id" "$_ghd_d" octet auth; then
+
+    if ! gh_http "$GH_WEB/$_ghd_r/releases/download/$_ghd_t/$_ghd_a" "$_ghd_d"; then
         rm -f "$_ghd_d"
-        say "  both the release URL and the GitHub API failed for $_ghd_a ($_ghd_t): the API asset download failed"
-        return 1
-    fi
-    if [ "${#_ghd_dig}" = 64 ]; then
-        _ghd_got="$(gh_sha256 "$_ghd_d")"
-        if [ -n "$_ghd_got" ] && [ "$_ghd_got" != "$_ghd_dig" ]; then
-            rm -f "$_ghd_d"
-            say "  the API download of $_ghd_a does not match the sha256 digest GitHub lists (expected $_ghd_dig, got $_ghd_got)"
+        say "  $GH_WEB/$_ghd_r/releases/download/$_ghd_t/$_ghd_a failed; trying the GitHub API"
+        if [ -z "$_ghd_id" ]; then
+            say "  both the release URL and the GitHub API failed for $_ghd_a ($_ghd_t): $_ghd_why"
             return 1
         fi
+        if ! gh_http "$GH_API/repos/$_ghd_r/releases/assets/$_ghd_id" "$_ghd_d" octet auth; then
+            rm -f "$_ghd_d"
+            say "  both the release URL and the GitHub API failed for $_ghd_a ($_ghd_t): the API asset download failed"
+            return 1
+        fi
+        say "  fetched $_ghd_a through the GitHub API"
     fi
-    say "  fetched $_ghd_a through the GitHub API"
+
+    # Verify before anything is unpacked. A digest that cannot be had is a
+    # refusal, not a pass.
+    if [ -n "$_ghd_why" ]; then
+        rm -f "$_ghd_d"
+        say "  $_ghd_a cannot be verified: $_ghd_why, so its sha256 digest is unknown."
+        say "  Try again later, or set GITHUB_TOKEN to raise the API's rate limit."
+        return 2
+    fi
+    if [ "${#_ghd_dig}" != 64 ]; then
+        rm -f "$_ghd_d"
+        say "  $_ghd_a cannot be verified: the $_ghd_t release lists no sha256 digest for it."
+        return 2
+    fi
+    _ghd_got="$(gh_sha256 "$_ghd_d")"
+    if [ -z "$_ghd_got" ]; then
+        rm -f "$_ghd_d"
+        say "  $_ghd_a cannot be verified: no sha256 tool here (sha256sum, shasum, sha256 or openssl)."
+        return 2
+    fi
+    if [ "$_ghd_got" != "$_ghd_dig" ]; then
+        rm -f "$_ghd_d"
+        say "  $_ghd_a does not match the sha256 digest GitHub lists for it (expected $_ghd_dig, got $_ghd_got)"
+        return 2
+    fi
+    say "  verified $_ghd_a against its sha256 digest"
     return 0
 }
 
@@ -216,11 +248,15 @@ if [ "$FROM_SOURCE" != "1" ] && [ "$is_release_tag" = "1" ]; then
     if [ -n "${slug:-}" ]; then
         asset="aether-$VER-$slug.tar.gz"
         say "trying prebuilt binary: $asset"
-        if gh_release_download "$REPO" "$REF" "$asset" "$tmp/aether-bin.tar.gz"; then
-            install_prebuilt=1
-        else
-            say "no prebuilt for $slug at $REF — will build from source."
-        fi
+        gh_rc=0
+        gh_release_download "$REPO" "$REF" "$asset" "$tmp/aether-bin.tar.gz" || gh_rc=$?
+        case "$gh_rc" in
+            0) install_prebuilt=1 ;;
+            # Fetched but not verified: never unpacked, and no quiet fall back
+            # to another way of installing it (#3748).
+            2) die "refusing the prebuilt $asset: it was not verified (above). Nothing was installed." ;;
+            *) say "no prebuilt for $slug at $REF; will build from source." ;;
+        esac
     else
         say "no prebuilt for this platform ($(uname -s)/$(uname -m)) — building from source."
     fi
