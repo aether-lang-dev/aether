@@ -608,9 +608,10 @@ static int c_dlopen_libm(st_vm* vm, char* d, size_t cap) {
 }
 
 /* libc's own syscall(): what ctypes, Perl's syscall and Ruby's Fiddle reach.
- * Only EPERM or EACCES is a refusal. ENOSYS is not: the preload's syscall()
- * gives EPERM while its sandbox is active and ENOSYS while it is not, so
- * ENOSYS means a preload whose grants never applied. */
+ * Only EPERM or EACCES is a refusal. The preload's syscall() refuses an
+ * openat with EPERM while a policy is in force and no native grant names it
+ * (docs/containment-sandbox.md, "Raw syscall()"), and forwards it otherwise;
+ * under a contained child's Landlock the kernel refuses it with EACCES. */
 static int c_syscall_fn_openat(st_vm* vm, char* d, size_t cap) {
     (void)vm;
 #if (defined(__linux__) || defined(__FreeBSD__)) && defined(SYS_openat)

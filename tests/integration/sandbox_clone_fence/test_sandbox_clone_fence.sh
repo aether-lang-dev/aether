@@ -18,8 +18,9 @@
 #      child OUTSIDE the sandbox.
 #   2. Runs each via `spawn_sandboxed` with no `fork` grant. Both must
 #      now fail (the syscall returns EPERM and the probe exits non-zero).
-#   3. Runs each via `spawn_sandboxed` WITH `fork:*` granted. Both must
-#      succeed — the fence is opt-in via the grant grammar.
+#   3. Runs vfork via `spawn_sandboxed` WITH `fork:*` granted: it must
+#      succeed — the fence is opt-in via the grant grammar. clone3 there
+#      reaches the kernel layer, which answers it ENOSYS (#3178).
 #
 # These are the two specific bypass paths called out in the issue. A
 # pass here proves the kernel-level fence is installed and effective.
@@ -234,13 +235,21 @@ run_case  clone3_no_fork   "$GRANTS_NO_FORK"   "$TMPDIR/probe_clone3"  denied
 
 # With fork grant: libc vfork must succeed (the seccomp filter is not
 # installed at all when fork:* is in the grant list, so glibc's
-# inline-syscall vfork goes through). The clone3-via-libc-syscall
-# probe is NOT tested with fork granted because the preload's existing
-# blanket `syscall()` wrapper denies ALL libc-syscall calls regardless
-# of category — that pre-dates this fix and is a separate property.
-# A probe that issued the clone3 instruction *directly* (asm) would
-# succeed here, mirroring vfork's case.
+# inline-syscall vfork goes through).
 run_case  vfork_with_fork  "$GRANTS_WITH_FORK" "$TMPDIR/probe_vfork"   0
+
+# clone3 through libc's syscall() with the fork grant: the preload holds a
+# new process to fork()'s rule, the fork grant, and forwards it (it used to
+# refuse every raw syscall, EPERM). The kernel layer then answers clone3
+# ENOSYS whatever the grants (its flags are in memory, which a filter cannot
+# read; libc falls back to clone), so ENOSYS is the sign the preload let it
+# through.
+run_case  clone3_with_fork "$GRANTS_WITH_FORK" "$TMPDIR/probe_clone3"  denied
+if ! grep -q 'Function not implemented' "$TMPDIR/clone3_with_fork.out"; then
+    echo "  [FAIL] clone3_with_fork: expected the kernel layer's ENOSYS, so the preload forwarded it:"
+    cat "$TMPDIR/clone3_with_fork.out"
+    exit 1
+fi
 
 echo "  [PASS] seccomp fence blocks raw clone3 + libc vfork when fork:* not granted (issue #668)"
 

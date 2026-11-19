@@ -820,7 +820,7 @@ cat sandbox-config.ae
 | Env var access outside grants | `getenv` interception |
 | Process execution outside grants | `execve` interception |
 | `dlopen` of libc or the loader, by any name or path (ctypes escape) | `dlopen` interception |
-| Raw `syscall()` | `syscall` interception |
+| Raw `syscall()` reaching what the wrappers govern | `syscall` interception (below) |
 | Shellcode via `mmap(PROT_EXEC)` | `mmap`/`mmap64` interception |
 | Shellcode via `mprotect(PROT_EXEC)` | `mprotect` interception |
 | `fork()` / `vfork()` / a `clone()` or `clone3()` that is not a thread | Blocked by default at the **kernel** level (seccomp-bpf in `spawn_sandboxed`, see below). A thread passes. Grant new processes with `grant_fork()` (`fork:*`). |
@@ -835,6 +835,30 @@ cat sandbox-config.ae
 
 For these vectors, combine with OS-level sandboxing (seccomp-bpf,
 Linux namespaces, OpenBSD pledge/unveil) for defence in depth.
+
+### Raw `syscall()`
+
+libc's `syscall()` is interposed so it cannot be used to go round this
+library: a raw call skips the argument checks the wrappers make, and most
+calls have no wrapper at all (`unlink`, `rename`, `mkdir`, `sendto`, `kill`,
+`ptrace` are not intercepted as libc calls). With nothing in force (no grant
+source, no in-process level on the calling thread) every call is forwarded.
+With a policy in force it is **default-deny**:
+
+| Raw call | Under a policy |
+|----------|----------------|
+| The allowlist: `futex` (and `futex_waitv`, `futex_time64`, FreeBSD `_umtx_op`), `set_robust_list`, `rseq`, `membarrier`, `sched_yield`, `getcpu`; `sched_getaffinity` / `sched_setaffinity` / `sched_getattr` / `sched_setattr` / `get_robust_list` of this process or thread; `gettid`, `getpid`, `getppid`, the `getuid` family; `getrandom`, the clocks, `nanosleep`; `munmap`, `mremap`, `madvise`; `read`, `write`, `pread64`, `pwrite64`, `readv`, `writev`, `lseek`, `close`, `close_range` on a descriptor already held; `epoll_*`, `poll`, `ppoll`, `eventfd2`, `timerfd_*`; the `rt_sig*` calls, `sigaltstack`, FreeBSD `sigreturn`; `kill` / `tgkill` / `rt_tgsigqueueinfo` to this process and `tkill` to this thread; `prctl` of the thread's name; `arch_prctl`; `exit`, `exit_group` | Forwarded: none reaches a file, socket, program or other process. A descriptor already held was authorised when it was opened (or by the host that handed it over), so I/O on it reaches nothing new; `sendto` and `sendmsg`, which name a peer of their own, are not on the list. These are the calls an idle GTK4 program, sae-driver and Aether actor programs were traced making through `syscall()` (GLib's futexes, `gettid`, `sched_getattr` / `sched_setattr`; the Aether scheduler's `sched_getaffinity` and `membarrier`), plus FreeBSD libthr's (`getpid`, `sigreturn`) and the ones of the same kind. |
+| `fork`, `vfork`, a `clone` or `clone3` without `CLONE_THREAD`, FreeBSD `rfork` with `RFPROC` and `pdfork` | `fork()`'s rule: the fork grant under a grant file. A thread passes. |
+| `mmap`, `mmap2`, `mprotect`, `pkey_mprotect` | `mmap()`'s and `mprotect()`'s rule: executable memory refused under a grant file, the rest forwarded. |
+| Anything else (`openat`, `unlinkat`, `renameat`, `sendto`, `kill` of another process, `ptrace`, an unknown number, ...) | Refused with `EPERM` and logged, `AETHER_DENIED: native syscall:<name>` (the number for a call the preload does not name), unless a `native` grant names it: `grant_native("syscall:unlinkat")`, or `native:*` / `grant_all()` for every call. |
+
+Names are the kernel's for the architecture (`<sys/syscall.h>`), so a grant
+reads the same on x86_64 and aarch64. libc's own `unlink()` and friends are
+not intercepted: they get the kernel's answer (on Linux, under
+`spawn_socket`, Landlock's) whatever the preload's policy. (`syscall()` used
+to answer every call `ENOSYS` with no policy and `EPERM` under one, so under
+the preload GLib's futex waits returned at once and its threads spun, and
+the Aether scheduler's `sched_getaffinity` and `membarrier` failed.)
 
 ### Kernel layer: Landlock
 
@@ -1045,7 +1069,7 @@ issue backlog.
 | Function / syscall | What it does | Risk |
 |-------------------|-------------|------|
 | `clone()` (arch-specific) | Create new process/thread | Variadic, arch-dependent, hard to intercept portably |
-| `execveat` / `clone` as raw syscalls | Execute or create a process with no libc wrapper | Out of the preload's reach; under a grant file `syscall()` itself is refused, and a contained child's kernel layer (seccomp, the clone fence) still holds them |
+| `execveat` / `clone` as raw syscalls | Execute or create a process with no libc wrapper | Through libc's `syscall()` they are held as described in "Raw `syscall()`" above; issued as a raw instruction they are out of the preload's reach, and a contained child's kernel layer (seccomp, the clone fence) still holds them |
 | `prctl()` | Process control | Can disable dumpable, change name, etc. |
 | `ptrace()` | Debug/modify another process | Can modify own memory to skip checks |
 | `process_vm_readv/writev()` | Read/write another process's memory | Cross-process data exfiltration |
