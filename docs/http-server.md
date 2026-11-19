@@ -829,7 +829,7 @@ wants one (#3118). Inside the handler:
 | `ws_message_bytes(ws)` | the most recent message as a borrowed `byte[]` view (binary-safe; `.len` is its length), valid until the next recv/send/close. |
 | `ws_send_text(ws, text)` | emit one text frame; `0` on success, `-1` on transport error. |
 | `ws_send_binary(ws, data)` | emit one binary frame holding the bytes of `data` (a `byte[]`; binary-safe). |
-| `ws_close(ws, code, reason)` | emit a close frame; `1000` = normal, `1001` = going away, `1011` = internal error. |
+| `ws_close(ws, code, reason)` | emit a close frame; `1000` = normal, `1001` = going away, `1011` = internal error. `""`, or why nothing was sent: a code a close frame may not carry (only 1000 to 1003, 1007 to 1014 and 3000 to 4999), or a reason that is not UTF-8; the handle stays open then. A reason longer than 123 bytes is cut at a whole code point. |
 | `ws_set_max_message(ws, max_bytes)` | the cap on one message for this handle from the next `ws_recv` on; `""` or why the value was refused. |
 
 Returning from the handler closes with code `1000` automatically.
@@ -871,6 +871,12 @@ not end inside a code point. It is checked as the bytes arrive and across
 fragments, so a code point split between two fragments is whole. Text that
 is not UTF-8 closes the connection with `1007`, and `ws_recv` returns `-1`.
 A binary message is not checked.
+
+A close frame from the peer is checked too (5.5.1, 7.4): a body of one byte
+holds no code, and a code a close frame may not carry (below 1000, 1004 to
+1006, 1015 to 2999, 5000 and up) closes the connection with `1002` rather
+than being echoed back. `ws_close` refuses to send such a code, with an
+error.
 
 ## Server-Sent Events
 

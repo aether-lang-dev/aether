@@ -224,6 +224,51 @@ fn role_seeds(dir: string, role: int, tag: string) {
     b = start(role, 0, 0, 63)
     whole(b, 1, 8, m, "\x03\xe8\xc3(")
     write_seed(dir, "${tag}_close_bad_reason", b)
+
+    // Close frames (RFC 6455 5.5.1, 7.4): a one-byte body, and codes at
+    // each edge of what a close frame may carry.
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 8, m, "\x03")
+    write_seed(dir, "${tag}_close_one_byte", b)
+    close_code(dir, role, m, tag, 999)
+    close_code(dir, role, m, tag, 1003)
+    close_code(dir, role, m, tag, 1004)
+    close_code(dir, role, m, tag, 1005)
+    close_code(dir, role, m, tag, 1006)
+    close_code(dir, role, m, tag, 1007)
+    close_code(dir, role, m, tag, 1014)
+    close_code(dir, role, m, tag, 1015)
+    close_code(dir, role, m, tag, 1016)
+    close_code(dir, role, m, tag, 2999)
+    close_code(dir, role, m, tag, 3000)
+    close_code(dir, role, m, tag, 4999)
+    close_code(dir, role, m, tag, 5000)
+    close_code(dir, role, m, tag, 65535)
+}
+
+// A close frame with `code` and the reason "x".
+fn close_code(dir: string, role: int, m: int, tag: string, code: int) {
+    b = start(role, 0, 0, 63)
+    _a = strbuilder.append_byte(b, 136)
+    _b = strbuilder.append_byte(b, (m * 128) + 3)
+    if m == 1 {
+        _c = strbuilder.append_byte(b, KEY0)
+        _d = strbuilder.append_byte(b, KEY1)
+        _e = strbuilder.append_byte(b, KEY2)
+        _f = strbuilder.append_byte(b, KEY3)
+    }
+    hi = (code >> 8) & 255
+    lo = code & 255
+    if m == 1 {
+        hi = hi ^ KEY0
+        lo = lo ^ KEY1
+    }
+    _g = strbuilder.append_byte(b, hi)
+    _h = strbuilder.append_byte(b, lo)
+    x = 120
+    if m == 1 { x = x ^ KEY2 }
+    _i = strbuilder.append_byte(b, x)
+    write_seed(dir, "${tag}_close_code_${code}", b)
 }
 
 main() {

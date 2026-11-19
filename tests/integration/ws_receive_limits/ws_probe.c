@@ -25,6 +25,12 @@
  *      surrogate, a code point past U+10FFFF, a message ending inside a
  *      code point) and a close reason that is not UTF-8 close with 1007
  *      (RFC 6455 8.1).
+ *  25-36. a close frame with a one-byte body, or a code no close frame may
+ *      carry (999, 1004, 1005, 1006, 1015, 1016, 2999, 5000), closes with
+ *      1002, as does one over 125 bytes or fragmented; 1014, 3000 and 4999
+ *      are echoed (RFC 6455 5.5.1, 7.4);
+ *  37. ws_close refuses 1005, 999, 5000 and a reason that is not UTF-8,
+ *      and cuts a long reason at a whole code point (/close).
  *
  * Usage: ws_probe <port>. Prints PASS/FAIL lines; exits 0 when all pass.
  *
@@ -462,6 +468,70 @@ int main(int argc, char** argv) {
     if (s == RAW_SOCK_INVALID) return 1;
     send_frame(s, 1, 0x8, (const unsigned char*)"\x03\xe8\xc3(", 4, 4);
     check(close_code(s) == 1007, "a close reason that is not UTF-8 closes with 1007");
+    raw_socket_close(s);
+
+    /* 25-34. Close frames (RFC 6455 5.5.1, 7.4). A body of one byte holds
+     * no code, and a code a close frame may not carry is a protocol error:
+     * both close with 1002. They were echoed back as they came. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 1, 0x8, (const unsigned char*)"\x03", 1, 1);
+    check(close_code(s) == 1002, "a close frame with a one-byte body closes with 1002");
+    raw_socket_close(s);
+    static const int bad_codes[] = { 999, 1004, 1005, 1006, 1015, 1016, 2999, 5000 };
+    for (size_t i = 0; i < sizeof(bad_codes) / sizeof(bad_codes[0]); i++) {
+        unsigned char cp[2] = { (unsigned char)(bad_codes[i] >> 8), (unsigned char)bad_codes[i] };
+        char what[96];
+        snprintf(what, sizeof what, "a close frame with code %d closes with 1002", bad_codes[i]);
+        s = ws_open("/ws");
+        if (s == RAW_SOCK_INVALID) return 1;
+        send_frame(s, 1, 0x8, cp, 2, 2);
+        check(close_code(s) == 1002, what);
+        raw_socket_close(s);
+    }
+    /* 35. Codes a close frame may carry are echoed: 1014 and the
+     * application range's ends. */
+    static const int good_codes[] = { 1014, 3000, 4999 };
+    for (size_t i = 0; i < sizeof(good_codes) / sizeof(good_codes[0]); i++) {
+        unsigned char cp[2] = { (unsigned char)(good_codes[i] >> 8), (unsigned char)good_codes[i] };
+        char what[96];
+        snprintf(what, sizeof what, "a close frame with code %d is echoed", good_codes[i]);
+        s = ws_open("/ws");
+        if (s == RAW_SOCK_INVALID) return 1;
+        send_frame(s, 1, 0x8, cp, 2, 2);
+        check(close_code(s) == good_codes[i], what);
+        raw_socket_close(s);
+    }
+    /* 36. A close frame over 125 bytes, or fragmented, closes with 1002
+     * (5.5), as a ping does (#3739). */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    {
+        unsigned char big[126];
+        memset(big, 'x', sizeof big);
+        big[0] = 0x03; big[1] = 0xe8;
+        send_frame(s, 1, 0x8, big, 126, 126);
+    }
+    check(close_code(s) == 1002, "a close frame of 126 bytes closes with 1002");
+    raw_socket_close(s);
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 0, 0x8, (const unsigned char*)"\x03\xe8", 2, 2);
+    check(close_code(s) == 1002, "a fragmented close frame closes with 1002");
+    raw_socket_close(s);
+
+    /* 37. ws_close refuses a code it may not send, or a reason that is not
+     * UTF-8, and sends nothing; a long reason is cut at a whole code point
+     * within 123 bytes. */
+    s = ws_open("/close");
+    if (s == RAW_SOCK_INVALID) return 1;
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    if (n >= 0) buf[n] = '\0';
+    check(n >= 0 && op == 0x1 && strcmp((char*)buf, "refused=true,true,true,true") == 0,
+          "ws_close refuses 1005, 999, 5000 and a reason that is not UTF-8");
+    n = read_frame(s, &op, buf, sizeof(buf));
+    check(n == 2 + 122 && op == 0x8 && buf[0] == 0x03 && buf[1] == 0xe8 && buf[n - 1] == 'a',
+          "ws_close cuts a long reason at the last whole code point within 123 bytes");
     raw_socket_close(s);
 
     if (failures) {

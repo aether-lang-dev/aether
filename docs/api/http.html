@@ -864,8 +864,9 @@
     </div>
     <div class="function" id="ws_close" data-name="ws_close">
       <h3 class="function-name">ws_close <span class="kind">fn</span></h3>
-      <pre class="usage"><code>ws_close(ws, code, reason)</code></pre>
+      <pre class="usage"><code>ws_close(ws, code, reason) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">ws: ptr, code: int, reason: string</span></p>
+      <p class="doc">&quot;&quot; when the close frame went out (or the handle was already closed), else why nothing was sent: a code a close frame may not carry (RFC 6455 7.4: only 1000-1003, 1007-1014 and 3000-4999) or a reason that is not UTF-8.</p>
     </div>
     <div class="function" id="ws_set_max_message_raw" data-name="ws_set_max_message_raw">
       <h3 class="function-name">ws_set_max_message_raw <span class="kind">extern</span></h3>

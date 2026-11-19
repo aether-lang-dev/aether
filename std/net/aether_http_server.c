@@ -225,7 +225,7 @@ const char* http_server_set_body_timeout_raw(HttpServer* s, int64_t t, int64_t r
 const char* http_server_set_tls_handshake_timeout_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_h2_max_age_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_loop_max_connections_raw(HttpServer* s, int m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
-void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
+const char* http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; return "WebSocket unavailable: networking not built in"; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_post(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -4957,21 +4957,87 @@ int http_ws_send_binary(HttpWsConn* ws, const void* data, int len) {
     return ws_send_frame_masked(ws->conn, WS_OP_BIN, data, len, ws->mask_tx);
 }
 
-void http_ws_close(HttpWsConn* ws, int code, const char* reason) {
-    if (!ws || ws->closed) return;
-    /* Close payload: 2 bytes status code (network order) + UTF-8
-     * reason. Reason capped at 123 bytes per spec. */
+/* Strict UTF-8 (RFC 3629), checked a piece at a time, so a code point may
+ * straddle two pieces (two fragments of one message). `need` is how many
+ * continuation bytes the sequence in progress still wants, and [lo, hi] the
+ * range the next one must fall in: that range is what refuses an overlong
+ * form (E0 then below A0, F0 then below 90), a surrogate (ED then above 9F)
+ * and a code point past U+10FFFF (F4 then above 8F). C0, C1 and F5 to FF
+ * never begin a sequence. */
+typedef struct {
+    int need;
+    unsigned char lo, hi;
+} WsUtf8;
+
+/* 0 while every byte so far is valid UTF-8 (a sequence may be unfinished),
+ * -1 at the first that is not. */
+static int ws_utf8_feed(WsUtf8* u, const unsigned char* p, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = p[i];
+        if (u->need == 0) {
+            if (c < 0x80) continue;
+            u->lo = 0x80;
+            u->hi = 0xBF;
+            if (c >= 0xC2 && c <= 0xDF) u->need = 1;
+            else if (c == 0xE0) { u->need = 2; u->lo = 0xA0; }
+            else if (c == 0xED) { u->need = 2; u->hi = 0x9F; }
+            else if (c >= 0xE1 && c <= 0xEF) u->need = 2;
+            else if (c == 0xF0) { u->need = 3; u->lo = 0x90; }
+            else if (c == 0xF4) { u->need = 3; u->hi = 0x8F; }
+            else if (c >= 0xF1 && c <= 0xF3) u->need = 3;
+            else return -1;
+        } else {
+            if (c < u->lo || c > u->hi) return -1;
+            u->need--;
+            u->lo = 0x80;
+            u->hi = 0xBF;
+        }
+    }
+    return 0;
+}
+
+/* Whether a close frame may carry `code` (RFC 6455 7.4): 1000 to 1003, 1007
+ * to 1014 (the IANA registry's), and 3000 to 4999 (libraries and
+ * applications). Below 1000 is not used; 1004 is reserved; 1005, 1006 and
+ * 1015 say what happened without a close frame and are never sent in one;
+ * 1016 to 2999 are reserved for the protocol; 5000 and up are not defined. */
+static int ws_close_code_allowed(int code) {
+    return (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) ||
+           (code >= 3000 && code <= 4999);
+}
+
+const char* http_ws_close(HttpWsConn* ws, int code, const char* reason) {
+    if (!ws) return "websocket is null";
+    if (ws->closed) return "";
+    /* A code a close frame may not carry is refused, never sent: the peer
+     * fails the connection on it with 1002 (RFC 6455 7.4). */
+    if (!ws_close_code_allowed(code))
+        return "close code is not one a close frame may carry (RFC 6455 7.4): "
+               "1000-1003, 1007-1014 or 3000-4999";
+    /* Close payload: 2 bytes status code (network order) + UTF-8 reason, at
+     * most 123 bytes (125 for the control frame). A reason that is not
+     * UTF-8 is refused, as the peer would fail with 1007 on it; a longer
+     * one is cut at the last whole code point that fits, where cutting at
+     * 123 bytes could leave half of one, which is not UTF-8. */
     unsigned char payload[125];
     payload[0] = (unsigned char)((code >> 8) & 0xFF);
     payload[1] = (unsigned char)(code & 0xFF);
-    int rn = 0;
+    size_t rn = 0;
     if (reason && *reason) {
-        rn = (int)strlen(reason);
-        if (rn > 123) rn = 123;
+        size_t full = strlen(reason);
+        WsUtf8 u = { 0, 0x80, 0xBF };
+        if (ws_utf8_feed(&u, (const unsigned char*)reason, full) != 0 || u.need != 0)
+            return "close reason is not UTF-8";
+        rn = full;
+        if (rn > 123) {
+            rn = 123;
+            while (rn > 0 && ((unsigned char)reason[rn] & 0xC0) == 0x80) rn--;
+        }
         memcpy(payload + 2, reason, rn);
     }
-    ws_send_frame_masked(ws->conn, WS_OP_CLOSE, payload, 2 + rn, ws->mask_tx);
+    ws_send_frame_masked(ws->conn, WS_OP_CLOSE, payload, (int)(2 + rn), ws->mask_tx);
     ws->closed = 1;
+    return "";
 }
 
 /* The largest message `ws` reassembles. */
@@ -5168,45 +5234,6 @@ int http_ws_poll(HttpWsConn* ws, int timeout_ms) {
  * by a chatty peer.
  *
  * timeout_ms < 0 blocks indefinitely, which is exactly http_ws_recv. */
-/* Strict UTF-8 (RFC 3629), checked a piece at a time, so a code point may
- * straddle two pieces (two fragments of one message). `need` is how many
- * continuation bytes the sequence in progress still wants, and [lo, hi] the
- * range the next one must fall in: that range is what refuses an overlong
- * form (E0 then below A0, F0 then below 90), a surrogate (ED then above 9F)
- * and a code point past U+10FFFF (F4 then above 8F). C0, C1 and F5 to FF
- * never begin a sequence. */
-typedef struct {
-    int need;
-    unsigned char lo, hi;
-} WsUtf8;
-
-/* 0 while every byte so far is valid UTF-8 (a sequence may be unfinished),
- * -1 at the first that is not. */
-static int ws_utf8_feed(WsUtf8* u, const unsigned char* p, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = p[i];
-        if (u->need == 0) {
-            if (c < 0x80) continue;
-            u->lo = 0x80;
-            u->hi = 0xBF;
-            if (c >= 0xC2 && c <= 0xDF) u->need = 1;
-            else if (c == 0xE0) { u->need = 2; u->lo = 0xA0; }
-            else if (c == 0xED) { u->need = 2; u->hi = 0x9F; }
-            else if (c >= 0xE1 && c <= 0xEF) u->need = 2;
-            else if (c == 0xF0) { u->need = 3; u->lo = 0x90; }
-            else if (c == 0xF4) { u->need = 3; u->hi = 0x8F; }
-            else if (c >= 0xF1 && c <= 0xF3) u->need = 3;
-            else return -1;
-        } else {
-            if (c < u->lo || c > u->hi) return -1;
-            u->need--;
-            u->lo = 0x80;
-            u->hi = 0xBF;
-        }
-    }
-    return 0;
-}
-
 int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
     if (!ws || !ws->conn || ws->closed) return -1;
     ws->msg_len = 0;  /* reset for this message */
@@ -5313,9 +5340,17 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
                 continue;
             }
             if (opcode == WS_OP_PONG) continue;  /* unsolicited pong: discard */
-            /* A close frame's reason, after its two-byte code, is UTF-8
-             * (RFC 6455 5.5.1); one that is not fails with 1007 (8.1)
-             * rather than being echoed back. */
+            /* A close frame's body, when it has one, is a two-byte code and
+             * then a reason (RFC 6455 5.5.1): one byte is no code at all,
+             * and a code a close frame may not carry (7.4: below 1000,
+             * 1004 to 1006, 1015 to 2999, 5000 and up) is a protocol error.
+             * Both fail with 1002; they were echoed back as they came. */
+            if (pl == 1)
+                return ws_fail(ws, 1002, "close frame with a one-byte body");
+            if (pl >= 2 && !ws_close_code_allowed((ctl[0] << 8) | ctl[1]))
+                return ws_fail(ws, 1002, "close code not allowed on the wire");
+            /* The reason, after the code, is UTF-8 (5.5.1); one that is not
+             * fails with 1007 (8.1) rather than being echoed back. */
             if (pl > 2) {
                 WsUtf8 reason = { 0, 0x80, 0xBF };
                 if (ws_utf8_feed(&reason, ctl + 2, (size_t)pl - 2) != 0 || reason.need != 0)

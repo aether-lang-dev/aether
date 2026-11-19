@@ -24,6 +24,12 @@
 # U+10FFFF, and not ending inside a code point. One that is not closes with
 # 1007; a binary message is not checked.
 #
+# A close frame with a one-byte body, or with a code no close frame may
+# carry (RFC 6455 7.4: below 1000, 1004 to 1006, 1015 to 2999, 5000 and up),
+# closes with 1002, as does one over 125 bytes or fragmented; allowed codes
+# are echoed. ws_close refuses to send such a code, or a reason that is not
+# UTF-8, and cuts a long reason at a whole code point.
+#
 # ws_probe.c sends the frames over a raw socket, since no library client
 # sends them; wsserver.ae is the server. For the client side, `ws_probe
 # relay` stands between wsclient.ae and the server: it passes the handshake
@@ -119,4 +125,4 @@ sed -n '2,$p' "$TMP/relay.log"
 grep -q "PASS: a client closes with 1002 on a masked server frame" "$TMP/relay.log" \
     || fail "the client did not close with 1002 on a masked server frame"
 
-echo "  [PASS] ws_receive_limits: message cap (1009), control frames, reserved opcodes, masking, reserved bits and fragment order (1002), UTF-8 (1007), growth as bytes arrive"
+echo "  [PASS] ws_receive_limits: message cap (1009), control frames, reserved opcodes, masking, reserved bits and fragment order (1002), close codes (1002), UTF-8 (1007), ws_close refusals, growth as bytes arrive"

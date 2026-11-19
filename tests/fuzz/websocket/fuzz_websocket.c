@@ -27,6 +27,8 @@
  *       reserved bit set (5.2), a control frame that is fragmented or
  *       longer than 125 bytes (5.5), a continuation with no message in
  *       progress or a data frame inside one (5.4), a message past the cap,
+ *       a close frame of one byte, or with a code no close frame may
+ *       carry (7.4: below 1000, 1004 to 1006, 1015 to 2999, 5000 and up),
  *       a text message or a close reason that is not UTF-8 (8.1: no
  *       overlong form, surrogate or code point past U+10FFFF, checked
  *       across fragments, failing at the frame where the bytes can no
@@ -180,6 +182,19 @@ static int utf8_prefix(const uint8_t* b, size_t n) {
     return 0;
 }
 
+/* The close codes RFC 6455 7.4 lets a close frame carry: the ones 7.4.1
+ * defines that may be sent (1000 to 1003, 1007 to 1011), the ones IANA
+ * registered since (1012 to 1014), and 3000 to 4999 for libraries and
+ * applications. */
+static int close_code_ok(int c) {
+    if (c >= 3000 && c <= 4999) return 1;
+    switch (c) {
+    case 1000: case 1001: case 1002: case 1003: case 1007: case 1008: case 1009:
+    case 1010: case 1011: case 1012: case 1013: case 1014: return 1;
+    default: return 0;
+    }
+}
+
 /* The whole stream, read as the reader must read it: each message it
  * returns, then -1, and every frame it sends. */
 static void model_stream(const uint8_t* s, size_t n, int mask_tx, size_t max, Model* m) {
@@ -222,6 +237,8 @@ static void model_stream(const uint8_t* s, size_t n, int mask_tx, size_t max, Mo
                 p += (size_t)pl;
                 if (opcode == WS_OP_PING) { model_send(m, WS_OP_PONG, ctl, (size_t)pl); continue; }
                 if (opcode == WS_OP_PONG) continue;
+                if (pl == 1) { model_fail(m, 1002); goto closed; }
+                if (pl >= 2 && !close_code_ok((ctl[0] << 8) | ctl[1])) { model_fail(m, 1002); goto closed; }
                 if (pl > 2 && utf8_prefix(ctl + 2, (size_t)pl - 2) != 0) { model_fail(m, 1007); goto closed; }
                 model_send(m, WS_OP_CLOSE, ctl, (size_t)pl);
                 goto closed;

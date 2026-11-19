@@ -34,6 +34,26 @@ echo_lengths(ws: ptr) {
     echo_lengths(ws)
 }
 
+// /close: what ws_close refuses, said to the client as text, then a close
+// with 1000 and a reason of 130 bytes with a code point across byte 123 (122
+// "a"s, then four two-byte "é"s): it goes out as the 122 "a"s.
+@c_callback close_handler(req: ptr, ws: ptr, ud: ptr) {
+    e1 = http.ws_close(ws, 1005, "never on the wire")
+    e2 = http.ws_close(ws, 999, "")
+    e3 = http.ws_close(ws, 5000, "")
+    e4 = http.ws_close(ws, 1000, "not utf8 \xff")
+    http.ws_send_text(ws, "refused=${e1 != ""},${e2 != ""},${e3 != ""},${e4 != ""}")
+    reason = ""
+    i = 0
+    while i < 122 {
+        reason = "${reason}a"
+        i = i + 1
+    }
+    reason = "${reason}\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9"
+    e5 = http.ws_close(ws, 1000, reason)
+    if e5 != "" { println("server: ws_close(1000) refused: ${e5}") }
+}
+
 used_handler(req: ptr, res: ptr, ud: ptr) {
     http.http_response_set_status(res, 200)
     http.http_response_set_body(res, "${aether_caps_used_bytes()}")
@@ -57,6 +77,7 @@ main() {
     }
     http.server_websocket(raw, "/ws", small_handler, null)
     http.server_websocket(raw, "/wsbig", big_handler, null)
+    http.server_websocket(raw, "/close", close_handler, null)
     http.http_server_get(raw, "/used", used_handler, null)
     if http.server_bind(raw, "127.0.0.1", 0) != "" {
         println("FAIL: bind")

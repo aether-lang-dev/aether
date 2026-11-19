@@ -1037,8 +1037,12 @@ int         http_ws_message_length(HttpWsConn* ws);
 // Send a close frame with the given code (1000 = normal,
 // 1001 = going away, 1002 = protocol error, 1008 = policy
 // violation, 1011 = internal error) and an optional reason.
-// Reason may be NULL/empty. Idempotent.
-void http_ws_close(HttpWsConn* ws, int code, const char* reason);
+// Reason may be NULL/empty, is UTF-8, and is cut at the last whole
+// code point within 123 bytes. Returns "" (also on a handle already
+// closed), or why nothing was sent: a code a close frame may not
+// carry (RFC 6455 7.4: only 1000-1003, 1007-1014 and 3000-4999), or a
+// reason that is not UTF-8. A refused close leaves the handle open.
+const char* http_ws_close(HttpWsConn* ws, int code, const char* reason);
 
 // Server-Sent Events (#260 Tier 2). An SSE handler "owns" the
 // connection — the server writes the initial 200 response with
