@@ -63,7 +63,9 @@ part a grant matched: `grant_exec("echo *")` matches `"echo hi; rm -rf ~"`
 too. So `os.system` and `os.exec` need `grant_shell()` as well as the
 command's own grant, and that pair allows anything the shell can be told to
 run. For untrusted code, grant the program (`grant_exec("echo")`) and call
-`os.run` or `os.run_capture` with an argv, which runs no shell.
+`os.run` or `os.run_capture` with an argv, which runs no shell. A program
+file with no `#!` line is the exception: it runs through the shell, and so
+needs `grant_shell()` too (#3755).
 
 `sandbox.new` returns a `sandbox.Grants`, an opaque type: it can be passed to
 `enforce`, to `free`, and to a host bridge's `run_sandboxed` calls, but

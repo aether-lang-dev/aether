@@ -229,6 +229,14 @@ its own and the shell's, `grant_shell()`. The pair allows anything the shell
 can be told to run, so give it only to code you would let run any command.
 The LD_PRELOAD library applies the same rule to `system()` and `popen()`.
 
+A file with no `#!` line is a script too. `os.run` and its siblings run one
+through `/bin/sh`, as `execvp` does, and the shell runs whatever the file
+holds, so it needs `grant_shell()` as well as the file's own grant. Without
+it the start fails with "permission denied" (#3755). A script that names its
+interpreter on a `#!` line needs no shell grant, since the kernel starts the
+interpreter itself. The LD_PRELOAD library asks the same of `execvp` and
+`execlp`.
+
 ```aether,fragment
 // Untrusted code: name the program and pass an argv. No shell runs.
 grant_exec("echo")              // os.run_capture("echo", argv, null)

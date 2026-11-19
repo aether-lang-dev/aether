@@ -1474,6 +1474,7 @@ typedef struct {
     char*  path;     /* the program, resolved: aether_spawn_resolve */
     char** argv;     /* build_argv_array */
     char** sh_argv;  /* /bin/sh, path, argv[1..]: for a file with no #! */
+    int    sh_granted; /* the sandbox lets sh_argv[0] run (#3755) */
     char** envp;     /* build_envp_array: the explicit env, or NULL */
     char** env;      /* what execve gets: envp, or NULL for this process's
                       * environ, which the child reads after the fork: taken
@@ -1499,6 +1500,12 @@ static const char* aether_exec_prepare(AetherExec* x, const char* prog,
         return "argv build failed";
     }
     x->sh_argv[0] = (char*)AETHER_OS_SHELL;
+    /* Whether a file with no #! line may run through the shell: the shell
+     * runs whatever the file holds, so it needs an exec grant of its own,
+     * as a command string does (#3735) and as the LD_PRELOAD library's
+     * exec_or_script requires. Asked here, in the parent: the check is not
+     * a call the child may make between fork and exec (#3755). */
+    x->sh_granted = aether_sandbox_check("exec", x->sh_argv[0]);
     x->sh_argv[1] = x->path;
     for (size_t i = 1; i <= n; i++) x->sh_argv[i + 1] = x->argv[i];
     x->envp = build_envp_array(env_list);
@@ -1525,11 +1532,20 @@ static void aether_exec_release(AetherExec* x) {
  * refuses with ENOEXEC, runs under /bin/sh with its arguments, as execvp
  * runs it, so a script that never had one keeps working. Returns only when
  * neither could start, errno set: "not an executable" then means /bin/sh
- * could not run it either. Only execve, which is async-signal-safe. */
+ * could not run it either. Only execve, which is async-signal-safe.
+ *
+ * Under a sandbox the shell runs such a file only with an exec grant for
+ * the shell (grant_shell), checked by the parent in aether_exec_prepare.
+ * Without one the start fails with EACCES, "permission denied" (#3755): the
+ * grant for the file let the shell run it, whatever it held. */
 static void aether_child_exec(const AetherExec* x) {
     char** env = x->env ? x->env : aether_environ;
     execve(x->path, x->argv, env);
     if (errno != ENOEXEC) return;
+    if (!x->sh_granted) {
+        errno = EACCES;
+        return;
+    }
     /* sh_argv[0], not the literal: the pointer a spawn hook was told about
      * (AetherSpawnHook.ready). */
     execve(x->sh_argv[0], x->sh_argv, env);

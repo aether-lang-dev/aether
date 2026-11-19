@@ -261,7 +261,9 @@ grant_exec(_ctx: Grants, cmd: string) { add_grant(_ctx, "exec", cmd) }
 // with grant_exec("echo *"), "echo hi; rm -rf ~" matches too. So a command
 // string needs this grant as well as its own, and the pair allows whatever
 // the shell can be told to run. Grant it only to code you would let run any
-// command; give the rest os.run with an argv, which runs no shell.
+// command; give the rest os.run with an argv, which runs no shell. A file
+// with no #! line that os.run starts also runs through the shell, and needs
+// this grant too (#3755).
 grant_shell(_ctx: Grants) { add_grant(_ctx, "exec", aether_sandbox_shell_path()) }
 
 // Reading the environment variables whose names match `name`.

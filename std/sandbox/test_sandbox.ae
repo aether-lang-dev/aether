@@ -338,6 +338,41 @@ main() {
             sandbox.free(g)
         }
 
+        // #3755: os.run and its siblings run a file with no #! line through
+        // /bin/sh, as execvp does. The exec grant for the file let the shell
+        // run it, and the shell runs whatever the file holds; the LD_PRELOAD
+        // library already asked for a grant for the shell there, and now
+        // the in-process path does too. POSIX only: Windows runs no such file
+        // through a shell.
+        spec.it("runs a file with no #! line through the shell only with grant_shell") callback {
+            if select(windows: 1, other: 0) == 0 {
+                script = "${dir}/no_shebang"
+                _w = fs.write(script, "exit 7\n")
+                _c = fs.chmod(script, 493) // 0o755
+                argv = list.new()
+                g = sandbox.new("script-only") {
+                    grant_exec(script)
+                }
+                sandbox.enforce(g) callback {
+                    _o, code, err = os.run_capture(script, argv, null)
+                    spec.assert_err(err, "without a shell grant the script does not run")
+                    spec.assert_eq(code, -1, "and reports that it could not start")
+                }
+                sandbox.free(g)
+                g2 = sandbox.new("script-and-shell") {
+                    grant_exec(script)
+                    grant_shell()
+                }
+                sandbox.enforce(g2) callback {
+                    _o2, code2, err2 = os.run_capture(script, argv, null)
+                    spec.assert_ok(err2, "with grant_shell the shell runs it")
+                    spec.assert_eq(code2, 7, "to its exit status")
+                }
+                sandbox.free(g2)
+                list.free(argv)
+            }
+        }
+
         spec.it("denies everything when nothing is granted") callback {
             g = sandbox.new("nothing") {}
             sandbox.enforce(g) callback {
