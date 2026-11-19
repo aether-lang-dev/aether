@@ -1,0 +1,70 @@
+// A variable named after a libc function, bound to a call with a trailing
+// block, compiles.
+//
+// The trailing block runs with the bound value pushed as its context, and the
+// push spelt the variable with safe_c_name, which is the spelling of a
+// FUNCTION named after libc (#1366: `open` -> `ae_open`). Variables are not
+// renamed that way: the declaration and every read say `open`. So
+// `open = sandbox.new("open") { grant_env("X") }` declared `open` and pushed
+// `ae_open`, and the generated C did not compile ("use of undeclared
+// identifier 'ae_open'"). Three statements did it: a new local, a
+// reassignment of one, and a store to a module variable.
+//
+// Each shape below, with names from the different corners of that libc list,
+// failed to compile before the push used the variable's own spelling. A
+// module variable is checked with `open` only: a module variable named
+// `abs` (or any libc function the prelude declares) is a separate,
+// file-scope collision that a trailing block has nothing to do with.
+
+extern exit(code: int)
+
+var open: ptr = null
+var pushes: int = 0
+
+mk() -> ptr {
+    pushes = pushes + 1
+    return null
+}
+
+main() {
+    // A new local.
+    open_local = 0
+    abs = mk() {
+        open_local = open_local + 1
+    }
+    remove = mk() {
+        open_local = open_local + 1
+    }
+    index = mk() {
+        open_local = open_local + 1
+    }
+
+    // A reassignment.
+    read = mk()
+    read = mk() {
+        open_local = open_local + 1
+    }
+    var time: ptr = null
+    time = mk() {
+        open_local = open_local + 1
+    }
+
+    // A module variable.
+    open = mk() {
+        open_local = open_local + 1
+    }
+
+    if abs != null || remove != null || index != null || read != null || time != null || open != null {
+        println("FAIL: a binding lost its value")
+        exit(1)
+    }
+    if open_local != 6 {
+        println("FAIL: ${open_local} of 6 trailing blocks ran")
+        exit(1)
+    }
+    if pushes != 7 {
+        println("FAIL: ${pushes} of 7 calls made")
+        exit(1)
+    }
+    println("ok")
+}
