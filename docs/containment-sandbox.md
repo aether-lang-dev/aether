@@ -70,7 +70,7 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_fs_write(path)` | `fs_write` | path being opened, created or written |
 | `grant_fs(path)` | `fs_read`, `fs_write` and `fs` | reads, writes and directory operations such as `os.chdir` |
 | `grant_exec(cmd)` | `exec` | program (`os.run` and its family) or command string (`os.system`, `os.exec`) |
-| `grant_shell()` | `exec` | the shell a command string runs through: `/bin/sh`, or on Windows what `COMSPEC` names (`cmd.exe`) |
+| `grant_shell()` | `exec` | the shell a command string runs through: `/bin/sh` (`_PATH_BSHELL` where the system names another), or on Windows what `COMSPEC` names (`cmd.exe`) |
 | `grant_env(name)` | `env` | environment variable name |
 | `grant_tcp(host)` | `tcp` | host name (std.net) or resolved IP (LD_PRELOAD); ports are not checked |
 | `grant_tcp_listen()` | `tcp_listen` | any listening socket |
@@ -513,7 +513,27 @@ the process.
   name opened `O_PATH|O_NOFOLLOW`, or through a descriptor opened for it.
   A `freopen` with a path reopens the stream through `/proc/self/fd/N` of
   the file the walk opened, or on the BSDs puts that descriptor in the
-  stream's place (`dup2`) and reopens it with no name. The process starts
+  stream's place (`dup2`) and reopens it with no name. A name spelt with a
+  trailing slash ("name/") is a directory, as the kernel takes it: an unlink
+  of one never removes anything (`ENOTDIR`, or `EISDIR` for a directory),
+  an open that would create is `EISDIR`, a rename moves a directory only,
+  and a new symlink, hard link or node is not made (`EEXIST` or `ENOENT`);
+  an open of one follows the name and needs a directory there. A hard link
+  whose source is a descriptor (`linkat` with `AT_EMPTY_PATH`, or
+  `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW`, the ways an `O_TMPFILE` file
+  gets its name) needs `fs_write` on the new name, which may not reach the
+  file more than the path the descriptor is open on may, and is made with
+  the caller's own spelling of the source. `lsetxattr` and `lremovexattr`
+  open the name `O_PATH|O_NOFOLLOW` and set through `/proc/self/fd/N`.
+  `mount` checks `fs_write` on the mount point and, for a bind or a move,
+  `fs_read` on the source (and `fs_write` unless the bind is read-only),
+  and passes both as resolved; FreeBSD's `nmount` does the same for a
+  nullfs or unionfs source ("target", "from"), and its `mount(2)` refuses
+  those. `unshare` and `clone` with a `CLONE_NEW*` flag, `clone3` with one,
+  and `setns` need the native grant their system call needs
+  (`syscall:unshare`, `syscall:setns`): a new user and mount namespace
+  would let a bind mount show any directory where a grant allows. The
+  process starts
   (`execve` and the rest of the family, `posix_spawn`, `fork`, `system`,
   `popen`), `dlopen` and `dlmopen`, `connect`, `bind`, `listen`, `accept`,
   `getenv`, raw `syscall()`, and executable memory. A test lists every

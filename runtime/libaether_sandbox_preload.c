@@ -880,6 +880,13 @@ static int fs_open_access(int flags) {
 // opened, as itself, in that file's directory.
 static int fs_open_checked(int dirfd, const char* path, int flags, unsigned mode) {
     int entry = (flags & O_NOFOLLOW) || (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+    if (aether_sandbox_dir_slash(path)) {
+        // "name/": the kernel follows the name and needs a directory there;
+        // it creates no file by such a path (EISDIR).
+        if (flags & O_CREAT) { errno = EISDIR; return -1; }
+        entry = 0;
+        flags |= O_DIRECTORY;
+    }
     int access = fs_open_access(flags);
     char resolved[PATH_MAX];
     const char* target = (dirfd == AT_FDCWD && path) ? staged_write_target(path, flags) : path;
@@ -1164,6 +1171,21 @@ static int fs_on_name(int dirfd, const char* path, char name[PATH_MAX]) {
     return aether_sandbox_anchor(resolved, name, PATH_MAX, &preload_ops);
 }
 
+// fs_on_name for a call that has an answer of its own for "name/"
+// (aether_sandbox_slash_call's `op`): the anchor when the call goes on,
+// else -1 with the kernel's errno.
+static int fs_on_name_op(int dirfd, const char* path, char name[PATH_MAX], int op) {
+    int d = fs_on_name(dirfd, path, name);
+    if (d < 0 || !aether_sandbox_dir_slash(path)) return d;
+    if (aether_sandbox_slash_call(d, name, op) != 0) {
+        int err = errno;
+        close(d);
+        errno = err;
+        return -1;
+    }
+    return d;
+}
+
 // fs.write_atomic's temporary (staged_sibling_target): fs_write on the file
 // it stands for, then its directory anchored and its last name in `name`.
 // -2 when `path` is not that temporary.
@@ -1199,7 +1221,7 @@ int unlink(const char* path) {
     if (!policy_in_force()) return FS_REAL(unlink)(path);
     char name[PATH_MAX];
     int d = fs_on_staged(path, name);
-    if (d == -2) d = fs_on_name(AT_FDCWD, path, name);
+    if (d == -2) d = fs_on_name_op(AT_FDCWD, path, name, AETHER_SLASH_UNLINK);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(unlinkat)(d, name, 0));
 }
@@ -1207,7 +1229,8 @@ int unlink(const char* path) {
 int unlinkat(int dirfd, const char* path, int flags) {
     if (!policy_in_force()) return FS_REAL(unlinkat)(dirfd, path, flags);
     char name[PATH_MAX];
-    int d = fs_on_name(dirfd, path, name);
+    int d = fs_on_name_op(dirfd, path, name,
+                          (flags & AT_REMOVEDIR) ? AETHER_SLASH_DIR : AETHER_SLASH_UNLINK);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(unlinkat)(d, name, flags));
 }
@@ -1216,7 +1239,7 @@ static int (*real_rmdir)(const char*) = NULL;
 int rmdir(const char* path) {
     if (!policy_in_force()) return FS_REAL(rmdir)(path);
     char name[PATH_MAX];
-    int d = fs_on_name(AT_FDCWD, path, name);
+    int d = fs_on_name_op(AT_FDCWD, path, name, AETHER_SLASH_DIR);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(unlinkat)(d, name, AT_REMOVEDIR));
 }
@@ -1227,7 +1250,7 @@ int remove(const char* path) {
     if (!policy_in_force()) return FS_REAL(remove)(path);
     char name[PATH_MAX];
     int d = fs_on_staged(path, name);
-    if (d == -2) d = fs_on_name(AT_FDCWD, path, name);
+    if (d == -2) d = fs_on_name_op(AT_FDCWD, path, name, AETHER_SLASH_DIR);
     if (d < 0) return -1;
     struct stat st;
     int dir = fstatat(d, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode);
@@ -1267,7 +1290,7 @@ static int (*real_mknod)(const char*, mode_t, dev_t) = NULL;
 int mknod(const char* path, mode_t mode, dev_t dev) {
     if (!policy_in_force()) return FS_REAL(mknod)(path, mode, dev);
     char name[PATH_MAX];
-    int d = fs_on_name(AT_FDCWD, path, name);
+    int d = fs_on_name_op(AT_FDCWD, path, name, AETHER_SLASH_NEW);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(mknodat)(d, name, mode, dev));
 }
@@ -1275,7 +1298,7 @@ int mknod(const char* path, mode_t mode, dev_t dev) {
 int mknodat(int dirfd, const char* path, mode_t mode, dev_t dev) {
     if (!policy_in_force()) return FS_REAL(mknodat)(dirfd, path, mode, dev);
     char name[PATH_MAX];
-    int d = fs_on_name(dirfd, path, name);
+    int d = fs_on_name_op(dirfd, path, name, AETHER_SLASH_NEW);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(mknodat)(d, name, mode, dev));
 }
@@ -1285,7 +1308,7 @@ static int (*real_mkfifo)(const char*, mode_t) = NULL;
 int mkfifo(const char* path, mode_t mode) {
     if (!policy_in_force()) return FS_REAL(mkfifo)(path, mode);
     char name[PATH_MAX];
-    int d = fs_on_name(AT_FDCWD, path, name);
+    int d = fs_on_name_op(AT_FDCWD, path, name, AETHER_SLASH_NEW);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(mkfifoat)(d, name, mode));
 }
@@ -1293,7 +1316,7 @@ int mkfifo(const char* path, mode_t mode) {
 int mkfifoat(int dirfd, const char* path, mode_t mode) {
     if (!policy_in_force()) return FS_REAL(mkfifoat)(dirfd, path, mode);
     char name[PATH_MAX];
-    int d = fs_on_name(dirfd, path, name);
+    int d = fs_on_name_op(dirfd, path, name, AETHER_SLASH_NEW);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(mkfifoat)(d, name, mode));
 }
@@ -1305,7 +1328,7 @@ static int (*real_symlink)(const char*, const char*) = NULL;
 int symlink(const char* target, const char* linkpath) {
     if (!policy_in_force()) return FS_REAL(symlink)(target, linkpath);
     char name[PATH_MAX];
-    int d = fs_on_name(AT_FDCWD, linkpath, name);
+    int d = fs_on_name_op(AT_FDCWD, linkpath, name, AETHER_SLASH_NEW);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(symlinkat)(target, d, name));
 }
@@ -1313,7 +1336,7 @@ int symlink(const char* target, const char* linkpath) {
 int symlinkat(const char* target, int dirfd, const char* linkpath) {
     if (!policy_in_force()) return FS_REAL(symlinkat)(target, dirfd, linkpath);
     char name[PATH_MAX];
-    int d = fs_on_name(dirfd, linkpath, name);
+    int d = fs_on_name_op(dirfd, linkpath, name, AETHER_SLASH_NEW);
     if (d < 0) return -1;
     FS_AT_CALL(d, FS_REAL(symlinkat)(target, d, name));
 }
@@ -1343,6 +1366,22 @@ static int fs_two_names(int d1, const char* p1, int d2, const char* p2,
         return fs_r_;                \
     } while (0)
 
+// A rename spelt with "name/" on either side: the kernel moves a directory only
+// (the source not followed: ENOENT, or ENOTDIR for a file or a symlink),
+// and onto a directory or nothing (ENOTDIR). 0 to go on.
+static int fs_rename_slash(const char* from, int a1, const char* n1, const char* to, int a2,
+                           const char* n2) {
+    int to_slash = aether_sandbox_dir_slash(to);
+    if (!aether_sandbox_dir_slash(from) && !to_slash) return 0;
+    if (aether_sandbox_slash_call(a1, n1, AETHER_SLASH_DIR) != 0) return -1;
+    struct stat st;
+    if (fstatat(a2, n2, &st, AT_SYMLINK_NOFOLLOW) == 0 && !S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
+    return 0;
+}
+
 static int (*real_renameat)(int, const char*, int, const char*) = NULL;
 static int (*real_rename)(const char*, const char*) = NULL;
 int rename(const char* from, const char* to) {
@@ -1364,7 +1403,7 @@ int rename(const char* from, const char* to) {
     } else if (fs_two_names(AT_FDCWD, from, AT_FDCWD, to, &a1, n1, &a2, n2) != 0) {
         return -1;
     }
-    FS_AT_CALL2(a1, a2, FS_REAL(renameat)(a1, n1, a2, n2));
+    FS_AT_CALL2(a1, a2, fs_rename_slash(from, a1, n1, to, a2, n2) != 0 ? -1 : FS_REAL(renameat)(a1, n1, a2, n2));
 }
 
 int renameat(int fromfd, const char* from, int tofd, const char* to) {
@@ -1372,7 +1411,7 @@ int renameat(int fromfd, const char* from, int tofd, const char* to) {
     int a1, a2;
     char n1[PATH_MAX], n2[PATH_MAX];
     if (fs_two_names(fromfd, from, tofd, to, &a1, n1, &a2, n2) != 0) return -1;
-    FS_AT_CALL2(a1, a2, FS_REAL(renameat)(a1, n1, a2, n2));
+    FS_AT_CALL2(a1, a2, fs_rename_slash(from, a1, n1, to, a2, n2) != 0 ? -1 : FS_REAL(renameat)(a1, n1, a2, n2));
 }
 #if defined(__linux__)
 static int (*real_renameat2)(int, const char*, int, const char*, unsigned) = NULL;
@@ -1381,7 +1420,8 @@ int renameat2(int fromfd, const char* from, int tofd, const char* to, unsigned f
     int a1, a2;
     char n1[PATH_MAX], n2[PATH_MAX];
     if (fs_two_names(fromfd, from, tofd, to, &a1, n1, &a2, n2) != 0) return -1;
-    FS_AT_CALL2(a1, a2, FS_REAL(renameat2)(a1, n1, a2, n2, flags));
+    FS_AT_CALL2(a1, a2, fs_rename_slash(from, a1, n1, to, a2, n2) != 0 ? -1
+                                                                      : FS_REAL(renameat2)(a1, n1, a2, n2, flags));
 }
 #endif
 
@@ -1391,11 +1431,93 @@ int renameat2(int fromfd, const char* from, int tofd, const char* to, unsigned f
 // link into a writable directory would make any file there writable. With
 // AT_SYMLINK_FOLLOW the target is where its symlink leads.
 static int (*real_linkat)(int, const char*, int, const char*, int) = NULL;
+
+// The descriptor a link's source is when no path names it: AT_EMPTY_PATH
+// with an empty path (the descriptor `d1`), or /proc/self/fd/N (or
+// /dev/fd/N, or /proc/<this pid>/fd/N) followed with AT_SYMLINK_FOLLOW,
+// the idiom that gives an O_TMPFILE file its name where AT_EMPTY_PATH needs
+// a capability. -1 when a path names the source.
+static int fs_link_source_fd(int d1, const char* target, int flags) {
+    if (!target) return -1;
+#ifdef AT_EMPTY_PATH
+    if ((flags & AT_EMPTY_PATH) && !target[0]) return d1;
+#endif
+    if (!(flags & AT_SYMLINK_FOLLOW)) return -1;
+    char own[48];
+    snprintf(own, sizeof own, "/proc/%ld/fd/", (long)getpid());
+    const char* digits = NULL;
+    if (strncmp(target, "/proc/self/fd/", 14) == 0) digits = target + 14;
+    else if (strncmp(target, "/dev/fd/", 8) == 0) digits = target + 8;
+    else if (strncmp(target, own, strlen(own)) == 0) digits = target + strlen(own);
+    if (!digits || !*digits) return -1;
+    long v = 0;
+    for (const char* c = digits; *c; c++) {
+        if (*c < '0' || *c > '9' || v > INT_MAX / 10) return -1;
+        v = v * 10 + (*c - '0');
+    }
+    return (int)v;
+}
+
+// A link whose source is a descriptor (fs_link_source_fd): the new name is
+// checked for fs_write, and may not reach the file more than the path the
+// descriptor is open on may (an O_TMPFILE file's "#ino (deleted)" in the
+// directory it was made in, the " (deleted)" taken off), so an inherited
+// descriptor of a file outside the grants gets no name inside them. The
+// link is made with the caller's own spelling of the source, from the new
+// name's anchor: it used to be resolved to the descriptor's path and linked
+// by that name, which an O_TMPFILE file does not have (ENOENT), or refused
+// as a path outside the grants (EACCES).
+static int fs_link_from_fd(int src, int d1, const char* target, int d2, const char* linkpath,
+                           int flags) {
+    char rl[PATH_MAX];
+    if (!fs_allowed(d2, linkpath, 1, AETHER_ACCESS_WRITE, rl)) return -1;
+    char fp[PATH_MAX], run[PATH_MAX];
+    if (!fd_path(src, fp, run)) {
+        log_deny("fs_read", target[0] ? target : "(a descriptor)");
+        errno = EACCES;
+        return -1;
+    }
+    static const char deleted[] = " (deleted)";
+    size_t fl = strlen(fp), dl = sizeof deleted - 1;
+    if (fl > dl && strcmp(fp + fl - dl, deleted) == 0) fp[fl - dl] = '\0';
+    static const char* const cats[2] = { "fs_read", "fs_write" };
+    for (int i = 0; i < 2; i++) {
+        if (grant_covers(cats[i], rl) && !check_resolved(cats[i], fp)) {
+            errno = EACCES;
+            return -1;
+        }
+    }
+    char n2[PATH_MAX];
+    int a2 = aether_sandbox_anchor(rl, n2, sizeof n2, &preload_ops);
+    if (a2 < 0) return -1;
+    int r;
+    if (aether_sandbox_dir_slash(linkpath) && aether_sandbox_slash_call(a2, n2, AETHER_SLASH_NEW) != 0)
+        r = -1;
+    else if (!target[0])
+        r = FS_REAL(linkat)(d1, "", a2, n2, flags & ~AT_SYMLINK_FOLLOW);
+    else
+        r = FS_REAL(linkat)(AT_FDCWD, target, a2, n2, AT_SYMLINK_FOLLOW);
+    int err = errno;
+    close(a2);
+    errno = err;
+    return r;
+}
+
 static int fs_link_checked(int d1, const char* target, int d2, const char* linkpath, int flags) {
+    int src = fs_link_source_fd(d1, target, flags);
+    if (src >= 0) return fs_link_from_fd(src, d1, target, d2, linkpath, flags);
     char rt[PATH_MAX], rl[PATH_MAX];
     if (!fs_allowed(d2, linkpath, 1, AETHER_ACCESS_WRITE, rl)) return -1;
     char joined[PATH_MAX];
     int follow = (flags & AT_SYMLINK_FOLLOW) != 0;
+    if (aether_sandbox_dir_slash(target)) {
+        // "name/" as the source: the kernel follows it and refuses it,
+        // a directory (EPERM: no hard link to one) or not (ENOTDIR).
+        struct stat st;
+        if (!fs_at_path(d1, target, joined) || stat(joined, &st) != 0) errno = ENOENT;
+        else errno = S_ISDIR(st.st_mode) ? EPERM : ENOTDIR;
+        return -1;
+    }
     if (!fs_at_path(d1, target, joined) ||
         !(follow ? aether_sandbox_canon_path(joined, rt, sizeof rt)
                  : aether_sandbox_canon_entry(joined, rt, sizeof rt))) {
@@ -1420,7 +1542,10 @@ static int fs_link_checked(int d1, const char* target, int d2, const char* linkp
         errno = err;
         return -1;
     }
-    FS_AT_CALL2(a1, a2, FS_REAL(linkat)(a1, n1, a2, n2, 0));
+    FS_AT_CALL2(a1, a2,
+                (aether_sandbox_dir_slash(linkpath) && aether_sandbox_slash_call(a2, n2, AETHER_SLASH_NEW) != 0)
+                    ? -1
+                    : FS_REAL(linkat)(a1, n1, a2, n2, 0));
 }
 
 static int (*real_link)(const char*, const char*) = NULL;
@@ -1630,12 +1755,30 @@ int utime(const char* path, const struct utimbuf* times) {
 // Extended attributes, set or removed: fs_write on the file, the call made
 // on it opened by step 3 (O_PATH cannot carry them, so O_RDONLY, or
 // O_WRONLY for a file that cannot be read), with the f* variant. lsetxattr
-// and lremovexattr act on a symlink itself: by its resolved name.
+// and lremovexattr act on the name itself, a symlink not followed: it is
+// opened O_PATH|O_NOFOLLOW from its anchor, and set through
+// /proc/self/fd/N, which setxattr follows to exactly what was opened (an
+// O_PATH descriptor takes no fsetxattr). Only without /proc is it set by
+// its resolved name, from which a swap of the name alone remains.
 static int fs_xattr_fd(const char* path, int nofollow, char resolved[PATH_MAX]) {
     if (!fs_changed_file(AT_FDCWD, path, nofollow, resolved)) return -1;
     if (nofollow) return -2;   // by name, below
     int fd = aether_sandbox_walk(resolved, O_RDONLY | O_CLOEXEC, 0, &preload_ops);
     if (fd < 0 && errno == EACCES) fd = aether_sandbox_walk(resolved, O_WRONLY | O_CLOEXEC, 0, &preload_ops);
+    return fd;
+}
+
+// The name `resolved` itself, opened O_PATH|O_NOFOLLOW from its anchor, as
+// /proc/self/fd/N in `self`: the descriptor, or -1.
+static int fs_xattr_entry(const char* resolved, char self[64]) {
+    char name[PATH_MAX];
+    int d = aether_sandbox_anchor(resolved, name, sizeof name, &preload_ops);
+    if (d < 0) return -1;
+    int fd = fs_real_openat(d, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    int err = errno;
+    close(d);
+    errno = err;
+    if (fd >= 0) snprintf(self, 64, "/proc/self/fd/%d", fd);
     return fd;
 }
 
@@ -1654,7 +1797,13 @@ int lsetxattr(const char* path, const char* key, const void* value, size_t size,
     if (!policy_in_force()) return FS_REAL(lsetxattr)(path, key, value, size, flags);
     char resolved[PATH_MAX];
     if (fs_xattr_fd(path, 1, resolved) == -1) return -1;
-    return FS_REAL(lsetxattr)(resolved, key, value, size, flags);
+    char self[64];
+    int fd = fs_xattr_entry(resolved, self);
+    if (fd < 0) return -1;
+    int r = FS_REAL(setxattr)(self, key, value, size, flags);
+    if (r != 0 && errno == ENOENT && access("/proc/self/fd", F_OK) != 0)
+        r = FS_REAL(lsetxattr)(resolved, key, value, size, flags);   // no /proc
+    FS_AT_CALL(fd, r);
 }
 
 static int (*real_removexattr)(const char*, const char*) = NULL;
@@ -1672,7 +1821,13 @@ int lremovexattr(const char* path, const char* key) {
     if (!policy_in_force()) return FS_REAL(lremovexattr)(path, key);
     char resolved[PATH_MAX];
     if (fs_xattr_fd(path, 1, resolved) == -1) return -1;
-    return FS_REAL(lremovexattr)(resolved, key);
+    char self[64];
+    int fd = fs_xattr_entry(resolved, self);
+    if (fd < 0) return -1;
+    int r = FS_REAL(removexattr)(self, key);
+    if (r != 0 && errno == ENOENT && access("/proc/self/fd", F_OK) != 0)
+        r = FS_REAL(lremovexattr)(resolved, key);   // no /proc
+    FS_AT_CALL(fd, r);
 }
 #endif // __linux__ (xattr)
 
@@ -1972,34 +2127,95 @@ int open_by_handle_at(int mountfd, struct file_handle* handle, int flags) {
 #endif
 
 // mount and its undoing change what a path leads to: fs_write on the
-// mount point, then the call.
+// mount point. A bind mount (MS_BIND) or a move (MS_MOVE) also takes a
+// directory's tree from its source and shows it at the mount point, so the
+// source is a path read through the mount point: fs_read on it, and
+// fs_write unless the bind is read-only (MS_RDONLY), or for a move, which
+// takes the source's mount away from it. Checking the mount point alone let
+// a bind of a directory outside the grants onto one inside them read it
+// (#3751). Both are passed to the kernel as they were resolved.
 #if defined(__linux__)
 static int (*real_mount)(const char*, const char*, const char*, unsigned long, const void*) = NULL;
 int mount(const char* source, const char* target, const char* type, unsigned long flags,
           const void* data) {
-    if (policy_in_force()) {
-        char resolved[PATH_MAX];
-        if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    if (!policy_in_force()) return FS_REAL(mount)(source, target, type, flags, data);
+    char rt[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, rt)) return -1;
+    const char* src = source;
+    char rs[PATH_MAX];
+    if ((flags & (MS_BIND | MS_MOVE)) && !(flags & MS_REMOUNT)) {
+        int access = AETHER_ACCESS_READ;
+        if ((flags & MS_MOVE) || !(flags & MS_RDONLY)) access |= AETHER_ACCESS_WRITE;
+        if (!fs_allowed(AT_FDCWD, source, 0, access, rs)) return -1;
+        src = rs;
     }
-    return FS_REAL(mount)(source, target, type, flags, data);
+    return FS_REAL(mount)(src, rt, type, flags, data);
 }
 
 static int (*real_umount2)(const char*, int) = NULL;
 int umount2(const char* target, int flags) {
-    if (policy_in_force()) {
-        char resolved[PATH_MAX];
-        if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
-    }
-    return FS_REAL(umount2)(target, flags);
+    if (!policy_in_force()) return FS_REAL(umount2)(target, flags);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    return FS_REAL(umount2)(resolved, flags);
 }
 
 static int (*real_umount)(const char*) = NULL;
 int umount(const char* target) {
-    if (policy_in_force()) {
-        char resolved[PATH_MAX];
-        if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
-    }
-    return FS_REAL(umount)(target);
+    if (!policy_in_force()) return FS_REAL(umount)(target);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    return FS_REAL(umount)(resolved);
+}
+
+// Namespaces. A new mount namespace (with a user namespace, which needs no
+// privilege) lets a process bind any directory onto any other where the
+// path checks no longer describe what a path reaches; joining another
+// process's namespace does the same. Under a policy unshare and clone with
+// a CLONE_NEW* flag, and setns, need the native grant their raw system call
+// needs ("syscall:unshare", "syscall:setns", as the syscall() wrapper names
+// them); clone3 is held below. unshare with no namespace flag (CLONE_FILES,
+// CLONE_FS, CLONE_SYSVSEM) changes only this process and goes through.
+#define AE_CLONE_NEW_ANY (0x00020000UL /* NEWNS */ | 0x02000000UL /* NEWCGROUP */ | \
+                          0x04000000UL /* NEWUTS */ | 0x08000000UL /* NEWIPC */ | \
+                          0x10000000UL /* NEWUSER */ | 0x20000000UL /* NEWPID */ | \
+                          0x40000000UL /* NEWNET */)
+#define AE_CLONE_NEWTIME 0x00000080UL   /* unshare and clone3 only: in clone() it is the signal */
+
+static int ns_allowed(const char* call) {
+    if (!policy_in_force() || check_grant("native", call)) return 1;
+    errno = EPERM;
+    return 0;
+}
+
+static int (*real_unshare)(int) = NULL;
+int unshare(int flags) {
+    if (((unsigned long)(unsigned)flags & (AE_CLONE_NEW_ANY | AE_CLONE_NEWTIME)) &&
+        !ns_allowed("syscall:unshare"))
+        return -1;
+    return FS_REAL(unshare)(flags);
+}
+
+static int (*real_setns)(int, int) = NULL;
+int setns(int fd, int nstype) {
+    if (!ns_allowed("syscall:setns")) return -1;
+    return FS_REAL(setns)(fd, nstype);
+}
+
+// clone() is variadic: (fn, stack, flags, arg[, parent_tid, tls, child_tid]).
+// The three trailing pointers are passed on as read; the kernel reads each
+// only when a flag asks for it, which is when the caller passed it.
+static int (*real_clone)(int (*)(void*), void*, int, void*, ...) = NULL;
+int clone(int (*fn)(void*), void* stack, int flags, void* arg, ...) {
+    va_list ap;
+    va_start(ap, arg);
+    void* ptid = va_arg(ap, void*);
+    void* tls = va_arg(ap, void*);
+    void* ctid = va_arg(ap, void*);
+    va_end(ap);
+    if (((unsigned long)(unsigned)flags & AE_CLONE_NEW_ANY) && !ns_allowed("syscall:unshare")) return -1;
+    if (!FS_REAL(clone)) { errno = ENOSYS; return -1; }
+    return real_clone(fn, stack, flags, arg, ptid, tls, ctid);
 }
 #endif
 
@@ -2720,6 +2936,9 @@ long clone3(struct clone_args* args, size_t size) {
         errno = EPERM;
         return -1;
     }
+    /* A new namespace needs what unshare needs (see unshare above). */
+    if (args && (args->flags & (AE_CLONE_NEW_ANY | AE_CLONE_NEWTIME)) && !ns_allowed("syscall:unshare"))
+        return -1;
     return real_clone3(args, size);
 }
 #endif // __linux__ (clone3)
@@ -3953,34 +4172,73 @@ int exect(const char* path, char* const argv[], char* const envp[]) {
     return real_exect(path, argv, envp);
 }
 
-// nmount: the mount point is the iovec pair named "fspath".
+// nmount: the mount point is the iovec pair named "fspath", fs_write on
+// it. A nullfs (or unionfs) mount shows the directory named "target" (or
+// "from") at the mount point, so that is read through it: fs_read on it,
+// and fs_write unless the mount is read-only (an "ro" or "rdonly" option, or
+// MNT_RDONLY). The call is made on a copy of the vector with each of those
+// paths as it was resolved.
+#ifndef MNT_RDONLY
+#define MNT_RDONLY 0x00000001   /* <sys/mount.h> */
+#endif
 struct iovec;
 static int (*real_nmount)(struct iovec*, unsigned int, int) = NULL;
+static int nmount_opt_is(const void* base, size_t len, const char* name) {
+    size_t nl = strlen(name) + 1;
+    return base && len == nl && memcmp(base, name, nl) == 0;
+}
 int nmount(struct iovec* iov, unsigned int n, int flags) {
-    if (policy_in_force()) {
-        struct { void* base; size_t len; } const* v = (const void*)iov;
-        const char* fspath = NULL;
-        for (unsigned i = 0; i + 1 < n; i += 2) {
-            if (v[i].base && v[i].len == sizeof "fspath" && memcmp(v[i].base, "fspath", sizeof "fspath") == 0)
-                fspath = (const char*)v[i + 1].base;
-        }
-        char resolved[PATH_MAX];
-        if (!fspath || !fs_allowed(AT_FDCWD, fspath, 0, AETHER_ACCESS_WRITE, resolved)) {
-            errno = EACCES;
-            return -1;
-        }
+    if (!policy_in_force()) return FS_REAL(nmount)(iov, n, flags);
+    struct ae_iov { void* base; size_t len; };
+    const struct ae_iov* v = (const void*)iov;
+    if (n > 128 || (n & 1)) { errno = EINVAL; return -1; }
+    int fspath_at = -1, layered = 0, ro = (flags & MNT_RDONLY) != 0;
+    for (unsigned i = 0; i + 1 < n; i += 2) {
+        if (nmount_opt_is(v[i].base, v[i].len, "fspath")) fspath_at = (int)i + 1;
+        if (nmount_opt_is(v[i].base, v[i].len, "fstype") &&
+            (nmount_opt_is(v[i + 1].base, v[i + 1].len, "nullfs") ||
+             nmount_opt_is(v[i + 1].base, v[i + 1].len, "unionfs")))
+            layered = 1;
+        if (nmount_opt_is(v[i].base, v[i].len, "ro") || nmount_opt_is(v[i].base, v[i].len, "rdonly"))
+            ro = 1;
     }
-    return FS_REAL(nmount)(iov, n, flags);
+    if (fspath_at < 0 || !v[fspath_at].base) { errno = EACCES; return -1; }
+    struct ae_iov copy[128];
+    memcpy(copy, v, n * sizeof copy[0]);
+    char paths[3][PATH_MAX];
+    int used = 0;
+    if (!fs_allowed(AT_FDCWD, (const char*)v[fspath_at].base, 0, AETHER_ACCESS_WRITE, paths[used])) return -1;
+    copy[fspath_at].base = paths[used];
+    copy[fspath_at].len = strlen(paths[used]) + 1;
+    used++;
+    for (unsigned i = 0; layered && i + 1 < n && used < 3; i += 2) {
+        if (!nmount_opt_is(v[i].base, v[i].len, "target") && !nmount_opt_is(v[i].base, v[i].len, "from"))
+            continue;
+        if (!v[i + 1].base) continue;
+        int access = AETHER_ACCESS_READ | (ro ? 0 : AETHER_ACCESS_WRITE);
+        if (!fs_allowed(AT_FDCWD, (const char*)v[i + 1].base, 0, access, paths[used])) return -1;
+        copy[i + 1].base = paths[used];
+        copy[i + 1].len = strlen(paths[used]) + 1;
+        used++;
+    }
+    return FS_REAL(nmount)((struct iovec*)(void*)copy, n, flags);
 }
 
 // mount(2) on FreeBSD: (type, dir, flags, data).
 static int (*real_mount)(const char*, const char*, int, void*) = NULL;
+// A layered file system (nullfs, unionfs) takes its source through nmount
+// only, where it is checked above; mount(2) is refused for one under a
+// policy rather than mount a source it cannot see.
 int mount(const char* type, const char* dir, int flags, void* data) {
-    if (policy_in_force()) {
-        char resolved[PATH_MAX];
-        if (!fs_allowed(AT_FDCWD, dir, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    if (!policy_in_force()) return FS_REAL(mount)(type, dir, flags, data);
+    if (type && (strcmp(type, "nullfs") == 0 || strcmp(type, "unionfs") == 0)) {
+        log_deny("fs_read", type);
+        errno = EACCES;
+        return -1;
     }
-    return FS_REAL(mount)(type, dir, flags, data);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, dir, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    return FS_REAL(mount)(type, resolved, flags, data);
 }
 
 // _open and _openat: libc's own names for open and openat, exported, which

@@ -2,7 +2,8 @@
 // asks, under the LD_PRELOAD library, and reports the outcome in the exit
 // status: 0 done, 3 refused with EACCES (the sandbox's refusal), 4 any other
 // failure, 5 it reached something outside the box (the escape the case is
-// about), 6 EEXIST, 7 not on this system, 2 a usage error.
+// about), 6 EEXIST, 7 not on this system, 8 ENOTDIR, 9 EISDIR, 10 EPERM
+// from unshare, 2 a usage error.
 //
 //   harness <case> <root>
 //
@@ -16,10 +17,14 @@
 #include <ftw.h>
 #include <glob.h>
 #include <pthread.h>
+#include <sched.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
+#include <sys/mount.h>
+#endif
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -39,6 +44,8 @@ static int verdict(int ok) {
     if (ok) return 0;
     if (errno == EACCES) return 3;
     if (errno == EEXIST) return 6;
+    if (errno == ENOTDIR) return 8;
+    if (errno == EISDIR) return 9;
     return 4;
 }
 
@@ -244,6 +251,65 @@ int main(int argc, char** argv) {
         stop_swap = 1;
         pthread_join(t, NULL);
         return escaped ? 5 : 0;
+    }
+    // "name/": a directory to the kernel. Unlinking a file or a symlink
+    // that way is ENOTDIR, an open that would create is EISDIR, a rename
+    // of a file to "x/" is ENOTDIR; rmdir of "dir/" removes it.
+    if (strcmp(c, "unlink-slash-file") == 0) return verdict(unlink(at("box/inside.txt/")) == 0);
+    if (strcmp(c, "unlink-slash-link") == 0) return verdict(unlink(at("box/out_dir/")) == 0);
+    if (strcmp(c, "open-creat-slash") == 0) {
+        int fd = open(at("box/slash_new/"), O_WRONLY | O_CREAT, 0600);
+        if (fd >= 0) close(fd);
+        return verdict(fd >= 0);
+    }
+    if (strcmp(c, "rmdir-slash") == 0) return verdict(rmdir(at("box/rmd/")) == 0);
+    if (strcmp(c, "rename-slash-file") == 0)
+        return verdict(rename(at("box/ren_s.txt"), at("box/ren_s_dir/")) == 0);
+    // An O_TMPFILE file given its name, both ways: linkat with
+    // AT_EMPTY_PATH on its descriptor, and /proc/self/fd/N followed.
+    if (strcmp(c, "link-tmpfile-empty") == 0 || strcmp(c, "link-tmpfile-proc") == 0) {
+#if defined(O_TMPFILE) && defined(AT_EMPTY_PATH)
+        int fd = open(at("box"), O_TMPFILE | O_RDWR, 0600);
+        if (fd < 0) return (errno == EOPNOTSUPP || errno == EISDIR || errno == EINVAL) ? 7 : verdict(0);
+        if (write(fd, "tmp\n", 4) != 4) { close(fd); return 4; }
+        int r;
+        if (strcmp(c, "link-tmpfile-empty") == 0) {
+            r = linkat(fd, "", AT_FDCWD, at("box/tmp_empty"), AT_EMPTY_PATH);
+        } else {
+            char self[64];
+            snprintf(self, sizeof self, "/proc/self/fd/%d", fd);
+            r = linkat(AT_FDCWD, self, AT_FDCWD, at("box/tmp_proc"), AT_SYMLINK_FOLLOW);
+        }
+        int rc = verdict(r == 0);
+        close(fd);
+        return rc;
+#else
+        return 7;
+#endif
+    }
+    // A descriptor of a file outside the box, inherited on fd 9 (the script
+    // opens it), given a name in the box through /proc/self/fd/9: refused.
+    if (strcmp(c, "link-fd-out") == 0)
+        return verdict(linkat(AT_FDCWD, "/proc/self/fd/9", AT_FDCWD, at("box/stolen_fd"),
+                              AT_SYMLINK_FOLLOW) == 0);
+    // The way round every path check: a mount namespace (with a user
+    // namespace, which needs no privilege) and a bind of a directory outside
+    // the box onto one inside it. unshare is refused (EPERM) without a
+    // native grant, and the bind is refused (EACCES) for its source.
+    if (strcmp(c, "unshare-ns") == 0) {
+#if defined(__linux__)
+        if (unshare(CLONE_NEWUSER | CLONE_NEWNS) == 0) return 0;
+        return errno == EPERM ? 10 : verdict(0);
+#else
+        return 7;
+#endif
+    }
+    if (strcmp(c, "bind-mount-out") == 0) {
+#if defined(__linux__)
+        return verdict(mount(at("outside"), at("box/sub"), NULL, MS_BIND, NULL) == 0);
+#else
+        return 7;
+#endif
     }
     fprintf(stderr, "unknown case %s\n", c);
     return 2;

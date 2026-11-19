@@ -264,7 +264,7 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
  * system() and popen() do is kept: `/bin/sh -c` (with `--`, so a command
  * that starts with `-` is no option, as glibc passes it), the wait-status
  * word, the signal handling and the waits retried on EINTR. */
-#define AETHER_OS_SHELL AETHER_SANDBOX_SHELL   /* "/bin/sh", aether_sandbox_match.h */
+#define AETHER_OS_SHELL AETHER_SANDBOX_SHELL   /* _PATH_BSHELL, or "/bin/sh": aether_sandbox_match.h */
 
 /* This process's environment: what a child execs with when no env is given
  * (#3201). */
@@ -1194,7 +1194,7 @@ int os_execv(const char* prog, void* argv_list) {
     // with ENOEXEC (no #! line) through /bin/sh by itself: the exec grant
     // matched the file, and the shell then ran whatever the file held with
     // no grant of its own (#3762). The shell fallback is made here instead,
-    // as execvp makes it ("/bin/sh", path, argv[1..]), and only when the
+    // as execvp makes it (the system shell, path, argv[1..]), and only when the
     // sandbox lets the shell run (grant_shell, the rule os.run follows,
     // #3755). Refused, the call fails with EACCES. Asked only after the
     // kernel refused the file, so the audit names the shell only for a

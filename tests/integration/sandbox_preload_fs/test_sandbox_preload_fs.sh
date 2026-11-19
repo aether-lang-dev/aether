@@ -42,7 +42,8 @@ if ! ${CC:-cc} -std=c11 -Wall -Wextra -Werror -pthread \
 fi
 
 FIX="$TMP/root"
-mkdir -p "$FIX/box/sub" "$FIX/box/d" "$FIX/outside/empty"
+mkdir -p "$FIX/box/sub" "$FIX/box/d" "$FIX/box/rmd" "$FIX/outside/empty"
+printf 'ren\n' > "$FIX/box/ren_s.txt"
 printf 'inside\n' > "$FIX/box/inside.txt"
 printf 'inside\n' > "$FIX/box/d/secret.txt"
 printf 'del\n' > "$FIX/box/del.txt"
@@ -56,7 +57,8 @@ printf 'fs_read:%s\nfs_read:%s/*\nfs_write:%s/*\n' \
     "$FIX/box" "$FIX/box" "$FIX/box" > "$TMP/box.grants"
 fail=0
 
-# expected: 0 done, 3 refused (EACCES), 5 escaped, 6 EEXIST, 7 not here.
+# expected: 0 done, 3 refused (EACCES), 4 another failure, 5 escaped,
+# 6 EEXIST, 7 not here, 8 ENOTDIR, 9 EISDIR.
 run_case() {
     label="$1"
     case_name="$2"
@@ -112,6 +114,43 @@ run_case "mkstemp outside is refused"                            mkstemp-out    
 run_case "mkstemp in the box makes"                              mkstemp-in       0
 run_case "mkdtemp outside is refused"                            mkdtemp-out      3
 run_case "posix_spawn's addopen outside is refused"              spawn-addopen-out 3
+run_case "unlink of 'file/' is ENOTDIR and removes nothing"      unlink-slash-file 8
+run_case "unlink of 'link/' is ENOTDIR and leaves the link"      unlink-slash-link 8
+run_case "an open that would create 'new/' is EISDIR"            open-creat-slash  9
+run_case "rmdir of 'dir/' removes the directory"                 rmdir-slash       0
+run_case "a rename of a file to 'x/' is ENOTDIR"                 rename-slash-file 8
+run_case "an O_TMPFILE file linked by /proc/self/fd/N gets its name" link-tmpfile-proc 0
+# AT_EMPTY_PATH needs CAP_DAC_READ_SEARCH before Linux 6.10: the call is
+# expected to do under the preload what it does without it.
+(cd "$FIX/box/sub" && "$TMP/harness" link-tmpfile-empty "$FIX" </dev/null >/dev/null 2>&1)
+free_empty=$?
+rm -f "$FIX/box/tmp_empty"
+run_case "an O_TMPFILE file linked by AT_EMPTY_PATH does what it does unsandboxed" link-tmpfile-empty "$free_empty"
+(cd "$FIX/box/sub" && LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/box.grants" \
+    AETHER_SANDBOX_LOG=none "$TMP/harness" link-fd-out "$FIX" \
+    </dev/null 9<"$FIX/outside/secret.txt" >"$TMP/out" 2>"$TMP/err")
+got=$?
+if [ "$got" -eq 3 ]; then
+    echo "  [PASS] an inherited descriptor of an outside file gets no name in the box"
+else
+    echo "  [FAIL] link of an inherited outside descriptor into the box: exit $got, expected 3"
+    fail=1
+fi
+run_case "a bind mount of a directory outside onto the box is refused" bind-mount-out 3
+# unshare(CLONE_NEWUSER|CLONE_NEWNS): EPERM from the preload, whatever the
+# kernel would allow. The log tells the preload's refusal from the kernel's.
+(cd "$FIX/box/sub" && LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/box.grants" \
+    AETHER_SANDBOX_LOG=stderr "$TMP/harness" unshare-ns "$FIX" </dev/null >"$TMP/out" 2>"$TMP/err")
+got=$?
+if [ "$got" -eq 10 ] && grep -q 'syscall:unshare' "$TMP/err"; then
+    echo "  [PASS] a new user and mount namespace is refused without a native grant"
+elif [ "$got" -eq 7 ]; then
+    echo "  [SKIP] unshare: not on this system"
+else
+    echo "  [FAIL] unshare(CLONE_NEWUSER|CLONE_NEWNS) under the preload: exit $got, expected 10 and the refusal logged"
+    sed 's/^/    /' "$TMP/err"
+    fail=1
+fi
 
 if [ "$(cat "$FIX/outside/secret.txt" 2>/dev/null)" != "outside" ]; then
     echo "  [FAIL] the outside file was changed or removed"
@@ -123,7 +162,12 @@ for made in created newdir new_link fifo; do
         fail=1
     fi
 done
-if [ -e "$FIX/box/stolen" ] || [ -e "$FIX/box/hard" ]; then
+if [ -e "$FIX/box/slash_new" ] || [ ! -e "$FIX/box/inside.txt" ] || [ ! -L "$FIX/box/out_dir" ] ||
+   [ -e "$FIX/box/rmd" ] || [ ! -e "$FIX/box/ren_s.txt" ]; then
+    echo "  [FAIL] a call on 'name/' acted on the name as something else"
+    fail=1
+fi
+if [ -e "$FIX/box/stolen" ] || [ -e "$FIX/box/hard" ] || [ -e "$FIX/box/stolen_fd" ]; then
     echo "  [FAIL] an outside file was moved or linked into the box"
     fail=1
 fi
