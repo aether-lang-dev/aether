@@ -188,6 +188,9 @@ LRU list. Cacheability gates per RFC 7234 conservative subset:
 - Request `Cache-Control: no-store` → bypass.
 - Response `Cache-Control: no-store` / `private` → bypass.
 - Response `Vary: *` → uncacheable.
+- Request with `Authorization` → stored only when the response says
+  `public`, `s-maxage` or `must-revalidate` (RFC 9111 3.5).
+- Response with `Set-Cookie` → not stored.
 - Body length ≤ `max_body_bytes`.
 
 TTL resolution: response `Cache-Control: max-age` (clamped to 1
@@ -201,6 +204,10 @@ hour for v1 conservatism), else `default_ttl_sec`. `s-maxage` and
 | `url` | `path?query` | method-agnostic, POST/GET share entries (rare; usually wrong) |
 | `method_url` | `METHOD path?query` | safe default, GET and HEAD don't share entries with each other or with POST |
 | `method_url_vary` | as above + `\0name=value` for each header in upstream's `Vary:` | the response varies on `Accept-Encoding` / `Accept-Language` / etc. |
+
+The query is part of every key, as it is sent upstream. With
+`proxy.opts_set_preserve_host(opts, 1)` the client's `Host` is part of
+the key too, since the upstream then answers by it.
 
 ## Idempotent retry, `proxy_next_upstream` semantics
 

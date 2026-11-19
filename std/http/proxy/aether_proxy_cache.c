@@ -10,6 +10,9 @@
  *   - status in {200, 203, 204, 300, 301, 404, 410}.
  *   - Cache-Control on request: no `no-store`.
  *   - Cache-Control on response: no `no-store` / `private`.
+ *   - a request with Authorization only when the response says `public`,
+ *     `s-maxage` or `must-revalidate` (RFC 9111 3.5).
+ *   - no `Set-Cookie` on the response.
  *   - body_length ≤ max_body_bytes.
  *   - Vary: * → uncacheable.
  *
@@ -321,30 +324,74 @@ static int cc_has_directive(const char* cc, const char* dir) {
     return strstr(cc, dir) != NULL;
 }
 
-/* Helper — locate one header value in a `Name: value\r\n` block.
- * Case-insensitive name match. Returns NULL on miss. Caller frees
- * the returned malloc'd string. */
-static char* extract_header(const char* block, const char* name) {
+/* Whether Cache-Control `cc` carries directive `dir` as a directive of its
+ * own: an element of the comma-separated list whose name is `dir`, matched
+ * case-insensitively, with or without an `=value`. A quoted value is skipped
+ * whole, so `no-cache="public"` names no `public` directive.
+ *
+ * cc_has_directive's substring match is kept for the refusals (no-store,
+ * private), where a false match only refuses a store. This one is for the
+ * directives that permit a store, where a false match would keep a response
+ * the origin never said was shareable. */
+static int cc_has_token(const char* cc, const char* dir) {
+    if (!cc || !dir) return 0;
+    size_t dl = strlen(dir);
+    const char* p = cc;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        const char* name = p;
+        while (*p && *p != '=' && *p != ',' && *p != ' ' && *p != '\t') p++;
+        size_t nl = (size_t)(p - name);
+        if (nl == dl && strncasecmp(name, dir, dl) == 0) return 1;
+        /* Skip the rest of this element: an optional value, quoted or not. */
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '=') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '"') {
+                p++;
+                while (*p && *p != '"') {
+                    if (*p == '\\' && p[1]) p++;
+                    p++;
+                }
+                if (*p == '"') p++;
+            }
+        }
+        while (*p && *p != ',') p++;
+    }
+    return 0;
+}
+
+/* Where field `name` starts in a `Name: value\r\n` block, at the start of its
+ * name, or NULL when the block has no such field. Case-insensitive. */
+static const char* find_header(const char* block, const char* name) {
     if (!block || !name) return NULL;
     size_t name_len = strlen(name);
     const char* p = block;
     while (*p) {
-        if (strncasecmp(p, name, name_len) == 0 && p[name_len] == ':') {
-            const char* v = p + name_len + 1;
-            while (*v == ' ' || *v == '\t') v++;
-            const char* eol = strstr(v, "\r\n");
-            size_t vl = eol ? (size_t)(eol - v) : strlen(v);
-            char* out = (char*)malloc(vl + 1);
-            if (!out) return NULL;
-            memcpy(out, v, vl);
-            out[vl] = '\0';
-            return out;
-        }
+        if (strncasecmp(p, name, name_len) == 0 && p[name_len] == ':') return p;
         const char* eol = strstr(p, "\r\n");
         if (!eol) break;
         p = eol + 2;
     }
     return NULL;
+}
+
+/* One field's value from a `Name: value\r\n` block, as a malloc'd string the
+ * caller frees, or NULL on a miss. */
+static char* extract_header(const char* block, const char* name) {
+    const char* p = find_header(block, name);
+    if (!p) return NULL;
+    const char* v = p + strlen(name) + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    const char* eol = strstr(v, "\r\n");
+    size_t vl = eol ? (size_t)(eol - v) : strlen(v);
+    char* out = (char*)malloc(vl + 1);
+    if (!out) return NULL;
+    memcpy(out, v, vl);
+    out[vl] = '\0';
+    return out;
 }
 
 void aether_proxy_cache_store(AetherProxyCache* cache,
@@ -378,6 +425,27 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
     char* resp_cc = extract_header(response_headers, "Cache-Control");
     if (resp_cc && (cc_has_directive(resp_cc, "no-store") ||
                     cc_has_directive(resp_cc, "private"))) {
+        free(resp_cc);
+        return;
+    }
+
+    /* A response to a request that carried credentials is one user's view
+     * of the resource. A shared cache stores it only when the origin says it
+     * may be shared: public, s-maxage or must-revalidate (RFC 9111 3.5,
+     * #3736). Stored without that, it was replayed to every later client of
+     * the URL, credentials or not. */
+    if (http_get_header(req, "Authorization") &&
+        !(cc_has_token(resp_cc, "public") ||
+          cc_has_token(resp_cc, "s-maxage") ||
+          cc_has_token(resp_cc, "must-revalidate"))) {
+        free(resp_cc);
+        return;
+    }
+
+    /* A response that sets a cookie is addressed to the client that asked:
+     * replayed from the cache, it handed that client's session to everyone
+     * else (#3736). It is not stored at all. */
+    if (find_header(response_headers, "Set-Cookie")) {
         free(resp_cc);
         return;
     }
