@@ -1,0 +1,5 @@
+a: !!str 123
+b: !!int "7"
+c: !custom value
+d: !!binary aGVsbG8=
+e: !!null ''

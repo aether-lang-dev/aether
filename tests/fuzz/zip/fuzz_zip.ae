@@ -1,0 +1,203 @@
+// The std.zip fuzz target: the archive reader (open, count, entry_*,
+// entry_read with its CRC check) and extract, on an archive from wherever it
+// came from. Built --emit=obj and called from tests/fuzz/ae_target.c with
+// the input whole.
+//
+// Each input is extracted for real, under a scratch directory of its own
+// ($FUZZ_SCRATCH, which run_fuzz_c.sh sets): root/out is the destination,
+// and root/outside holds one file, "canary". Byte 0 picks the options: bit 0
+// allow_symlinks, bits 1-2 small limits on entries and bytes; the rest is
+// the archive.
+//
+// Each check is a property, and a failure abort()s, saying which:
+//
+//   Z1  Nothing is written outside the destination, whatever the archive
+//       names (an absolute path, `..`, a drive letter, backslashes): root
+//       holds out and outside only, and outside holds the canary,
+//       unchanged. No symbolic link is made.
+//   Z2  The reader is consistent: count is the number of entries, each has
+//       a name, and an entry that reads has its declared size; an
+//       encrypted entry does not read.
+//   Z3  An extraction that succeeds wrote what the reader reads: each file
+//       entry with a plain name is a file under out with those bytes, each
+//       directory entry a directory; no more files than max_entries, none
+//       larger than max_entry_bytes.
+//   Z4  Nothing leaks (LeakSanitizer).
+import std.bytes
+import std.string
+import std.fs
+import std.os
+import std.io
+import std.zip
+
+extern abort()
+
+fn fail(what: string) {
+    _w = io.stderr_write("fuzz_zip: property failed: ${what}\n")
+    abort()
+}
+
+fn scratch_root() -> string {
+    base = os.getenv("FUZZ_SCRATCH")
+    if base == "" { base = "build/fuzz/zip/scratch" }
+    return "${base}/run"
+}
+
+fn is_dot(name: string) -> bool {
+    return name == "." || name == ".."
+}
+
+// Z1
+fn nothing_outside(root: string) {
+    lst, lerr = fs.list_dir(root)
+    if lerr != "" { fail("the scratch root cannot be listed") }
+    n = fs.dir_list_count(lst)
+    i = 0
+    while i < n {
+        name = fs.dir_list_get(lst, i)
+        if !is_dot(name) && name != "out" && name != "outside" { fail("'${name}' was written beside the destination") }
+        i = i + 1
+    }
+    fs.dir_list_free(lst)
+    out, oerr = fs.list_dir("${root}/outside")
+    if oerr != "" { fail("the outside directory is gone") }
+    m = fs.dir_list_count(out)
+    j = 0
+    while j < m {
+        name = fs.dir_list_get(out, j)
+        if !is_dot(name) && name != "canary" { fail("'${name}' was written outside the destination") }
+        j = j + 1
+    }
+    fs.dir_list_free(out)
+    data, len, rerr = fs.read_binary("${root}/outside/canary")
+    if rerr != "" || len != 6 || string.substring(data, 0, len) != "canary" { fail("the canary outside the destination changed") }
+}
+
+// Z1 (links) and Z3 (bounds): the number of regular files under `dir`.
+fn walk_out(dir: string, max_bytes: long, depth: int) -> int {
+    if depth > 64 { fail("the destination nests deeper than 64") }
+    lst, lerr = fs.list_dir(dir)
+    if lerr != "" { return 0 }
+    files = 0
+    n = fs.dir_list_count(lst)
+    i = 0
+    while i < n {
+        name = fs.dir_list_get(lst, i)
+        if !is_dot(name) {
+            path = "${dir}/${name}"
+            kind = fs.dir_list_kind(lst, i)
+            if fs.fs_is_symlink(path) == 1 || kind == fs.STAT_KIND_SYMLINK {
+                fail("a symbolic link was made: ${path}")
+            } else if kind == fs.STAT_KIND_DIR {
+                files = files + walk_out(path, max_bytes, depth + 1)
+            } else {
+                files = files + 1
+                _d, len, rerr = fs.read_binary(path)
+                if rerr == "" && (len as long) > max_bytes { fail("a file past max_entry_bytes: ${path}") }
+            }
+        }
+        i = i + 1
+    }
+    fs.dir_list_free(lst)
+    return files
+}
+
+fn plain_name(name: string) -> bool {
+    n = string.length(name)
+    if n == 0 || n > 200 { return false }
+    comp = 0
+    dots = 0
+    i = 0
+    while i < n {
+        c = string.char_at_n(name, n, i) & 255
+        if c == 47 {
+            if comp == 0 || comp == dots { return false }
+            comp = 0
+            dots = 0
+        } else {
+            ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 46 || c == 45 || c == 95
+            if !ok { return false }
+            if c == 46 { dots = dots + 1 }
+            comp = comp + 1
+        }
+        i = i + 1
+    }
+    if comp > 0 && comp == dots { return false }
+    return true
+}
+
+fn strip_slash(name: string) -> string {
+    n = string.length(name)
+    if n > 1 && string.char_at_n(name, n, n - 1) == 47 { return string.substring(name, 0, n - 1) }
+    return name
+}
+
+fuzz_target(data: ptr, len: int) {
+    if len < 1 {
+        return
+    }
+    flags = (data as byte[])[0] & 255
+    archive = (data as byte[])[1..len]
+
+    // Z2
+    ar, oerr = zip.open(archive)
+    if oerr == "" {
+        n = zip.count(ar)
+        if n < 0 { fail("a negative entry count") }
+        i = 0
+        while i < n && i < 2000 {
+            name = zip.entry_name(ar, i)
+            body, blen, rerr = zip.entry_read(ar, i)
+            if rerr == "" {
+                if zip.entry_is_encrypted(ar, i) == 1 { fail("an encrypted entry read") }
+                if (blen as long) != zip.entry_size(ar, i) { fail("entry ${i} read ${blen} bytes, it declares ${zip.entry_size(ar, i)}") }
+                if string.length(body) < blen { fail("entry ${i}'s bytes are shorter than its length") }
+            }
+            if string.length(name) < 0 { fail("a name") }
+            i = i + 1
+        }
+        zip.close(ar)
+    }
+
+    root = scratch_root()
+    if fs.remove_tree(root) != "" { fail("the scratch root cannot be cleared") }
+    if fs.mkdir_p("${root}/outside") != "" { fail("the scratch root cannot be made") }
+    if fs.write_binary("${root}/outside/canary", string.bytes("canary")) != "" { fail("the canary cannot be written") }
+
+    opts = zip.default_extract_options()
+    opts.allow_symlinks = flags & 1
+    if (flags & 2) != 0 { opts.max_entries = 3 }
+    if (flags & 4) != 0 { opts.max_entry_bytes = 100 as long }
+    err = zip.extract(archive, "${root}/out", opts)
+
+    nothing_outside(root)
+    files = walk_out("${root}/out", opts.max_entry_bytes, 0)
+
+    // Z3
+    if err == "" {
+        if files > opts.max_entries { fail("${files} files past max_entries ${opts.max_entries}") }
+        ar2, oerr2 = zip.open(archive)
+        if oerr2 != "" { fail("an archive that extracted does not open") }
+        n2 = zip.count(ar2)
+        j = 0
+        while j < n2 {
+            name = zip.entry_name(ar2, j)
+            if plain_name(name) {
+                if zip.entry_is_dir(ar2, j) == 1 {
+                    if fs.exists("${root}/out/${strip_slash(name)}") != 1 { fail("directory entry '${name}' was not made") }
+                } else {
+                    want, wlen, werr = zip.entry_read(ar2, j)
+                    if werr != "" { fail("entry '${name}' extracted and does not read: ${werr}") }
+                    got, glen, gerr = fs.read_binary("${root}/out/${name}")
+                    if gerr != "" { fail("entry '${name}' was not written: ${gerr}") }
+                    if glen != wlen || string.substring(got, 0, glen) != string.substring(want, 0, wlen) {
+                        fail("entry '${name}' was written with other bytes")
+                    }
+                }
+            }
+            j = j + 1
+        }
+        zip.close(ar2)
+    }
+    if fs.remove_tree(root) != "" { fail("the scratch root cannot be removed") }
+}

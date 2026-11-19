@@ -1,0 +1,11 @@
+HTTP/1.1 200 OK
+Connection: close, X-Drop
+Keep-Alive: timeout=5
+Proxy-Connection: keep-alive
+TE: trailers
+Trailer: X-T
+Upgrade: h2c
+Proxy-Authenticate: Basic
+X-Kept: yes
+Content-Length: 0
+

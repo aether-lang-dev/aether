@@ -1,0 +1,72 @@
+// Writes the seed corpus for the YAML fuzz target into the directory named on
+// the command line (corpus/ beside this file, as `make fuzz-corpus` runs it).
+// Edit this file, not the seeds.
+//
+// A seed is a document: the configuration shapes std.yaml reads, each scalar
+// style (plain, quoted with escapes, literal and folded blocks with their
+// chomping indicators), flow and block collections, anchors and aliases,
+// tags, comments, several documents, complex keys, and documents libfyaml
+// refuses.
+import std.os
+import std.io
+import std.fs
+import std.strbuilder
+
+extern exit(code: int)
+
+fn seed(dir: string, name: string, text: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, text)
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // Documents libfyaml accepts.
+    seed(dir, "config", "server:\n  host: example.com\n  port: 8080\n  tls: true\nworkers: [1, 2, 3]\nname: \"svc\"\n")
+    seed(dir, "sequence", "- a\n- b\n- - c\n  - d\n- {e: f}\n")
+    seed(dir, "flow", "{a: [1, 2, {b: c}], d: 'e''f', g: \"h\\ti\\u00e9\\n\"}\n")
+    seed(dir, "literal", "text: |\n  line one\n  line two\nkeep: |+\n  kept\n\nstrip: |-\n  stripped\n")
+    seed(dir, "folded", "text: >\n  folded\n  lines\n\n  para\nindented: >2\n    deeper\n")
+    seed(dir, "anchors", "base: &b {x: 1, y: 2}\nuse: *b\nlist: [&s scalar, *s]\n")
+    seed(dir, "merge", "defaults: &d\n  a: 1\nentry:\n  <<: *d\n  b: 2\n")
+    seed(dir, "tags", "a: !!str 123\nb: !!int \"7\"\nc: !custom value\nd: !!binary aGVsbG8=\ne: !!null ''\n")
+    seed(dir, "comments", "# head\na: 1 # trailing\n# middle\nb:\n  # inside\n  - x\n")
+    seed(dir, "documents", "---\na: 1\n...\n---\n- b\n...\n")
+    seed(dir, "directives", "%YAML 1.2\n%TAG !e! tag:example.com,2000:\n---\n!e!thing value\n")
+    seed(dir, "complex_key", "? [a, b]\n: c\n? {d: e}\n: f\n? |\n  block key\n: g\n")
+    seed(dir, "null_values", "a:\nb: ~\nc: null\n? d\n")
+    seed(dir, "empty", "")
+    seed(dir, "scalar_only", "just a scalar\n")
+    seed(dir, "quoted_escapes", "s: \"\\x41\\u0042\\U00000043\\0\\a\\b\\e\\f\\r\\v\\/\\N\\_\\L\\P\"\n")
+    seed(dir, "multiline_plain", "a: this is\n  a multi\n  line plain\nb: 'single\n\n  quoted'\n")
+    seed(dir, "duplicate_keys", "a: 1\na: 2\n")
+    seed(dir, "unicode", "caf\xc3\xa9: \xe2\x82\xac\nemoji: \xf0\x9f\x98\x80\n")
+    seed(dir, "bom", "\xef\xbb\xbfa: 1\n")
+    seed(dir, "deep_flow", "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[x]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\n")
+    seed(dir, "crlf", "a: 1\r\nb:\r\n  - c\r\n")
+
+    // Documents it refuses.
+    seed(dir, "bad_indent", "a:\n  b: 1\n c: 2\n")
+    seed(dir, "unclosed_flow", "{a: [1, 2\n")
+    seed(dir, "unclosed_quote", "a: \"open\n")
+    seed(dir, "undefined_alias", "a: *nowhere\n")
+    seed(dir, "tab_indent", "a:\n\t- b\n")
+    seed(dir, "bad_escape", "a: \"\\q\"\n")
+    seed(dir, "colon_in_flow", "{a: b: c}\n")
+    seed(dir, "directive_after", "a: 1\n%YAML 1.2\n---\n")
+}

@@ -1,0 +1,1 @@
+<?xml version="1.0"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>b</Name><Contents><Key>k&amp;1</Key><Size>3</Size></Contents></ListBucketResult>

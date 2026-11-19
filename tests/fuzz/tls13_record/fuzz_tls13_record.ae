@@ -1,0 +1,307 @@
+// The TLS 1.3 record layer fuzz target (std/cryptography/tls13_record),
+// built --emit=obj and called from tests/fuzz/ae_target.c with the input
+// whole. open_record and check_header read what a peer sends.
+//
+// Input: byte 0 picks the AEAD (bits 0-1: ChaCha20-Poly1305, AES-128-GCM,
+// AES-256-GCM), the mode (bit 2: the rest is a record as received, else a
+// plaintext to seal) and whether to seal it with seal_records too (bit 3);
+// byte 1 is the inner content type, byte 2 the zero padding after it, bytes
+// 3-4 a byte to change in the sealed record (65535: none) and byte 5 what to
+// XOR it with. Each check is a property, and a failure abort()s:
+//
+//   R1  check_header gives the alert a reading of RFC 8446 5.1 and 5.2
+//       written here gives (unknown content type and an empty handshake or
+//       alert record: unexpected_message; a plaintext record over 2^14 bytes
+//       or a protected one over 2^14 + 256: record_overflow).
+//   R2  A record sealed here, TLSInnerPlaintext as RFC 8446 5.2 has it
+//       (content, content type, zeros), opens to exactly its content and
+//       type, or is refused with the alert 5.2 and 5.4 give: no non-zero
+//       byte (unexpected_message), an inner plaintext over 2^14 + 1 bytes
+//       or a ciphertext over 2^14 + 256 (record_overflow), a type TLS 1.3
+//       does not know (unexpected_message).
+//   R3  Any record not sealed with the key and sequence number, a received
+//       one or a sealed one with one byte changed, is refused with the alert
+//       its header gives or bad_record_mac, and hands back no plaintext.
+//   R4  The sequence number advances once per record that decrypted, and
+//       only then: the same record opened again is bad_record_mac, and a
+//       refused forgery does not cost the next record its number.
+//   R5  seal_records cuts a plaintext into records of at most 2^14 bytes
+//       that open, in order, to the plaintext; seal_record refuses one
+//       longer.
+//   R6  Nothing leaks (LeakSanitizer).
+import std.bytes
+import std.cryptography.tls13_record
+import std.cryptography.chacha20poly1305
+import std.cryptography.aes
+
+extern abort()
+
+const NONE = 0
+const UNEXPECTED_MESSAGE = 10
+const BAD_RECORD_MAC = 20
+const RECORD_OVERFLOW = 22
+const DECODE_ERROR = 50
+
+fn key_len(aead: int) -> int {
+    if aead == tls13_record.AEAD_AES_128_GCM { return 16 }
+    return 32
+}
+
+fn pattern(n: int, seed: int) -> ptr {
+    b = bytes.new(n)
+    bytes.set_length(b, n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, (i * 7 + seed) & 255)
+        i = i + 1
+    }
+    return b
+}
+
+// A whole TLSCiphertext for `inner` (inner_len bytes), sealed by hand with
+// the record nonce for `seq`, so any inner plaintext can be sealed: padding,
+// a zero or unknown type. Caller frees.
+fn seal_inner(aead: int, key: ptr, klen: int, iv: ptr, seq: long, inner: ptr, inner_len: int) -> ptr {
+    ct_len = inner_len + tls13_record.TAG_LEN
+    aad = bytes.new(5)
+    bytes.set_length(aad, 5)
+    bytes.set(aad, 0, 23)
+    bytes.set(aad, 1, 3)
+    bytes.set(aad, 2, 3)
+    bytes.set(aad, 3, (ct_len >> 8) & 255)
+    bytes.set(aad, 4, ct_len & 255)
+    nonce = tls13_record.nonce_for(iv, seq)
+    enc = null
+    if aead == tls13_record.AEAD_CHACHA20_POLY1305 {
+        enc = chacha20poly1305.aead_seal(key, nonce, bytes.view(aad)[0..5], bytes.view(inner)[0..inner_len])
+    } else {
+        actx = aes.new_encryptor(bytes.view(key)[0..klen])
+        enc = aes.gcm_seal(actx, nonce, bytes.view(aad)[0..5], bytes.view(inner)[0..inner_len])
+        aes.free(actx)
+    }
+    rec = bytes.new(5 + ct_len)
+    bytes.set_length(rec, 5 + ct_len)
+    bytes.copy_from_bytes(rec, 0, aad, 0, 5)
+    bytes.copy_from_bytes(rec, 5, enc, 0, ct_len)
+    bytes.free(aad)
+    bytes.free(nonce)
+    bytes.free(enc)
+    return rec
+}
+
+// R1: the alert check_header should give for `n` bytes of header at `h`.
+fn header_alert(h: ptr, n: int) -> int {
+    if n < 5 { return DECODE_ERROR }
+    t = bytes.get(h, 0) & 255
+    len = ((bytes.get(h, 3) & 255) << 8) | (bytes.get(h, 4) & 255)
+    if t != 20 && t != 21 && t != 22 && t != 23 { return UNEXPECTED_MESSAGE }
+    if t == 23 {
+        if len > 16640 { return RECORD_OVERFLOW }
+    } else if len > 16384 {
+        return RECORD_OVERFLOW
+    }
+    if (t == 21 || t == 22) && len == 0 { return UNEXPECTED_MESSAGE }
+    return NONE
+}
+
+fn check_header_agrees(h: ptr, n: int) {
+    m = n
+    if m > 5 { m = 5 }
+    alert, err = tls13_record.check_header(bytes.view(h)[0..m])
+    want = header_alert(h, m)
+    if alert != want { abort() }
+    if (alert == NONE) != (err == "") { abort() }
+}
+
+// What open_record must answer, from the header, for a record that is not
+// authentic: the alert, never success.
+fn forged_alert(r: ptr, n: int) -> int {
+    if n < 21 { return BAD_RECORD_MAC }
+    if (bytes.get(r, 0) & 255) != 23 { return UNEXPECTED_MESSAGE }
+    ct_len = ((bytes.get(r, 3) & 255) << 8) | (bytes.get(r, 4) & 255)
+    if ct_len > 16640 { return RECORD_OVERFLOW }
+    if 5 + ct_len > n { return DECODE_ERROR }
+    return BAD_RECORD_MAC
+}
+
+// Open `r` with `ctx` and require the refusal `want`.
+fn expect_refused(ctx: ptr, r: ptr, n: int, want: int) {
+    o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+    err = tls13_record.open_record(ctx, bytes.view(r)[0..n], &o)
+    if err == "" { abort() }
+    if o.alert != want { abort() }
+    if o.plaintext != null { abort() }
+}
+
+fn raw_record(aead: int, r: ptr, len: int) {
+    if len <= 0 { return }
+    check_header_agrees(r, len)
+    klen = key_len(aead)
+    key = pattern(klen, 1)
+    iv = pattern(12, 9)
+    ctx = tls13_record.new_aead(aead, bytes.view(key)[0..klen], iv)
+    expect_refused(ctx, r, len, forged_alert(r, len))
+    tls13_record.free_ctx(ctx)
+    bytes.free(key)
+    bytes.free(iv)
+}
+
+fn sealed_record(aead: int, ctype: int, pad: int, mpos: int, mxor: int, also_split: int, pt: ptr, pt_len: int) {
+    klen = key_len(aead)
+    key = pattern(klen, 1)
+    iv = pattern(12, 9)
+
+    inner_len = pt_len + 1 + pad
+    inner = bytes.new(inner_len)
+    bytes.set_length(inner, inner_len)
+    i = 0
+    while i < inner_len {
+        bytes.set(inner, i, 0)
+        i = i + 1
+    }
+    if pt_len > 0 { bytes.copy_from_bytes(inner, 0, pt, 0, pt_len) }
+    bytes.set(inner, pt_len, ctype)
+
+    rec = seal_inner(aead, key, klen, iv, 0 as long, inner, inner_len)
+    rlen = 5 + inner_len + tls13_record.TAG_LEN
+    check_header_agrees(rec, rlen)
+
+    // R2: what the record must open to.
+    want = NONE
+    idx = inner_len - 1
+    while idx >= 0 {
+        if (bytes.get(inner, idx) & 255) != 0 { break }
+        idx = idx - 1
+    }
+    advances = 1
+    if inner_len + tls13_record.TAG_LEN > 16640 {
+        want = RECORD_OVERFLOW
+        advances = 0
+    } else if idx < 0 {
+        want = UNEXPECTED_MESSAGE
+    } else if inner_len > 16385 {
+        want = RECORD_OVERFLOW
+    } else {
+        t = bytes.get(inner, idx) & 255
+        if t != 21 && t != 22 && t != 23 { want = UNEXPECTED_MESSAGE }
+    }
+
+    ctx = tls13_record.new_aead(aead, bytes.view(key)[0..klen], iv)
+
+    // R3, R4: a changed byte is refused and costs no sequence number.
+    if mxor != 0 && mpos < rlen {
+        bytes.set(rec, mpos, (bytes.get(rec, mpos) ^ mxor) & 255)
+        expect_refused(ctx, rec, rlen, forged_alert(rec, rlen))
+        bytes.set(rec, mpos, (bytes.get(rec, mpos) ^ mxor) & 255)
+    }
+
+    o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+    err = tls13_record.open_record(ctx, bytes.view(rec)[0..rlen], &o)
+    if want == NONE {
+        if err != "" { abort() }
+        if o.alert != NONE { abort() }
+        if o.content_type != (bytes.get(inner, idx) & 255) { abort() }
+        if o.plaintext_len != idx { abort() }
+        j = 0
+        while j < idx {
+            if bytes.get(o.plaintext, j) != bytes.get(inner, j) { abort() }
+            j = j + 1
+        }
+        bytes.free(o.plaintext)
+    } else {
+        if err == "" { abort() }
+        if o.alert != want { abort() }
+        if o.plaintext != null { abort() }
+    }
+
+    // R4: opened again, the next sequence number does not fit it.
+    if advances == 1 {
+        expect_refused(ctx, rec, rlen, BAD_RECORD_MAC)
+    } else {
+        expect_refused(ctx, rec, rlen, want)
+    }
+    tls13_record.free_ctx(ctx)
+
+    // R5
+    if also_split == 1 && pt_len > 0 && (ctype == 21 || ctype == 22 || ctype == 23) {
+        sctx = tls13_record.new_aead(aead, bytes.view(key)[0..klen], iv)
+        one = tls13_record.seal_record(sctx, ctype, bytes.view(pt)[0..pt_len])
+        if pt_len > tls13_record.CONTENT_MAX_PLAIN_LEN {
+            if one != null { abort() }
+        } else {
+            if one == null { abort() }
+            bytes.free(one)
+        }
+        tls13_record.free_ctx(sctx)
+
+        sctx = tls13_record.new_aead(aead, bytes.view(key)[0..klen], iv)
+        rctx = tls13_record.new_aead(aead, bytes.view(key)[0..klen], iv)
+        all = tls13_record.seal_records(sctx, ctype, bytes.view(pt)[0..pt_len])
+        if all == null { abort() }
+        total = bytes.length(all)
+        p = 0
+        got = 0
+        while p < total {
+            if p + 5 > total { abort() }
+            n = 5 + (((bytes.get(all, p + 3) & 255) << 8) | (bytes.get(all, p + 4) & 255))
+            if p + n > total { abort() }
+            piece = bytes.new(n)
+            bytes.set_length(piece, n)
+            bytes.copy_from_bytes(piece, 0, all, p, n)
+            po = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+            perr = tls13_record.open_record(rctx, bytes.view(piece)[0..n], &po)
+            if perr != "" { abort() }
+            if po.content_type != ctype { abort() }
+            if po.plaintext_len > tls13_record.CONTENT_MAX_PLAIN_LEN { abort() }
+            if po.plaintext_len == 0 { abort() }
+            k = 0
+            while k < po.plaintext_len {
+                if got + k >= pt_len { abort() }
+                if bytes.get(po.plaintext, k) != bytes.get(pt, got + k) { abort() }
+                k = k + 1
+            }
+            got = got + po.plaintext_len
+            bytes.free(po.plaintext)
+            bytes.free(piece)
+            p = p + n
+        }
+        if got != pt_len { abort() }
+        bytes.free(all)
+        tls13_record.free_ctx(sctx)
+        tls13_record.free_ctx(rctx)
+    }
+
+    bytes.free(rec)
+    bytes.free(inner)
+    bytes.free(key)
+    bytes.free(iv)
+}
+
+fuzz_target(data: ptr, len: int) {
+    if len < 6 {
+        return
+    }
+    head = bytes.new(6)
+    bytes.set_length(head, 6)
+    bytes.copy_from_slice(head, 0, (data as byte[])[0..6])
+    flags = bytes.get(head, 0) & 255
+    aead = flags & 3
+    if aead == 3 { aead = 0 }
+    ctype = bytes.get(head, 1) & 255
+    pad = bytes.get(head, 2) & 255
+    mpos = ((bytes.get(head, 3) & 255) << 8) | (bytes.get(head, 4) & 255)
+    mxor = bytes.get(head, 5) & 255
+    bytes.free(head)
+    rest = len - 6
+    body = bytes.new(rest + 1)
+    bytes.set_length(body, rest + 1)
+    if rest > 0 {
+        bytes.copy_from_slice(body, 0, (data as byte[])[6..len])
+    }
+    if (flags & 4) != 0 {
+        raw_record(aead, body, rest)
+    } else {
+        sealed_record(aead, ctype, pad, mpos, mxor, (flags >> 3) & 1, body, rest)
+    }
+    bytes.free(body)
+}

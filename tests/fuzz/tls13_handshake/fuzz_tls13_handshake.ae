@@ -1,0 +1,235 @@
+// The TLS 1.3 handshake fuzz target: the message parsers of
+// std/cryptography/tls13_hs that the server (tls13_server: ClientHello) and
+// the client (tls13_client: ServerHello and HelloRetryRequest,
+// EncryptedExtensions, Certificate, CertificateRequest, NewSessionTicket)
+// run on what the peer sends. Built --emit=obj and called from
+// tests/fuzz/ae_target.c with the input whole.
+//
+// Input: byte 0 picks what to do. Below 0x80, bits 0-2 pick a parser and the
+// rest is the message (for check_extensions, byte 1 picks the message kind
+// and byte 2 what the client offered). From 0x80, the rest is the material
+// for a ClientHello and a ServerHello built with the module's own builders
+// (randoms, session ids, a key share, a host name) and parsed back.
+//
+// Each check is a property, and a failure abort()s:
+//
+//   H1  A refusal names an alert TLS 1.3 defines for it (unexpected_message,
+//       handshake_failure, illegal_parameter, decode_error,
+//       protocol_version, missing_extension, unsupported_extension) and a
+//       reason; an acceptance names neither.
+//   H2  What a parser accepts it reports from the message: a ClientHello is
+//       a ClientHello whose header length is its body's, its random is the
+//       32 bytes after legacy_version, its session id the bytes after that
+//       (at most 32); the suite chosen is one this TLS implements, and a key
+//       share is reported with its group or not at all. A ServerHello
+//       negotiates TLS 1.3 and one of these suites, and its session id and
+//       cookie lie inside the message; a NewSessionTicket's nonce and
+//       ticket lie inside the body, the ticket not empty.
+//   H3  What the builders write the parsers read back: the same random,
+//       session id, key share and group, server name or not, suite.
+//   H4  Nothing leaks (LeakSanitizer), whether the parser accepts or not.
+import std.bytes
+import std.string
+import std.cryptography.tls13_hs
+
+extern abort()
+
+fn known_alert(a: int) -> bool {
+    return a == 10 || a == 40 || a == 47 || a == 50 || a == 70 || a == 109 || a == 110
+}
+
+// H1 for an (alert, error) answer.
+fn answer(a: int, err: string) {
+    if a == 0 {
+        if err != "" { abort() }
+    } else {
+        if !known_alert(a) { abort() }
+        if err == "" { abort() }
+    }
+}
+
+fn supported_suite(s: int) -> bool {
+    return s == tls13_hs.TLS_AES_128_GCM_SHA256 || s == tls13_hs.TLS_AES_256_GCM_SHA384 || s == tls13_hs.TLS_CHACHA20_POLY1305_SHA256
+}
+
+fn same_range(a: ptr, aoff: int, b: ptr, boff: int, n: int) -> bool {
+    i = 0
+    while i < n {
+        if (bytes.get(a, aoff + i) & 255) != (bytes.get(b, boff + i) & 255) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn client_hello(m: ptr, n: int) {
+    ch = tls13_hs.ChParsed { random: null, session_id: null, session_id_len: 0, cipher_suite: 0, group: 0,
+                             key_share: null, key_share_len: 0, has_sni: 0, saw_supported_versions: 0,
+                             sig_algs: 0, saw_sig_algs: 0, groups: 0, retry_group: 0, has_early_data: 0,
+                             has_cookie: 0, alert: 0 }
+    err = tls13_hs.parse_client_hello(bytes.view(m)[0..n], &ch)
+    if err == "" {
+        if ch.alert != 0 { abort() }
+        if (bytes.get(m, 0) & 255) != 1 { abort() }
+        body = ((bytes.get(m, 1) & 255) << 16) | ((bytes.get(m, 2) & 255) << 8) | (bytes.get(m, 3) & 255)
+        if body + 4 != n { abort() }
+        if ch.random == null { abort() }
+        if !same_range(ch.random, 0, m, 6, 32) { abort() }
+        sid_len = bytes.get(m, 38) & 255
+        if ch.session_id_len != sid_len || sid_len > 32 { abort() }
+        if sid_len > 0 && !same_range(ch.session_id, 0, m, 39, sid_len) { abort() }
+        if ch.cipher_suite != 0 && !supported_suite(ch.cipher_suite) { abort() }
+        if (ch.group == 0) != (ch.key_share == null) { abort() }
+        if ch.key_share != null && ch.key_share_len <= 0 { abort() }
+    } else {
+        if !known_alert(ch.alert) { abort() }
+    }
+    tls13_hs.free_ch(&ch)
+}
+
+fn server_hello(m: ptr, n: int) {
+    sh = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
+                             is_hello_retry: 0, psk_accepted: 0, alert: 0, session_id_off: 0,
+                             session_id_len: 0, selected_identity: -1, cookie_off: 0, cookie_len: 0 }
+    err = tls13_hs.parse_server_hello(bytes.view(m)[0..n], &sh)
+    if err == "" {
+        if sh.alert != 0 { abort() }
+        if sh.version != 0x0304 { abort() }
+        if !supported_suite(sh.cipher_suite) { abort() }
+        if sh.session_id_len < 0 || sh.session_id_len > 32 { abort() }
+        if sh.session_id_off < 0 || sh.session_id_off + sh.session_id_len > n { abort() }
+        if sh.cookie_len < 0 || sh.cookie_off < 0 || sh.cookie_off + sh.cookie_len > n { abort() }
+        if sh.key_share != null && sh.key_share_len <= 0 { abort() }
+    } else {
+        if !known_alert(sh.alert) { abort() }
+    }
+    if sh.key_share != null { bytes.free(sh.key_share) }
+}
+
+fn session_ticket(m: ptr, n: int) {
+    t = tls13_hs.NstParsed { lifetime: 0, age_add: 0, nonce_off: 0, nonce_len: 0, ticket_off: 0, ticket_len: 0,
+                             max_early_data: 0, alert: 0 }
+    err = tls13_hs.parse_new_session_ticket(bytes.view(m)[0..n], &t)
+    if err == "" {
+        if t.alert != 0 { abort() }
+        if t.nonce_off < 0 || t.nonce_len < 0 || t.nonce_off + t.nonce_len > n { abort() }
+        if t.ticket_off < 0 || t.ticket_len < 1 || t.ticket_off + t.ticket_len > n { abort() }
+    } else {
+        if !known_alert(t.alert) { abort() }
+    }
+}
+
+// H3: build a ClientHello and a ServerHello from the material, parse both.
+fn round_trip(m: ptr, n: int) {
+    if n < 100 { return }
+    random = bytes.new(32)
+    bytes.set_length(random, 32)
+    bytes.copy_from_bytes(random, 0, m, 0, 32)
+    sid_len = (bytes.get(m, 32) & 255) % 33
+    sid = bytes.new(33)
+    bytes.set_length(sid, 33)
+    bytes.copy_from_bytes(sid, 0, m, 33, 32)
+    pub = bytes.new(32)
+    bytes.set_length(pub, 32)
+    bytes.copy_from_bytes(pub, 0, m, 66, 32)
+    // A host name from the remaining bytes: letters, digits, dots and dashes.
+    host = ""
+    hb = bytes.new(64)
+    hl = 0
+    i = 99
+    while i < n && hl < 63 {
+        c = bytes.get(m, i) & 255
+        if (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 46 || c == 45 {
+            bytes.set(hb, hl, c)
+            hl = hl + 1
+        }
+        i = i + 1
+    }
+    if (bytes.get(m, 98) & 1) == 1 && hl > 0 {
+        host = bytes.string_from_slice(bytes.view(hb)[0..hl])
+    }
+    bytes.free(hb)
+
+    msg = tls13_hs.client_hello_full(random, bytes.view(sid)[0..sid_len], tls13_hs.GROUP_X25519,
+                                     bytes.view(pub)[0..32], 0, bytes.view(pub)[0..0], 0, bytes.view(pub)[0..0], host)
+    ml = 4 + (((bytes.get(msg, 1) & 255) << 16) | ((bytes.get(msg, 2) & 255) << 8) | (bytes.get(msg, 3) & 255))
+    ch = tls13_hs.ChParsed { random: null, session_id: null, session_id_len: 0, cipher_suite: 0, group: 0,
+                             key_share: null, key_share_len: 0, has_sni: 0, saw_supported_versions: 0,
+                             sig_algs: 0, saw_sig_algs: 0, groups: 0, retry_group: 0, has_early_data: 0,
+                             has_cookie: 0, alert: 0 }
+    err = tls13_hs.parse_client_hello(bytes.view(msg)[0..ml], &ch)
+    if err != "" { abort() }
+    if !same_range(ch.random, 0, random, 0, 32) { abort() }
+    if ch.session_id_len != sid_len { abort() }
+    if sid_len > 0 && !same_range(ch.session_id, 0, sid, 0, sid_len) { abort() }
+    if ch.group != tls13_hs.GROUP_X25519 || ch.key_share_len != 32 { abort() }
+    if !same_range(ch.key_share, 0, pub, 0, 32) { abort() }
+    if ch.saw_supported_versions != 1 { abort() }
+    if !supported_suite(ch.cipher_suite) { abort() }
+    if (string.length(host) > 0) != (ch.has_sni == 1) { abort() }
+    tls13_hs.free_ch(&ch)
+    bytes.free(msg)
+
+    suite = tls13_hs.TLS_AES_128_GCM_SHA256
+    pick = (bytes.get(m, 98) & 255) % 3
+    if pick == 1 { suite = tls13_hs.TLS_AES_256_GCM_SHA384 }
+    if pick == 2 { suite = tls13_hs.TLS_CHACHA20_POLY1305_SHA256 }
+    shm = tls13_hs.server_hello(random, bytes.view(sid)[0..sid_len], suite, tls13_hs.GROUP_X25519, bytes.view(pub)[0..32])
+    sl = 4 + (((bytes.get(shm, 1) & 255) << 16) | ((bytes.get(shm, 2) & 255) << 8) | (bytes.get(shm, 3) & 255))
+    sh = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
+                             is_hello_retry: 0, psk_accepted: 0, alert: 0, session_id_off: 0,
+                             session_id_len: 0, selected_identity: -1, cookie_off: 0, cookie_len: 0 }
+    serr = tls13_hs.parse_server_hello(bytes.view(shm)[0..sl], &sh)
+    if serr != "" { abort() }
+    if sh.version != 0x0304 || sh.cipher_suite != suite || sh.group != tls13_hs.GROUP_X25519 { abort() }
+    if sh.key_share_len != 32 || !same_range(sh.key_share, 0, pub, 0, 32) { abort() }
+    if sh.session_id_len != sid_len { abort() }
+    if sid_len > 0 && !same_range(shm, sh.session_id_off, sid, 0, sid_len) { abort() }
+    if sh.is_hello_retry != 0 { abort() }
+    bytes.free(sh.key_share)
+    bytes.free(shm)
+
+    bytes.free(random)
+    bytes.free(sid)
+    bytes.free(pub)
+}
+
+fuzz_target(data: ptr, len: int) {
+    if len < 1 {
+        return
+    }
+    buf = bytes.new(len + 1)
+    bytes.set_length(buf, len + 1)
+    bytes.copy_from_slice(buf, 0, (data as byte[])[0..len])
+    sel = bytes.get(buf, 0) & 255
+    n = len - 1
+    m = bytes.new(n + 1)
+    bytes.set_length(m, n + 1)
+    if n > 0 { bytes.copy_from_bytes(m, 0, buf, 1, n) }
+    bytes.free(buf)
+
+    if sel >= 128 {
+        round_trip(m, n)
+    } else if (sel & 7) == 0 {
+        client_hello(m, n)
+    } else if (sel & 7) == 1 {
+        server_hello(m, n)
+    } else if (sel & 7) == 2 {
+        if n >= 2 {
+            kind = 1 + (bytes.get(m, 0) & 255) % 6
+            offered = bytes.get(m, 1) & 255
+            a, err = tls13_hs.check_extensions(kind, bytes.view(m)[2..n], offered)
+            answer(a, err)
+        }
+    } else if (sel & 7) == 3 {
+        if n >= 1 {
+            a, err = tls13_hs.check_certificate(bytes.view(m)[1..n], bytes.get(m, 0) & 255)
+            answer(a, err)
+        }
+    } else if (sel & 7) == 4 {
+        a, err = tls13_hs.check_certificate_request(bytes.view(m)[0..n])
+        answer(a, err)
+    } else {
+        session_ticket(m, n)
+    }
+    bytes.free(m)
+}

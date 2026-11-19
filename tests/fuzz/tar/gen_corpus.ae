@@ -1,0 +1,231 @@
+// Writes the seed corpus for the tar fuzz target into the directory named on
+// the command line (corpus/ beside this file, as `make fuzz-corpus` runs
+// it). Edit this file, not the seeds.
+//
+// A seed is an options byte (see fuzz_tar.ae) and a tar archive laid out
+// here header by header (ustar, POSIX.1-1988 10.1.1): files and directories,
+// and every way an archive tries to write outside where it is extracted
+// (`..`, an absolute path, a drive letter, backslashes, a symbolic link out
+// followed by a file through it, a hard link, a pax path, a GNU long name),
+// with entries past the limits, a size the data does not have, a bad
+// checksum and a header cut short. std/tar/test_tar.ae checks the same
+// refusals on archives it writes.
+import std.os
+import std.io
+import std.fs
+import std.bytes
+import std.string
+
+extern exit(code: int)
+
+// The archive is laid out in a zeroed 64 KB buffer; each function takes the
+// length laid out so far and returns the new one. Byte 0 is the options.
+fn tar_new(flags: int) -> ptr {
+    b = bytes.new(65536)
+    bytes.set_length(b, 65536)
+    i = 0
+    while i < 65536 {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    bytes.set(b, 0, flags)
+    return b
+}
+
+fn put_str(b: ptr, off: int, s: string, max: int) {
+    n = string.length(s)
+    if n > max { n = max }
+    i = 0
+    while i < n {
+        bytes.set(b, off + i, string.char_at_n(s, n, i) & 255)
+        i = i + 1
+    }
+}
+
+// `v` in octal, `width` - 1 digits and a NUL.
+fn put_octal(b: ptr, off: int, v: long, width: int) {
+    i = width - 2
+    x = v
+    while i >= 0 {
+        bytes.set(b, off + i, 48 + ((x & 7) as int))
+        x = x >> 3
+        i = i - 1
+    }
+    bytes.set(b, off + width - 1, 0)
+}
+
+// One header and its data (`data`, or `n` bytes of it when n differs: a
+// size the data does not have), padded to the block.
+fn entry(buf: ptr, at: int, name: string, kind: int, link: string, data: string, size: long, bad_sum: int) -> int {
+    h = at
+    put_str(buf, h, name, 100)
+    put_octal(buf, h + 100, 420 as long, 8)
+    put_octal(buf, h + 108, 0 as long, 8)
+    put_octal(buf, h + 116, 0 as long, 8)
+    put_octal(buf, h + 124, size, 12)
+    put_octal(buf, h + 136, 1700000000 as long, 12)
+    i = 0
+    while i < 8 {
+        bytes.set(buf, h + 148 + i, 32)
+        i = i + 1
+    }
+    bytes.set(buf, h + 156, kind)
+    put_str(buf, h + 157, link, 100)
+    put_str(buf, h + 257, "ustar", 6)
+    put_str(buf, h + 263, "00", 2)
+    sum = 0
+    i = 0
+    while i < 512 {
+        sum = sum + (bytes.get(buf, h + i) & 255)
+        i = i + 1
+    }
+    if bad_sum == 1 { sum = sum + 1 }
+    put_octal(buf, h + 148, sum as long, 7)
+    bytes.set(buf, h + 155, 32)
+    dn = string.length(data)
+    put_str(buf, h + 512, data, dn)
+    return h + 512 + ((dn + 511) / 512) * 512
+}
+
+fn file(buf: ptr, at: int, name: string, data: string) -> int {
+    return entry(buf, at, name, 48, "", data, string.length(data) as long, 0)
+}
+
+fn finish(dir: string, name: string, buf: ptr, at: int, end_blocks: int) {
+    total = at + end_blocks * 512
+    err = fs.write_binary("${dir}/${name}", bytes.view(buf)[0..total])
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+    bytes.free(buf)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    t = tar_new(0)
+    n = 1
+    n = file(t, n, "hello.txt", "hello, world\n")
+    n = entry(t, n, "d/", 53, "", "", 0 as long, 0)
+    n = file(t, n, "d/inner.bin", "\x01\x02\x03 inner")
+    n = file(t, n, "d/e/deep.txt", "deep")
+    finish(dir, "plain", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = file(t, n, "../outside/canary", "pwned!")
+    finish(dir, "dotdot", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = file(t, n, "a/../../outside/canary", "pwned!")
+    finish(dir, "dotdot_inside", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = file(t, n, "/tmp/aether_fuzz_tar_absolute", "pwned!")
+    finish(dir, "absolute", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = file(t, n, "C:/aether_fuzz_tar_drive", "pwned!")
+    finish(dir, "drive", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = file(t, n, "..\\outside\\canary", "pwned!")
+    finish(dir, "backslash", t, n, 2)
+
+    t = tar_new(1)
+    n = 1
+    n = entry(t, n, "link", 50, "../outside", "", 0 as long, 0)
+    n = file(t, n, "link/canary", "pwned!")
+    finish(dir, "symlink_out_allowed", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = entry(t, n, "link", 50, "../outside", "", 0 as long, 0)
+    n = file(t, n, "link/canary", "pwned!")
+    finish(dir, "symlink_out_refused", t, n, 2)
+
+    t = tar_new(1)
+    n = 1
+    n = entry(t, n, "ok", 50, "hello.txt", "", 0 as long, 0)
+    n = file(t, n, "hello.txt", "hi")
+    finish(dir, "symlink_inside", t, n, 2)
+
+    t = tar_new(1)
+    n = 1
+    n = entry(t, n, "hard", 49, "../outside/canary", "", 0 as long, 0)
+    finish(dir, "hardlink_out", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = entry(t, n, "PaxHeader", 120, "", "21 path=../escape.txt\n", 22 as long, 0)
+    n = file(t, n, "innocent.txt", "pwned!")
+    finish(dir, "pax_path", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    long_name = "long/"
+    i = 0
+    while i < 30 {
+        long_name = "${long_name}segment${i}/"
+        i = i + 1
+    }
+    long_name = "${long_name}end.txt"
+    n = entry(t, n, "././@LongLink", 76, "", "${long_name}\x01", (string.length(long_name) + 1) as long, 0)
+    n = file(t, n, "short.txt", "long named")
+    finish(dir, "gnu_long_name", t, n, 2)
+
+    t = tar_new(2)
+    n = 1
+    n = file(t, n, "1", "a")
+    n = file(t, n, "2", "b")
+    n = file(t, n, "3", "c")
+    n = file(t, n, "4", "d")
+    n = file(t, n, "5", "e")
+    finish(dir, "over_max_entries", t, n, 2)
+
+    t = tar_new(4)
+    n = 1
+    big = ""
+    i = 0
+    while i < 30 {
+        big = "${big}0123456789"
+        i = i + 1
+    }
+    n = file(t, n, "big.txt", big)
+    finish(dir, "over_max_entry_bytes", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = entry(t, n, "liar.txt", 48, "", "short", 8589934591 as long, 0)
+    finish(dir, "size_past_data", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = entry(t, n, "badsum.txt", 48, "", "data", 4 as long, 1)
+    finish(dir, "bad_checksum", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = file(t, n, "cut.txt", "x")
+    finish(dir, "no_end_blocks", t, n, 0)
+
+    t = tar_new(0)
+    n = 1
+    n = file(t, n, "dup.txt", "first")
+    n = file(t, n, "dup.txt", "second")
+    finish(dir, "duplicate_names", t, n, 2)
+}

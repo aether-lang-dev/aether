@@ -1,0 +1,152 @@
+// The std.msgpack fuzz target, built --emit=obj and called from
+// tests/fuzz/ae_target.c's LLVMFuzzerTestOneInput with the input whole, NUL
+// bytes included. unpack reads what a peer sends (std/msgpack/README.md:
+// "unpack treats its input as untrusted"). Each check is a property, and a
+// failure abort()s:
+//
+//   M1  A refusal is no value and an error; an accepted input is a value and
+//       no error.
+//   M2  A value that unpacks packs, the packed bytes unpack, and pack gives
+//       the same bytes again: what a program reads it can write back, and
+//       reading that changes nothing.
+//   M3  One value is the whole input: a MessagePack value is self-delimiting,
+//       so no proper prefix of an accepted input is accepted, and the input
+//       with a byte after it is refused ("trailing bytes after value").
+//   M4  The tree is consistent: every value has a type tag in 0..8, an
+//       array of n hands out n items, a map of n pairs n keys and n values,
+//       and nothing nests deeper than 256 levels.
+//   M5  Nothing leaks (LeakSanitizer).
+import std.msgpack
+import std.bytes
+import std.string
+
+extern abort()
+
+const MAX_DEPTH = 256
+
+fn same_bytes(s1: string, s2: string) -> bool {
+    l1 = string.length(s1)
+    l2 = string.length(s2)
+    if l1 != l2 {
+        return false
+    }
+    i = 0
+    while i < l1 {
+        if string.char_at_n(s1, l1, i) != string.char_at_n(s2, l2, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// M4: walk `v`, `depth` levels down.
+fn walk(v: ptr, depth: int) {
+    if depth > MAX_DEPTH {
+        abort()
+    }
+    t = msgpack.get_type(v)
+    if t < msgpack.TYPE_NIL || t > msgpack.TYPE_EXT {
+        abort()
+    }
+    if t == msgpack.TYPE_ARRAY {
+        n = msgpack.array_size(v)
+        if n < 0 {
+            abort()
+        }
+        i = 0
+        while i < n {
+            item = msgpack.array_get(v, i)
+            if item == null {
+                abort()
+            }
+            walk(item, depth + 1)
+            i = i + 1
+        }
+    }
+    if t == msgpack.TYPE_MAP {
+        n = msgpack.map_size(v)
+        if n < 0 {
+            abort()
+        }
+        i = 0
+        while i < n {
+            k = msgpack.map_get_key(v, i)
+            val = msgpack.map_get_value(v, i)
+            if k == null || val == null {
+                abort()
+            }
+            walk(k, depth + 1)
+            walk(val, depth + 1)
+            i = i + 1
+        }
+    }
+}
+
+// Whether `s` unpacks; what it unpacked to is freed.
+fn accepted(s: string) -> bool {
+    v, err = msgpack.unpack(s)
+    if err != "" {
+        if v != null {
+            abort()
+        }
+        return false
+    }
+    if v == null {
+        abort()
+    }
+    msgpack.free(v)
+    return true
+}
+
+fuzz_target(data: ptr, len: int) {
+    if len < 0 {
+        return
+    }
+    x = bytes.string_from_ptr(data, len)
+
+    v, err = msgpack.unpack(x)
+    if err != "" {
+        // M1
+        if v != null {
+            abort()
+        }
+        return
+    }
+    if v == null {
+        abort()
+    }
+
+    // M4
+    walk(v, 0)
+
+    // M2
+    p1 = msgpack.pack(v)
+    v2, err2 = msgpack.unpack(p1)
+    if err2 != "" || v2 == null {
+        abort()
+    }
+    p2 = msgpack.pack(v2)
+    if !same_bytes(p1, p2) {
+        abort()
+    }
+    msgpack.free(v2)
+    msgpack.free(v)
+
+    // M3: a few proper prefixes, and one byte more.
+    if len > 1 {
+        if accepted(bytes.string_from_ptr(data, len - 1)) {
+            abort()
+        }
+        if accepted(bytes.string_from_ptr(data, len / 2)) {
+            abort()
+        }
+        if accepted(bytes.string_from_ptr(data, 1)) {
+            abort()
+        }
+    }
+    longer = string.concat(x, "\xc0")
+    if string.length(longer) == len + 1 && accepted(longer) {
+        abort()
+    }
+}

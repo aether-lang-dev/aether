@@ -1,0 +1,201 @@
+// Writes the seed corpus for the X.509 fuzz target into the directory named
+// on the command line (corpus/ beside this file, as `make fuzz-corpus` runs
+// it, from the repository's root). Edit this file, not the seeds.
+//
+// A seed is a selector byte (see fuzz_x509.ae) and its input. The
+// certificates are the ones the TLS tests use, read out of their sources
+// (tests/integration/crypto_tls13_chain and crypto_tls13_sig_algs: ECDSA on
+// P-256, P-384 and P-521, RSA, Ed25519; roots, intermediates and leaves,
+// with and without SANs and basicConstraints), each as DER, as PEM and as
+// DER for the TLV reader. Beside them, DER the reader must survive:
+// indefinite lengths nested deep, a high tag number that does not end, the
+// longest length forms, contents past the end; and OCSP responses.
+import std.os
+import std.io
+import std.fs
+import std.bytes
+import std.string
+import std.strbuilder
+import std.cryptography.pem
+
+extern exit(code: int)
+
+const SOURCES_CHAIN = "tests/integration/crypto_tls13_chain/test_tls13_chain.ae"
+const SOURCES_SIG_ALGS = "tests/integration/crypto_tls13_sig_algs/test_tls13_sig_algs.ae"
+const MAX_CERTS = 10
+
+fn write_out(dir: string, name: string, out: ptr, n: int) {
+    err = fs.write_binary("${dir}/${name}", bytes.view(out)[0..n])
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// The selector, then `n` bytes at `p`.
+fn with_selector(dir: string, name: string, sel: int, p: ptr, n: int) {
+    out = bytes.new(n + 1)
+    bytes.set_length(out, n + 1)
+    bytes.set(out, 0, sel)
+    if n > 0 { bytes.copy_from_bytes(out, 1, p, 0, n) }
+    write_out(dir, name, out, n + 1)
+    bytes.free(out)
+}
+
+fn laid(dir: string, name: string, sel: int, b: ptr) {
+    body = strbuilder.finish_with_length(b)
+    int n = body.len
+    out = bytes.new(n + 1)
+    bytes.set_length(out, n + 1)
+    bytes.set(out, 0, sel)
+    bytes.copy_from_slice(out, 1, body)
+    write_out(dir, name, out, n + 1)
+    bytes.free(out)
+}
+
+// Every PEM certificate written as a string literal in the .ae file at
+// `path` (its line breaks spelled \n), up to MAX_CERTS of them.
+fn certs_from(dir: string, path: string, tag: string) {
+    data, len, rerr = fs.read_binary(path)
+    if rerr != "" {
+        _w = io.stdout_write("gen_corpus: ${path}: ${rerr} (run from the repository's root)\n")
+        exit(1)
+    }
+    src = string.substring(data, 0, len)
+    from = 0
+    k = 0
+    while k < MAX_CERTS {
+        b = string.index_of_from(src, "-----BEGIN CERTIFICATE-----", from)
+        if b < 0 { break }
+        e = string.index_of_from(src, "-----END CERTIFICATE-----", b)
+        if e < 0 { break }
+        e = e + 25
+        literal = string.substring(src, b, e)
+        text = string.replace_all(literal, "\\n", "\n")
+        der, _label, perr = pem.parse(text)
+        if perr != "" {
+            _w = io.stdout_write("gen_corpus: ${path}: certificate ${k}: ${perr}\n")
+            exit(1)
+        }
+        dn = bytes.length(der)
+        with_selector(dir, "${tag}_${k}_der", 0, der, dn)
+        with_selector(dir, "${tag}_${k}_tlv", 1, der, dn)
+        tb = strbuilder.new(0)
+        _t = strbuilder.append(tb, text)
+        laid(dir, "${tag}_${k}_pem", 2, tb)
+        bytes.free(der)
+        from = e
+        k = k + 1
+    }
+    if k == 0 {
+        _w = io.stdout_write("gen_corpus: ${path}: no certificate found\n")
+        exit(1)
+    }
+}
+
+fn put(b: ptr, v: int) {
+    _a = strbuilder.append_byte(b, v & 255)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    certs_from(dir, SOURCES_CHAIN, "chain")
+    certs_from(dir, SOURCES_SIG_ALGS, "sigalg")
+
+    // DER for the reader (selector 1).
+    b = strbuilder.new(0)
+    i = 0
+    while i < 3000 {
+        put(b, 0x30)
+        put(b, 0x80)
+        i = i + 1
+    }
+    laid(dir, "indefinite_deep", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x80)
+    put(b, 0x02)
+    put(b, 0x01)
+    put(b, 0x05)
+    put(b, 0x00)
+    put(b, 0x00)
+    laid(dir, "indefinite_one", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x1f)
+    i = 0
+    while i < 40 {
+        put(b, 0xff)
+        i = i + 1
+    }
+    put(b, 0x01)
+    put(b, 0x00)
+    laid(dir, "high_tag_long", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x04)
+    put(b, 0x84)
+    put(b, 0x7f)
+    put(b, 0xff)
+    put(b, 0xff)
+    put(b, 0xff)
+    laid(dir, "length_huge", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x04)
+    put(b, 0x85)
+    put(b, 1)
+    put(b, 0)
+    put(b, 0)
+    put(b, 0)
+    put(b, 0)
+    laid(dir, "length_five_bytes", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x10)
+    put(b, 0x02)
+    put(b, 0x01)
+    laid(dir, "content_past_end", 1, b)
+
+    // OCSP responses (selector 3): unsuccessful, and one cut short.
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x03)
+    put(b, 0x0a)
+    put(b, 0x01)
+    put(b, 0x01)
+    laid(dir, "ocsp_malformed_request", 3, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x82)
+    put(b, 0x01)
+    put(b, 0x00)
+    put(b, 0x0a)
+    put(b, 0x01)
+    put(b, 0x00)
+    put(b, 0xa0)
+    put(b, 0x10)
+    laid(dir, "ocsp_truncated", 3, b)
+
+    // PEM text (selector 2) that is not a certificate.
+    b = strbuilder.new(0)
+    _p = strbuilder.append(b, "-----BEGIN CERTIFICATE-----\nnot base64 !!\n-----END CERTIFICATE-----\n")
+    laid(dir, "pem_bad_base64", 2, b)
+
+    b = strbuilder.new(0)
+    _q = strbuilder.append(b, "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n")
+    laid(dir, "pem_unterminated", 2, b)
+}

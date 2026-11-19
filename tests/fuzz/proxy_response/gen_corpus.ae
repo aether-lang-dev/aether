@@ -1,0 +1,89 @@
+// Writes the seed corpus for the proxy-response fuzz target into the
+// directory named on the command line (corpus/ beside this file, as
+// `make fuzz-corpus` runs it). Edit this file, not the seeds.
+//
+// A seed is one byte for the request's method (0 GET, 1 HEAD) and what the
+// upstream sends: the shapes tests/runtime/test_runtime_http.c pins for the
+// pass-through (no headers, only hop-by-hop ones, a repeated header, a CR
+// inside a value, an empty value), and the framings the event loop tells
+// apart (Content-Length, chunked, to the close, no body by status, interim
+// responses, conflicting lengths), answers to GET and to HEAD.
+import std.os
+import std.io
+import std.fs
+import std.strbuilder
+
+extern exit(code: int)
+
+fn seed(dir: string, name: string, method: int, text: string) {
+    b = strbuilder.new(0)
+    _m = strbuilder.append_byte(b, method)
+    _a = strbuilder.append(b, text)
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// The same upstream bytes as an answer to GET and to HEAD.
+fn both(dir: string, name: string, text: string) {
+    seed(dir, "${name}_get", 0, text)
+    seed(dir, "${name}_head", 1, text)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    both(dir, "plain", "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello")
+    both(dir, "no_headers", "HTTP/1.1 200 OK\r\n\r\n")
+    both(dir, "server_and_type", "HTTP/1.1 200 OK\r\nServer: nginx\r\nContent-Type: text/plain\r\nX-Tag: keep\r\nContent-Length: 3\r\n\r\nabc")
+    both(dir, "hop_by_hop", "HTTP/1.1 200 OK\r\nConnection: close, X-Drop\r\nKeep-Alive: timeout=5\r\nProxy-Connection: keep-alive\r\nTE: trailers\r\nTrailer: X-T\r\nUpgrade: h2c\r\nProxy-Authenticate: Basic\r\nX-Kept: yes\r\nContent-Length: 0\r\n\r\n")
+    both(dir, "repeated", "HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 2\r\n\r\nok")
+    both(dir, "cr_in_value", "HTTP/1.1 200 OK\r\nX-Bad: a\rInjected: yes\r\nX-Good: b\r\nContent-Length: 1\r\n\r\nx")
+    both(dir, "lf_in_value", "HTTP/1.1 200 OK\r\nX-Bad: a\nInjected: yes\r\nContent-Length: 1\r\n\r\nx")
+    both(dir, "nul_in_value", "HTTP/1.1 200 OK\r\nX-Nul: a\x01b\r\nContent-Length: 1\r\n\r\nx")
+    both(dir, "empty_value", "HTTP/1.1 200 OK\r\nX-Empty:\r\nContent-Length: 0\r\n\r\n")
+    both(dir, "chunked", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+    both(dir, "chunked_trailer", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n3;ext=1\r\nabc\r\n0\r\nX-T: 1\r\n\r\n")
+    both(dir, "to_close", "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nall of it until the close")
+    both(dir, "no_content", "HTTP/1.1 204 No Content\r\nContent-Length: 10\r\n\r\n")
+    both(dir, "not_modified", "HTTP/1.1 304 Not Modified\r\nETag: \"x\"\r\n\r\n")
+    both(dir, "interim", "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+    both(dir, "server_error", "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 4\r\n\r\nbusy")
+    both(dir, "two_lengths", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nabc")
+    both(dir, "bad_length", "HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello")
+    both(dir, "extra_body", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokEXTRA BYTES")
+    both(dir, "short_body", "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort")
+    both(dir, "unknown_status", "HTTP/1.1 599 Whatever\r\nContent-Length: 0\r\n\r\n")
+    both(dir, "no_reason", "HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n")
+    both(dir, "http10", "HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\nx")
+    both(dir, "obs_fold", "HTTP/1.1 200 OK\r\nX-Fold: a\r\n b\r\nContent-Length: 0\r\n\r\n")
+    both(dir, "space_before_colon", "HTTP/1.1 200 OK\r\nX-Space : a\r\nContent-Length: 0\r\n\r\n")
+    both(dir, "bad_name", "HTTP/1.1 200 OK\r\nX(Bad): a\r\nContent-Length: 0\r\n\r\n")
+    both(dir, "no_colon", "HTTP/1.1 200 OK\r\nno colon here\r\nContent-Length: 0\r\n\r\n")
+    both(dir, "bare_lf", "HTTP/1.1 200 OK\nContent-Length: 1\n\nx")
+    both(dir, "not_http", "SSH-2.0-OpenSSH_9.6\r\n")
+    both(dir, "truncated_head", "HTTP/1.1 200 OK\r\nContent-Le")
+    both(dir, "empty", "")
+
+    // More fields than a response object held at first (50), and a length
+    // repeated with one value.
+    many = "HTTP/1.1 200 OK\r\n"
+    i = 0
+    while i < 60 {
+        many = "${many}X-Field-${i}: value ${i}\r\n"
+        i = i + 1
+    }
+    both(dir, "many_fields", "${many}Content-Length: 2\r\n\r\nok")
+    both(dir, "two_equal_lengths", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-A: 1\r\nContent-Length: 2\r\n\r\nok")
+}

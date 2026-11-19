@@ -214,17 +214,17 @@ make fuzz-corpus                       # after editing a gen_corpus.ae
 
 ### Without libFuzzer
 
-`FUZZ_REPLAY=1` builds a C target with `$CC` and no libFuzzer, linked to
+`FUZZ_REPLAY=1` builds a target with `$CC` and no libFuzzer, linked to
 **`replay_main.c`**, a `main` that feeds each file it is given, or each file
 in a directory it is given, to `LLVMFuzzerTestOneInput` once. With
 `-dict=FILE` it reads a dictionary as libFuzzer reads it (`name="value"` or
 `"value"`, printable bytes, the escapes `\\`, `\"` and `\xNN` only), fails
 on a line libFuzzer would refuse to start on, naming it, and runs each entry
 as an input. `make fuzz-replay` runs every dictionary entry and every seed
-of the four targets through their property checks that way, and reads the
-CBOR and frame-reader dictionaries too (`-check_dict=`); it works where clang
-has no libFuzzer, Windows (MinGW) among them, and finds nothing new. It also
-replays a reproducer:
+of every run_fuzz_c.sh target through their property checks that way (h2
+where libnghttp2 is found), and reads the CBOR and frame-reader dictionaries
+too (`-check_dict=`); it works where clang has no libFuzzer, Windows (MinGW)
+among them, and finds nothing new. It also replays a reproducer:
 
 ```sh
 make fuzz-replay
@@ -236,16 +236,121 @@ the CBOR fuzzer; add it to the target's `gen_corpus.ae` and a regression test
 beside the module's own (`tests/runtime/test_http_server.c`,
 `tests/runtime/test_runtime_http.c`, `tests/regression/test_json_*.ae`).
 
+## Every other decoder that reads untrusted input (#3749)
+
+Eleven more targets run through **`run_fuzz_c.sh`** the same way, each in
+its own directory with its harness, **`gen_corpus.ae`**, **`corpus/`** and
+dictionary. Four are C harnesses; the Aether ones (**`fuzz_<target>.ae`**,
+exporting `fuzz_target(data, len)`) are compiled by `ae build --emit=obj`
+with the fuzzing compiler, so the std modules they import carry the
+coverage and the sanitizers, and **`ae_target.c`** is their
+`LLVMFuzzerTestOneInput`. Each checks its decoder's contract; the header of
+each harness lists the properties.
+
+- **`websocket`** (C): `http_ws_recv` over a stream the input gives, part
+  already buffered past the upgrade and the rest from a transport that
+  hands it over in chunks (the pure-TLS hooks stand in for the socket). Each
+  message, each frame it sends back (pong, close echo, a 1002 or 1009
+  close) and each refusal agree with a reading of RFC 6455 5 written in the
+  harness, for a client handle and a server handle, under the default cap
+  and small ones; the reassembly buffer never grows past the cap or much
+  past what arrived. Two of the reader's leniencies are modelled as they
+  are: a continuation with no message to continue, and a data frame in the
+  middle of a fragmented message, which starts a new one; text is not
+  checked to be UTF-8.
+- **`h2`** (C, needs libnghttp2): the HTTP/2 glue driven with no socket,
+  through `aether_h2_session_feed` and `aether_h2_session_drain`. The input
+  is raw frames, or a script of client frames the harness encodes with
+  nghttp2's own HPACK deflater, so it knows what each stream sent: every
+  request the server's middleware sees is one a stream asked for, with the
+  method, path, query, fields and body it sent, never one with a missing
+  pseudo-header or a connection-specific field, never twice; every whole,
+  valid request is dispatched while the connection stands; the server
+  writes well-formed frames, a `:status 200` and the echoed body for each.
+- **`proxy_response`** (C): what an upstream sends back, framed as the
+  proxy event loop frames it, through the copying path (the client's reader
+  and the exchange) and the pass-through (`aether_proxy_direct_take`,
+  `aether_proxy_direct_head`). Each writes one well-formed head with no
+  line break inside a field and no hop-by-hop field, one Content-Length that
+  is the body's (none for HEAD), and the two write the same head and body.
+- **`xml`** (C): the reader's events nest, names and text hold only what
+  they may, an accepted document written again with the builder reads back
+  to the same events, and `xml_pretty` formats exactly what the reader
+  accepts.
+- **`yaml`** (C, with the vendored libfyaml compiled in): a refusal carries
+  a message, the tree is consistent, a mapping finds each scalar key's first
+  value, and an accepted document emits text that parses to the same tree.
+- **`msgpack`** (Aether): what unpacks packs, unpacks and packs to the same
+  bytes; one value is the whole input (no proper prefix is accepted, a byte
+  after it is refused); nothing nests past 256.
+- **`tar`**, **`zip`** (Aether): the input is extracted for real, under
+  `$FUZZ_SCRATCH` (`build/fuzz/<target>/scratch`), beside a directory that
+  holds one canary file. Nothing is written outside the destination,
+  whatever the archive names; no symbolic link is made when they are
+  refused (and, for tar, none points out when they are allowed); an
+  extraction that succeeds wrote what the reader reads, within its limits.
+- **`tls13_record`** (Aether): a record sealed in the harness, with any
+  content type and padding, opens to its content or is refused with the
+  alert RFC 8446 5 gives; a changed byte, or a record as received, is
+  refused with the alert its header gives or bad_record_mac; the sequence
+  number moves only for a record that decrypted; `check_header` agrees with
+  a reading of 5.1 and 5.2; `seal_records` cuts a long plaintext into
+  records that open back to it.
+- **`tls13_handshake`** (Aether): the message parsers the server and the
+  client run (ClientHello, ServerHello and HelloRetryRequest, the
+  extension blocks, Certificate, CertificateRequest, NewSessionTicket):
+  a refusal names an alert TLS 1.3 defines, what is accepted is described
+  from inside the message, and what the module's builders write its
+  parsers read back.
+- **`x509`** (Aether): `parse_certificate`, the DER reader under it, PEM and
+  OCSP status. An accepted certificate is described from inside its bytes
+  and matches each of its own plain DNS names; the DER reader stays inside
+  its input, 32 levels into constructed contents; PEM decodes to bytes with
+  a label.
+
+The full state machines of the TLS server and client run over a socket and
+are not driven here; their parsers are. The seeds come from the existing
+tests: the certificates are read out of the TLS integration tests' sources,
+the messages and archives are written by the modules' own builders, and the
+refusals are the ones the modules' tests pin.
+
+```sh
+make fuzz-websocket      # or fuzz-h2, fuzz-proxy-response, fuzz-xml, fuzz-yaml, fuzz-msgpack,
+                         # fuzz-tar, fuzz-zip, fuzz-tls13-record, fuzz-tls13-handshake, fuzz-x509
+FUZZ_REPLAY=1 sh tests/fuzz/run_fuzz_c.sh x509     # the seeds, without libFuzzer
+```
+
+Bugs these targets found, fixed with a regression test each: std.yaml
+answered an empty stream with no document and no error, could not emit the
+empty document, and looked keys up as YAML source; the HTTP client read a
+response with no head as status 0 with no error, which the proxy wrote to
+its client as `HTTP/1.1 0`; the proxy's pass-through answered with an
+interim (1xx) status, the copying path kept one of a repeated field (one
+Set-Cookie of several) and a response held at most 50 fields; ASN.1
+indefinite lengths nested without bound and overflowed the stack (a 60 KB
+certificate); `asn1.last_tag_class`, `last_tag_pc` and `last_tag_number`
+were exported and never defined; std.tar's `entry_read` failed instead of
+reporting the end of an entry read whole.
+
 ## In CI (`make fuzz-ci`)
 
-**`fuzz_ci.sh`** runs every target, the CBOR and frame-reader fuzzers
-included, for `FUZZ_SECONDS` each (default 60), one after another; a target
-that fails does not stop the rest, and the script names each that failed.
-`.github/workflows/fuzz.yml` runs it on Linux with clang 18 on every push to
-main and on the PRs that change `std/net`, `std/json`, `std/cbor`,
-`std/ipc`, `tests/fuzz` or the workflow: about 6 minutes of fuzzing and 4 of
-building. On a failure it uploads the reproducers as the `fuzz-reproducers`
-artifact.
+**`fuzz_ci.sh`** runs the targets `FUZZ_TARGETS` names (by default every
+one, as **`select_targets.sh --all`** lists them), the CBOR and
+frame-reader fuzzers included, for `FUZZ_SECONDS` each (default 60), one
+after another; a target that fails does not stop the rest, and the script
+names each that failed.
 
-Not fuzzed yet: TLS record and handshake parsing, h2, YAML and the archive
-readers.
+`.github/workflows/fuzz.yml` runs it on Linux with clang 18, in three shards
+side by side (`select_targets.sh --shard I/3`), about 6 minutes of fuzzing
+and 4 of building each:
+
+- on a pull request, the targets its changes reach: `select_targets.sh
+  --changed` reads `git diff --name-only` against the base, and holds the
+  one table of what each target is built from (a change to the runtime, the
+  compiler, `ae`, std.string, std.bytes, the Makefile or the runner reaches
+  them all); the workflow's paths filter covers the same paths;
+- on every push to main, every target;
+- weekly (Sunday 03:17 UTC), every target for 600 seconds.
+
+On a failure it uploads the reproducers as the `fuzz-reproducers-<shard>`
+artifact.

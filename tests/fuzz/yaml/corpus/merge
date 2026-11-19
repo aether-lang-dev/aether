@@ -1,0 +1,5 @@
+defaults: &d
+  a: 1
+entry:
+  <<: *d
+  b: 2

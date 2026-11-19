@@ -1,0 +1,199 @@
+// Writes the seed corpus for the HTTP/2 fuzz target into the directory named
+// on the command line (corpus/ beside this file, as `make fuzz-corpus` runs
+// it). Edit this file, not the seeds.
+//
+// A seed is a script of client frames (byte 0 even; see fuzz_h2.c) or raw
+// frames after the preface (byte 0 odd): a GET, a request with a body in
+// several DATA frames, a HEAD, streams interleaved, a PING and a
+// WINDOW_UPDATE between them, each pseudo-header left out, connection
+// fields, a stream reset before it ends, ids that go down; and raw frames
+// nghttp2 must refuse or ignore (a CONTINUATION with no HEADERS, a frame
+// longer than the maximum, a GOAWAY, an unknown type).
+import std.os
+import std.io
+import std.fs
+import std.strbuilder
+
+extern exit(code: int)
+
+fn b8(b: ptr, v: int) {
+    _a = strbuilder.append_byte(b, v & 255)
+}
+
+// HEADERS on stream index `k` with `flags` (bit 0 END_STREAM, 1-3 leave out
+// :method, :path, :scheme, 4 connection, 5 te: gzip, 6 HEAD), a path of
+// `path` (each byte picks a character) and `fields` (name length byte, value
+// length byte, then the bytes).
+fn headers(b: ptr, k: int, flags: int, path: string, nfields: int, fields: string) {
+    b8(b, 0)
+    b8(b, k)
+    b8(b, flags)
+    b8(b, string_len(path))
+    _p = strbuilder.append(b, path)
+    b8(b, nfields)
+    _f = strbuilder.append(b, fields)
+}
+
+extern string_length(s: string) -> int
+
+fn string_len(s: string) -> int {
+    return string_length(s)
+}
+
+// DATA on stream index `k`, END_STREAM when `end`, the bytes of `payload`.
+fn data(b: ptr, k: int, end: int, payload: string) {
+    b8(b, 1)
+    b8(b, k)
+    b8(b, (string_len(payload) << 2) | end)
+    _p = strbuilder.append(b, payload)
+}
+
+fn write_seed(dir: string, name: string, b: ptr) {
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+fn frame(b: ptr, len: int, t: int, flags: int, id: int) {
+    b8(b, len >> 16)
+    b8(b, len >> 8)
+    b8(b, len)
+    b8(b, t)
+    b8(b, flags)
+    b8(b, id >> 24)
+    b8(b, id >> 16)
+    b8(b, id >> 8)
+    b8(b, id)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // A field: name length 3 (bytes pick "abc"-ish), value length 5.
+    field = "\x02\x05\x01\x02\x03XYZ12"
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 0, 1, "", 1, field)
+    write_seed(dir, "get", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 0, 0, "\x05\x0d\x03", 2, "${field}\x04\x02abcdeQQ")
+    data(b, 0, 0, "first part ")
+    data(b, 0, 0, "second part ")
+    data(b, 0, 1, "end")
+    write_seed(dir, "post_body", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 0, 65, "", 0, "")
+    write_seed(dir, "head", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 0, 0, "\x01", 0, "")
+    headers(b, 1, 1, "\x10\x0f", 1, field)
+    b8(b, 3)
+    data(b, 0, 1, "late body")
+    b8(b, 4)
+    headers(b, 2, 65, "", 0, "")
+    b8(b, 7)
+    write_seed(dir, "interleaved", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 0, 3, "", 0, "")
+    headers(b, 1, 5, "", 0, "")
+    headers(b, 2, 9, "", 0, "")
+    headers(b, 3, 1, "", 0, "")
+    write_seed(dir, "missing_pseudo", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 0, 17, "", 0, "")
+    headers(b, 1, 33, "", 0, "")
+    headers(b, 2, 1, "", 0, "")
+    write_seed(dir, "connection_fields", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 0, 0, "", 0, "")
+    data(b, 0, 0, "partial")
+    b8(b, 2)
+    b8(b, 0)
+    headers(b, 1, 1, "", 0, "")
+    write_seed(dir, "reset_before_end", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 3, 1, "", 0, "")
+    headers(b, 1, 1, "", 0, "")
+    write_seed(dir, "ids_go_down", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    data(b, 5, 1, "no such stream")
+    write_seed(dir, "data_on_idle", b)
+
+    b = strbuilder.new(0)
+    b8(b, 0)
+    headers(b, 0, 1, "\x10\x10\x11", 0, "")
+    b8(b, 5)
+    b8(b, 9)
+    frame(b, 0, 8, 0, 0)
+    write_seed(dir, "raw_tail", b)
+
+    // Raw frames after the preface.
+    b = strbuilder.new(0)
+    b8(b, 1)
+    frame(b, 4, 9, 4, 1)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 0)
+    write_seed(dir, "raw_continuation_alone", b)
+
+    b = strbuilder.new(0)
+    b8(b, 1)
+    frame(b, 70000, 0, 0, 1)
+    write_seed(dir, "raw_oversized", b)
+
+    b = strbuilder.new(0)
+    b8(b, 1)
+    frame(b, 8, 7, 0, 0)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 1)
+    write_seed(dir, "raw_goaway", b)
+
+    b = strbuilder.new(0)
+    b8(b, 1)
+    frame(b, 3, 0xfa, 0, 0)
+    b8(b, 1)
+    b8(b, 2)
+    b8(b, 3)
+    frame(b, 5, 2, 0, 1)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 0)
+    b8(b, 3)
+    b8(b, 16)
+    write_seed(dir, "raw_unknown_and_priority", b)
+}

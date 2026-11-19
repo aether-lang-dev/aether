@@ -1,0 +1,8 @@
+text: |
+  line one
+  line two
+keep: |+
+  kept
+
+strip: |-
+  stripped
