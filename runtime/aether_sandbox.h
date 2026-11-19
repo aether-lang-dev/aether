@@ -216,7 +216,32 @@ long  aether_sandbox_readlink(const char* path, char* buf, size_t cap);
 // A descriptor of what `path` names, to ask about it (fstatvfs, a watch
 // through /proc/self/fd): fs_read, opened by the walk as a path only.
 int   aether_sandbox_open_lookup(const char* path);
+// utimensat of `path` (`ts` a struct timespec[2]): fs_write on the
+// resolution (on the name itself with `nofollow`), set from its anchor.
+int   aether_sandbox_utimens(const char* path, const void* ts, int nofollow);
 #else
+// What `path` names (the name itself with `nofollow`), opened with
+// `desired` access and `flags` (FILE_FLAG_*; FILE_FLAG_BACKUP_SEMANTICS is
+// always added) and verified for `access` (AETHER_ACCESS_READ, _WRITE): a
+// HANDLE, INVALID_HANDLE_VALUE on a failure (aether_sandbox_refused says
+// whether the grants refused it). With no level in force it is opened as
+// given. For calls that act through a handle (SetSecurityInfo,
+// SetFileInformationByHandle, SetFileTime) instead of by name.
+void* aether_sandbox_win_open(const char* path, unsigned long desired, unsigned long flags,
+                              int nofollow, int access);
+// A directory listing through a verified handle (NtQueryDirectoryFile),
+// for fs.list_dir, fs.walk and fs.glob inside an enforce block. opendir
+// checks fs_read on the directory and verifies the handle; `pattern`
+// (FindFirstFile's wildcards, NULL for every entry) filters as
+// FindFirstFile does. opendir_at opens the subdirectory `name` of `parent`
+// relative to its handle, a link (a reparse point that redirects names)
+// refused (NULL, errno ELOOP), as a walk on POSIX opens one with
+// O_NOFOLLOW. readdir gives the next name (UTF-8, "." and ".." skipped) and
+// its FILE_ATTRIBUTE_* bits: 1, 0 at the end, -1 on a failure.
+void* aether_sandbox_win_opendir(const char* path, const char* pattern);
+void* aether_sandbox_win_opendir_at(void* parent, const char* name);
+int   aether_sandbox_win_readdir(void* dir, char* name, size_t cap, unsigned long* attrs);
+void  aether_sandbox_win_closedir(void* dir);
 // mkdir with a security descriptor (NULL: the folder's), for a private
 // directory.
 int   aether_sandbox_win_mkdir(const char* path, void* sd);
@@ -266,6 +291,8 @@ int aether_sandbox_refused(void);
 #define aether_sandbox_symlink(target, linkpath) symlink((target), (linkpath))
 #define aether_sandbox_link(target, linkpath) link((target), (linkpath))
 #define aether_sandbox_chmod(path, mode) chmod((path), (mode_t)(mode))
+#define aether_sandbox_utimens(path, ts, nofollow) \
+    utimensat(AT_FDCWD, (path), (const struct timespec*)(ts), (nofollow) ? AT_SYMLINK_NOFOLLOW : 0)
 #endif
 
 #endif // AETHER_HAS_SANDBOX

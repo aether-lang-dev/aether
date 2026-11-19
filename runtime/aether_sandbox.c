@@ -1497,29 +1497,173 @@ int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char
     return win_fail(ERROR_FILE_EXISTS);
 }
 
-/* What `path` names, for a watch: a handle opened (overlapped, for
- * ReadDirectoryChangesW) and verified. */
-void* aether_sandbox_win_open_watched(const char* path) {
+void* aether_sandbox_win_open(const char* path, unsigned long desired, unsigned long flags,
+                              int nofollow, int access) {
     if (!path) { errno = EINVAL; return INVALID_HANDLE_VALUE; }
     char resolved[PATH_MAX];
     int levels = fs_levels_here();
-    if (levels && (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
-                   decide("fs_read", resolved) == 0)) {
+    if (levels && (!(nofollow ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
+                              : aether_sandbox_canon_path(path, resolved, sizeof resolved)) ||
+                   !fs_access_allowed(resolved, access))) {
         fs_refused();
         return INVALID_HANDLE_VALUE;
     }
     wchar_t wp[AETHER_SANDBOX_WPATH];
     if (!win_wide(path, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
-    HANDLE h = CreateFileW(wp, FILE_LIST_DIRECTORY | SYNCHRONIZE,
+    HANDLE h = CreateFileW(wp, (DWORD)desired | SYNCHRONIZE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+                           (DWORD)flags | FILE_FLAG_BACKUP_SEMANTICS |
+                               (nofollow ? FILE_FLAG_OPEN_REPARSE_POINT : 0),
+                           NULL);
     if (h == INVALID_HANDLE_VALUE) { win_fail(GetLastError()); return h; }
-    if (levels && !win_handle_is(h, resolved, AETHER_ACCESS_READ)) {
+    if (levels && !win_handle_is(h, resolved, access)) {
         CloseHandle(h);
         fs_refused();
         return INVALID_HANDLE_VALUE;
     }
     return h;
+}
+
+/* What `path` names, for a watch: a handle opened (overlapped, for
+ * ReadDirectoryChangesW) and verified. */
+void* aether_sandbox_win_open_watched(const char* path) {
+    return aether_sandbox_win_open(path, FILE_LIST_DIRECTORY, FILE_FLAG_OVERLAPPED, 0, AETHER_ACCESS_READ);
+}
+
+/* A listing through a directory handle. NtQueryDirectoryFile with the
+ * class FindFirstFile uses (FileBothDirectoryInformation), so a pattern
+ * matches the long and the short name as it does there. */
+typedef NTSTATUS (NTAPI* aether_nt_query_dir_fn)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK, PVOID,
+                                                 ULONG, int, BOOLEAN, PUNICODE_STRING, BOOLEAN);
+typedef struct {
+    ULONG NextEntryOffset;
+    ULONG FileIndex;
+    LARGE_INTEGER CreationTime, LastAccessTime, LastWriteTime, ChangeTime, EndOfFile, AllocationSize;
+    ULONG FileAttributes;
+    ULONG FileNameLength;
+    ULONG EaSize;
+    CCHAR ShortNameLength;
+    WCHAR ShortName[12];
+    WCHAR FileName[1];
+} AetherBothDirInfo;
+#define AETHER_FILE_BOTH_DIR_INFO 3
+#define AETHER_STATUS_NO_MORE_FILES ((NTSTATUS)0x80000006L)
+#define AETHER_STATUS_NO_SUCH_FILE  ((NTSTATUS)0xC000000FL)
+
+typedef struct {
+    HANDLE h;
+    int started;          /* the first query (with the pattern) was made */
+    int done;
+    ULONG at;             /* the next entry's offset in buf; `have` bytes filled */
+    ULONG have;
+    USHORT pat_len;       /* bytes; 0: every entry */
+    WCHAR pat[MAX_PATH];
+    ULONG_PTR buf[16384 / sizeof(ULONG_PTR)];   /* aligned for the entries */
+} AetherWinDir;
+
+/* FindFirstFile's wildcards in the file system's form, as it converts
+ * them: '?' is DOS_QM ('>'); a '*' before a '.' is DOS_STAR ('<'); a '.'
+ * before a '?' or '*' is DOS_DOT ('"'). So "*.*" matches a name with no
+ * dot, as it does for FindFirstFile. */
+static int win_dos_pattern(const char* pattern, AetherWinDir* d) {
+    if (!pattern || !*pattern || strcmp(pattern, "*") == 0) { d->pat_len = 0; return 1; }
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, d->pat, MAX_PATH);
+    if (n <= 1) return 0;
+    n--;
+    for (int i = 0; i < n; i++) {
+        WCHAR c = d->pat[i], next = i + 1 < n ? d->pat[i + 1] : 0;
+        if (c == L'?') d->pat[i] = L'>';
+        else if (c == L'*' && next == L'.') d->pat[i] = L'<';
+        else if (c == L'.' && (next == L'?' || next == L'*')) d->pat[i] = L'"';
+    }
+    d->pat_len = (USHORT)(n * sizeof(WCHAR));
+    return 1;
+}
+
+static AetherWinDir* win_dir_new(HANDLE h, const char* pattern) {
+    AetherWinDir* d = (AetherWinDir*)calloc(1, sizeof *d);
+    if (!d) { CloseHandle(h); errno = ENOMEM; return NULL; }
+    d->h = h;
+    if (!win_dos_pattern(pattern, d)) {
+        CloseHandle(h);
+        free(d);
+        win_fail(ERROR_INVALID_NAME);
+        return NULL;
+    }
+    return d;
+}
+
+void* aether_sandbox_win_opendir(const char* path, const char* pattern) {
+    HANDLE h = (HANDLE)aether_sandbox_win_open(path, FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+                                              0, 0, AETHER_ACCESS_READ);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    return win_dir_new(h, pattern);
+}
+
+void* aether_sandbox_win_opendir_at(void* parent, const char* name) {
+    AetherWinDir* p = (AetherWinDir*)parent;
+    if (!p || !name) { errno = EINVAL; return NULL; }
+    wchar_t wname[AETHER_SANDBOX_WPATH];
+    if (!win_wide(name, wname)) { win_fail(ERROR_INVALID_NAME); return NULL; }
+    HANDLE h = INVALID_HANDLE_VALUE;
+    NTSTATUS st = win_create_at(p->h, wname, FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES, 0,
+                                FILE_OPEN, FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT, NULL, &h);
+    if (st < 0) { win_fail_status(st); return NULL; }
+    FILE_ATTRIBUTE_TAG_INFO ti;
+    if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &ti, sizeof ti) ||
+        ((ti.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && IsReparseTagNameSurrogate(ti.ReparseTag))) {
+        /* A link where the listing saw a directory: swapped in since. */
+        CloseHandle(h);
+        errno = ELOOP;
+        return NULL;
+    }
+    return win_dir_new(h, NULL);
+}
+
+int aether_sandbox_win_readdir(void* dir, char* name, size_t cap, unsigned long* attrs) {
+    AetherWinDir* d = (AetherWinDir*)dir;
+    if (!d || !name || !cap) { errno = EINVAL; return -1; }
+    aether_nt_query_dir_fn query = (aether_nt_query_dir_fn)win_ntdll("NtQueryDirectoryFile");
+    if (!query) { win_fail(ERROR_NOT_SUPPORTED); return -1; }
+    for (;;) {
+        if (d->at >= d->have) {
+            if (d->done) return 0;
+            UNICODE_STRING us;
+            us.Buffer = d->pat;
+            us.Length = us.MaximumLength = d->pat_len;
+            IO_STATUS_BLOCK io;
+            NTSTATUS st = query(d->h, NULL, NULL, NULL, &io, d->buf, (ULONG)sizeof d->buf,
+                                AETHER_FILE_BOTH_DIR_INFO, FALSE,
+                                (!d->started && d->pat_len) ? &us : NULL, d->started ? FALSE : TRUE);
+            d->started = 1;
+            if (st == AETHER_STATUS_NO_MORE_FILES || st == AETHER_STATUS_NO_SUCH_FILE) {
+                d->done = 1;
+                return 0;
+            }
+            if (st < 0) { win_fail_status(st); return -1; }
+            d->at = 0;
+            d->have = (ULONG)io.Information;
+            if (d->have == 0) { d->done = 1; return 0; }
+        }
+        const AetherBothDirInfo* e = (const AetherBothDirInfo*)((const unsigned char*)d->buf + d->at);
+        d->at = e->NextEntryOffset ? d->at + e->NextEntryOffset : d->have;
+        int wn = (int)(e->FileNameLength / sizeof(WCHAR));
+        if ((wn == 1 && e->FileName[0] == L'.') ||
+            (wn == 2 && e->FileName[0] == L'.' && e->FileName[1] == L'.'))
+            continue;
+        int n = WideCharToMultiByte(CP_UTF8, 0, e->FileName, wn, name, (int)cap - 1, NULL, NULL);
+        if (n <= 0) continue;   /* longer than the caller holds: not listed */
+        name[n] = '\0';
+        if (attrs) *attrs = e->FileAttributes;
+        return 1;
+    }
+}
+
+void aether_sandbox_win_closedir(void* dir) {
+    AetherWinDir* d = (AetherWinDir*)dir;
+    if (!d) return;
+    CloseHandle(d->h);
+    free(d);
 }
 
 int aether_sandbox_win_handle_ok(void* handle, const char* path, int nofollow, int access) {
@@ -1602,6 +1746,13 @@ int aether_sandbox_open(const char* path, int flags, int mode) {
     if (!fs_levels_here()) return open(path, flags, mode);
     /* O_NOFOLLOW and O_CREAT|O_EXCL act on a symlink at the end itself. */
     int entry = (flags & O_NOFOLLOW) || (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+    if (aether_sandbox_dir_slash(path)) {
+        /* "name/": the kernel follows the name and needs a directory there,
+         * and makes no file by such a path. */
+        if (flags & O_CREAT) { errno = EISDIR; return -1; }
+        entry = 0;
+        flags |= O_DIRECTORY;
+    }
     char resolved[PATH_MAX];
     int ok = entry ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
                    : aether_sandbox_canon_path(path, resolved, sizeof resolved);
@@ -1683,10 +1834,18 @@ static int at_chmod(int d, const char* n, const void* a) {
 #endif
 }
 
+/* A call on a name spelt "name/" (aether_sandbox_dir_slash) does what the
+ * kernel does with it: 0 to go on, else -1 with its errno. */
+static int fs_slash(const char* path, const char* resolved, int op) {
+    if (!aether_sandbox_dir_slash(path)) return 0;
+    return aether_sandbox_slash_call(AT_FDCWD, resolved, op);
+}
+
 int aether_sandbox_unlink(const char* path) {
     if (!path || !fs_levels_here()) return unlink(path);
     char resolved[PATH_MAX];
     if (!fs_entry_writable(path, resolved)) return -1;
+    if (fs_slash(path, resolved, AETHER_SLASH_UNLINK) != 0) return -1;
     if (fs_preload_here()) return unlink(resolved);
     return fs_at(resolved, at_unlink, NULL);
 }
@@ -1695,6 +1854,7 @@ int aether_sandbox_rmdir(const char* path) {
     if (!path || !fs_levels_here()) return rmdir(path);
     char resolved[PATH_MAX];
     if (!fs_entry_writable(path, resolved)) return -1;
+    if (fs_slash(path, resolved, AETHER_SLASH_DIR) != 0) return -1;
     if (fs_preload_here()) return rmdir(resolved);
     return fs_at(resolved, at_rmdir, NULL);
 }
@@ -1703,6 +1863,7 @@ int aether_sandbox_remove(const char* path) {
     if (!path || !fs_levels_here()) return remove(path);
     char resolved[PATH_MAX];
     if (!fs_entry_writable(path, resolved)) return -1;
+    if (fs_slash(path, resolved, AETHER_SLASH_DIR) != 0) return -1;
     if (fs_preload_here()) return remove(resolved);
     return fs_at(resolved, at_remove, NULL);
 }
@@ -1748,11 +1909,14 @@ int aether_sandbox_mkdir_p(const char* path, int mode) {
         return -1;
     }
     if (fs_preload_here()) return fs_mkdir_each(resolved, mode);
-    /* From "/" down, each directory opened as an anchor from the one before
-     * (O_NOFOLLOW), and made first where it is missing. */
-    int d = open("/", AETHER_SANDBOX_ANCHOR);
-    if (d < 0) return -1;
+    /* From "/" (on WASI the preopened directory that holds the path) down,
+     * each directory opened as an anchor from the one before (O_NOFOLLOW),
+     * and made first where it is missing. */
     const char* p = resolved;
+    int owned = 1;
+    int d = aether_sandbox_walk_start(resolved, &p, &owned, &g_libc_ops);
+    if (d == -2) return fs_mkdir_each(resolved, mode);   /* no preopen holds it */
+    if (d < 0) return -1;
     char name[PATH_MAX];
     for (;;) {
         while (*p == '/') p++;
@@ -1766,7 +1930,7 @@ int aether_sandbox_mkdir_p(const char* path, int mode) {
         if (nd < 0 && errno == ENOENT) {
             if (mkdirat(d, name, (mode_t)mode) != 0 && errno != EEXIST) {
                 int err = errno;
-                close(d);
+                if (owned) close(d);
                 errno = err;
                 return -1;
             }
@@ -1775,15 +1939,16 @@ int aether_sandbox_mkdir_p(const char* path, int mode) {
         if (nd < 0) {
             int err = errno;
             int link = aether_sandbox_met_link(d, name, err);
-            close(d);
+            if (owned) close(d);
             errno = link ? EACCES : err;
             return -1;
         }
-        close(d);
+        if (owned) close(d);
         d = nd;
+        owned = 1;
         p = e;
     }
-    close(d);
+    if (owned) close(d);
     return 0;
 }
 
@@ -1791,6 +1956,12 @@ int aether_sandbox_rename(const char* from, const char* to) {
     if (!from || !to || !fs_levels_here()) return rename(from, to);
     char rf[PATH_MAX], rt[PATH_MAX];
     if (!fs_entry_writable(from, rf) || !fs_entry_writable(to, rt)) return -1;
+    if (aether_sandbox_dir_slash(from) || aether_sandbox_dir_slash(to)) {
+        /* A directory only, onto a directory or nothing, as the kernel. */
+        if (aether_sandbox_slash_call(AT_FDCWD, rf, AETHER_SLASH_DIR) != 0) return -1;
+        struct stat st;
+        if (lstat(rt, &st) == 0 && !S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
+    }
     if (fs_preload_here()) return rename(rf, rt);
     char nf[PATH_MAX], nt[PATH_MAX];
     int df = aether_sandbox_anchor(rf, nf, sizeof nf, &g_libc_ops);
@@ -1816,6 +1987,7 @@ int aether_sandbox_symlink(const char* target, const char* linkpath) {
      * checked where it leads. */
     char resolved[PATH_MAX];
     if (!fs_entry_writable(linkpath, resolved)) return -1;
+    if (fs_slash(linkpath, resolved, AETHER_SLASH_NEW) != 0) return -1;
     if (fs_preload_here()) return symlink(target, resolved);
     return fs_at(resolved, at_symlink, target);
 }
@@ -1824,6 +1996,14 @@ int aether_sandbox_link(const char* target, const char* linkpath) {
     if (!target || !linkpath || !fs_levels_here()) return link(target, linkpath);
     char rl[PATH_MAX], rt[PATH_MAX];
     if (!fs_link_allowed(target, linkpath, rt, rl)) return -1;
+    if (fs_slash(linkpath, rl, AETHER_SLASH_NEW) != 0) return -1;
+    if (aether_sandbox_dir_slash(target)) {
+        /* "name/" as the source: followed and refused, as the kernel does. */
+        struct stat st;
+        if (stat(rt, &st) != 0) errno = ENOENT;
+        else errno = S_ISDIR(st.st_mode) ? EPERM : ENOTDIR;
+        return -1;
+    }
     if (fs_preload_here()) return link(rt, rl);
     char nt[PATH_MAX], nl[PATH_MAX];
     int dt = aether_sandbox_anchor(rt, nt, sizeof nt, &g_libc_ops);
@@ -1841,6 +2021,27 @@ int aether_sandbox_link(const char* target, const char* linkpath) {
     close(dl);
     errno = err;
     return r;
+}
+
+static int at_utimens(int d, const char* n, const void* a) {
+    /* The resolution has no symlink at its end: one there now is the race,
+     * and its own times are what is set, not what it points at. */
+    return utimensat(d, n, (const struct timespec*)a, AT_SYMLINK_NOFOLLOW);
+}
+
+int aether_sandbox_utimens(const char* path, const void* ts, int nofollow) {
+    if (!path || !fs_levels_here())
+        return utimensat(AT_FDCWD, path, (const struct timespec*)ts, nofollow ? AT_SYMLINK_NOFOLLOW : 0);
+    char resolved[PATH_MAX];
+    if (!(nofollow ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
+                   : aether_sandbox_canon_path(path, resolved, sizeof resolved)) ||
+        decide("fs_write", resolved) == 0) {
+        fs_refused();
+        return -1;
+    }
+    if (fs_preload_here())
+        return utimensat(AT_FDCWD, resolved, (const struct timespec*)ts, AT_SYMLINK_NOFOLLOW);
+    return fs_at(resolved, at_utimens, ts);
 }
 
 int aether_sandbox_chmod(const char* path, int mode) {

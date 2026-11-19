@@ -423,14 +423,22 @@ against its levels.
     `fs.realpath`, `fs.statvfs`) are `fstatat` (or `readlinkat`, or
     `fstatvfs` of a walked descriptor) from the anchor; `fs.watch`
     watches the walked descriptor through `/proc/self/fd/N` (inotify) or
-    the descriptor itself (kqueue).
+    the descriptor itself (kqueue); `std.tar` sets times with `utimensat`
+    from the anchor. A name spelt with a trailing slash is a directory, as
+    the kernel takes it (see the standalone preload below). On WASI the
+    walk starts from the preopened directory that holds the path, which
+    wasi-libc reaches only through it.
   - On Windows what a call acts on, or the directory it acts in, is opened
     without changing it and the final path of the handle is checked
     (`GetFinalPathNameByHandleW`) before anything happens: an open for
     writing never truncates or creates by name (no `CREATE_ALWAYS` or
     `TRUNCATE_EXISTING`); the file is emptied with `SetEndOfFile` once
     verified, and a file the call created and then refused is deleted
-    through its handle. Unlink, rmdir and remove set the disposition of a
+    through its handle. Only an open that may create asks for `DELETE`,
+    and once verified its handle is reopened without it (`ReOpenFile`), so
+    the file is shared as `fopen` shares it; where `DELETE` cannot be had
+    the new file is made by `NtCreateFile` in the verified directory
+    instead. Unlink, rmdir and remove set the disposition of a
     handle opened with `DELETE` and `FILE_FLAG_OPEN_REPARSE_POINT`; rename
     and a hard link go through `NtSetInformationFile` with the verified
     destination directory as `RootDirectory`; mkdir, `mkdir -p`,
@@ -438,7 +446,19 @@ against its levels.
     `NtCreateFile` relative to a verified directory; `fs.copy` copies
     between two checked handles; a lookup, `fs.readlink` and
     `fs.realpath` verify the handle they read; `fs.watch` reads changes
-    from a verified directory handle (`ReadDirectoryChangesW`). A symlink
+    from a verified directory handle (`ReadDirectoryChangesW`);
+    `fs.chmod` changes the DACL (`SetSecurityInfo`) and the read-only
+    attribute (`SetFileInformationByHandle`) through a verified handle, and
+    `std.tar` sets times through one (`SetFileTime`); `fs.list_dir`,
+    `fs.walk` and `fs.glob` list a verified directory handle
+    (`NtQueryDirectoryFile`, a glob's last part matched by the file system
+    as `FindFirstFileA` matches it), each subdirectory opened relative to
+    its parent with no link followed, as the POSIX walk enters no symlink.
+    The name a call makes is the one a Win32 call acts on: the whole path
+    goes through `GetFullPathNameW` first, so a trailing dot or space is
+    dropped and a device name is the device (`\\.\NUL`, its own resource,
+    covered by a grant that names it or by `grant_all`, as `/dev/null` is
+    on POSIX). A symlink
     is made by name (`CreateSymbolicLinkW` has no handle form), then
     opened and verified, and removed again if a swap sent it elsewhere.
 - Calls on a name check that name (its directory resolved, the name kept),
@@ -455,8 +475,12 @@ against its levels.
   assembly, a library's own calls), other threads (each thread has its own
   levels), and a few windows that remain by the platform's design. On
   Windows a symlink exists for a moment, by name, before it is verified and
-  removed; a hard link and a file that a swapped-in junction would create
-  are refused before anything changes. On a POSIX system whose `*at` calls
+  removed, and so does a file an open creates through a junction swapped in
+  after the check: it is made where the junction leads, outside the grant,
+  then found by the verification and deleted through its handle before
+  anything is written to it (where `DELETE` cannot be had it is made in the
+  verified directory, never outside); a hard link is refused before
+  anything changes. On a POSIX system whose `*at` calls
   re-resolve by name instead of from the descriptor (Cygwin and MSYS2
   emulate them so), the walk holds nothing more than a check by name.
   Without `/proc` on Linux, `fs.watch` watches by name and compares the

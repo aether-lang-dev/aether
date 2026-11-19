@@ -21,35 +21,15 @@
 int aether_tar_set_mtime_raw(const char* path, int64_t mtime, int is_symlink) {
     if (!path) return 0;
     // A symlink's own times are its own: the link is checked, not what it
-    // leads to (#3751).
-    if (!(is_symlink ? aether_sandbox_check_entry("fs_write", path)
-                     : aether_sandbox_check("fs_write", path))) return 0;
+    // leads to (#3751). The time is set on what the check saw: through a
+    // handle verified after it was opened (Windows), from the anchor of
+    // the resolved path (POSIX), never by the name a second time.
 
 #ifdef _WIN32
-    // Windows implementation with UTF-8 to UTF-16 path conversion
-    int wpath_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-    if (wpath_len <= 0) return 0;
-
-    // Allocate transient wide-char buffer
-    size_t wpath_bytes = (size_t)wpath_len * sizeof(wchar_t);
-    wchar_t* wpath = (wchar_t*)aether_caps_malloc(wpath_bytes);
-    if (!wpath) return 0;
-
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wpath_len);
-
-    // Open handle to file/directory/symlink.
-    // Use FILE_FLAG_BACKUP_SEMANTICS to allow opening directories,
-    // and FILE_FLAG_OPEN_REPARSE_POINT to prevent following symbolic links/junctions.
-    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
-    if (is_symlink) {
-        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    }
-
-    HANDLE h = CreateFileW(wpath, FILE_WRITE_ATTRIBUTES,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING, flags, NULL);
-    aether_caps_free(wpath, wpath_bytes);
-
+    // FILE_FLAG_OPEN_REPARSE_POINT for a symlink, so the link itself is
+    // opened and changed, not its target.
+    HANDLE h = (HANDLE)aether_sandbox_win_open(path, FILE_WRITE_ATTRIBUTES, 0, is_symlink,
+                                               AETHER_ACCESS_WRITE);
     if (h == INVALID_HANDLE_VALUE) {
         return 0;
     }
@@ -72,22 +52,13 @@ int aether_tar_set_mtime_raw(const char* path, int64_t mtime, int is_symlink) {
     times[1].tv_sec = (time_t)mtime;
     times[1].tv_nsec = 0;
 
-    int flags = 0;
-    if (is_symlink) {
-#ifdef AT_SYMLINK_NOFOLLOW
-        flags |= AT_SYMLINK_NOFOLLOW;
-#else
-        /* Never follow a symlink merely to preserve its timestamp. */
-        return 0;
+#ifndef AT_SYMLINK_NOFOLLOW
+    /* Never follow a symlink merely to preserve its timestamp. */
+    if (is_symlink) return 0;
 #endif
-    }
 
     // utimensat is standard POSIX.1-2008 and available on virtually all modern systems.
-    if (utimensat(AT_FDCWD, path, times, flags) == 0) {
-        return 1;
-    }
-
-    return 0;
+    return aether_sandbox_utimens(path, times, is_symlink) == 0 ? 1 : 0;
 #endif
 }
 

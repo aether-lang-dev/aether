@@ -213,6 +213,50 @@ main() {
             spec.assert_eq(done, 1, "and each call works in the box when the directory is its own")
             spec.assert_true(swaps_made > 0, "while the directory was being swapped")
         }
+        // chmod and the listings (list_dir, walk, glob) act on what their
+        // check saw too: on Windows through a verified handle, where they
+        // used to call SetFileAttributesW, SetNamedSecurityInfoW and
+        // FindFirstFileA by name after the check.
+        spec.it_when(have_dir_link, "chmod and a listing never reach a link swapped in after the check", no_dir_link) callback {
+            _wc1 = fs.write("${box}/d/c.txt", "inside-c")
+            _wc2 = fs.write("${outside}/c.txt", "outside-c")
+            stop_swap = 0
+            ok = worker.run(| _c: ptr | { swap_until_stopped() }, | _c: ptr | {})
+            listed_out = 0
+            i = 0
+            sandbox.enforce(in_box) callback {
+                while i < 3000 {
+                    _ok, _kind, _e = fs.chmod("${box}/d/c.txt", 292) // 0o444, read-only
+                    l, lerr = fs.list_dir("${box}/d")
+                    if lerr == "" {
+                        n = fs.dir_list_count(l)
+                        j = 0
+                        while j < n {
+                            if fs.dir_list_get(l, j) == "only_out.txt" { listed_out = listed_out + 1 }
+                            j = j + 1
+                        }
+                        fs.dir_list_free(l)
+                    }
+                    g, gerr = fs.glob("${box}/d/only_out*")
+                    if gerr == "" {
+                        listed_out = listed_out + fs.dir_list_count(g)
+                        fs.dir_list_free(g)
+                    }
+                    i = i + 1
+                }
+            }
+            stop_swap = 1
+            if ok { worker.wait() }
+            worker.drain(16)
+            werr = fs.write("${outside}/c.txt", "outside-c")
+            spec.assert_str_eq(werr, "", "chmod never made the outside file read-only")
+            spec.assert_eq(listed_out, 0, "a listing never named a file that is only outside")
+            spec.assert_true(swaps_made > 0, "while the directory was being swapped")
+            _r1, _rk1, _re1 = fs.chmod("${box}/d/c.txt", 420)
+            _r2, _rk2, _re2 = fs.chmod("${outside}/c.txt", 420)
+            _d1 = fs.delete("${box}/d/c.txt")
+            _d2 = fs.delete("${outside}/c.txt")
+        }
     }
 
     spec.describe(fw, "std.sandbox: calls on a name check the name") {
@@ -268,6 +312,39 @@ main() {
             spec.assert_str_eq(uerr, "", "unlink removes it")
             spec.assert_eq(fs.exists("${box}/j"), 0, "it is gone")
             spec.assert_eq(fs.exists("${outside}/secret.txt"), 1, "what it pointed at is not")
+        }
+        // "name/" is a directory to the kernel: an unlink of it removes
+        // nothing, an open that would create makes no file, and a symlink
+        // there is followed, not removed. The checked calls used to drop the
+        // slash and act on the name as whatever it was.
+        spec.it_when(1 - windows, "takes a name with a trailing slash for a directory, as the kernel does", "POSIX paths") callback {
+            _w = fs.write("${box}/slash_f", "x")
+            _m = fs.mkdir_p("${box}/slash_d")
+            eu = ""
+            ew = ""
+            ed = "not tried"
+            el = ""
+            sandbox.enforce(in_box) callback {
+                _u, _k, e1 = fs.unlink("${box}/slash_f/")
+                eu = e1
+                ew = fs.write("${box}/slash_new/", "x")
+                ed = fs.delete_dir("${box}/slash_d/")
+                if have_dir_link == 1 {
+                    _u2, _k2, e2 = fs.unlink("${box}/d_link/")
+                    el = e2
+                }
+            }
+            spec.assert_true(eu != "", "unlink of 'file/' is refused (ENOTDIR)")
+            spec.assert_eq(fs.exists("${box}/slash_f"), 1, "and the file stays")
+            spec.assert_true(ew != "", "a write to 'new/' is refused (EISDIR)")
+            spec.assert_eq(fs.exists("${box}/slash_new"), 0, "and makes no file")
+            spec.assert_str_eq(ed, "", "rmdir of 'dir/' removes the directory")
+            spec.assert_eq(fs.exists("${box}/slash_d"), 0, "it is gone")
+            if have_dir_link == 1 {
+                spec.assert_true(el != "", "unlink of 'link/' is refused")
+                spec.assert_eq(fs.is_symlink("${box}/d_link"), 1, "and the link stays")
+            }
+            _d = fs.delete("${box}/slash_f")
         }
         spec.it("refuses a hard link that would put a file outside the box under its grants") callback {
             err = ""

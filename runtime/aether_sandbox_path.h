@@ -405,6 +405,38 @@ static int aether_sandbox_met_link(int dirfd, const char* name, int err) {
     return fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode);
 }
 
+#if defined(__wasi__)
+#include <wasi/libc-find-relpath.h>
+#endif
+
+// Where a walk of `resolved` starts: "/" opened as an anchor, `*rest` the
+// part of `resolved` below it. On WASI there is no "/" to open unless a
+// preopened directory is "/": wasi-libc reaches a path only through the
+// preopen that holds it, so the walk starts from that preopen
+// (__wasilibc_find_abspath), which is not the caller's to close
+// (`*owned` 0). The descriptor; -1 with errno; -2 when no preopen holds the
+// path (the caller opens it whole, its end not followed).
+static int aether_sandbox_walk_start(const char* resolved, const char** rest, int* owned,
+                                     const AetherSandboxFsOps* ops) {
+#if defined(__wasi__)
+    (void)ops;
+    const char* prefix = NULL;
+    const char* rel = NULL;
+    int pre = __wasilibc_find_abspath(resolved, &prefix, &rel);
+    if (pre < 0) return -2;
+    *owned = 0;
+    *rest = (rel && strcmp(rel, ".") != 0) ? rel : "";
+    while (**rest == '/') (*rest)++;
+    return pre;
+#else
+    const char* p = resolved;
+    while (*p == '/') p++;
+    *rest = p;
+    *owned = 1;
+    return ops->openat(AT_FDCWD, "/", AETHER_SANDBOX_ANCHOR);
+#endif
+}
+
 // Opens `resolved` (absolute, as aether_sandbox_canon_path gives it) with
 // `flags` and `mode`, following no symlink on the way or at its end.
 // Returns the descriptor, or -1 with errno set: EACCES when a component is
@@ -425,16 +457,24 @@ static int aether_sandbox_walk(const char* resolved, int flags, unsigned mode,
     }
 #endif
     const char* p = resolved;
-    while (*p == '/') p++;
-    if (!*p) return ops->openat(AT_FDCWD, "/", flags & ~O_NOFOLLOW, mode);
-    int dir = ops->openat(AT_FDCWD, "/", AETHER_SANDBOX_ANCHOR);
+    int owned = 1;   // the walk's first directory is its own to close
+    int dir = aether_sandbox_walk_start(resolved, &p, &owned, ops);
+    if (dir == -2) return ops->openat(AT_FDCWD, resolved, flags, mode);
     if (dir < 0) return -1;
+    if (!*p) {
+        // The start itself ("/", or a preopened directory on WASI).
+        int fd = ops->openat(dir, ".", flags & ~O_NOFOLLOW, mode);
+        int err = errno;
+        if (owned) ops->close(dir);
+        errno = err;
+        return fd;
+    }
     char name[PATH_MAX];
     for (;;) {
         const char* e = p;
         while (*e && *e != '/') e++;
         size_t n = (size_t)(e - p);
-        if (n >= sizeof name) { ops->close(dir); errno = ENAMETOOLONG; return -1; }
+        if (n >= sizeof name) { if (owned) ops->close(dir); errno = ENAMETOOLONG; return -1; }
         memcpy(name, p, n);
         name[n] = '\0';
         while (*e == '/') e++;
@@ -444,7 +484,7 @@ static int aether_sandbox_walk(const char* resolved, int flags, unsigned mode,
         if (fd < 0) {
             int err = errno;
             int link = aether_sandbox_met_link(dir, name, err);
-            ops->close(dir);
+            if (owned) ops->close(dir);
             if (link) { errno = last && own_nofollow ? ELOOP : EACCES; return -1; }
             if (!last && err == EACCES && !AETHER_SANDBOX_ANCHOR_SEARCH_ONLY) {
                 // A directory that may be searched but not read: no anchor
@@ -454,9 +494,10 @@ static int aether_sandbox_walk(const char* resolved, int flags, unsigned mode,
             errno = err;
             return -1;
         }
-        ops->close(dir);
+        if (owned) ops->close(dir);
         if (last) return fd;
         dir = fd;
+        owned = 1;
         p = e;
     }
 }
@@ -486,6 +527,52 @@ static int aether_sandbox_anchor(const char* resolved, char* name, size_t cap,
     return aether_sandbox_walk(parent, AETHER_SANDBOX_ANCHOR & ~O_NOFOLLOW, 0, ops);
 }
 
+
+// A path that ends in a separator after a name ("/box/new/", not "/" or
+// "x/.."): the kernel takes that name for a directory. aether_sandbox_canon_
+// entry and aether_sandbox_canon_path drop the separator, so a call made on
+// their result would act on "new" as whatever it is; each call on a name
+// asks this first and keeps to what the kernel does with "new/". 1 when
+// `in` has such a separator.
+static int aether_sandbox_dir_slash(const char* in) {
+    if (!in) return 0;
+    size_t n = strlen(in);
+    if (n < 2 || in[n - 1] != '/') return 0;
+    while (n > 0 && in[n - 1] == '/') n--;
+    if (n == 0) return 0;   // "/" itself
+    size_t s = n;
+    while (s > 0 && in[s - 1] != '/') s--;
+    size_t len = n - s;
+    if ((len == 1 && in[s] == '.') || (len == 2 && in[s] == '.' && in[s + 1] == '.')) return 0;
+    return 1;
+}
+
+// What Linux does with "name/" for a call on the name itself, the name not
+// followed (`name` in `dirfd`: an anchor and its name, or AT_FDCWD and the
+// checked resolution): AETHER_SLASH_UNLINK never removes it (ENOENT when it is not
+// there, EISDIR for a directory, ENOTDIR for anything else, a symlink to a
+// directory included); AETHER_SLASH_DIR goes on only for a directory
+// (rmdir, rename: ENOENT, or ENOTDIR for a symlink or a file);
+// AETHER_SLASH_NEW makes no new non-directory (symlink, link, mknod:
+// EEXIST when the name is there, else ENOENT). 0 to go on, -1 with errno.
+#define AETHER_SLASH_UNLINK 1
+#define AETHER_SLASH_DIR    2
+#define AETHER_SLASH_NEW    3
+static int aether_sandbox_slash_call(int dirfd, const char* name, int op) {
+    struct stat st;
+    int there = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0;
+    if (op == AETHER_SLASH_NEW) {
+        errno = there ? EEXIST : ENOENT;
+        return -1;
+    }
+    if (!there) { errno = ENOENT; return -1; }
+    if (op == AETHER_SLASH_UNLINK) {
+        errno = S_ISDIR(st.st_mode) ? EISDIR : ENOTDIR;
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
+    return 0;
+}
 
 #if !defined(__wasi__)
 // chmod of `name` in the directory `dirfd`, not following it: fchmodat with
@@ -525,9 +612,11 @@ static int aether_sandbox_chmod_at(int dirfd, const char* name, mode_t mode,
 #else
     (void)chmod_fn;
 #endif
-    int fd = ops->openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    // O_NONBLOCK: a FIFO there opens without waiting for a writer (or a
+    // reader); O_NOCTTY: a terminal does not become the controlling one.
+    int fd = ops->openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     if (fd < 0 && (errno == EACCES || errno == EISDIR))
-        fd = ops->openat(dirfd, name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+        fd = ops->openat(dirfd, name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     if (fd >= 0) {
         int r = fchmod(fd, mode);
         int err = errno;

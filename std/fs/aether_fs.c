@@ -344,6 +344,43 @@ static DWORD fs_win_apply_mode_acl(const wchar_t* wpath, int mode, int is_dir) {
     return rc;
 }
 
+/* fs_win_apply_mode_acl through `h`, a verified handle on the object, for
+ * fs.chmod (#3751): the object the check saw is the one changed, whatever
+ * its name leads to by now. `h` carries READ_CONTROL and WRITE_DAC where
+ * they were had; a change that needs one it lacks fails ACCESS_DENIED, as
+ * the same change by name did. */
+static DWORD fs_win_apply_mode_acl_handle(HANDLE h, int mode, int is_dir) {
+    if ((mode & 077) == 0) {
+        PSECURITY_DESCRIPTOR sd = fs_win_private_sd(is_dir);
+        if (!sd) return GetLastError() ? GetLastError() : ERROR_INVALID_SECURITY_DESCR;
+        BOOL present = FALSE, defaulted = FALSE;
+        PACL dacl = NULL;
+        DWORD rc = ERROR_INVALID_SECURITY_DESCR;
+        if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present) {
+            rc = SetSecurityInfo(h, SE_FILE_OBJECT,
+                                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                 NULL, NULL, dacl, NULL);
+        }
+        LocalFree(sd);
+        return rc;
+    }
+    PACL dacl = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    DWORD rc = GetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &sd);
+    if (rc != ERROR_SUCCESS) return rc;
+    SECURITY_DESCRIPTOR_CONTROL ctl = 0;
+    DWORD rev = 0;
+    if (GetSecurityDescriptorControl(sd, &ctl, &rev) && (ctl & SE_DACL_PROTECTED) && dacl) {
+        /* Inherited entries in `dacl` are dropped and recomputed from the
+         * folder; the explicit ones stay. */
+        rc = SetSecurityInfo(h, SE_FILE_OBJECT,
+                             DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                             NULL, NULL, dacl, NULL);
+    }
+    LocalFree(sd);
+    return rc;
+}
+
 /* 1 when `wpath`'s DACL is protected (inherits nothing from its folder),
  * which is what an owner-only mode leaves (fs_win_apply_mode_acl); 0 when
  * it is not, or cannot be read. */
@@ -3369,24 +3406,30 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
     }
 #ifdef _WIN32
-    if (!aether_sandbox_check("fs_write", path)) {
-        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
-                                 "sandbox: cannot chmod path");
+    /* The file is opened once (following a link, as POSIX chmod does) and
+     * verified, and both the DACL and the read-only attribute are changed
+     * through that handle: changed by name, a junction swapped in after the
+     * check sent them to whatever it pointed at (#3751). It asks for the
+     * rights to read and change the DACL too, and without them where they
+     * are not had: a chmod that changes no DACL never needed them, and one
+     * that does fails at SetSecurityInfo with ACCESS_DENIED, as it did by
+     * name. */
+    static const DWORD chmod_rights[3] = {
+        READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+        READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+        FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+    };
+    HANDLE h = INVALID_HANDLE_VALUE;
+    for (int r = 0; r < 3; r++) {
+        h = (HANDLE)aether_sandbox_win_open(path, chmod_rights[r], 0, 0, AETHER_ACCESS_WRITE);
+        if (h != INVALID_HANDLE_VALUE || aether_sandbox_refused() || GetLastError() != ERROR_ACCESS_DENIED)
+            break;
     }
-    int wpath_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-    if (wpath_len <= 0) {
-        return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "path UTF-8 invalid");
-    }
-    /* #462: transient UTF-8 → UTF-16 path scratch — see fs_copy_raw. */
-    size_t wpath_bytes = (size_t)wpath_len * sizeof(wchar_t);
-    wchar_t* wpath = (wchar_t*)aether_caps_malloc(wpath_bytes);
-    if (!wpath) {
-        return aether_fs_iks_err(AETHER_FS_KIND_IO, "allocation failed");
-    }
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wpath_len);
-    DWORD attrs = GetFileAttributesW(wpath);
-    if (attrs == INVALID_FILE_ATTRIBUTES) {
-        aether_caps_free(wpath, wpath_bytes);
+    if (h == INVALID_HANDLE_VALUE) {
+        if (aether_sandbox_refused()) {
+            return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
+                                     "sandbox: cannot chmod path");
+        }
         DWORD win_err = GetLastError();
         aether_fs_note_os_error((int)win_err);
         int kind = AETHER_FS_KIND_IO;
@@ -3400,16 +3443,23 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
         }
         return aether_fs_iks_err(kind, msg);
     }
+    FILE_BASIC_INFO bi;
+    if (!GetFileInformationByHandleEx(h, FileBasicInfo, &bi, sizeof bi)) {
+        DWORD win_err = GetLastError();
+        CloseHandle(h);
+        aether_fs_note_os_error((int)win_err);
+        return aether_fs_iks_err(AETHER_FS_KIND_IO, "chmod failed");
+    }
+    DWORD attrs = bi.FileAttributes;
     /* Group/other bits: none means owner-only, made true with a DACL (see
      * fs_win_apply_mode_acl). A volume with no ACLs (FAT, exFAT) cannot keep
      * a file private, and saying so beats a silent success the caller would
      * take for privacy; it only matters when privacy was asked for. */
-    DWORD acl_err = fs_win_apply_mode_acl(wpath, mode,
-                                          (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+    DWORD acl_err = fs_win_apply_mode_acl_handle(h, mode, (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
     if (acl_err != ERROR_SUCCESS) {
         int unsupported = acl_err == ERROR_NOT_SUPPORTED || acl_err == ERROR_INVALID_FUNCTION;
         if (!unsupported || (mode & 077) == 0) {
-            aether_caps_free(wpath, wpath_bytes);
+            CloseHandle(h);
             aether_fs_note_os_error((int)acl_err);
             if (acl_err == ERROR_ACCESS_DENIED) {
                 return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "access denied");
@@ -3425,12 +3475,19 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     } else {
         attrs |= FILE_ATTRIBUTE_READONLY;
     }
-    BOOL ok = SetFileAttributesW(wpath, attrs);
-    aether_caps_free(wpath, wpath_bytes);
+    /* The bits SetFileAttributesW sets (FILE_ATTRIBUTE_VALID_SET_FLAGS);
+     * none at all is FILE_ATTRIBUTE_NORMAL. Zero times leave them as they
+     * are. */
+    FILE_BASIC_INFO nb;
+    memset(&nb, 0, sizeof nb);
+    nb.FileAttributes = attrs & 0x31a7;
+    if (nb.FileAttributes == 0) nb.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    BOOL ok = SetFileInformationByHandle(h, FileBasicInfo, &nb, sizeof nb);
+    DWORD set_err = ok ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(h);
     if (!ok) {
-        DWORD win_err = GetLastError();
-        aether_fs_note_os_error((int)win_err);
-        if (win_err == ERROR_ACCESS_DENIED) {
+        aether_fs_note_os_error((int)set_err);
+        if (set_err == ERROR_ACCESS_DENIED) {
             return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "access denied");
         }
         return aether_fs_iks_err(AETHER_FS_KIND_IO, "chmod failed");
@@ -3744,7 +3801,19 @@ DirList* dir_list_raw(const char* path) {
      * root (#3743). A refusal is NULL, which the wrappers report as
      * "cannot list directory". */
 #ifdef _WIN32
-    if (!aether_sandbox_check("fs_read", path)) return NULL;
+    /* Inside an enforce block the directory listed is the one checked: a
+     * handle opened and verified, listed by NtQueryDirectoryFile (#3751).
+     * FindFirstFileA by name listed whatever a junction swapped in after
+     * the check pointed at. */
+    void* wdir = NULL;
+    int verified = 0;   /* in a block: listed through the handle or not at all */
+    if (aether_sandbox_levels_here() > 0) {
+        wdir = aether_sandbox_win_opendir(path, NULL);
+        if (!wdir && aether_sandbox_refused()) return NULL;
+        verified = 1;
+    } else if (!aether_sandbox_check("fs_read", path)) {
+        return NULL;
+    }
 #else
     /* On POSIX the directory listed is the one checked (#3751). */
     DIR* dir = (DIR*)aether_sandbox_opendir(path);
@@ -3758,6 +3827,8 @@ DirList* dir_list_raw(const char* path) {
     if (!list) {
 #ifndef _WIN32
         if (dir) closedir(dir);
+#else
+        aether_sandbox_win_closedir(wdir);
 #endif
         return NULL;
     }
@@ -3768,21 +3839,35 @@ DirList* dir_list_raw(const char* path) {
 
     #ifdef _WIN32
     WIN32_FIND_DATAA find_data;
-    char search_path[MAX_PATH];
-    snprintf(search_path, sizeof(search_path), "%s\\*", path);
-
-    HANDLE hFind = FindFirstFileA(search_path, &find_data);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        return list;
+    HANDLE hFind = INVALID_HANDLE_VALUE;
+    if (!wdir) {
+        if (verified) return list;   /* not there, or not a directory: empty, as FindFirstFileA leaves it */
+        char search_path[MAX_PATH];
+        snprintf(search_path, sizeof(search_path), "%s\\*", path);
+        hFind = FindFirstFileA(search_path, &find_data);
+        if (hFind == INVALID_HANDLE_VALUE) {
+            return list;
+        }
     }
 
     // Capacity-doubling growth for the entries array. Without it every
     // readdir step reallocated + memcpy'd the whole list, turning an
     // N-entry directory into O(N^2) work.
     int cap = 0;
-    do {
-        if (strcmp(find_data.cFileName, ".") != 0 &&
-            strcmp(find_data.cFileName, "..") != 0) {
+    char wname[MAX_PATH * 4];
+    for (int more = 1; more; more = wdir ? 1 : FindNextFileA(hFind, &find_data)) {
+        const char* entry_name = find_data.cFileName;
+        DWORD entry_attrs = 0;
+        if (wdir) {
+            unsigned long wattrs = 0;
+            if (aether_sandbox_win_readdir(wdir, wname, sizeof wname, &wattrs) <= 0) break;
+            entry_name = wname;
+            entry_attrs = (DWORD)wattrs;
+        } else {
+            entry_attrs = find_data.dwFileAttributes;
+        }
+        if (strcmp(entry_name, ".") != 0 &&
+            strcmp(entry_name, "..") != 0) {
             if (list->count >= cap) {
                 int new_cap = cap ? cap * 2 : 16;
                 char** new_entries = (char**)aether_caps_realloc(
@@ -3799,15 +3884,16 @@ DirList* dir_list_raw(const char* path) {
                 cap = new_cap;
                 list->capacity = new_cap;
             }
-            char* name_copy = fs_caps_strdup(find_data.cFileName);
+            char* name_copy = fs_caps_strdup(entry_name);
             if (!name_copy) break;
             list->kinds[list->count] =                                   /* #966 */
-                fs_winattr_to_kind(find_data.dwFileAttributes);
+                fs_winattr_to_kind(entry_attrs);
             list->entries[list->count++] = name_copy;
         }
-    } while (FindNextFileA(hFind, &find_data));
+    }
 
-    FindClose(hFind);
+    if (wdir) aether_sandbox_win_closedir(wdir);
+    else FindClose(hFind);
     #else
     if (!dir) return list;
 
@@ -3977,6 +4063,30 @@ static void walk_recursive(const char* dir, const char* suffix_pattern, DirList*
 
     FindClose(h);
 }
+
+// walk_recursive inside an enforce block (#3751): `d` is `dir` opened
+// through a verified handle, and each subdirectory is opened relative to
+// it, a link (a junction) not entered, as the POSIX walk enters no symlink.
+// FindFirstFileA by name listed whatever a junction swapped in after the
+// check pointed at. `d` is closed here.
+static void walk_recursive_verified(const char* dir, void* d, const char* suffix_pattern,
+                                    DirList* result) {
+    char name[MAX_PATH * 4];
+    unsigned long attrs = 0;
+    while (aether_sandbox_win_readdir(d, name, sizeof name, &attrs) > 0) {
+        char fullpath[4096];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, name);
+        if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+            // Skip dot-prefixed directories (.git, .aeb, .vscode, …)
+            if (name[0] == '.') continue;
+            void* sub = aether_sandbox_win_opendir_at(d, name);
+            if (sub) walk_recursive_verified(fullpath, sub, suffix_pattern, result);
+        } else if (win_fnmatch(suffix_pattern, name)) {
+            dirlist_add(result, fullpath);
+        }
+    }
+    aether_sandbox_win_closedir(d);
+}
 #else
 // Recursive walk for ** patterns (POSIX).
 // Skips '.' and '..', and skips dot-prefixed directories (e.g. .git, .aeb)
@@ -4082,7 +4192,47 @@ DirList* fs_glob_raw(const char* pattern) {
         // every level it visits — including the top-level `dir` — so a
         // separate base-dir scan here would re-emit every root-level match
         // (issue #1279). Rely solely on the walk.
-        walk_recursive(dir, suffix, result);
+        if (aether_sandbox_levels_here() > 0) {
+            void* d = aether_sandbox_win_opendir(dir, NULL);
+            if (d) walk_recursive_verified(dir, d, suffix, result);
+        } else {
+            walk_recursive(dir, suffix, result);
+        }
+    } else if (aether_sandbox_levels_here() > 0) {
+        // Simple glob inside an enforce block (#3751): the pattern's
+        // directory opened through a verified handle, its last part matched
+        // by the file system as FindFirstFileA matches it, the results
+        // named as below.
+        const char* last_slash = strrchr(pattern, '/');
+        const char* last_bslash = strrchr(pattern, '\\');
+        const char* sep = (last_bslash > last_slash) ? last_bslash : last_slash;
+        size_t dir_prefix_len = sep ? (size_t)(sep - pattern) + 1 : 0;
+        char dir[4096];
+        if (dir_prefix_len == 0) {
+            memcpy(dir, ".", 2);
+        } else if (dir_prefix_len < sizeof(dir)) {
+            size_t dl = dir_prefix_len - 1;
+            if (dl == 0) dl = 1;                          /* "\x*": the root */
+            if (dl == 2 && pattern[1] == ':') dl = 3;     /* "C:\x*": the drive's root */
+            memcpy(dir, pattern, dl);
+            dir[dl] = '\0';
+        } else {
+            return result;
+        }
+        void* d = aether_sandbox_win_opendir(dir, pattern + dir_prefix_len);
+        if (d) {
+            char name[MAX_PATH * 4];
+            unsigned long attrs = 0;
+            while (aether_sandbox_win_readdir(d, name, sizeof name, &attrs) > 0) {
+                if (attrs & FILE_ATTRIBUTE_DIRECTORY) continue;
+                char full[4096];
+                if (dir_prefix_len + strlen(name) >= sizeof(full)) continue;
+                memcpy(full, pattern, dir_prefix_len);
+                snprintf(full + dir_prefix_len, sizeof(full) - dir_prefix_len, "%s", name);
+                dirlist_add(result, full);
+            }
+            aether_sandbox_win_closedir(d);
+        }
     } else {
         // Simple glob (no **). FindFirstFileA matches against the full
         // `pattern` but its WIN32_FIND_DATA::cFileName is the BARE file name,
@@ -4586,6 +4736,43 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
     return 0;
 }
 
+#ifdef _WIN32
+/* fs_walk_recurse inside an enforce block (#3751): `dir` is the directory
+ * `buf` names, opened through a verified handle, and each subdirectory is
+ * opened relative to it, a link there refused (a junction swapped in for a
+ * directory during the walk is not entered), as the POSIX walk opens one
+ * with O_NOFOLLOW from its parent. `dir` is closed here. */
+static int fs_walk_recurse_verified(char* buf, size_t len, int depth,
+                                    int (*cb)(void*, const char*, int, int), void* env,
+                                    int* count, void* dir) {
+    char name[MAX_PATH * 4];
+    unsigned long attrs = 0;
+    int r;
+    while ((r = aether_sandbox_win_readdir(dir, name, sizeof name, &attrs)) > 0) {
+        size_t nlen = strlen(name);
+        if (len + 1 + nlen >= FS_WALK_PATH_CAP) continue;  /* too long — prune */
+        buf[len] = '/';
+        memcpy(buf + len + 1, name, nlen + 1);
+        int kind = fs_winattr_to_kind((DWORD)attrs);
+        (*count)++;
+        int rc = cb(env, buf, kind, depth);
+        if (rc == 2) { buf[len] = '\0'; aether_sandbox_win_closedir(dir); return 2; }
+        if (rc != 1 && kind == FS_STAT_KIND_DIR) {
+            void* sub = aether_sandbox_win_opendir_at(dir, name);
+            if (sub && fs_walk_recurse_verified(buf, len + 1 + nlen, depth + 1,
+                                                cb, env, count, sub) == 2) {
+                buf[len] = '\0';
+                aether_sandbox_win_closedir(dir);
+                return 2;
+            }
+        }
+        buf[len] = '\0';
+    }
+    aether_sandbox_win_closedir(dir);
+    return 0;
+}
+#endif
+
 int fs_walk_raw(const char* root, void* cb_box) {
     if (!root || !cb_box) return -1;
     if (!aether_sandbox_check("fs_read", root)) return -1;
@@ -4609,6 +4796,12 @@ int fs_walk_raw(const char* root, void* cb_box) {
     int count = 1;
     int rc = cb(clo.env, buf, root_kind, 0);    /* the root is visited too */
     if (rc != 1 && rc != 2 && root_kind == FS_STAT_KIND_DIR) {
+#ifdef _WIN32
+        if (aether_sandbox_levels_here() > 0) {
+            void* dir = aether_sandbox_win_opendir(buf, NULL);
+            if (dir) fs_walk_recurse_verified(buf, rlen, 1, cb, clo.env, &count, dir);
+        } else
+#endif
         fs_walk_recurse(buf, rlen, 1, cb, clo.env, &count, -1);
     }
 
