@@ -55,7 +55,7 @@ import std.string
 
 exports(
     request, set_header, set_body, set_timeout, set_follow_redirects, set_insecure,
-    set_cafile, set_partial_chain, set_tls_backend, set_stream, set_unix_socket, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
+    set_cafile, set_partial_chain, set_tls_backend, set_stream, set_max_response, set_default_max_response, set_unix_socket, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
     send_request, send_stream,
     response_status, response_body, response_body_bytes, response_error, response_redirect_error,
     response_is_stream, response_read, response_take_conn,
@@ -81,6 +81,8 @@ extern http_request_set_cafile_raw(req: ptr, path: string) -> int
 extern http_request_set_partial_chain_raw(req: ptr, on: int) -> int
 extern http_request_set_tls_backend_raw(req: ptr, name: string) -> int
 extern http_request_set_stream_raw(req: ptr, on: int) -> int
+extern http_request_set_max_response_raw(req: ptr, max_bytes: long) -> int
+extern http_client_set_max_response_raw(max_bytes: long) -> int
 extern http_request_set_unix_socket_raw(req: ptr, path: string) -> int
 extern http_request_use_env_proxy_raw(req: ptr, on: int) -> int
 extern http_request_use_http_proxy_raw(req: ptr, proxy_url: string) -> int
@@ -250,6 +252,28 @@ set_tls_backend(req: ptr, backend: string) -> string {
 set_stream(req: ptr, on: int) -> string {
     rc = http_request_set_stream_raw(req, on)
     if rc != 0 { return "set_stream failed (null req)" }
+    return ""
+}
+
+// The most of a response this request holds, head and body, in bytes
+// (#3750); 0 for no bound. Unset, it is the client's default, 64 MiB unless
+// set_default_max_response says otherwise. Past it the request fails with an
+// error naming the limit, rather than the client growing its buffer for as
+// long as the server keeps sending. A response read with set_stream holds
+// one window of its body, so only its head is bounded by this. Returns ""
+// or why the value was refused.
+set_max_response(req: ptr, max_bytes: long) -> string {
+    rc = http_request_set_max_response_raw(req, max_bytes)
+    if rc != 0 { return "set_max_response failed (negative size or null req)" }
+    return ""
+}
+
+// The response limit every request that sets none takes, for the whole
+// program (#3750); 0 for no bound. 64 MiB unless set here. Returns "" or
+// why the value was refused.
+set_default_max_response(max_bytes: long) -> string {
+    rc = http_client_set_max_response_raw(max_bytes)
+    if rc != 0 { return "set_default_max_response failed (negative size)" }
     return ""
 }
 

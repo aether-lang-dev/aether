@@ -66,6 +66,12 @@
     <li><a href="#server_set_max_body">server_set_max_body</a></li>
     <li><a href="#server_set_head_timeout_raw">server_set_head_timeout_raw</a></li>
     <li><a href="#server_set_head_timeout">server_set_head_timeout</a></li>
+    <li><a href="#server_set_body_timeout_raw">server_set_body_timeout_raw</a></li>
+    <li><a href="#server_set_body_timeout">server_set_body_timeout</a></li>
+    <li><a href="#server_set_tls_handshake_timeout_raw">server_set_tls_handshake_timeout_raw</a></li>
+    <li><a href="#server_set_tls_handshake_timeout">server_set_tls_handshake_timeout</a></li>
+    <li><a href="#server_set_h2_max_age_raw">server_set_h2_max_age_raw</a></li>
+    <li><a href="#server_set_h2_max_age">server_set_h2_max_age</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
     <li><a href="#server_set_h2">server_set_h2</a></li>
     <li><a href="#server_set_multi_accept_raw">server_set_multi_accept_raw</a></li>
@@ -549,6 +555,39 @@
     <div class="function" id="server_set_head_timeout" data-name="server_set_head_timeout">
       <h3 class="function-name">server_set_head_timeout <span class="kind">fn</span></h3>
       <pre class="usage"><code>server_set_head_timeout(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
+    </div>
+    <div class="function" id="server_set_body_timeout_raw" data-name="server_set_body_timeout_raw">
+      <h3 class="function-name">server_set_body_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_body_timeout_raw(server, timeout_ns, min_rate) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long, min_rate: long</span></p>
+      <p class="doc">The budget for a request body (#3737): the server waits on the client for the body no longer than `timeout`, plus one second for every `min_rate_bytes` it has received, counting only the time it waits (not the handler's between reads). 30 s and 500 bytes a second unless set here. Past it a body the server reads before the handler runs is answered 408; one the handler reads (request_body, request_body_read) ends short and the response becomes 408. The connection closes either way. 0ns turns the bound off; a rate of 0 makes `timeout` an absolute bound on the wait. Returns &quot;&quot; or why the values were refused.</p>
+    </div>
+    <div class="function" id="server_set_body_timeout" data-name="server_set_body_timeout">
+      <h3 class="function-name">server_set_body_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_body_timeout(server, timeout, min_rate_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration, min_rate_bytes: long</span></p>
+    </div>
+    <div class="function" id="server_set_tls_handshake_timeout_raw" data-name="server_set_tls_handshake_timeout_raw">
+      <h3 class="function-name">server_set_tls_handshake_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_tls_handshake_timeout_raw(server, timeout_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long</span></p>
+      <p class="doc">The longest a TLS handshake may take as a whole (#3737), on both TLS backends; 30 s unless set here. Past it the connection is closed. The idle timeout bounds each of its reads on its own, so without this a client that sent its ClientHello a byte at a time held a worker for as long as it liked. 0ns turns the bound off. Returns &quot;&quot; or why it was refused.</p>
+    </div>
+    <div class="function" id="server_set_tls_handshake_timeout" data-name="server_set_tls_handshake_timeout">
+      <h3 class="function-name">server_set_tls_handshake_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_tls_handshake_timeout(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
+    </div>
+    <div class="function" id="server_set_h2_max_age_raw" data-name="server_set_h2_max_age_raw">
+      <h3 class="function-name">server_set_h2_max_age_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_h2_max_age_raw(server, timeout_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long</span></p>
+      <p class="doc">How long an HTTP/2 connection may live (#3738); 1 h unless set here. Past it the server sends GOAWAY, lets the streams it has finish, and closes no later than the idle timeout after. An HTTP/2 connection with no stream open closes after the idle timeout (server_set_keepalive) whatever this is. 0ns turns the bound off. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_h2_max_age" data-name="server_set_h2_max_age">
+      <h3 class="function-name">server_set_h2_max_age <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_h2_max_age(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
     </div>
     <div class="function" id="server_set_h2_raw" data-name="server_set_h2_raw">

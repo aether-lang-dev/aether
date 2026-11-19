@@ -106,6 +106,10 @@ typedef struct {
      * ends when the caller's budget does. */
     int64_t deadline_ms;
     int    timed_out;    /* the deadline passed before the response ended */
+    /* The most of the response the exchange holds, head and body, 0 for no
+     * bound (#3750); too_large is set when the next read would pass it. */
+    size_t max_len;
+    int    too_large;
 } HttpExchange;
 
 /* An upstream connection acquired without blocking. */

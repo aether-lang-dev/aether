@@ -260,6 +260,37 @@ int http_request_set_timeout_raw(HttpClientRequest* req, int seconds);
 // sub-ms value doesn't degrade to "infinite" via DWORD=0.
 int http_request_set_timeout_ns_raw(HttpClientRequest* req, int64_t timeout_ns);
 
+// The HTTP client's limits (#3750), with the server's (HttpServerLimits in
+// aether_http_server.h, the table in docs/http-server.md "Resource limits"):
+//
+//   field          default  setter (std.http.client)            past it
+//   max_response   64 MiB   set_max_response, set_default_max_response
+//                                                               the request fails, "response is larger than ..."
+//
+// max_response bounds the bytes a buffered response holds, head and body: a
+// server could make the client grow its buffer for as long as it kept
+// sending. A streamed response (set_stream) holds one window of its body,
+// and only its head is bounded by this. 0 for no bound.
+#define HTTP_CLIENT_DEFAULT_MAX_RESPONSE ((int64_t)64 * 1024 * 1024)
+// How the error of a response past max_response begins, for a caller (the
+// reverse proxy) that answers it differently from a failed transport.
+#define HTTP_CLIENT_TOO_LARGE_PREFIX "response is larger than the client's limit"
+typedef struct HttpClientLimits {
+    int64_t max_response;
+} HttpClientLimits;
+
+// The most of a response this request holds, in bytes; 0 for no bound.
+// Unset, a request takes the client's default (http_client_set_max_response_raw,
+// HTTP_CLIENT_DEFAULT_MAX_RESPONSE unless set). Returns 0, or -1 for a NULL
+// request or a negative size.
+int http_request_set_max_response_raw(HttpClientRequest* req, int64_t max_bytes);
+
+// The default every request that sets none takes, for the whole process;
+// 0 for no bound. Returns 0, or -1 for a negative size.
+int http_client_set_max_response_raw(int64_t max_bytes);
+// The client's limits as they stand.
+void http_client_limits(HttpClientLimits* out);
+
 // Configure automatic redirect-following on this request. `max_hops` of
 // 0 (the default) keeps the v1/v2 behaviour: redirects are returned as
 // 30x to the caller, which decides what to do. `max_hops > 0` follows

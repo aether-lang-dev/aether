@@ -477,7 +477,8 @@ idle timeout, is answered `408` and the connection closes: before the
 handler runs when the server reads the body itself (a chunked body, or one
 that fits the connection buffer), and after it when the handler reads it
 with `request_body` or `request_body_read`, whose read ends short. A rate
-of 0 makes the body's timeout absolute.
+of 0 makes the body's timeout absolute. Every limit is in one table in
+[Resource limits](#resource-limits).
 
 ### Idle connections wait in a poller, not on a worker
 
@@ -1134,6 +1135,53 @@ Either path may be `""` to skip; `ready_check` may be null. Mirrors
 Kubernetes / Docker probe conventions.
 
 ---
+
+## Resource limits
+
+Every bound the server puts on what one client can make it hold (memory,
+a worker, a connection) is in one place, `HttpServerLimits` in
+`std/net/aether_http_server.h`, with one set of defaults (#3750). This is
+that table; each limit has a setter, and the older setters
+(`server_set_keepalive`, `server_set_max_body`, ...) write into it. A
+timeout of `0ns` turns that bound off.
+
+| Limit | Default | Set with | Past it |
+|---|---|---|---|
+| Idle: a wait for the next byte, a send that makes no progress, a kept-alive connection's wait for its next request | 30 s | `server_set_keepalive` (its idle timeout) | the wait fails; the connection closes |
+| TLS handshake, as a whole | 30 s | `server_set_tls_handshake_timeout` | the connection closes |
+| Request head, from its first byte | 30 s | `server_set_head_timeout` | `408`; the connection closes |
+| Request body: the server's waiting, extended by one second per `min_rate` bytes received | 30 s and 500 bytes/s | `server_set_body_timeout` | `408`; the connection closes |
+| Body `request_body` buffers | 64 MiB | `server_set_max_body` | `413` (HTTP/2: the stream is reset) |
+| Chunked body, read whole before the handler | 8 MiB, and never past the body limit | none | `413`; the connection closes |
+| WebSocket message | 64 MiB | `server_set_ws_max_message`, `ws_set_max_message` | close `1009` |
+| HTTP/2 streams on one connection | 100 | `server_set_h2` | the new stream is reset |
+| HTTP/2 request bodies held on one connection | the body limit | `server_set_max_body` | the stream is refused (`REFUSED_STREAM`) |
+| HTTP/2 header list | 32 KiB | none | `431` |
+| HTTP/2 request, from its first HEADERS | the head and body budgets | as those | the stream is reset (`CANCEL`) |
+| HTTP/2 connection with no stream open | the idle timeout | as that | `GOAWAY`; closed |
+| HTTP/2 connection's age | 1 h | `server_set_h2_max_age` | graceful `GOAWAY`; closed when its streams are done |
+
+Fixed limits, which size buffers and have no setter: a request head
+16 KiB (`431`), a request line 2 KiB (`414`), a header line 1 KiB and 50
+headers (`431`).
+
+The HTTP client has one limit of the same kind (`HttpClientLimits` in
+`std/net/aether_http.h`):
+
+| Limit | Default | Set with | Past it |
+|---|---|---|---|
+| A buffered response, head and body; a streamed response's head | 64 MiB | `client.set_max_response(req, n)`, `client.set_default_max_response(n)`; `0` for none | the request fails: "response is larger than the client's limit of N bytes" |
+
+A request's timeout (`client.set_timeout`) bounds the whole exchange, a
+streamed response's head included. A response you want whole past 64 MiB
+takes `set_max_response` with its size; one you can read in pieces takes
+`set_stream`, which holds one window of the body at a time. The reverse
+proxy gives each upstream fetch its own body cap as the limit.
+
+`tests/integration/http_server_slow_clients` drives each time limit with a
+client that keeps just inside the idle timeout, over plain and both TLS
+backends; `http_server_body_limit`, `ws_receive_limits`,
+`http_server_h2_limits` and `http_client_max_response` drive the rest.
 
 ## Performance tuning checklist
 

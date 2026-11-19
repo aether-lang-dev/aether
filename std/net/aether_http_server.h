@@ -215,18 +215,24 @@ struct HttpConn;
 // server_set_max_body, ...) write into it. docs/http-server.md "Resource
 // limits" is the same table for programs.
 //
-//   field                     default  setter (std.http)            past it
-//   idle_timeout_ms           30 s     server_set_keepalive (idle)  the wait fails, connection closed
+//   field                     default  setter (std.http)                 past it
+//   idle_timeout_ms           30 s     server_set_keepalive (idle)       the wait fails, connection closed
 //   tls_handshake_timeout_ms  30 s     server_set_tls_handshake_timeout  connection closed
-//   head_timeout_ms           30 s     server_set_head_timeout      408, connection closed
-//   body_timeout_ms           30 s     server_set_body_timeout      408, connection closed
-//   body_min_rate             500 B/s  server_set_body_timeout      (extends body_timeout_ms)
-//   max_body                  64 MiB   server_set_max_body          413 (HTTP/2: RST_STREAM CANCEL)
-//   max_chunked_body          8 MiB    none (clamped to max_body)   413, connection closed
-//   ws_max_message            64 MiB   server_set_ws_max_message    close 1009
-//   h2_max_concurrent_streams 100      server_set_h2                the new stream is reset
-//   h2_max_header_list        32 KiB   none                         431, the stream reset
-//   h2_max_age_ms             1 h      server_set_h2_max_age        GOAWAY, then closed
+//   head_timeout_ms           30 s     server_set_head_timeout           408, connection closed
+//   body_timeout_ms           30 s     server_set_body_timeout           408, connection closed
+//   body_min_rate             500 B/s  server_set_body_timeout           (extends body_timeout_ms)
+//   max_body                  64 MiB   server_set_max_body               413 (HTTP/2: RST_STREAM CANCEL)
+//   max_chunked_body          8 MiB    none (clamped to max_body)        413, connection closed
+//   ws_max_message            64 MiB   server_set_ws_max_message         close 1009
+//   h2_max_concurrent_streams 100      server_set_h2                     the new stream is reset
+//   h2_max_header_list        32 KiB   none                              431, the stream reset
+//   h2_max_age_ms             1 h      server_set_h2_max_age             GOAWAY, then closed
+//
+// HTTP/2 also holds no more than max_body of request bodies on one
+// connection (a stream past it is refused), resets a stream whose request
+// is not whole within the head and body budgets, and closes a connection
+// with no stream open for idle_timeout_ms. The HTTP client's limits are
+// HttpClientLimits in aether_http.h.
 //
 // The body's budget: the server waits on the client for a body no longer
 // than body_timeout_ms plus one second for every body_min_rate bytes it has

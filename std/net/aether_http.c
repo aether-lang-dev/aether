@@ -189,6 +189,9 @@ int http_request_set_header_raw(HttpClientRequest* r, const char* n, const char*
 int http_request_set_body_raw(HttpClientRequest* r, const char* b, int l, const char* c) { (void)r; (void)b; (void)l; (void)c; return -1; }
 int http_request_set_timeout_raw(HttpClientRequest* r, int s) { (void)r; (void)s; return -1; }
 int http_request_set_timeout_ns_raw(HttpClientRequest* r, int64_t ns) { (void)r; (void)ns; return -1; }
+int http_request_set_max_response_raw(HttpClientRequest* r, int64_t m) { (void)r; (void)m; return -1; }
+int http_client_set_max_response_raw(int64_t m) { (void)m; return -1; }
+void http_client_limits(HttpClientLimits* out) { if (out) out->max_response = HTTP_CLIENT_DEFAULT_MAX_RESPONSE; }
 int http_request_set_follow_redirects_raw(HttpClientRequest* r, int n) { (void)r; (void)n; return -1; }
 int http_request_set_insecure_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_set_cafile_raw(HttpClientRequest* r, const char* p) { (void)r; (void)p; return -1; }
@@ -1454,6 +1457,10 @@ struct HttpClientRequest {
                           * DWORD ms) slice this down to whatever
                           * granularity they support. */
     int   max_redirects; /* 0 = don't follow (default); N>0 = follow up to N hops */
+    /* The most of a response this request holds (#3750), when
+     * max_response_set; else the client's default (http_client_limits). */
+    int64_t max_response;
+    int   max_response_set;
     int   insecure;      /* 0 = verify peer cert + hostname (default); 1 = skip
                           * both for THIS connection only (curl -k equivalent).
                           * Relaxed per-SSL, never on the shared SSL_CTX. */
@@ -1689,6 +1696,46 @@ int http_request_set_timeout_ns_raw(HttpClientRequest* req, int64_t timeout_ns) 
     if (!req || timeout_ns < 0) return -1;
     req->timeout_ns = timeout_ns;
     return 0;
+}
+
+/* The client's limits (#3750): HTTP_CLIENT_DEFAULT_MAX_RESPONSE until a
+ * program sets another, for every request that sets none. Atomic: any
+ * thread may set it while others send. */
+static _Atomic int64_t http_client_max_response = HTTP_CLIENT_DEFAULT_MAX_RESPONSE;
+
+int http_client_set_max_response_raw(int64_t max_bytes) {
+    if (max_bytes < 0) return -1;
+    atomic_store(&http_client_max_response, max_bytes);
+    return 0;
+}
+
+void http_client_limits(HttpClientLimits* out) {
+    if (!out) return;
+    out->max_response = atomic_load(&http_client_max_response);
+}
+
+int http_request_set_max_response_raw(HttpClientRequest* req, int64_t max_bytes) {
+    if (!req || max_bytes < 0) return -1;
+    req->max_response = max_bytes;
+    req->max_response_set = 1;
+    return 0;
+}
+
+/* The most of a response `req` holds, 0 for no bound. */
+static int64_t http_request_max_response(const HttpClientRequest* req) {
+    if (req && req->max_response_set) return req->max_response;
+    return atomic_load(&http_client_max_response);
+}
+
+/* The error a response past it fails with, saying which limit and how to
+ * change it. */
+static AetherString* http_response_too_large_error(int64_t max) {
+    char msg[192];
+    snprintf(msg, sizeof(msg),
+             HTTP_CLIENT_TOO_LARGE_PREFIX " of %lld bytes "
+             "(set_max_response, or set_stream to read it in pieces)",
+             (long long)max);
+    return string_new(msg);
 }
 
 int http_request_set_follow_redirects_raw(HttpClientRequest* req, int max_hops) {
@@ -3802,6 +3849,13 @@ int http_exchange_recv(HttpExchange* x) {
         int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
         if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
         if (n < 0)  return http_io_would_block() ? AE_X_WANT_READ : AE_X_ERROR;
+        /* Past the response limit, the read ends there (#3750): a server
+         * could make the client grow this buffer for as long as it kept
+         * sending. */
+        if (x->max_len && x->len + (size_t)n > x->max_len) {
+            x->too_large = 1;
+            return AE_X_ERROR;
+        }
 
         if (x->len + (size_t)n + 1 > x->cap) {
             size_t new_cap = x->cap ? x->cap * 2 : 16384;
@@ -4106,7 +4160,27 @@ send_request:
         size_t hlen = 0, hcap = 0;
         char*  hend = NULL;
         int    sn, serr = 0;
+        /* The head is bounded as a buffered response is, in size by the
+         * response limit and in time by the request's timeout as a whole
+         * (#3750): it was read for as long as a server kept sending header
+         * bytes, each inside the per-read timeout, into a buffer that grew
+         * to match. */
+        int64_t head_max = http_request_max_response(req);
+        int64_t head_due = req->timeout_ns > 0
+            ? (int64_t)http_now_ms() + (req->timeout_ns + 999999LL) / 1000000LL : 0;
         while ((sn = transport_recv(&t, sbuf, sizeof(sbuf))) > 0) {
+            if (head_max > 0 && hlen + (size_t)sn > (size_t)head_max) {
+                free(hb);
+                transport_close(&t);
+                response->error = http_response_too_large_error(head_max);
+                return response;
+            }
+            if (head_due && (int64_t)http_now_ms() >= head_due) {
+                free(hb);
+                transport_close(&t);
+                response->error = string_new("request timed out before the response headers arrived");
+                return response;
+            }
             if (hlen + (size_t)sn + 1 > hcap) {
                 size_t nc = hcap ? hcap * 2 : 16384;
                 while (nc < hlen + (size_t)sn + 1) nc *= 2;
@@ -4255,6 +4329,8 @@ send_request:
          * each recv: SO_RCVTIMEO alone let a peer that dribbles a byte just
          * inside the limit hold the request open indefinitely. */
         http_exchange_set_timeout(&rx, req->timeout_ns);
+        int64_t max_response = http_request_max_response(req);
+        rx.max_len = max_response > 0 ? (size_t)max_response : 0;
         int rc = http_exchange_recv(&rx);
         timed_out = rx.timed_out;
         rx_complete_at_deadline = rx.complete || rx.peer_closed;
@@ -4279,6 +4355,13 @@ send_request:
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new("out of memory reading response");
+            return response;
+        }
+        if (rx.too_large) {
+            aether_caps_free(hdr, hdr_cap);
+            aether_caps_free(full_response, cap);
+            transport_close(&t);
+            response->error = http_response_too_large_error(max_response);
             return response;
         }
         /* A WANT on a blocking transport is SO_RCVTIMEO firing, not a socket

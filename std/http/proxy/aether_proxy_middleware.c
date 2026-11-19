@@ -673,6 +673,15 @@ static int px_build(AetherProxyExchange* px) {
     if (opts->pool->request_timeout_sec > 0) {
         http_request_set_timeout_raw(px->outbound, opts->pool->request_timeout_sec);
     }
+    /* The upstream's answer is buffered whole, and refused past the
+     * proxy's body cap only once it was all in (#3750): the client held
+     * whatever the upstream sent first. Its response limit is the cap,
+     * with room for the head; past it the answer is response_too_large,
+     * as before, without the bytes. A cap past the client's default keeps
+     * working, as the client takes the request's limit over its default. */
+    if (opts->max_body_bytes > 0)
+        http_request_set_max_response_raw(px->outbound,
+                                          (int64_t)opts->max_body_bytes + 64 * 1024);
 
     /* Forward inbound headers minus hop-by-hop, including the ones this
      * particular request named in its own Connection header. */
@@ -798,6 +807,23 @@ static int px_classify(AetherProxyExchange* px, int64_t elapsed_ms) {
 
     const char* err = http_response_error(px->resp);
     int status = http_response_status(px->resp);
+
+    /* Past the proxy's cap (the client's response limit, set in px_build):
+     * the upstream answered, too much, which is no transport failure to
+     * retry elsewhere or to charge its breaker with. Answered as a body
+     * over the cap always was (#3750). */
+    if (err && strncmp(err, HTTP_CLIENT_TOO_LARGE_PREFIX,
+                       sizeof(HTTP_CLIENT_TOO_LARGE_PREFIX) - 1) == 0) {
+        aether_proxy_breaker_record(opts->pool, px->u, 1);
+        aether_proxy_inflight_dec(px->u);
+        http_response_free(px->resp);
+        px->resp = NULL;
+        http_response_set_status(res, 502);
+        http_response_set_header(res, "X-Aether-Proxy-Error", "response_too_large");
+        http_response_set_header(res, "Content-Type", "text/plain");
+        http_response_set_body(res, "upstream response exceeds proxy cap\n");
+        return 0;
+    }
 
     if (err && *err) {
         int is_timeout = strstr(err, "timeout") != NULL ||
@@ -954,7 +980,7 @@ static int px_copy(AetherProxyExchange* px) {
     if (body_length > opts->max_body_bytes) {
         http_response_set_status(res, 502);
         http_response_set_header(res, "X-Aether-Proxy-Error", "response_too_large");
-        http_response_set_body(res, "px->resp response exceeds proxy cap\n");
+        http_response_set_body(res, "upstream response exceeds proxy cap\n");
         http_response_free(px->resp);
         return 0;
     }
