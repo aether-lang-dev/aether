@@ -197,6 +197,11 @@ typedef void (*HttpRequestHook)(HttpRequest* req,
 // HTTP Server
 struct HttpConn;
 
+// The SETTINGS_MAX_CONCURRENT_STREAMS an HTTP/2 server advertises when
+// http_server_set_h2_raw was given 0 (#3738). nghttp2's own local default is
+// unlimited, so without it a client could open streams without bound.
+#define HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS 100
+
 typedef struct HttpServer {
     int socket_fd;
     /* The port: read by any thread (http_server_port) while the thread that
@@ -258,7 +263,7 @@ typedef struct HttpServer {
     //     apply uniformly.
     // Off by default; enable via http_server_set_h2_raw().
     int h2_enabled;
-    int h2_max_concurrent_streams;  /* nghttp2 SETTINGS; 0 → 100 default */
+    int h2_max_concurrent_streams;  /* SETTINGS_MAX_CONCURRENT_STREAMS; 0 → HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS (#3738) */
 
     // Per-stream concurrent dispatch worker count. When > 0, the
     // stream-level dispatch runs on the shared std.worker pool,
@@ -454,7 +459,8 @@ typedef struct HttpServer {
     // The largest request body http_request_body buffers, in bytes (#3740):
     // HTTP_DEFAULT_MAX_BODY unless http_server_set_max_body_raw set another.
     // A handler that reads its body with http_request_body_read streams it
-    // and is not bounded by this.
+    // and is not bounded by this. HTTP/2 holds every stream's body whole, so
+    // there a stream whose DATA passes it is reset (#3738).
     int64_t max_body;
 } HttpServer;
 

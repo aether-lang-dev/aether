@@ -82,6 +82,9 @@ typedef struct AetherH2Stream {
     size_t body_len;
     size_t body_cap;
     int    request_done;   /* peer sent END_STREAM on the request */
+    /* Set when the body passed the server's max_body and the stream was
+     * reset (#3738): later DATA is dropped and the stream never dispatched. */
+    int    body_refused;
 
     /* Response side — populated when the route handler returns,
      * consumed by the nghttp2_data_source_read_callback as the
@@ -372,7 +375,24 @@ static int ng_on_data_chunk_recv(nghttp2_session* ng,
     (void)ng; (void)flags;
     AetherH2Session* s = (AetherH2Session*)user_data;
     AetherH2Stream* str = stream_lookup(s, stream_id);
-    if (!str) return 0;
+    if (!str || str->body_refused) return 0;
+    /* Every h2 request body is held whole until END_STREAM, and nghttp2's
+     * automatic WINDOW_UPDATE kept it flowing with no bound (#3738). A body
+     * past the server's limit (the one request_body applies, #3740) resets
+     * the stream with CANCEL rather than REFUSED_STREAM, which tells a
+     * client the request may be retried as it was. What it sent is freed
+     * and the stream is never dispatched. */
+    int64_t max_body = (s->server && s->server->max_body > 0)
+                     ? s->server->max_body : HTTP_DEFAULT_MAX_BODY;
+    if ((uint64_t)str->body_len + (uint64_t)len > (uint64_t)max_body) {
+        free(str->body);
+        str->body = NULL;
+        str->body_len = str->body_cap = 0;
+        str->body_refused = 1;
+        str->response_submitted = 1;
+        nghttp2_submit_rst_stream(s->ng, NGHTTP2_FLAG_NONE, stream_id, NGHTTP2_CANCEL);
+        return 0;
+    }
     if (buf_append(&str->body, &str->body_len, &str->body_cap,
                    (const char*)data, len) != 0) {
         return NGHTTP2_ERR_CALLBACK_FAILURE;
@@ -993,10 +1013,14 @@ int aether_h2_session_send_initial_settings(AetherH2Session* sess) {
     iv[n].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
     iv[n++].value     = 1 << 20;  /* 1 MiB initial flow-control window */
 
-    if (sess->server->h2_max_concurrent_streams > 0) {
-        iv[n].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
-        iv[n++].value     = (uint32_t)sess->server->h2_max_concurrent_streams;
-    }
+    /* Always sent (#3738). It was sent only when configured, and
+     * nghttp2's local default is unlimited, so a client could open as
+     * many streams as it liked on one connection, each holding a request
+     * and its body. 100 is the floor RFC 9113 5.1.2 recommends. */
+    iv[n].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
+    iv[n++].value     = sess->server->h2_max_concurrent_streams > 0
+                      ? (uint32_t)sess->server->h2_max_concurrent_streams
+                      : (uint32_t)HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
 
     return nghttp2_submit_settings(sess->ng, NGHTTP2_FLAG_NONE, iv, (size_t)n);
 }

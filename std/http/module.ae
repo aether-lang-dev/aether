@@ -357,7 +357,9 @@ server_set_tls_backend(server: ptr, backend: string) -> string {
 //     HTTP/1.1 and HTTP/2 traffic.
 //
 // max_concurrent_streams advertises SETTINGS_MAX_CONCURRENT_STREAMS
-// to the peer. Pass 0 for libnghttp2's default (100). Negative
+// to the peer. Pass 0 for the default, 100, which is sent too: nghttp2's
+// own is unlimited (#3738). A stream whose request body passes the
+// server's limit (server_set_max_body) is reset (RST_STREAM). Negative
 // values return an error.
 //
 // Returns "" on success or an error string when the build doesn't

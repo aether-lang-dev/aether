@@ -156,7 +156,7 @@ import std.http
 main() {
     server = http.server_create(443)
     http.server_set_tls(server, "/etc/ssl/cert.pem", "/etc/ssl/key.pem")
-    http.server_set_h2(server, 0)        // 0 = nghttp2 default 100
+    http.server_set_h2(server, 0)        // 0 = advertise 100 streams
     http.server_set_keepalive(server, 1, 0, 30000ms)
 
     http.server_get(server, "/", home, 0)
@@ -182,8 +182,12 @@ What the toggle changes:
   logs, and all health probes apply uniformly.
 
 `max_concurrent_streams` is the SETTINGS_MAX_CONCURRENT_STREAMS
-value advertised to peers. Pass `0` for libnghttp2's default
-(100).
+value advertised to peers. Pass `0` for the default, 100, which is
+advertised too: nghttp2's own local default is unlimited, and the setting
+used to go out only when given (#3738). A stream's request body is held
+whole until the stream ends, under the limit `server_set_max_body` sets
+(64 MiB by default, #3740); past it the stream is reset with
+`RST_STREAM` (`CANCEL`) and its handler never runs.
 
 ### Per-stream concurrent dispatch
 

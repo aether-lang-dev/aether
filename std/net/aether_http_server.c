@@ -1509,7 +1509,7 @@ HttpServer* http_server_create(int port) {
     server->tls_key_pem = NULL;
     server->pure_creds = NULL;
     server->h2_enabled = 0;
-    server->h2_max_concurrent_streams = 0;  /* nghttp2 default 100 when 0 */
+    server->h2_max_concurrent_streams = 0;  /* 0: advertise 100 (#3738) */
     /* HTTP/1.1 is persistent by default (RFC 9112 section 9.3), and a proxy
      * or client that dials this server pays a handshake per request when it
      * is not: the load balancer measured 3.7x behind nginx with 8% of
@@ -2588,7 +2588,9 @@ const char* http_server_set_tls_backend_raw(HttpServer* server, const char* name
  *     metrics, access logs, and health probes all apply uniformly.
  *
  * Returns "" on success, an error string when nghttp2 isn't linked.
- * max_concurrent_streams = 0 → use libnghttp2's default (100). */
+ * max_concurrent_streams = 0 → the server advertises 100
+ * (HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS, #3738). nghttp2's own local
+ * default is unlimited, and the setting was sent only when given. */
 const char* http_server_set_h2_raw(HttpServer* server,
                                    int max_concurrent_streams) {
     if (!server) return "server is null";
