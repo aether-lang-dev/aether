@@ -1,0 +1,590 @@
+// std.sandbox: every std call that touches the file system is checked
+// against the levels in force, and the check reaches the audit ring.
+//
+// Each case runs the call three ways: under a level that grants nothing (the
+// call is refused and changes nothing), under a level with the grant that
+// covers it (the call works), and it looks in the audit ring for the check
+// the call made, naming the category and the path. Listing, globbing (the
+// directory a glob starts from and the paths it reports), dir_exists, mtime,
+// statvfs and the directory calls were checked by #3743; their cases stay as
+// regression coverage. The rest were not checked at all, or checked only one
+// of their paths: the directories a ** glob or a walk enters below the root,
+// the mount table off Linux, the parents mkdir_p makes, a hard link's target,
+// the source of a rename or move, all of std.io (files and environment), the
+// log file, a library load, a file served over HTTP, a TLS key file, an
+// access log and a child's working directory.
+
+import std.spec
+import std.sandbox
+import std.audit
+import std.os
+import std.fs
+import std.io
+import std.log
+import std.dl
+import std.http
+import std.list
+import std.string
+
+extern exit(code: int)
+
+// Did a check in `category` of a resource ending in `suffix` come out as
+// `allowed` (1 or 0) since the ring was last cleared? The resource is the
+// resolved path, spelt with backslashes on Windows; the suffix is compared
+// with forward slashes.
+fn seen(category: string, suffix: string, allowed: int) -> int {
+    n = audit.count()
+    var i: int = 0
+    while i < n {
+        cat, res, ok = audit.entry(i)
+        if cat == category && ok == allowed {
+            fwd = string.replace_all(res, "\\", "/")
+            if string.ends_with(fwd, suffix) == 1 { return 1 }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+main() {
+    fw = spec.init()
+
+    raw, terr = fs.make_temp_dir("", "ae_sandbox_fs_cov")
+    if terr != "" {
+        println("cannot make a fixture directory: ${terr}")
+        exit(1)
+    }
+    // Resolved up front (/var is /private/var on macOS), so the grants below
+    // name the directories as the checks see them.
+    tmp, _k, rerr = fs.realpath(raw)
+    if rerr != "" {
+        println("cannot resolve the fixture directory: ${rerr}")
+        exit(1)
+    }
+    windows = 0
+    if os.platform() == "windows" { windows = 1 }
+
+    _a = fs.mkdir_p("${tmp}/lsd")
+    _b = fs.write("${tmp}/lsd/a.txt", "a")
+    _c = fs.mkdir_p("${tmp}/gl/sub")
+    _d = fs.write("${tmp}/gl/x.txt", "x")
+    _e = fs.write("${tmp}/gl/sub/y.txt", "y")
+    _f = fs.mkdir_p("${tmp}/wk/sub")
+    _g = fs.write("${tmp}/wk/sub/f.txt", "f")
+    _h = fs.write("${tmp}/mt.txt", "m")
+    _i = fs.mkdir_p("${tmp}/dd")
+    _j = fs.mkdir_p("${tmp}/hl/out")
+    _hs = fs.write("${tmp}/hl/secret", "s")
+    _l = fs.mkdir_p("${tmp}/rn/out")
+    _m = fs.write("${tmp}/rn/secret", "s")
+    _n = fs.write("${tmp}/rn/secret2", "s")
+    _o = fs.mkdir_p("${tmp}/io")
+    _p = fs.write("${tmp}/io/r.txt", "r")
+    _q = fs.write("${tmp}/io/del.txt", "d")
+    _r = fs.write("${tmp}/srv.txt", "served")
+    _s = fs.write("${tmp}/cert.pem", "not a certificate")
+    _t = fs.write("${tmp}/key.pem", "not a key")
+    _u = fs.mkdir_p("${tmp}/cwd")
+    _v = os.setenv("AE_FS_COV_VAR", "visible")
+
+    nothing = sandbox.new("nothing") {}
+    all_tmp = sandbox.new("the fixture") {
+        grant_fs("${tmp}*")
+    }
+
+    spec.describe(fw, "std.fs directory reads are checked") {
+        spec.it("list_dir is a read of the directory") callback {
+            audit.clear()
+            l1 = null
+            e1 = ""
+            sandbox.enforce(nothing) callback {
+                l1, e1 = fs.list_dir("${tmp}/lsd")
+            }
+            spec.assert_true(l1 == null, "refused under nothing")
+            spec.assert_true(e1 != "", "with an error")
+            spec.assert_eq(seen("fs_read", "/lsd", 0), 1, "refusal audited")
+            audit.clear()
+            l2 = null
+            e2 = ""
+            only = sandbox.new("the directory") { grant_fs_read("${tmp}/lsd") }
+            sandbox.enforce(only) callback {
+                l2, e2 = fs.list_dir("${tmp}/lsd")
+            }
+            spec.assert_str_eq(e2, "", "allowed with a read grant on it")
+            spec.assert_eq(fs.dir_list_count(l2), 1, "and listed")
+            spec.assert_eq(seen("fs_read", "/lsd", 1), 1, "allowed check audited")
+            fs.dir_list_free(l2)
+            sandbox.free(only)
+        }
+        spec.it("glob checks the directory it starts from") callback {
+            audit.clear()
+            g1 = null
+            e1 = ""
+            sandbox.enforce(nothing) callback {
+                g1, e1 = fs.glob("${tmp}/gl/*.txt")
+            }
+            spec.assert_true(g1 == null, "refused under nothing")
+            spec.assert_eq(seen("fs_read", "/gl", 0), 1, "refusal audited")
+            // The directory alone: the glob runs, and reports only the paths
+            // the caller may read (#3743), so x.txt is left out.
+            audit.clear()
+            only = sandbox.new("gl") { grant_fs_read("${tmp}/gl") }
+            g2 = null
+            e2 = ""
+            sandbox.enforce(only) callback {
+                g2, e2 = fs.glob("${tmp}/gl/*.txt")
+            }
+            spec.assert_str_eq(e2, "", "allowed with a read grant on the directory")
+            spec.assert_eq(fs.dir_list_count(g2), 0, "x.txt, not readable, left out")
+            spec.assert_eq(seen("fs_read", "/gl", 1), 1, "allowed check audited")
+            spec.assert_eq(seen("fs_read", "/gl/x.txt", 0), 1, "the match's refusal audited")
+            fs.dir_list_free(g2)
+            sandbox.free(only)
+            both = sandbox.new("glx") {
+                grant_fs_read("${tmp}/gl")
+                grant_fs_read("${tmp}/gl/x.txt")
+            }
+            g3 = null
+            e3 = ""
+            sandbox.enforce(both) callback {
+                g3, e3 = fs.glob("${tmp}/gl/*.txt")
+            }
+            spec.assert_str_eq(e3, "", "allowed with the directory and the file")
+            spec.assert_eq(fs.dir_list_count(g3), 1, "x.txt found")
+            fs.dir_list_free(g3)
+            sandbox.free(both)
+        }
+        spec.it_when(1 - windows, "glob leaves out a match from a refused directory below", "Windows globs a wildcard in the last component only") callback {
+            only = sandbox.new("gl") { grant_fs_read("${tmp}/gl") }
+            audit.clear()
+            g1 = null
+            e1 = ""
+            sandbox.enforce(only) callback {
+                g1, e1 = fs.glob("${tmp}/gl/*/y.txt")
+            }
+            spec.assert_str_eq(e1, "", "the base is granted")
+            spec.assert_eq(fs.dir_list_count(g1), 0, "the match in gl/sub is left out")
+            spec.assert_eq(seen("fs_read", "/gl/sub/y.txt", 0), 1, "refusal audited")
+            fs.dir_list_free(g1)
+            g2 = null
+            e2 = ""
+            sandbox.enforce(all_tmp) callback {
+                g2, e2 = fs.glob("${tmp}/gl/*/y.txt")
+            }
+            spec.assert_eq(fs.dir_list_count(g2), 1, "found with a grant on gl/sub")
+            fs.dir_list_free(g2)
+            sandbox.free(only)
+        }
+        spec.it("a ** glob checks each directory it enters") callback {
+            g0 = null
+            e0 = ""
+            sandbox.enforce(nothing) callback {
+                g0, e0 = fs.glob("${tmp}/gl/**/*.txt")
+            }
+            spec.assert_true(g0 == null, "refused under nothing")
+            // gl and x.txt in it may be read, gl/sub may not: x.txt is
+            // reported and gl/sub is not entered.
+            only = sandbox.new("gl") {
+                grant_fs_read("${tmp}/gl")
+                grant_fs_read("${tmp}/gl/x.txt")
+            }
+            audit.clear()
+            g1 = null
+            e1 = ""
+            sandbox.enforce(only) callback {
+                g1, e1 = fs.glob("${tmp}/gl/**/*.txt")
+            }
+            spec.assert_eq(fs.dir_list_count(g1), 1, "gl/sub not entered")
+            spec.assert_eq(seen("fs_read", "/gl/sub", 0), 1, "refusal audited")
+            fs.dir_list_free(g1)
+            g2 = null
+            e2 = ""
+            sandbox.enforce(all_tmp) callback {
+                g2, e2 = fs.glob("${tmp}/gl/**/*.txt")
+            }
+            spec.assert_eq(fs.dir_list_count(g2), 2, "both with a grant on the tree")
+            fs.dir_list_free(g2)
+            sandbox.free(only)
+        }
+        spec.it("walk enters only the directories it may read") callback {
+            _n0 = 0
+            e0 = ""
+            sandbox.enforce(nothing) callback {
+                _n0, e0 = fs.walk("${tmp}/wk", | path: string, kind: int, depth: int | { return 0 })
+            }
+            spec.assert_true(e0 != "", "refused under nothing")
+            only = sandbox.new("wk") { grant_fs_read("${tmp}/wk") }
+            audit.clear()
+            n1 = 0
+            e1 = ""
+            sandbox.enforce(only) callback {
+                n1, e1 = fs.walk("${tmp}/wk", | path: string, kind: int, depth: int | { return 0 })
+            }
+            spec.assert_str_eq(e1, "", "the root is granted")
+            spec.assert_eq(n1, 2, "wk and wk/sub reported, wk/sub not entered")
+            spec.assert_eq(seen("fs_read", "/wk/sub", 0), 1, "refusal audited")
+            n2 = 0
+            e2 = ""
+            sandbox.enforce(all_tmp) callback {
+                n2, e2 = fs.walk("${tmp}/wk", | path: string, kind: int, depth: int | { return 0 })
+            }
+            spec.assert_eq(n2, 3, "and f.txt with a grant on the tree")
+            sandbox.free(only)
+        }
+    }
+
+    spec.describe(fw, "std.fs metadata is a read") {
+        spec.it("dir_exists") callback {
+            audit.clear()
+            a = 1
+            sandbox.enforce(nothing) callback { a = fs.dir_exists("${tmp}/lsd") }
+            spec.assert_eq(a, 0, "refused reads as absent")
+            spec.assert_eq(seen("fs_read", "/lsd", 0), 1, "refusal audited")
+            b = 0
+            sandbox.enforce(all_tmp) callback { b = fs.dir_exists("${tmp}/lsd") }
+            spec.assert_eq(b, 1, "allowed")
+        }
+        spec.it("mtime and file_mtime") callback {
+            audit.clear()
+            var _m1: long = 0
+            e1 = ""
+            var r1: long = 1
+            sandbox.enforce(nothing) callback {
+                _m1, e1 = fs.mtime("${tmp}/mt.txt")
+                r1 = fs.file_mtime("${tmp}/mt.txt")
+            }
+            spec.assert_true(e1 != "", "mtime refused")
+            spec.assert_true(r1 == 0, "file_mtime refused")
+            spec.assert_eq(seen("fs_read", "/mt.txt", 0), 1, "refusal audited")
+            var m2: long = 0
+            e2 = ""
+            var r2: long = 0
+            sandbox.enforce(all_tmp) callback {
+                m2, e2 = fs.mtime("${tmp}/mt.txt")
+                r2 = fs.file_mtime("${tmp}/mt.txt")
+            }
+            spec.assert_str_eq(e2, "", "mtime allowed")
+            spec.assert_true(m2 > 0, "with a time")
+            spec.assert_true(r2 > 0, "file_mtime allowed")
+        }
+        spec.it_when(1 - windows, "statvfs", "no statvfs on Windows") callback {
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(nothing) callback {
+                _t1, _f1, _a1, e1 = fs.statvfs("${tmp}/lsd")
+            }
+            spec.assert_true(e1 != "", "refused")
+            spec.assert_eq(seen("fs_read", "/lsd", 0), 1, "refusal audited")
+            e2 = "unset"
+            sandbox.enforce(all_tmp) callback {
+                _t2, _f2, _a2, e2 = fs.statvfs("${tmp}/lsd")
+            }
+            spec.assert_str_eq(e2, "", "allowed")
+        }
+        spec.it("the mount table, on every platform") callback {
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(nothing) callback { _n1, e1 = fs.mounts() }
+            spec.assert_true(e1 != "", "refused")
+            // On Linux /proc/self resolves to /proc/<pid>, so the end of the
+            // name is what is compared.
+            spec.assert_eq(seen("fs_read", "/mountinfo", 0), 1, "refusal audited")
+            mt = sandbox.new("mounts") { grant_fs_read("/proc/self/mountinfo") }
+            e2 = "unset"
+            audit.clear()
+            sandbox.enforce(mt) callback { _n2, e2 = fs.mounts() }
+            // Whether the table can then be read is the platform's matter
+            // (Wine has none to give): the check let it through.
+            spec.assert_eq(seen("fs_read", "/mountinfo", 1), 1, "allowed: ${e2}")
+            spec.assert_eq(audit.denied_count(), 0, "and nothing refused")
+            sandbox.free(mt)
+        }
+    }
+
+    spec.describe(fw, "std.fs directory changes are writes") {
+        spec.it("create_dir") callback {
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(nothing) callback { e1 = fs.create_dir("${tmp}/cd") }
+            spec.assert_true(e1 != "", "refused")
+            spec.assert_eq(fs.dir_exists("${tmp}/cd"), 0, "and not made")
+            spec.assert_eq(seen("fs_write", "/cd", 0), 1, "refusal audited")
+            e2 = "unset"
+            sandbox.enforce(all_tmp) callback { e2 = fs.create_dir("${tmp}/cd") }
+            spec.assert_str_eq(e2, "", "allowed")
+        }
+        spec.it("create_dir_with_mode") callback {
+            audit.clear()
+            ok1 = 1
+            sandbox.enforce(nothing) callback { ok1, _k1, _m1 = fs.create_dir_with_mode("${tmp}/cdm", 448) }
+            spec.assert_eq(ok1, 0, "refused")
+            spec.assert_eq(fs.dir_exists("${tmp}/cdm"), 0, "and not made")
+            spec.assert_eq(seen("fs_write", "/cdm", 0), 1, "refusal audited")
+            ok2 = 0
+            sandbox.enforce(all_tmp) callback { ok2, _k2, _m2 = fs.create_dir_with_mode("${tmp}/cdm", 448) }
+            spec.assert_eq(ok2, 1, "allowed")
+        }
+        spec.it("delete_dir") callback {
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(nothing) callback { e1 = fs.delete_dir("${tmp}/dd") }
+            spec.assert_true(e1 != "", "refused")
+            spec.assert_eq(fs.dir_exists("${tmp}/dd"), 1, "and still there")
+            spec.assert_eq(seen("fs_write", "/dd", 0), 1, "refusal audited")
+            e2 = "unset"
+            sandbox.enforce(all_tmp) callback { e2 = fs.delete_dir("${tmp}/dd") }
+            spec.assert_str_eq(e2, "", "allowed")
+        }
+        spec.it("mkdir_p checks each parent it makes") callback {
+            leaf = sandbox.new("leaf only") { grant_fs_write("${tmp}/mp/a/b") }
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(leaf) callback { e1 = fs.mkdir_p("${tmp}/mp/a/b") }
+            spec.assert_true(e1 != "", "refused: mp and mp/a are not granted")
+            spec.assert_eq(fs.exists("${tmp}/mp"), 0, "and nothing made")
+            spec.assert_eq(seen("fs_write", "/mp", 0), 1, "refusal audited")
+            e2 = "unset"
+            sandbox.enforce(all_tmp) callback { e2 = fs.mkdir_p("${tmp}/mp/a/b") }
+            spec.assert_str_eq(e2, "", "allowed with a grant on the parents")
+            sandbox.free(leaf)
+        }
+    }
+
+    spec.describe(fw, "two-path calls check both ends") {
+        spec.it("a hard link's target is read and written through it") callback {
+            out_only = sandbox.new("out") { grant_fs("${tmp}/hl/out/*") }
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(out_only) callback { e1 = fs.hard_link("${tmp}/hl/secret", "${tmp}/hl/out/l") }
+            spec.assert_true(e1 != "", "refused")
+            spec.assert_eq(fs.exists("${tmp}/hl/out/l"), 0, "and not made")
+            spec.assert_eq(seen("fs_read", "/hl/secret", 0), 1, "refusal audited")
+            e2 = "unset"
+            sandbox.enforce(all_tmp) callback { e2 = fs.hard_link("${tmp}/hl/secret", "${tmp}/hl/out/l") }
+            spec.assert_str_eq(e2, "", "allowed with a grant on the target")
+            sandbox.free(out_only)
+        }
+        spec.it("rename reads its source") callback {
+            write_only = sandbox.new("write only") { grant_fs_write("${tmp}/rn/*") }
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(write_only) callback { e1 = fs.rename("${tmp}/rn/secret", "${tmp}/rn/out/s") }
+            spec.assert_true(e1 != "", "refused")
+            spec.assert_eq(fs.exists("${tmp}/rn/secret"), 1, "and not moved")
+            spec.assert_eq(seen("fs_read", "/rn/secret", 0), 1, "refusal audited")
+            e2 = "unset"
+            sandbox.enforce(all_tmp) callback { e2 = fs.rename("${tmp}/rn/secret", "${tmp}/rn/out/s") }
+            spec.assert_str_eq(e2, "", "allowed with a read grant too")
+            sandbox.free(write_only)
+        }
+        spec.it("move reads its source") callback {
+            write_only = sandbox.new("write only") { grant_fs_write("${tmp}/rn/*") }
+            audit.clear()
+            ok1 = 1
+            sandbox.enforce(write_only) callback { ok1, _k1, _m1 = fs.move("${tmp}/rn/secret2", "${tmp}/rn/out/s2") }
+            spec.assert_eq(ok1, 0, "refused")
+            spec.assert_eq(fs.exists("${tmp}/rn/secret2"), 1, "and not moved")
+            spec.assert_eq(seen("fs_read", "/rn/secret2", 0), 1, "refusal audited")
+            ok2 = 0
+            sandbox.enforce(all_tmp) callback { ok2, _k2, _m2 = fs.move("${tmp}/rn/secret2", "${tmp}/rn/out/s2") }
+            spec.assert_eq(ok2, 1, "allowed with a read grant too")
+            sandbox.free(write_only)
+        }
+    }
+
+    spec.describe(fw, "std.io is checked") {
+        spec.it("read_file, file_exists, file_info and fd_open_read are reads") callback {
+            audit.clear()
+            _c1 = "unset"
+            e1 = ""
+            x1 = 1
+            i1 = null
+            _ie1 = ""
+            _fd1 = 0
+            fe1 = ""
+            sandbox.enforce(nothing) callback {
+                _c1, e1 = io.read_file("${tmp}/io/r.txt")
+                x1 = io.file_exists("${tmp}/io/r.txt")
+                i1, _ie1 = io.file_info("${tmp}/io/r.txt")
+                _fd1, fe1 = io.fd_open_read("${tmp}/io/r.txt")
+            }
+            spec.assert_true(e1 != "", "read_file refused")
+            spec.assert_eq(x1, 0, "file_exists refused")
+            spec.assert_true(i1 == null, "file_info refused")
+            spec.assert_true(fe1 != "", "fd_open_read refused")
+            spec.assert_eq(seen("fs_read", "/io/r.txt", 0), 1, "refusal audited")
+            c2 = ""
+            e2 = "unset"
+            x2 = 0
+            i2 = null
+            fd2 = 0 - 1
+            fe2 = "unset"
+            sandbox.enforce(all_tmp) callback {
+                c2, e2 = io.read_file("${tmp}/io/r.txt")
+                x2 = io.file_exists("${tmp}/io/r.txt")
+                i2, _ie2 = io.file_info("${tmp}/io/r.txt")
+                fd2, fe2 = io.fd_open_read("${tmp}/io/r.txt")
+            }
+            spec.assert_str_eq(c2, "r", "read_file allowed")
+            spec.assert_eq(x2, 1, "file_exists allowed")
+            spec.assert_true(i2 != null, "file_info allowed")
+            spec.assert_str_eq(fe2, "", "fd_open_read allowed")
+            if i2 != null { io.file_info_free(i2) }
+            if fd2 >= 0 { _c = io.fd_close(fd2) }
+        }
+        spec.it("write_file, append_file, delete_file and fd_open_write are writes") callback {
+            audit.clear()
+            w1 = ""
+            a1 = ""
+            d1 = ""
+            fe1 = ""
+            sandbox.enforce(nothing) callback {
+                w1 = io.write_file("${tmp}/io/w.txt", "w")
+                a1 = io.append_file("${tmp}/io/a.txt", "a")
+                d1 = io.delete_file("${tmp}/io/del.txt")
+                _fd1, fe1 = io.fd_open_write("${tmp}/io/fw.txt")
+            }
+            spec.assert_true(w1 != "", "write_file refused")
+            spec.assert_true(a1 != "", "append_file refused")
+            spec.assert_true(d1 != "", "delete_file refused")
+            spec.assert_true(fe1 != "", "fd_open_write refused")
+            spec.assert_eq(fs.exists("${tmp}/io/w.txt") + fs.exists("${tmp}/io/a.txt") + fs.exists("${tmp}/io/fw.txt"), 0, "nothing made")
+            spec.assert_eq(fs.exists("${tmp}/io/del.txt"), 1, "nothing deleted")
+            spec.assert_eq(seen("fs_write", "/io/del.txt", 0), 1, "refusal audited")
+            w2 = "unset"
+            a2 = "unset"
+            d2 = "unset"
+            fd2 = 0 - 1
+            fe2 = "unset"
+            sandbox.enforce(all_tmp) callback {
+                w2 = io.write_file("${tmp}/io/w.txt", "w")
+                a2 = io.append_file("${tmp}/io/a.txt", "a")
+                d2 = io.delete_file("${tmp}/io/del.txt")
+                fd2, fe2 = io.fd_open_write("${tmp}/io/fw.txt")
+            }
+            spec.assert_str_eq("${w2}${a2}${d2}${fe2}", "", "all allowed")
+            if fd2 >= 0 { _c = io.fd_close(fd2) }
+        }
+        spec.it("the environment is checked as os.getenv checks it") callback {
+            audit.clear()
+            g1 = "unset"
+            s1 = ""
+            u1 = ""
+            sandbox.enforce(nothing) callback {
+                g1 = io.getenv("AE_FS_COV_VAR")
+                s1 = io.setenv("AE_FS_COV_VAR", "changed")
+                u1 = io.unsetenv("AE_FS_COV_VAR")
+            }
+            spec.assert_true(g1 == null, "getenv refused")
+            spec.assert_true(s1 != "", "setenv refused")
+            spec.assert_true(u1 != "", "unsetenv refused")
+            spec.assert_true(os.getenv("AE_FS_COV_VAR") == "visible", "and unchanged")
+            spec.assert_eq(seen("env", "AE_FS_COV_VAR", 0), 1, "refusal audited")
+            ev = sandbox.new("env") { grant_env("AE_FS_COV_VAR") }
+            g2 = ""
+            s2 = "unset"
+            sandbox.enforce(ev) callback {
+                g2 = io.getenv("AE_FS_COV_VAR")
+                s2 = io.setenv("AE_FS_COV_VAR", "changed")
+            }
+            spec.assert_true(g2 == "visible", "getenv allowed")
+            spec.assert_str_eq(s2, "", "setenv allowed")
+            sandbox.free(ev)
+        }
+    }
+
+    spec.describe(fw, "other std calls that open paths") {
+        spec.it("log.init writes its file") callback {
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(nothing) callback { e1 = log.init("${tmp}/app.log", 0) }
+            spec.assert_true(e1 != "", "refused")
+            spec.assert_eq(fs.exists("${tmp}/app.log"), 0, "and not made")
+            spec.assert_eq(seen("fs_write", "/app.log", 0), 1, "refusal audited")
+            e2 = "unset"
+            sandbox.enforce(all_tmp) callback { e2 = log.init("${tmp}/app.log", 0) }
+            spec.assert_str_eq(e2, "", "allowed")
+            _r = log.init("", 0)
+        }
+        spec.it("dl.open is a native load") callback {
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(nothing) callback { _h1, e1 = dl.open("${tmp}/libnothing.so") }
+            spec.assert_true(string.contains(e1, "denied by the sandbox") == 1, "refused by the sandbox: ${e1}")
+            spec.assert_eq(seen("native", "/libnothing.so", 0), 1, "refusal audited")
+            nat = sandbox.new("native") { grant_native("${tmp}/*") }
+            e2 = ""
+            sandbox.enforce(nat) callback { _h2, e2 = dl.open("${tmp}/libnothing.so") }
+            spec.assert_true(e2 != "", "no such library")
+            spec.assert_eq(string.contains(e2, "denied by the sandbox"), 0, "but not refused by the sandbox: ${e2}")
+            sandbox.free(nat)
+        }
+        spec.it("http serve_file reads the file it serves") callback {
+            audit.clear()
+            r1 = http.response_create()
+            sandbox.enforce(nothing) callback { http.serve_file(r1, "${tmp}/srv.txt") }
+            spec.assert_eq(http.response_get_status(r1), 403, "refused")
+            spec.assert_eq(seen("fs_read", "/srv.txt", 0), 1, "refusal audited")
+            http.server_response_free(r1)
+            r2 = http.response_create()
+            sandbox.enforce(all_tmp) callback { http.serve_file(r2, "${tmp}/srv.txt") }
+            spec.assert_eq(http.response_get_status(r2), 200, "allowed")
+            http.server_response_free(r2)
+        }
+        spec.it("a server's TLS files and access log") callback {
+            srv = http.server_create(0)
+            audit.clear()
+            t1 = ""
+            l1 = ""
+            sandbox.enforce(nothing) callback {
+                t1 = http.server_set_tls(srv, "${tmp}/cert.pem", "${tmp}/key.pem")
+                l1 = http.server_set_access_log(srv, "combined", "${tmp}/access.log")
+            }
+            spec.assert_true(string.contains(t1, "denied by the sandbox") == 1, "TLS files refused: ${t1}")
+            spec.assert_true(string.contains(l1, "denied by the sandbox") == 1, "access log refused: ${l1}")
+            spec.assert_eq(seen("fs_read", "/cert.pem", 0), 1, "TLS refusal audited")
+            spec.assert_eq(seen("fs_write", "/access.log", 0), 1, "access log refusal audited")
+            t2 = ""
+            l2 = "unset"
+            sandbox.enforce(all_tmp) callback {
+                t2 = http.server_set_tls(srv, "${tmp}/cert.pem", "${tmp}/key.pem")
+                l2 = http.server_set_access_log(srv, "combined", "${tmp}/access.log")
+            }
+            spec.assert_eq(string.contains(t2, "denied by the sandbox"), 0, "TLS files read (and rejected as PEM): ${t2}")
+            spec.assert_str_eq(l2, "", "access log allowed")
+            http.server_free(srv)
+        }
+        spec.it_when(1 - windows, "a child's working directory is a chdir", "uses /bin/sh") callback {
+            ex = sandbox.new("exec only") { grant_exec("*") }
+            argv = list.new()
+            list.add(argv, "-c")
+            list.add(argv, "exit 0")
+            audit.clear()
+            e1 = ""
+            sandbox.enforce(ex) callback { _a1, _b1, _p1, e1 = os.run_stdio("/bin/sh", argv, null, 0, "", "${tmp}/cwd") }
+            spec.assert_str_eq(e1, "denied by sandbox", "refused")
+            spec.assert_eq(seen("fs", "/cwd", 0), 1, "refusal audited")
+            both = sandbox.new("exec and cwd") {
+                grant_exec("*")
+                grant_fs("${tmp}/cwd")
+            }
+            e2 = "unset"
+            _in_fd = 0 - 1
+            _out_fd = 0 - 1
+            pid = 0 - 1
+            sandbox.enforce(both) callback { _in_fd, _out_fd, pid, e2 = os.run_stdio("/bin/sh", argv, null, 0, "", "${tmp}/cwd") }
+            spec.assert_str_eq(e2, "", "allowed")
+            if pid > 0 {
+                _w, _we = os.wait_pid(pid)
+            }
+            list.free(argv)
+            sandbox.free(ex)
+            sandbox.free(both)
+        }
+    }
+
+    sandbox.free(nothing)
+    sandbox.free(all_tmp)
+    _x = fs.remove_tree(tmp)
+    exit(spec.run_summary(fw))
+}

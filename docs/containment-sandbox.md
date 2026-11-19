@@ -392,6 +392,43 @@ needs a grant that matches the directory's path: `grant_fs_read("/data/*")`
 covers what is under `/data`, and `grant_fs_read("/data")` lets it be
 listed.
 
+Every std call that touches the file system is checked the same way, by what
+it reveals or changes, on the path as it resolves:
+
+- **`fs_read`**: anything that reads a file or tells what is at a path.
+  Opening for reading, `fs.read`/`read_binary`/`copy` (the source),
+  `std.io`'s `read_file`, `file_info`, `fd_open_read` and `file_exists`, and
+  the metadata calls (`fs.exists`, `dir_exists`, `file_stat`, `size`,
+  `mtime`, `is_symlink`, `is_socket`, `readlink`, `realpath`, `statvfs`),
+  which are refused as reads: a stat tells whether something is there, which
+  is what a grant list hides. A refused metadata call reads as absent (0) or
+  as an error. **A listing is a read of the directory listed**:
+  `fs.list_dir(d)` needs a grant matching `d` itself (`"/data"` or
+  `"/data*"`; `"/data/*"` covers what is in it, not the directory). `fs.glob`
+  checks the directory it starts from, refusing the glob when that is
+  refused, reports only the paths the caller may read, and a `**` glob
+  enters only the directories it may read; `fs.walk` checks its root and
+  each directory before entering it. The mount table is checked as
+  `/proc/self/mountinfo` on every platform, so one grant serves everywhere.
+- **`fs_write`**: anything that creates, changes or removes. Opening for
+  writing, `std.io`'s `write_file`, `append_file`, `delete_file` and
+  `fd_open_write`, `fs.write*`, `unlink`, `chmod`, `create_dir`,
+  `create_dir_with_mode`, `delete_dir`, `make_temp_*` (the directory),
+  `symlink` (the link), `log.init`'s file, an HTTP server's access log, and
+  each directory `mkdir_p` actually makes (one already there is walked
+  through unchecked).
+- **Both ends of a two-path call.** `copy` reads its source and writes its
+  destination; `rename` and `move` read and write their source (what is moved
+  becomes readable where it lands) and write their destination; `hard_link`
+  writes the new name and reads and writes the target, since the link is a
+  second name for it. A symbolic link's target is not checked when it is
+  made: every later use of the link is checked where it leads.
+- `os.chdir` and a child's working directory (`os.run_stdio`'s `cwd`) are
+  checked under `"fs"` (`grant_fs`); `dl.open` under `"native"`
+  (`grant_native`); `http.serve_file`/`serve_static` and an HTTP server's TLS
+  key and certificate files under `fs_read`, a refused file being served as
+  403 whether or not it exists.
+
 Nested sandboxes are intersected, an inner sandbox cannot escalate
 beyond what the outer sandbox grants.
 

@@ -88,6 +88,11 @@ static int ae_open_for_write(const char* p) { return open(p, O_WRONLY | O_CREAT 
 #endif
 
 #include "../string/aether_string.h"  // the counted strings returned below
+/* Every call here that names a path or a variable is checked against the
+ * sandbox levels in force on the calling thread, as std.fs and std.os check
+ * theirs: std.io opened, wrote, deleted and stat'ed files, and read and set
+ * the environment, inside a deny-everything level. */
+#include "../../runtime/aether_sandbox.h"
 
 // Console I/O
 void io_print(const char* str) {
@@ -146,6 +151,7 @@ static char* io_read_stream_to_eof(FILE* fp) {
 
 char* io_read_file_raw(const char* path) {
     if (!path) return NULL;
+    if (!aether_sandbox_check("fs_read", path)) { errno = EACCES; return NULL; }
 
     FILE* file = fopen(path, "rb");
     if (!file) return NULL;
@@ -176,6 +182,7 @@ char* io_read_file_raw(const char* path) {
 
 int io_write_file_raw(const char* path, const char* content) {
     if (!path || !content) return 0;
+    if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
 
     FILE* file = fopen(path, "wb");
     if (!file) return 0;
@@ -189,6 +196,7 @@ int io_write_file_raw(const char* path, const char* content) {
 
 int io_append_file_raw(const char* path, const char* content) {
     if (!path || !content) return 0;
+    if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
 
     FILE* file = fopen(path, "ab");
     if (!file) return 0;
@@ -202,6 +210,7 @@ int io_append_file_raw(const char* path, const char* content) {
 
 int io_file_exists(const char* path) {
     if (!path) return 0;
+    if (!aether_sandbox_check("fs_read", path)) return 0;
 
     FILE* file = fopen(path, "r");
     if (file) {
@@ -213,12 +222,14 @@ int io_file_exists(const char* path) {
 
 int io_delete_file_raw(const char* path) {
     if (!path) return 0;
+    if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
     return remove(path) == 0 ? 1 : 0;
 }
 
 // File info
 FileInfo* io_file_info_raw(const char* path) {
     if (!path) return NULL;
+    if (!aether_sandbox_check("fs_read", path)) { errno = EACCES; return NULL; }
 
     struct stat st;
     if (stat(path, &st) != 0) return NULL;
@@ -240,6 +251,7 @@ void io_file_info_free(FileInfo* info) {
 // Environment variables
 char* io_getenv(const char* name) {
     if (!name) return NULL;
+    if (!aether_sandbox_check("env", name)) return NULL;
     const char* value = getenv(name);
     if (!value) return NULL;
     /* Cap-aware (#462): the counted copy is allocated against the memory
@@ -250,6 +262,7 @@ char* io_getenv(const char* name) {
 
 int io_setenv_raw(const char* name, const char* value) {
     if (!name || !value) return 0;
+    if (!aether_sandbox_check("env", name)) return 0;
 #ifdef _WIN32
     // Windows uses _putenv_s
     return _putenv_s(name, value) == 0 ? 1 : 0;
@@ -261,6 +274,7 @@ int io_setenv_raw(const char* name, const char* value) {
 
 int io_unsetenv_raw(const char* name) {
     if (!name) return 0;
+    if (!aether_sandbox_check("env", name)) return 0;
 #ifdef _WIN32
     return _putenv_s(name, "") == 0 ? 1 : 0;
 #else
@@ -338,6 +352,11 @@ char* io_errno_message_raw(void) {
 _tuple_int_string_io io_fd_open_read_tuple(const char* path) {
     _tuple_int_string_io out;
     if (!path) { out._0 = -1; out._1 = "null path"; return out; }
+    if (!aether_sandbox_check("fs_read", path)) {
+        out._0 = -1;
+        out._1 = "cannot open for read: denied by the sandbox";
+        return out;
+    }
     int fd = ae_open_for_read(path);
     if (fd < 0) {
         out._0 = -1;
@@ -352,6 +371,11 @@ _tuple_int_string_io io_fd_open_read_tuple(const char* path) {
 _tuple_int_string_io io_fd_open_write_tuple(const char* path) {
     _tuple_int_string_io out;
     if (!path) { out._0 = -1; out._1 = "null path"; return out; }
+    if (!aether_sandbox_check("fs_write", path)) {
+        out._0 = -1;
+        out._1 = "cannot open for write: denied by the sandbox";
+        return out;
+    }
     int fd = ae_open_for_write(path);
     if (fd < 0) {
         out._0 = -1;
