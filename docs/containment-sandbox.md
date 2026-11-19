@@ -263,8 +263,12 @@ runtime (#2955):
 
 `sandbox_install()` and `sandbox_uninstall()`, which a hand-written
 `sandbox_push` / `sandbox_pop` pair used to need, do nothing now: the push
-is all it takes. A C host pushes and pops with `aether_sandbox_push` and
-`aether_sandbox_pop` (runtime/aether_sandbox.h).
+is all it takes. Aether code that needs the push and the pop apart (a
+level that is not one block) calls `sandbox.enter(perms)` and
+`sandbox.leave()` (std/sandbox/README.md, "enter and leave"): the list is
+lent rather than frozen, and the caller pairs them. A C host pushes and
+pops with `aether_sandbox_push` and `aether_sandbox_pop`
+(runtime/aether_sandbox.h).
 
 A level cannot be widened from inside, either. `enforce` freezes the grant
 list when the block starts and checks against its own copy, which nothing

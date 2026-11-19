@@ -71,6 +71,35 @@ private copy, and the block's parameter is `null`, not the list. Adding a
 grant to the list from inside the block, by code it was passed to, changes
 what the next `enforce` of that list allows, never the running block.
 
+## enter and leave
+
+`sandbox.enter(perms)` and `sandbox.leave()` are `enforce`'s two halves, for a
+sandboxed stretch that is not one block: a host's entry helper that puts a
+guest's grants in force, runs code it does not hold as a closure, and takes
+them off later.
+
+```aether,fragment
+sandbox.enter(worker)
+defer sandbox.leave()
+run_guest_entry()          // checked against worker's grants
+```
+
+- `enter` **lends** the list: no copy, unlike `enforce`. A grant added to it
+  after `enter` applies at once, and the list must stay alive until the
+  matching `leave`. Use `enforce` when the code inside must not widen its own
+  grants through the list.
+- Levels nest by intersection, with `enforce` blocks and other `enter`s alike:
+  an inner level only narrows. `null` narrows nothing; an empty list denies
+  everything.
+- A thread holds at most 64 levels (blocks, `enter`s, trusted calls, host
+  bridge calls); the 65th panics rather than be left out.
+- `leave` with no level in force is a no-op.
+- `leave` takes off the innermost level, whoever pushed it: pair each `enter`
+  with one `leave` on the same thread, on every path out (`defer` does it).
+  An unpaired `leave` inside an `enforce` block takes that block's level off.
+- A panic caught by a `try` outside the `enter` takes its level off as it
+  unwinds.
+
 ## Trusted names
 
 Inside `enforce` every check applies to whatever code makes it, including a
@@ -162,7 +191,8 @@ with other sandboxes, is in `docs/containment-sandbox.md`.
 
 ## Exports
 
-`new`, `enforce` (with optional trusted names), `free`, and the grants
+`new`, `enforce` (with optional trusted names), `enter`, `leave`, `free`,
+`spawn_socket`, `spawn_socket_uncontained`, and the grants
 `grant_all`, `grant_fs_read`, `grant_fs_write`, `grant_fs`, `grant_exec`,
 `grant_env`, `grant_tcp`, `grant_tcp_listen`, `grant_udp`, `grant_native`,
-`grant_fork`.
+`grant_fork`, `grant_without_landlock`, `grant_runtime`.
