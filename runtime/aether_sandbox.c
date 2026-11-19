@@ -780,9 +780,11 @@ static HANDLE win_open_dir_verified(const char* dir, const wchar_t* wname, const
     return h;
 }
 
-/* NtCreateFile of `wname` relative to the directory `root`. */
-static NTSTATUS win_create_at(HANDLE root, const wchar_t* wname, ACCESS_MASK access, ULONG attrs,
-                              ULONG disposition, ULONG options, PSECURITY_DESCRIPTOR sd, HANDLE* out) {
+/* NtCreateFile of `wname` relative to the directory `root`, shared as
+ * `share` says. */
+static NTSTATUS win_create_at_shared(HANDLE root, const wchar_t* wname, ACCESS_MASK access, ULONG attrs,
+                                     ULONG share, ULONG disposition, ULONG options,
+                                     PSECURITY_DESCRIPTOR sd, HANDLE* out) {
     aether_nt_create_file_fn nt_create = (aether_nt_create_file_fn)win_ntdll("NtCreateFile");
     if (!nt_create) return (NTSTATUS)0xC0000002L;   /* STATUS_NOT_IMPLEMENTED */
     UNICODE_STRING us;
@@ -792,9 +794,16 @@ static NTSTATUS win_create_at(HANDLE root, const wchar_t* wname, ACCESS_MASK acc
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &us, OBJ_CASE_INSENSITIVE, root, sd);
     IO_STATUS_BLOCK io;
-    return nt_create(out, access | SYNCHRONIZE, &oa, &io, NULL, attrs,
-                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, disposition,
+    return nt_create(out, access | SYNCHRONIZE, &oa, &io, NULL, attrs, share, disposition,
                      options | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+}
+
+/* NtCreateFile of `wname` relative to the directory `root`. */
+static NTSTATUS win_create_at(HANDLE root, const wchar_t* wname, ACCESS_MASK access, ULONG attrs,
+                              ULONG disposition, ULONG options, PSECURITY_DESCRIPTOR sd, HANDLE* out) {
+    return win_create_at_shared(root, wname, access, attrs,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, disposition,
+                                options, sd, out);
 }
 
 /* NtSetInformationFile of a rename or hard link of `h` to `wname` in the
@@ -1107,12 +1116,66 @@ static int win_parse_mode(const char* mode, WinOpenMode* m) {
     return 1;
 }
 
+/* The FILE_FLAG_* bits of CreateFileW's flags, which ReOpenFile takes. */
+#define WIN_FLAG_BITS 0xFFF00000u
+
+/* `h`, opened with DELETE so a refused new file could go, opened again
+ * without it, shared as fopen shares a file (read and write). A handle
+ * that keeps DELETE makes every later open that does not share delete,
+ * which is every fopen and _open, fail with a sharing violation for as
+ * long as it is open. Two steps: the first reopen has to share delete with
+ * `h` itself; once `h` is closed the second one shares read and write
+ * only. `h` is closed; the handle returned is the one to use (`h` itself
+ * when the system will not reopen it). */
+static HANDLE win_drop_delete(HANDLE h, DWORD access, DWORD flags) {
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    HANDLE wide = ReOpenFile(h, access, share | FILE_SHARE_DELETE, flags & WIN_FLAG_BITS);
+    if (wide == INVALID_HANDLE_VALUE) return h;
+    CloseHandle(h);
+    HANDLE tight = ReOpenFile(wide, access, share, flags & WIN_FLAG_BITS);
+    if (tight == INVALID_HANDLE_VALUE) return wide;
+    CloseHandle(wide);
+    return tight;
+}
+
+/* A new file made by NtCreateFile relative to the verified directory of
+ * `resolved` (FILE_CREATE: nothing that exists is opened), for when the
+ * open that may create cannot have DELETE: made in the directory the check
+ * saw, it never lands outside the grant, so there is nothing to remove. */
+static HANDLE win_create_in_verified(const char* resolved, const WinOpenMode* m, int* collided) {
+    *collided = 0;
+    char dir[PATH_MAX];
+    wchar_t wname[AETHER_SANDBOX_WPATH];
+    if (!win_split(resolved, dir, wname)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
+    HANDLE root = win_open_dir_verified(dir, wname, "fs_write");
+    if (root == INVALID_HANDLE_VALUE) return root;
+    ULONG options = FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT;
+    if (m->flags & FILE_FLAG_DELETE_ON_CLOSE) options |= FILE_DELETE_ON_CLOSE;
+    if (m->flags & FILE_FLAG_SEQUENTIAL_SCAN) options |= FILE_SEQUENTIAL_ONLY;
+    if (m->flags & FILE_FLAG_RANDOM_ACCESS) options |= FILE_RANDOM_ACCESS;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    NTSTATUS st = win_create_at_shared(root, wname, m->access | FILE_READ_ATTRIBUTES,
+                                       m->flags & 0xFFFFu, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       FILE_CREATE, options, NULL, &h);
+    CloseHandle(root);
+    if (st < 0) {
+        *collided = st == STATUS_OBJECT_NAME_COLLISION;
+        win_fail_status(st);
+        return INVALID_HANDLE_VALUE;
+    }
+    return h;
+}
+
 /* Opened as an fopen or open of `path` would open it, but changing nothing
  * first: no CREATE_ALWAYS, no TRUNCATE_EXISTING. The final path of the
  * handle is checked, and only then is the file emptied through it, for "w"
- * and O_TRUNC. A file this call created and then refused is deleted
- * through the handle, so a junction swapped in after the check leaves
- * nothing behind outside the grant. INVALID_HANDLE_VALUE with errno set. */
+ * and O_TRUNC. A file that exists is opened as it is, with no DELETE, so
+ * it is shared as fopen shares it. Where the open may create, it asks for
+ * DELETE too, so a file it created and then refused is deleted through the
+ * handle (a junction swapped in after the check leaves nothing behind
+ * outside the grant), and the handle kept is reopened without DELETE
+ * (win_drop_delete). Where DELETE cannot be had, the new file is made in
+ * the verified directory instead. INVALID_HANDLE_VALUE with errno set. */
 static HANDLE win_open_checked(const char* path, const WinOpenMode* m, int access) {
     char resolved[PATH_MAX];
     int entry = m->disposition == CREATE_NEW;
@@ -1124,23 +1187,52 @@ static HANDLE win_open_checked(const char* path, const WinOpenMode* m, int acces
     }
     wchar_t wp[AETHER_SANDBOX_WPATH];
     if (!win_wide(path, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
-    /* DELETE where the open may create, so a refused new file can go. */
-    DWORD want = m->access | (m->disposition != OPEN_EXISTING ? DELETE : 0);
     DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
-    HANDLE h = CreateFileW(wp, want, share, NULL, m->disposition, m->flags, NULL);
-    if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED && want != m->access) {
-        want = m->access;
+    DWORD want = m->access;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    int created = 0;
+    for (int attempt = 0; attempt < 2 && h == INVALID_HANDLE_VALUE; attempt++) {
+        if (m->disposition != CREATE_NEW) {
+            /* A file that is there: opened as it is, nothing created. */
+            want = m->access;
+            h = CreateFileW(wp, want, share, NULL, OPEN_EXISTING, m->flags, NULL);
+            if (h != INVALID_HANDLE_VALUE) break;
+            if (m->disposition == OPEN_EXISTING || GetLastError() != ERROR_FILE_NOT_FOUND) {
+                win_fail(GetLastError());
+                return INVALID_HANDLE_VALUE;
+            }
+        }
+        /* It may be created: DELETE too, so a refused new file can go. */
+        want = m->access | DELETE;
         h = CreateFileW(wp, want, share, NULL, m->disposition, m->flags, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            created = m->disposition == CREATE_NEW || GetLastError() != ERROR_ALREADY_EXISTS;
+            break;
+        }
+        DWORD e = GetLastError();
+        if (e != ERROR_ACCESS_DENIED && e != ERROR_SHARING_VIOLATION) {
+            win_fail(e);
+            return INVALID_HANDLE_VALUE;
+        }
+        /* No DELETE here: made in the verified directory, or, when a name
+         * appeared there meanwhile, opened as it is on the next round. */
+        int collided = 0;
+        want = m->access;
+        h = win_create_in_verified(resolved, m, &collided);
+        if (h != INVALID_HANDLE_VALUE) {
+            created = 1;
+            break;
+        }
+        if (!collided || m->disposition == CREATE_NEW) return INVALID_HANDLE_VALUE;
     }
-    if (h == INVALID_HANDLE_VALUE) { win_fail(GetLastError()); return h; }
-    int created = m->disposition == CREATE_NEW ||
-                  (m->disposition == OPEN_ALWAYS && GetLastError() != ERROR_ALREADY_EXISTS);
+    if (h == INVALID_HANDLE_VALUE) return h;
     if (!win_handle_is(h, resolved, access)) {
         if (created && (want & DELETE)) (void)win_delete_by_handle(h);
         CloseHandle(h);
         fs_refused();
         return INVALID_HANDLE_VALUE;
     }
+    if ((want & DELETE) && !(m->access & DELETE)) h = win_drop_delete(h, m->access, m->flags);
     if (m->truncate && !created) {
         LARGE_INTEGER zero;
         zero.QuadPart = 0;

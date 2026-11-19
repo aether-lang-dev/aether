@@ -283,6 +283,50 @@ main() {
             spec.assert_str_eq(err, "", "the lock file opens with fs_write alone")
             spec.assert_eq(got, 1, "and the lock is taken")
         }
+        // A file a block opens is shared as fopen shares it: on Windows the
+        // open that may create asks for DELETE, and a handle that kept it
+        // made every later open of the file (fopen, another process) fail
+        // with a sharing violation while it was open.
+        spec.it("leaves a file it holds open for others to open, in this process and another") callback {
+            log = "${box}/shared.log"
+            fresh = "${box}/fresh.log"
+            _w = fs.write(log, "first\n")
+            _d = fs.delete(fresh)
+            held_log = null
+            held_fresh = null
+            oerr = ""
+            sandbox.enforce(in_box) callback {
+                a, aerr = fs.open(log, "a")
+                held_log = a
+                b, berr = fs.open(fresh, "w")
+                held_fresh = b
+                oerr = "${aerr}${berr}"
+            }
+            spec.assert_str_eq(oerr, "", "both open in the block")
+            got_log, rerr = fs.read(log)
+            got_fresh, rerr2 = fs.read(fresh)
+            spec.assert_str_eq(rerr, "", "an fopen of the appended file opens while it is held")
+            spec.assert_str_eq(got_log, "first\n", "and reads it")
+            spec.assert_str_eq(rerr2, "", "an fopen of the file the block made opens while it is held")
+            argv = list.new()
+            prog = "cat"
+            if windows == 1 {
+                prog = "cmd.exe"
+                list.add(argv, "/c")
+                list.add(argv, "type")
+                list.add(argv, string.replace_all(log, "/", "\\"))
+            } else {
+                list.add(argv, log)
+            }
+            out, code, cerr = os.run_capture(prog, argv, null)
+            list.free(argv)
+            spec.assert_str_eq(cerr, "", "another process starts")
+            spec.assert_eq(code, 0, "and opens the held file")
+            spec.assert_contains(out, "first", "and reads it")
+            _c1 = fs.close(held_log)
+            _c2 = fs.close(held_fresh)
+            spec.assert_str_eq(got_fresh, "", "the new file is empty")
+        }
         spec.it("makes a hard link between two names of the box") callback {
             err = ""
             sandbox.enforce(in_box) callback {
