@@ -4813,6 +4813,24 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
             if (ws_recv_exact(ws->conn, mask_key, 4) != 0) { ws->closed = 1; return -1; }
         }
 
+        /* A client masks every frame it sends and a server masks none, and
+         * each end fails the connection on a frame that breaks the rule
+         * (RFC 6455 5.1). A server handle sends unmasked (mask_tx 0) and so
+         * must receive masked frames; a client handle the reverse. Unmasked
+         * client frames were taken as they came, which loses what masking
+         * is for: a client's script cannot choose the bytes an intermediary
+         * sees, so it cannot pass a request off as plain HTTP to poison its
+         * cache (#3759). */
+        if (masked == ws->mask_tx)
+            return ws_fail(ws, 1002, masked ? "masked frame from the server"
+                                            : "unmasked frame from the client");
+        /* Opcodes 3-7 and 0xB-0xF are reserved, and a frame carrying one
+         * fails the connection (RFC 6455 5.2). The reserved data opcodes
+         * were appended to the message as if they continued it, and the
+         * reserved control ones taken as data (#3759). */
+        if ((opcode >= 0x3 && opcode <= 0x7) || opcode >= 0xB)
+            return ws_fail(ws, 1002, "reserved opcode");
+
         if (opcode == WS_OP_PING || opcode == WS_OP_PONG || opcode == WS_OP_CLOSE) {
             /* A control frame carries at most 125 bytes and is never
              * fragmented (RFC 6455 5.5). Both were taken as given, and a

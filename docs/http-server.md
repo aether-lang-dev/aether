@@ -791,6 +791,15 @@ closes the connection with `1002` (RFC 6455 5.5). `ws_recv` returns `-1`
 in both cases (#3739). A client handle from `ws_connect` has the same
 64 MiB cap.
 
+Framing is checked as RFC 6455 requires (#3759). A frame with a reserved
+opcode (3 to 7, 0xB to 0xF) closes the connection with `1002` (5.2). A
+client masks every frame it sends and a server masks none (5.1): a server
+handle closes with `1002` on an unmasked frame from its client, and a
+client handle from `ws_connect` closes with `1002` on a masked frame from
+its server. `ws_recv` returns `-1` after each. Browsers and every
+conforming client mask their frames, and `ws_connect`'s handles always
+have.
+
 ## Server-Sent Events
 
 ```aether,fragment

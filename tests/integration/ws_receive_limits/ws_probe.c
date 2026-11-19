@@ -11,8 +11,19 @@
  *   6. a fragmented ping closes with 1002;
  *   7. on /wsbig, a frame declaring 48 MiB with 1000 bytes of it sent
  *      leaves the server holding far less than 48 MiB.
+ *   8. a frame with reserved data opcode 0x3 closes with 1002 (#3759);
+ *   9. a frame with reserved control opcode 0xB closes with 1002;
+ *  10. an unmasked client frame closes with 1002 (RFC 6455 5.1).
  *
  * Usage: ws_probe <port>. Prints PASS/FAIL lines; exits 0 when all pass.
+ *
+ * ws_probe relay <port> checks the client side of 5.1 (#3759): a client
+ * fails the connection on a masked frame from the server. It listens on a
+ * loopback port of its own and prints READY <port>; the client under test
+ * dials it. The upgrade request goes on to the server on <port> and its 101
+ * comes back, so the handshake is a real one; then, in the server's place,
+ * the relay sends the client one masked text frame, and expects the
+ * client's close with 1002. Prints PASS/FAIL; exits 0 on a pass.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,8 +120,16 @@ static int send_frame(raw_sock s, int fin, int opcode, const unsigned char* payl
     return rc;
 }
 
-/* One server frame: its opcode, and its payload into buf (up to cap).
- * Returns the payload length, or -1 on EOF or timeout. */
+/* A frame header with no mask, as a server sends it and a client must not:
+ * `opcode`, FIN set, no payload. */
+static int send_unmasked_header(raw_sock s, int opcode) {
+    unsigned char hdr[2] = { (unsigned char)(0x80 | (opcode & 0x0F)), 0 };
+    return raw_send_all(s, (const char*)hdr, 2);
+}
+
+/* One frame: its opcode, and its payload into buf (up to cap), unmasked when
+ * it came masked (a client's). Returns the payload length, or -1 on EOF or
+ * timeout. */
 static long read_frame(raw_sock s, int* opcode, unsigned char* buf, size_t cap) {
     unsigned char h[2];
     if (recv_n(s, h, 2) != 0) return -1;
@@ -126,8 +145,11 @@ static long read_frame(raw_sock s, int* opcode, unsigned char* buf, size_t cap) 
         pl = 0;
         for (int i = 0; i < 8; i++) pl = (pl << 8) | e[i];
     }
+    unsigned char key[4] = { 0, 0, 0, 0 };
+    if ((h[1] & 0x80) && recv_n(s, key, 4) != 0) return -1;
     if (pl > cap) return -1;
     if (pl && recv_n(s, buf, (size_t)pl) != 0) return -1;
+    for (size_t i = 0; i < pl; i++) buf[i] ^= key[i & 3];
     return (long)pl;
 }
 
@@ -165,10 +187,81 @@ static long long used_bytes(void) {
     return body ? atoll(body + 4) : -1;
 }
 
+/* A head (up to its blank line) from `s`, a byte at a time so nothing after
+ * it is taken. 0 on success. */
+static int read_head(raw_sock s, char* head, size_t cap) {
+    size_t n = 0;
+    while (n < cap - 1) {
+        if (recv_n(s, (unsigned char*)head + n, 1) != 0) return -1;
+        n++;
+        head[n] = '\0';
+        if (n >= 4 && memcmp(head + n - 4, "\r\n\r\n", 4) == 0) return 0;
+    }
+    return -1;
+}
+
+/* ws_probe relay <port>: see the comment at the top. */
+static int relay(void) {
+    raw_sock ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls == RAW_SOCK_INVALID) return 2;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    socklen_t al = sizeof(a);
+    if (bind(ls, (struct sockaddr*)&a, sizeof(a)) != 0 || listen(ls, 1) != 0 ||
+        getsockname(ls, (struct sockaddr*)&a, &al) != 0) {
+        printf("FAIL: relay could not listen\n");
+        return 1;
+    }
+    printf("READY %d\n", ntohs(a.sin_port));
+    fflush(stdout);
+    raw_sock c = accept(ls, NULL, NULL);
+    raw_socket_close(ls);
+    if (c == RAW_SOCK_INVALID) return 1;
+    raw_recv_timeout_ms(c, 5000);
+    char head[4096];
+    if (read_head(c, head, sizeof(head)) != 0) {
+        printf("FAIL: no upgrade request from the client\n");
+        return 1;
+    }
+    raw_sock s = dial();
+    if (s == RAW_SOCK_INVALID) return 1;
+    raw_send_all(s, head, strlen(head));
+    if (read_head(s, head, sizeof(head)) != 0 || strncmp(head, "HTTP/1.1 101", 12) != 0) {
+        printf("FAIL: the server did not upgrade: %s\n", head);
+        return 1;
+    }
+    raw_send_all(c, head, strlen(head));
+    /* A masked text frame "hi", which a server must never send. */
+    static const unsigned char frame[] = { 0x81, 0x82, 0x01, 0x02, 0x03, 0x04,
+                                           'h' ^ 0x01, 'i' ^ 0x02 };
+    raw_send_all(c, (const char*)frame, sizeof(frame));
+    unsigned char buf[256];
+    int op = 0;
+    long n = read_frame(c, &op, buf, sizeof(buf));
+    int code = (n >= 2 && op == 0x8) ? (buf[0] << 8) | buf[1] : -1;
+    raw_socket_close(c);
+    raw_socket_close(s);
+    if (code != 1002) {
+        printf("FAIL: the client answered a masked server frame with opcode %d, code %d, not a close with 1002\n",
+               n >= 0 ? op : -1, code);
+        return 1;
+    }
+    printf("PASS: a client closes with 1002 on a masked server frame\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
-    port = atoi(argv[1]);
     if (raw_socket_start() != 0) return 2;
+    if (strcmp(argv[1], "relay") == 0) {
+        if (argc < 3) return 2;
+        port = atoi(argv[2]);
+        return relay();
+    }
+    port = atoi(argv[1]);
     unsigned char data[6000];
     for (size_t i = 0; i < sizeof(data); i++) data[i] = (unsigned char)('a' + i % 26);
     unsigned char buf[256];
@@ -231,6 +324,27 @@ int main(int argc, char** argv) {
     printf("  allocator held %lld bytes before, %lld with the frame open\n", before, during);
     check(before >= 0 && during >= 0 && during - before < 8LL * 1024 * 1024,
           "a frame declaring 48 MiB with 1000 bytes sent holds well under 8 MiB");
+
+    /* 8, 9. Reserved opcodes: 1002 (RFC 6455 5.2). The frames carry no
+     * payload, so the server has read all of each when it closes. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 1, 0x3, data, 0, 0);
+    check(close_code(s) == 1002, "a frame with reserved data opcode 0x3 closes with 1002");
+    raw_socket_close(s);
+
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 1, 0xB, data, 0, 0);
+    check(close_code(s) == 1002, "a frame with reserved control opcode 0xB closes with 1002");
+    raw_socket_close(s);
+
+    /* 10. An unmasked client frame: 1002 (RFC 6455 5.1). */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_unmasked_header(s, 0x1);
+    check(close_code(s) == 1002, "an unmasked client frame closes with 1002");
+    raw_socket_close(s);
 
     if (failures) {
         printf("FAIL: %d case(s)\n", failures);

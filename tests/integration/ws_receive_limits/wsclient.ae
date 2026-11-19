@@ -1,0 +1,26 @@
+// The client for ws_receive_limits' relay case (#3759). It dials `ws_probe
+// relay`, which passes the handshake through to wsserver.ae and then sends a
+// masked frame in the server's place. A client must fail the connection on
+// one (RFC 6455 5.1): ws_recv reports the connection closed, and the close
+// frame it sent, with 1002, is what the relay checks.
+
+import std.http
+import std.os
+
+extern exit(code: int)
+
+main() {
+    w = http.ws_connect("ws://127.0.0.1:${os_getenv("AE_TEST_PORT")}/ws")
+    if w == null {
+        println("FAIL: ws_connect returned null")
+        exit(1)
+    }
+    kind = http.ws_recv(w)
+    http.ws_client_free(w)
+    if kind != -1 {
+        println("FAIL: ws_recv returned ${kind} for a masked server frame, want -1")
+        exit(1)
+    }
+    println("client: the masked server frame closed the connection")
+    exit(0)
+}
