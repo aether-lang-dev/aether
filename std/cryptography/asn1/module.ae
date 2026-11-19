@@ -120,7 +120,18 @@ struct Asn1Reader {
     last_tag_class: int
     last_tag_pc: int
     last_tag_number: int
+    // How many indefinite-length TLVs the read in progress is inside: each
+    // one is read by a recursive read_tlv, so their nesting is bounded
+    // (MAX_INDEFINITE_DEPTH).
+    indefinite_depth: int
 }
+
+// The most indefinite-length TLVs read_tlv reads one inside another. Each
+// level is a recursive call, and an input of nothing but `30 80` nested them
+// as deep as it was long: 30000 levels, 60 KB, a certificate a TLS peer may
+// send, overflowed the stack (#3749, found by the X.509 fuzz target). DER
+// has no indefinite lengths at all; BER content nests a handful deep.
+const MAX_INDEFINITE_DEPTH = 64
 
 reader_new(b: @keep ptr) -> ptr {
     r = malloc(sizeof(Asn1Reader)) as *Asn1Reader
@@ -131,6 +142,7 @@ reader_new(b: @keep ptr) -> ptr {
     r.last_tag_class = -1
     r.last_tag_pc = -1
     r.last_tag_number = -1
+    r.indefinite_depth = 0
     return r
 }
 
@@ -233,50 +245,13 @@ read_tlv(r: ptr) -> (ptr, string) {
     }
 
     if is_indefinite == 1 {
-        // Read TLVs recursively until we find EOC (00 00); each copy is
-        // wiped as it is replaced, the TLVs may hold a key (#3382).
-        acc = bytes.new(0)
-        acc_len = 0
-        loop = 1
-        while loop == 1 {
-            if rr.pos + 2 <= rr.len {
-                b1 = bytes.get(rr.buf, rr.pos) & 0xFF
-                b2 = bytes.get(rr.buf, rr.pos + 1) & 0xFF
-                if b1 == 0 && b2 == 0 {
-                    rr.pos = rr.pos + 2
-                    loop = 0
-                }
-            }
-            if loop == 1 {
-                if rr.pos >= rr.len {
-                    bytes.wipe_free(acc)
-                    return null, "asn1: unexpected end of input in indefinite length"
-                }
-                start_pos = rr.pos
-                sub_content, suberr = read_tlv(r)
-                if string.equals(suberr, "") != 1 {
-                    bytes.wipe_free(acc)
-                    return null, suberr
-                }
-                // suberr is the sub-call's (empty) success string; release it
-                // so the recursive read_tlv's "" doesn't leak per sub-TLV.
-                string.release(suberr)
-                bytes.wipe_free(sub_content)
-                end_pos = rr.pos
-                sub_tlv_len = end_pos - start_pos
-
-                // Copy the raw TLV bytes into acc
-                new_acc = bytes.new(acc_len + sub_tlv_len)
-                if acc_len > 0 {
-                    bytes.copy_from_bytes(new_acc, 0, acc, 0, acc_len)
-                }
-                bytes.copy_from_bytes(new_acc, acc_len, rr.buf, start_pos, sub_tlv_len)
-                bytes.wipe_free(acc)
-                acc = new_acc
-                acc_len = acc_len + sub_tlv_len
-            }
+        if rr.indefinite_depth >= MAX_INDEFINITE_DEPTH {
+            return null, "asn1: indefinite lengths nested too deep"
         }
-        return acc, ok
+        rr.indefinite_depth = rr.indefinite_depth + 1
+        acc, aerr = read_indefinite(r)
+        rr.indefinite_depth = rr.indefinite_depth - 1
+        return acc, aerr
     }
 
     // Against what is left, not as rr.pos + length: a four-byte length can
@@ -296,10 +271,80 @@ read_tlv(r: ptr) -> (ptr, string) {
     return content, ok
 }
 
+// The content of an indefinite-length TLV whose header read_tlv has read:
+// its TLVs, read recursively to the EOC (00 00), each copy wiped as it is
+// replaced, since the TLVs may hold a key (#3382).
+fn read_indefinite(r: ptr) -> (ptr, string) {
+    ok = ""
+    rr = r as *Asn1Reader
+    acc = bytes.new(0)
+    acc_len = 0
+    loop = 1
+    while loop == 1 {
+        if rr.pos + 2 <= rr.len {
+            b1 = bytes.get(rr.buf, rr.pos) & 0xFF
+            b2 = bytes.get(rr.buf, rr.pos + 1) & 0xFF
+            if b1 == 0 && b2 == 0 {
+                rr.pos = rr.pos + 2
+                loop = 0
+            }
+        }
+        if loop == 1 {
+            if rr.pos >= rr.len {
+                bytes.wipe_free(acc)
+                return null, "asn1: unexpected end of input in indefinite length"
+            }
+            start_pos = rr.pos
+            sub_content, suberr = read_tlv(r)
+            if string.equals(suberr, "") != 1 {
+                bytes.wipe_free(acc)
+                return null, suberr
+            }
+            // suberr is the sub-call's (empty) success string; release it
+            // so the recursive read_tlv's "" doesn't leak per sub-TLV.
+            string.release(suberr)
+            bytes.wipe_free(sub_content)
+            end_pos = rr.pos
+            sub_tlv_len = end_pos - start_pos
+
+            // Copy the raw TLV bytes into acc
+            new_acc = bytes.new(acc_len + sub_tlv_len)
+            if acc_len > 0 {
+                bytes.copy_from_bytes(new_acc, 0, acc, 0, acc_len)
+            }
+            bytes.copy_from_bytes(new_acc, acc_len, rr.buf, start_pos, sub_tlv_len)
+            bytes.wipe_free(acc)
+            acc = new_acc
+            acc_len = acc_len + sub_tlv_len
+        }
+    }
+    return acc, ok
+}
+
 // Tag of the most recently read TLV (-1 if none read yet).
 last_tag(r: ptr) -> int {
     rr = r as *Asn1Reader
     return rr.last_tag
+}
+
+// The parts of that tag (-1 if none read yet): its class (TAG_CLASS_*), its
+// constructed bit (TAG_PC_*) and its number, read whole from the
+// high-tag-number form. All three were exported and never defined, so a
+// program that called one did not compile (#3749, found by the X.509 fuzz
+// target).
+last_tag_class(r: ptr) -> int {
+    rr = r as *Asn1Reader
+    return rr.last_tag_class
+}
+
+last_tag_pc(r: ptr) -> int {
+    rr = r as *Asn1Reader
+    return rr.last_tag_pc
+}
+
+last_tag_number(r: ptr) -> int {
+    rr = r as *Asn1Reader
+    return rr.last_tag_number
 }
 
 // Current read offset into the underlying buffer. Bracketing a read_tlv with

@@ -118,7 +118,19 @@ void* yaml_parse_raw(const char* yaml_str) {
             snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf), "%s at %d:%d",
                      err->msg ? err->msg : "parse error", err->line, err->column);
             g_yaml_err_set = 1;
+        } else {
+            /* No error, and no document: a stream with none in it (empty,
+             * or only comments and white space), which is valid YAML. It
+             * came back as NULL with no message, so `parse` answered a
+             * document of null with no error, a pair its callers read as
+             * neither (#3749, found by the fuzzer). It is an empty
+             * document: one with no root node. */
+            doc = fy_document_create(&cfg);
         }
+    }
+    if (!doc && !g_yaml_err_set) {
+        snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf), "parse error");
+        g_yaml_err_set = 1;
     }
 
     // Clear collected errors then drop our ref. The collected-error entries are
@@ -190,10 +202,28 @@ void* yaml_mapping_get_value_raw(void* node, int index) {
     return fy_node_pair_value(pair);
 }
 
+/* The value of the first pair whose key is the scalar `key`, compared as the
+ * text it is. libfyaml's fy_node_mapping_lookup_by_string reads its argument
+ * as YAML source, so a key that YAML would read as something else ("a: b",
+ * "[x]", "#c", a key ending in a line break, one with quotes) was not found
+ * in a mapping that holds it (#3749, found by the fuzzer). A key given as
+ * YAML source that names a non-scalar key ("[a, b]") is still looked up that
+ * way when no scalar key matches. */
 void* yaml_mapping_lookup_raw(void* node, const char* key) {
     if (!node || !key) return NULL;
-    if (fy_node_get_type((struct fy_node*)node) != FYNT_MAPPING) return NULL;
-    return fy_node_mapping_lookup_by_string((struct fy_node*)node, key, strlen(key));
+    struct fy_node* map = (struct fy_node*)node;
+    if (fy_node_get_type(map) != FYNT_MAPPING) return NULL;
+    size_t klen = strlen(key);
+    void* iter = NULL;
+    struct fy_node_pair* pair;
+    while ((pair = fy_node_mapping_iterate(map, &iter)) != NULL) {
+        struct fy_node* k = fy_node_pair_key(pair);
+        if (!k || fy_node_get_type(k) != FYNT_SCALAR) continue;
+        size_t n = 0;
+        const char* s = fy_node_get_scalar(k, &n);
+        if (s && n == klen && memcmp(s, key, n) == 0) return fy_node_pair_value(pair);
+    }
+    return fy_node_mapping_lookup_by_string(map, key, klen);
 }
 
 const char* yaml_emit_node_raw(void* node) {
@@ -204,6 +234,14 @@ const char* yaml_emit_node_raw(void* node) {
 
 const char* yaml_emit_document_raw(void* doc) {
     if (!doc) return NULL;
+    /* A document with no root (what an empty stream parses to) is the empty
+     * text, which parses back to it; libfyaml emits nothing for it. */
+    if (!fy_document_root((struct fy_document*)doc)) {
+        char* empty = malloc(1);
+        if (!empty) return NULL;
+        empty[0] = '\0';
+        return store_emit_string(empty);
+    }
     char* str = fy_emit_document_to_string((struct fy_document*)doc, FYECF_DEFAULT);
     return store_emit_string(str);
 }

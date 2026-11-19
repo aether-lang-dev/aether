@@ -1,0 +1,68 @@
+// Regression (#3749, found by the tar fuzz target): std.tar's entry_read
+// answered "not positioned on an entry" once a file entry had been read to
+// its end, so a loop reading to length 0, the end-of-data convention its own
+// code has a branch for, failed after the last chunk of every file. The end
+// of an entry read whole is now its end of data: ("", 0, ""). Before any
+// entry, and past the archive's end, it is still an error.
+
+import std.fs
+import std.string
+import std.tar
+
+extern exit(code: int)
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("FAIL: ${what}")
+    return 1
+}
+
+main() {
+    fails = 0
+    dir, terr = fs.make_temp_dir("", "tar_eof")
+    if terr != "" {
+        println("FAIL: make_temp_dir: ${terr}")
+        exit(1)
+    }
+    src = "${dir}/src.txt"
+    _w = fs.write_binary(src, string.bytes("0123456789abcdef"))
+    archive = "${dir}/a.tar"
+    w, werr = tar.writer_create(archive)
+    if werr != "" {
+        println("FAIL: writer_create: ${werr}")
+        exit(1)
+    }
+    fails = fails + check(tar.writer_add_file(w, "f.txt", src) == "", "writer_add_file")
+    fails = fails + check(tar.writer_finish(w) == "", "writer_finish")
+
+    r, oerr = tar.reader_open(archive)
+    fails = fails + check(oerr == "", "reader_open: ${oerr}")
+    _c0, n0, e0 = tar.entry_read(r, 4)
+    fails = fails + check(n0 == 0 && e0 != "", "a read before any entry is not an error")
+    ok, nerr = tar.reader_next(r)
+    fails = fails + check(ok == 1 && nerr == "", "reader_next: ${nerr}")
+    total = 0
+    reads = 0
+    more = 1
+    while more == 1 && reads < 20 {
+        _chunk, n, err = tar.entry_read(r, 5)
+        fails = fails + check(err == "", "read ${reads} of the entry failed: ${err}")
+        if err != "" || n == 0 { more = 0 }
+        total = total + n
+        reads = reads + 1
+    }
+    fails = fails + check(total == 16, "read ${total} bytes of 16")
+    _c1, n1, e1 = tar.entry_read(r, 5)
+    fails = fails + check(n1 == 0 && e1 == "", "a second read past the end was '${e1}'")
+    done, derr = tar.reader_next(r)
+    fails = fails + check(done == 0 && derr == "", "the archive did not end: ${derr}")
+    _c2, n2, e2 = tar.entry_read(r, 5)
+    fails = fails + check(n2 == 0 && e2 != "", "a read past the archive's end is not an error")
+    tar.reader_close(r)
+    _rm = fs.remove_tree(dir)
+
+    if fails > 0 {
+        exit(1)
+    }
+    println("PASS: an entry read to its end reads as its end of data")
+}

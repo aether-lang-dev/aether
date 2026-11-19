@@ -1,0 +1,65 @@
+// Regression (#3749, found by the X.509 fuzz target): std.cryptography.asn1
+// exported last_tag_class, last_tag_pc and last_tag_number and defined none
+// of them, so a program calling one did not compile. They give the parts of
+// the most recently read tag: its class, its constructed bit and its number,
+// the high-tag-number form read whole.
+
+import std.bytes
+import std.cryptography.asn1
+
+extern exit(code: int)
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("FAIL: ${what}")
+    return 1
+}
+
+main() {
+    fails = 0
+    // SEQUENCE { [3] { }, [APPLICATION 200] primitive 'x' }
+    der = bytes.new(16)
+    bytes.set_length(der, 10)
+    bytes.set(der, 0, 0x30)
+    bytes.set(der, 1, 8)
+    bytes.set(der, 2, 0xa3)
+    bytes.set(der, 3, 0)
+    bytes.set(der, 4, 0x5f)
+    bytes.set(der, 5, 0x81)
+    bytes.set(der, 6, 0x48)
+    bytes.set(der, 7, 1)
+    bytes.set(der, 8, 0x78)
+    bytes.set(der, 9, 0)
+
+    r = asn1.reader_new(der)
+    fails = fails + check(asn1.last_tag_class(r) == -1 && asn1.last_tag_pc(r) == -1 && asn1.last_tag_number(r) == -1,
+                          "a reader that has read nothing reports a tag")
+    seq, err = asn1.read_tlv(r)
+    fails = fails + check(err == "", "the SEQUENCE did not read: ${err}")
+    fails = fails + check(asn1.last_tag_class(r) == asn1.TAG_CLASS_UNIVERSAL(), "the SEQUENCE's class")
+    fails = fails + check(asn1.last_tag_pc(r) == asn1.TAG_PC_CONSTRUCTED(), "the SEQUENCE is constructed")
+    fails = fails + check(asn1.last_tag_number(r) == 16, "the SEQUENCE's number")
+    asn1.reader_free(r)
+
+    inner = asn1.reader_new(seq)
+    ctx, err2 = asn1.read_tlv(inner)
+    fails = fails + check(err2 == "", "[3] did not read: ${err2}")
+    fails = fails + check(asn1.last_tag_class(inner) == asn1.TAG_CLASS_CONTEXT_SPECIFIC(), "[3]'s class")
+    fails = fails + check(asn1.last_tag_pc(inner) == asn1.TAG_PC_CONSTRUCTED(), "[3] is constructed")
+    fails = fails + check(asn1.last_tag_number(inner) == 3, "[3]'s number")
+    bytes.free(ctx)
+    app, err3 = asn1.read_tlv(inner)
+    fails = fails + check(err3 == "", "[APPLICATION 200] did not read: ${err3}")
+    fails = fails + check(asn1.last_tag_class(inner) == asn1.TAG_CLASS_APPLICATION(), "[APPLICATION 200]'s class")
+    fails = fails + check(asn1.last_tag_pc(inner) == asn1.TAG_PC_PRIMITIVE(), "[APPLICATION 200] is primitive")
+    fails = fails + check(asn1.last_tag_number(inner) == 200, "[APPLICATION 200]'s number")
+    bytes.free(app)
+    asn1.reader_free(inner)
+    bytes.free(seq)
+    bytes.free(der)
+
+    if fails > 0 {
+        exit(1)
+    }
+    println("PASS: the parts of the last tag read")
+}

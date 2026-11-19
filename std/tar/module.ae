@@ -705,6 +705,14 @@ entry_read(reader_ptr: ptr, max_bytes: int) -> {
     }
     reader = reader_ptr as *TarReader
     if reader.is_at_entry == 0 {
+        // An entry read to its end has nothing left, which is its end of
+        // data (length 0), as entry_skip has nothing to skip, not an error:
+        // a loop reading to length 0 got "not positioned on an entry" after
+        // the last chunk of every file (#3749, found by the tar fuzz
+        // target).
+        if reader.reached_eof == 0 && reader.entry_bytes_total > 0 && reader.entry_bytes_read >= reader.entry_bytes_total {
+            return "", 0, ""
+        }
         return "", 0, "not positioned on an entry"
     }
     if reader.entry_bytes_read >= reader.entry_bytes_total {

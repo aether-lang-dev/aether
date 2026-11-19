@@ -1813,13 +1813,13 @@ main() {
 ```
 
 **Functions:**
-- `yaml.parse(s)` → `(ptr, string)` - Parse a document; free it with `yaml.free`
+- `yaml.parse(s)` → `(ptr, string)` - Parse a document; free it with `yaml.free`. A stream with no document in it (empty, or only comments) is a document whose root is `null`
 - `yaml.root(doc)` → `ptr` - The document's root node
 - `yaml.type(node)` → `int` - `YAML_SCALAR`, `YAML_SEQUENCE` or `YAML_MAPPING`
 - `yaml.get_scalar(node)` → `(string, string)` - A scalar's text
 - `yaml.sequence_size(node)` → `int`, `yaml.sequence_get(node, i)` → `ptr`
 - `yaml.mapping_size(node)` → `int`, `yaml.mapping_get_key(node, i)` / `mapping_get_value(node, i)` → `ptr`
-- `yaml.mapping_lookup(node, key)` → `ptr` - Value for a key, `null` when absent
+- `yaml.mapping_lookup(node, key)` → `ptr` - Value of the first key whose scalar text is `key`, `null` when absent
 - `yaml.emit_node(node)` / `yaml.emit_document(doc)` → `(string, string)` - Back to YAML text
 - `yaml.free(doc)` - Release a document
 
