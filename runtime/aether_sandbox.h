@@ -251,7 +251,8 @@ int aether_sandbox_refused(void);
 #define aether_sandbox_stage_begin(path, s) ((void)(path), (void)(s), -2)
 #define aether_sandbox_stage_commit(s) ((void)(s), -1)
 #define aether_sandbox_stage_abort(s) ((void)(s))
-#define aether_sandbox_temp_in(dir, prefix, is_dir, out, cap) \n    ((void)(dir), (void)(prefix), (void)(is_dir), (void)(out), (void)(cap), -2)
+#define aether_sandbox_temp_in(dir, prefix, is_dir, out, cap) \
+    ((void)(dir), (void)(prefix), (void)(is_dir), (void)(out), (void)(cap), -2)
 #define aether_sandbox_stat(path, nofollow, out) ((void)(path), (void)(nofollow), (void)(out), -1)
 #define aether_sandbox_realpath(path, out, cap) ((void)(path), (void)(out), (void)(cap), -1)
 #ifndef _WIN32
