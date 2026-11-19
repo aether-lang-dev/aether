@@ -62,6 +62,8 @@
     <li><a href="#server_set_tls_backend">server_set_tls_backend</a></li>
     <li><a href="#server_set_keepalive_raw">server_set_keepalive_raw</a></li>
     <li><a href="#server_set_keepalive">server_set_keepalive</a></li>
+    <li><a href="#server_set_max_body_raw">server_set_max_body_raw</a></li>
+    <li><a href="#server_set_max_body">server_set_max_body</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
     <li><a href="#server_set_h2">server_set_h2</a></li>
     <li><a href="#server_set_multi_accept_raw">server_set_multi_accept_raw</a></li>
@@ -524,6 +526,17 @@
       <h3 class="function-name">server_set_keepalive <span class="kind">fn</span></h3>
       <pre class="usage"><code>server_set_keepalive(server, enabled, max_requests, idle_timeout) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, enabled: int, max_requests: int, idle_timeout: Duration</span></p>
+    </div>
+    <div class="function" id="server_set_max_body_raw" data-name="server_set_max_body_raw">
+      <h3 class="function-name">server_set_max_body_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_max_body_raw(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
+      <p class="doc">The largest request body request_body buffers, in bytes (#3740); 64 MiB unless set here. Past it request_body returns &quot;&quot;, request_body_length reports 0, and the server answers 413 whatever the handler set. The limit is on buffering, not on uploads: a handler that reads its body with request_body_read streams a body of any size. Returns &quot;&quot; or why the value was refused (not positive).</p>
+    </div>
+    <div class="function" id="server_set_max_body" data-name="server_set_max_body">
+      <h3 class="function-name">server_set_max_body <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_max_body(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
     </div>
     <div class="function" id="server_set_h2_raw" data-name="server_set_h2_raw">
       <h3 class="function-name">server_set_h2_raw <span class="kind">extern</span></h3>
@@ -1012,6 +1025,7 @@
       <h3 class="function-name">request_body <span class="kind">fn</span></h3>
       <pre class="usage"><code>request_body(req) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">req: ptr</span></p>
+      <p class="doc">The whole request body. A body past the server's limit (server_set_max_body, 64 MiB by default) is refused: &quot;&quot; here, and the server answers 413 (#3740). Stream a larger upload with request_body_read.</p>
     </div>
     <div class="function" id="request_body_length" data-name="request_body_length">
       <h3 class="function-name">request_body_length <span class="kind">fn</span></h3>

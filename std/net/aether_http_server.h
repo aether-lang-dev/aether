@@ -81,6 +81,13 @@ typedef struct {
      * (http_request_set_header) grows them and never shrinks them. Trailing,
      * as the fields above. */
     int   header_cap;
+    /* The largest body http_request_body buffers for this request, copied
+     * from the server's max_body when the request is dispatched; 0 means
+     * HTTP_DEFAULT_MAX_BODY (#3740). `body_refused` is set when
+     * http_request_body refused a body past it, and the server then
+     * answers 413. Trailing, as the fields above. */
+    int64_t body_max;
+    int     body_refused;
 } HttpRequest;
 
 // HTTP Response
@@ -444,6 +451,11 @@ typedef struct HttpServer {
     // upgrades (#3739): HTTP_WS_DEFAULT_MAX_MESSAGE unless
     // http_server_set_ws_max_message_raw set another.
     size_t ws_max_message;
+    // The largest request body http_request_body buffers, in bytes (#3740):
+    // HTTP_DEFAULT_MAX_BODY unless http_server_set_max_body_raw set another.
+    // A handler that reads its body with http_request_body_read streams it
+    // and is not bounded by this.
+    int64_t max_body;
 } HttpServer;
 
 // ============================================================================
@@ -1091,7 +1103,21 @@ const char* http_request_path(HttpRequest* req);
 // asked for. Mixed usage — calling this after http_request_body_read
 // already consumed part of the stream — returns "" (the prefix is
 // gone; a silent tail-as-whole would corrupt).
+//
+// A body past the server's max_body (HTTP_DEFAULT_MAX_BODY unless
+// http_server_set_max_body_raw set another) is refused (#3740): this
+// returns "", http_request_body_length reports 0, and the server answers
+// 413 whatever the handler set. http_request_body_read streams a body of
+// any size and is not bounded by it.
 const char* http_request_body(HttpRequest* req);
+
+// The largest request body http_request_body buffers by default (#3740).
+#define HTTP_DEFAULT_MAX_BODY ((int64_t)64 * 1024 * 1024)
+
+// The largest request body http_request_body buffers on this server, in
+// bytes. Returns "" or why the value was refused (not positive).
+const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes);
+
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,
 // gzip-compressed bodies) without strlen() truncating at the first

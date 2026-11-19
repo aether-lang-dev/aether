@@ -201,6 +201,7 @@ const char* http_ws_message_data(HttpWsConn* w) { (void)w; return ""; }
 int http_ws_message_length(HttpWsConn* w) { (void)w; return 0; }
 const char* http_ws_set_max_message_raw(HttpWsConn* w, int64_t m) { (void)w; (void)m; return "WebSocket unavailable: networking not built in"; }
 const char* http_server_set_ws_max_message_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "WebSocket unavailable: networking not built in"; }
+const char* http_server_set_max_body_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
 void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -1520,6 +1521,7 @@ HttpServer* http_server_create(int port) {
     server->keep_alive_max = 0;
     server->keep_alive_idle_ms = 0;
     server->ws_max_message = HTTP_WS_DEFAULT_MAX_MESSAGE;
+    server->max_body = HTTP_DEFAULT_MAX_BODY;
     server->response_transformer_chain = NULL;
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
@@ -1603,6 +1605,14 @@ const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_b
     if ((uint64_t)max_bytes > (uint64_t)HTTP_WS_MAX_MESSAGE_LIMIT)
         return "max message is past the 2 GiB a message length can report";
     server->ws_max_message = (size_t)max_bytes;
+    return "";
+}
+
+/* The largest request body http_request_body buffers (#3740). */
+const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes) {
+    if (!server) return "server is null";
+    if (max_bytes <= 0) return "max body must be positive";
+    server->max_body = max_bytes;
     return "";
 }
 
@@ -3332,6 +3342,8 @@ void http_request_reset(HttpRequest* req) {
     req->stream_conn = NULL;
     req->stream_total = 0;
     req->stream_consumed = 0;
+    req->body_max = 0;
+    req->body_refused = 0;
 }
 
 /* Parse into an object the caller owns, reusing what it already holds. */
@@ -5546,6 +5558,19 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
  * same size (HTTP_RX_KEEP_MAX). */
 #define HTTP_BODY_DRAIN_MAX (64 * 1024)
 
+/* The answer once http_request_body refused `req`'s body as past the
+ * server's limit (#3740): 413, in place of whatever the handler or a
+ * middleware set, since what it set was decided on a body it never had. A
+ * response already on the wire (a takeover, a chunked stream) is the
+ * caller's to skip. */
+static void response_refuse_body(HttpRequest* req, HttpServerResponse* res) {
+    if (!req->body_refused) return;
+    http_response_reset(res);
+    http_response_set_status(res, 413);
+    http_response_set_header(res, "Content-Type", "text/plain");
+    http_response_set_body(res, "request body exceeds server limit\n");
+}
+
 /* Whether some of `req`'s streamed body is still on its connection, which
  * then cannot carry another request: the next one would be read from the
  * middle of this one's body. */
@@ -6279,6 +6304,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         conn->pending_req = NULL;
         conn->pending_res = NULL;
         res->takeover_conn = conn;
+        req->body_max = server->max_body;   /* #3740 */
         return dispatch_request(server, conn, req, res, conn->pending_from,
                                 conn->pending_t_start, requests_served, max_requests);
     }
@@ -6537,6 +6563,9 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     }
 
 
+    /* The most of the body http_request_body may buffer (#3740). */
+    req->body_max = server->max_body;
+
     /* The peer, the local address and the TLS state, from the connection. */
     http_request_copy_conn_meta(req, conn);
 
@@ -6582,6 +6611,7 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
          * connection's fate is decided the same way. Transformers are the
          * route handler's (a proxied response is not gzipped here, as
          * nginx's gzip_proxied is off); the hooks observe it. */
+        response_refuse_body(req, res);
         run_request_hooks(server, req, res, t_start);
         return finish_response(server, conn, req, res, requests_served, max_requests);
     }
@@ -6778,6 +6808,9 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
         return 0;
     }
 
+    /* A body http_request_body refused is answered 413 (#3740). */
+    response_refuse_body(req, res);
+
     /* Run response-transformer chain (#260 Tier 1). Each transformer
      * may mutate the response — typical uses include gzip
      * compression and error-page substitution. They run in
@@ -6827,6 +6860,8 @@ void http_server_dispatch_for_h2(HttpServer* server,
                                  HttpRequest* req,
                                  HttpServerResponse* res) {
     if (!server || !req || !res) return;
+    /* The most of the body http_request_body may hand back (#3740). */
+    req->body_max = server->max_body;
     int64_t t_start = http_now_us();
 
     /* Middleware chain — same shape as the HTTP/1.1 path. */
@@ -6839,6 +6874,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
     if (!should_continue) {
         /* middleware answered; res already populated, and observed as
          * every response is (#3213) */
+        response_refuse_body(req, res);
         run_request_hooks(server, req, res, t_start);
         return;
     }
@@ -6850,6 +6886,8 @@ void http_server_dispatch_for_h2(HttpServer* server,
         http_response_set_status(res, 404);
         http_response_set_body(res, "404 Not Found");
     }
+
+    response_refuse_body(req, res);
 
     /* Response transformer chain (gzip / error_pages / etc.). */
     {
@@ -9022,31 +9060,60 @@ const char* http_request_path(HttpRequest* req) {
     return (req && req->path) ? req->path : "";
 }
 
+/* The most of a body http_request_body buffers for `req`. */
+static int64_t request_body_max(const HttpRequest* req) {
+    return req->body_max > 0 ? req->body_max : HTTP_DEFAULT_MAX_BODY;
+}
+
 const char* http_request_body(HttpRequest* req) {
     if (!req) return "";
-    /* #644 — v1 contract on a STREAMING request: `http.request_body` must
+    /* A body past the server's limit is refused, whatever the client
+     * declared it to be (#3740): the server answers 413 once the handler
+     * returns. It was allocated at its declared Content-Length, up to
+     * LONG_MAX, so a few connections each declaring gigabytes took the
+     * server's memory. A handler that wants a larger body streams it with
+     * http_request_body_read, which this does not bound. */
+    if (req->body_refused) return "";
+    int64_t declared = req->stream_conn ? (int64_t)req->stream_total
+                                        : (int64_t)req->body_length;
+    if (declared > request_body_max(req)) {
+        req->body_refused = 1;
+        return "";
+    }
+    /* #644: v1 contract on a STREAMING request: `http.request_body` must
      * keep returning the whole payload even though the dispatcher no longer
      * pre-buffers it. Materialize on demand: drain the remaining wire bytes
      * into a heap buffer once, then serve it like a buffered body. The
-     * caller explicitly asked for full buffering, so the O(Content-Length)
-     * allocation is the requested behaviour — handlers that want bounded
+     * caller explicitly asked for full buffering, so an allocation the size
+     * of the body is the requested behaviour; handlers that want bounded
      * RAM use http_request_body_read instead.
      *
      * Mixed usage (some bytes already pulled via http_request_body_read)
-     * cannot be honoured — the consumed prefix is gone, and returning a
+     * cannot be honoured: the consumed prefix is gone, and returning a
      * tail as if it were the whole body would silently corrupt. That case
      * keeps returning "" (same as before this fix). */
     if (req->stream_conn && !req->body && req->stream_consumed == 0 &&
         req->stream_total > 0) {
         HttpConn* conn = (HttpConn*)req->stream_conn;
         long total = req->stream_total;
-        char* buf = (char*)malloc((size_t)total + 1);
+        /* The buffer grows as the bytes arrive, from the connection
+         * buffer's size, rather than starting at the declared length: a
+         * client that declares the limit and sends little of it holds
+         * memory in proportion to what it sent (#3740). */
+        long cap = total < HTTP_CONN_BUF_CAP ? total : HTTP_CONN_BUF_CAP;
+        char* buf = (char*)malloc((size_t)cap + 1);
         if (!buf) return "";
         long got = 0;
         /* (a) body bytes that arrived in the same recv as the headers. */
         int buffered = conn->write_pos - conn->read_pos;
         if (buffered > 0) {
             long take = ((long)buffered < total) ? (long)buffered : total;
+            if (take > cap) {
+                char* nb = (char*)realloc(buf, (size_t)take + 1);
+                if (!nb) { free(buf); return ""; }
+                buf = nb;
+                cap = take;
+            }
             memcpy(buf, conn->buf + conn->read_pos, (size_t)take);
             conn->read_pos += (int)take;
             got += take;
@@ -9056,7 +9123,14 @@ const char* http_request_body(HttpRequest* req) {
          * sees the updated stream_consumed and gives up on the same
          * peer-close. */
         while (got < total) {
-            int n = conn_recv(conn, buf + got, (int)(total - got));
+            if (got == cap) {
+                long next = cap > total / 2 ? total : cap * 2;
+                char* nb = (char*)realloc(buf, (size_t)next + 1);
+                if (!nb) break;
+                buf = nb;
+                cap = next;
+            }
+            int n = conn_recv(conn, buf + got, (int)(cap - got));
             if (n <= 0) break;
             got += n;
         }
@@ -9070,8 +9144,12 @@ const char* http_request_body(HttpRequest* req) {
 
 int http_request_body_length(HttpRequest* req) {
     if (!req) return 0;
+    /* A refused body has no length to report: http_request_body gave "",
+     * and a caller slicing that by the declared length would read past it
+     * (#3740). */
+    if (req->body_refused) return 0;
     /* A materialized (or originally buffered) body reports its actual
-     * byte count — after a short read this is what request_body holds. */
+     * byte count; after a short read this is what request_body holds. */
     if (req->body) return (int)req->body_length;
     /* Streaming request not yet materialized: `body` is NULL but the
      * declared length is the Content-Length we stashed. The canonical
