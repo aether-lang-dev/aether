@@ -57,7 +57,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install dependencies
       uses: ./.github/actions/apt-install
@@ -140,7 +140,7 @@ jobs:
 
     - name: Upload Valgrind report
       if: always()
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: valgrind-report
         path: |
@@ -158,7 +158,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Setup GCC
       if: matrix.os == 'ubuntu-26.04'
@@ -233,7 +233,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install dependencies
       uses: ./.github/actions/apt-install
@@ -277,7 +277,7 @@ jobs:
         echo "SUCCESS: Peak memory usage acceptable"
 
     - name: Upload profiling report
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: memory-profile
         path: |
@@ -294,7 +294,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # Linux only, as the setup steps above. The macOS runner already has
     # clang and make; the brew fallback that ran there installed nothing the
