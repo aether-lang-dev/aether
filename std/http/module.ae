@@ -44,6 +44,8 @@ exports(
     http_server_set_keepalive_raw, server_set_keepalive,
     http_server_set_max_body_raw, server_set_max_body,
     http_server_set_head_timeout_raw, server_set_head_timeout,
+    http_server_set_body_timeout_raw, server_set_body_timeout,
+    http_server_set_tls_handshake_timeout_raw, server_set_tls_handshake_timeout,
     http_server_set_h2_raw, server_set_h2,
     http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
@@ -450,6 +452,32 @@ extern http_server_set_head_timeout_raw(server: ptr, timeout_ns: long) -> string
 
 server_set_head_timeout(server: ptr, timeout: Duration) -> string {
     return http_server_set_head_timeout_raw(server, timeout.ns)
+}
+
+// The budget for a request body (#3737): the server waits on the client for
+// the body no longer than `timeout`, plus one second for every
+// `min_rate_bytes` it has received, counting only the time it waits (not
+// the handler's between reads). 30 s and 500 bytes a second unless set here.
+// Past it a body the server reads before the handler runs is answered 408;
+// one the handler reads (request_body, request_body_read) ends short and the
+// response becomes 408. The connection closes either way. 0ns turns the
+// bound off; a rate of 0 makes `timeout` an absolute bound on the wait.
+// Returns "" or why the values were refused.
+extern http_server_set_body_timeout_raw(server: ptr, timeout_ns: long, min_rate: long) -> string
+
+server_set_body_timeout(server: ptr, timeout: Duration, min_rate_bytes: long) -> string {
+    return http_server_set_body_timeout_raw(server, timeout.ns, min_rate_bytes)
+}
+
+// The longest a TLS handshake may take as a whole (#3737), on both TLS
+// backends; 30 s unless set here. Past it the connection is closed. The idle
+// timeout bounds each of its reads on its own, so without this a client
+// that sent its ClientHello a byte at a time held a worker for as long as
+// it liked. 0ns turns the bound off. Returns "" or why it was refused.
+extern http_server_set_tls_handshake_timeout_raw(server: ptr, timeout_ns: long) -> string
+
+server_set_tls_handshake_timeout(server: ptr, timeout: Duration) -> string {
+    return http_server_set_tls_handshake_timeout_raw(server, timeout.ns)
 }
 
 // Graceful shutdown (#260 Tier 3). Stops accepting new connections,

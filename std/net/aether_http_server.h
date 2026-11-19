@@ -90,6 +90,11 @@ typedef struct {
      * answers 413. Trailing, as the fields above. */
     int64_t body_max;
     int     body_refused;
+    /* Set when the client sent the body too slowly for the server's body
+     * budget (limits.body_timeout_ms and body_min_rate, #3737) while the
+     * handler read it: what it read ended short, and the server answers
+     * 408 and closes. */
+    int     body_timed_out;
 } HttpRequest;
 
 // HTTP Response
@@ -212,11 +217,20 @@ struct HttpConn;
 //
 //   field                     default  setter (std.http)            past it
 //   idle_timeout_ms           30 s     server_set_keepalive (idle)  the wait fails, connection closed
+//   tls_handshake_timeout_ms  30 s     server_set_tls_handshake_timeout  connection closed
 //   head_timeout_ms           30 s     server_set_head_timeout      408, connection closed
+//   body_timeout_ms           30 s     server_set_body_timeout      408, connection closed
+//   body_min_rate             500 B/s  server_set_body_timeout      (extends body_timeout_ms)
 //   max_body                  64 MiB   server_set_max_body          413 (HTTP/2: RST_STREAM CANCEL)
 //   max_chunked_body          8 MiB    none (clamped to max_body)   413, connection closed
 //   ws_max_message            64 MiB   server_set_ws_max_message    close 1009
 //   h2_max_concurrent_streams 100      server_set_h2                the new stream is reset
+//
+// The body's budget: the server waits on the client for a body no longer
+// than body_timeout_ms plus one second for every body_min_rate bytes it has
+// received, counting only the time it waits (not the handler's between
+// reads). body_min_rate 0 makes body_timeout_ms an absolute bound on that
+// wait.
 //
 // A timeout of 0 turns that bound off; the sizes must be positive. Fixed
 // parse limits, not in the struct because a buffer is sized by them: a
@@ -225,6 +239,9 @@ struct HttpConn;
 
 #define HTTP_DEFAULT_IDLE_TIMEOUT_MS  30000
 #define HTTP_DEFAULT_HEAD_TIMEOUT_MS  30000
+#define HTTP_DEFAULT_TLS_HANDSHAKE_TIMEOUT_MS 30000
+#define HTTP_DEFAULT_BODY_TIMEOUT_MS  30000
+#define HTTP_DEFAULT_BODY_MIN_RATE    500
 #define HTTP_DEFAULT_MAX_BODY         ((int64_t)64 * 1024 * 1024)
 #define HTTP_DEFAULT_MAX_CHUNKED_BODY ((int64_t)8 * 1024 * 1024)
 #define HTTP_WS_DEFAULT_MAX_MESSAGE   ((size_t)64 * 1024 * 1024)
@@ -239,8 +256,15 @@ typedef struct HttpServerLimits {
     // may make no progress; also how long a kept-alive connection waits for
     // its next request.
     int     idle_timeout_ms;
+    // How long a TLS handshake may take as a whole, from the connection's
+    // first read.
+    int     tls_handshake_timeout_ms;
     // How long a request head may take to arrive whole, from its first byte.
     int     head_timeout_ms;
+    // The body's budget (above): a grace in ms, and the rate in bytes a
+    // second that extends it.
+    int     body_timeout_ms;
+    int     body_min_rate;
     // The largest body http_request_body buffers; an HTTP/2 stream's body
     // too, since HTTP/2 holds each whole.
     int64_t max_body;
@@ -605,7 +629,8 @@ void http_server_thread_leave(HttpServer* server);
 //     handler).
 // The same idle timeout bounds each read and write of a TLS handshake, on
 // both backends (#3703): a client that stalls in its handshake is closed
-// as one that stalls in a request is.
+// as one that stalls in a request is. The handshake as a whole has its own
+// deadline (limits.tls_handshake_timeout_ms, #3737).
 // Returns "" on success; "server is null" on bad input.
 const char* http_server_set_keepalive_raw(HttpServer* server,
                                           int enabled,
@@ -1174,6 +1199,22 @@ const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes);
 // past it the server answers 408 and closes. 0 turns the bound off, leaving
 // only the per-read idle timeout. Returns "" or why the value was refused.
 const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout_ns);
+
+// The body's budget (#3737): the server waits on the client for a request
+// body no longer than timeout_ns, plus a second for each min_rate bytes
+// received; only the time it waits counts. Past it a body the server reads
+// before the handler runs is answered 408, and one the handler reads
+// (http_request_body, http_request_body_read) ends short and the response
+// becomes 408; the connection closes either way. 0 for the timeout turns the
+// bound off; 0 for the rate makes the timeout absolute. Returns "" or why
+// the values were refused.
+const char* http_server_set_body_timeout_raw(HttpServer* server, int64_t timeout_ns,
+                                             int64_t min_rate);
+
+// The longest a TLS handshake may take as a whole (#3737), on both TLS
+// backends; past it the connection is closed. 0 leaves only the idle
+// timeout on each of its reads. Returns "" or why the value was refused.
+const char* http_server_set_tls_handshake_timeout_raw(HttpServer* server, int64_t timeout_ns);
 
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,

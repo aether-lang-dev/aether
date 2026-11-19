@@ -424,7 +424,24 @@ for the whole of it, 30 s from its first byte by default: a head not
 complete by then is answered `408` and the connection closes (#3737).
 Without it a client that sent a byte just inside the idle timeout, over
 and over, held a worker for as long as it liked. Set it with
-`http.server_set_head_timeout(server, 10s)`; `0ns` turns it off.
+`http.server_set_head_timeout(server, 10s)`; `0ns` turns it off. The
+deadline holds through TLS too: a record that arrives a byte at a time is
+cut off when it passes, and on a server with HTTP/2 on it runs from the
+first of the bytes read to look for the HTTP/2 preface.
+
+The TLS handshake and the request body have budgets of the same kind
+(#3737). A handshake must finish within 30 s of the connection's first
+read, on both TLS backends, or the connection closes
+(`http.server_set_tls_handshake_timeout`). For a body the server waits on
+the client no longer than 30 s plus one second for every 500 bytes
+received (`http.server_set_body_timeout(server, 30s, 500)`); only the time
+spent waiting counts, so a handler that takes its time between reads does
+not use up the client's. A body that runs out of budget, or stops for the
+idle timeout, is answered `408` and the connection closes: before the
+handler runs when the server reads the body itself (a chunked body, or one
+that fits the connection buffer), and after it when the handler reads it
+with `request_body` or `request_body_read`, whose read ends short. A rate
+of 0 makes the body's timeout absolute.
 
 ### Idle connections wait in a poller, not on a worker
 

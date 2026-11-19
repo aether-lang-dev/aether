@@ -1,0 +1,23 @@
+// The slow and abusive client harness (#3737, #3750): every time limit a
+// server puts on a client, driven by a client that keeps just inside the
+// per-read idle timeout. The work is in shim.c; this links the server, the
+// pure-Aether TLS backend, and the TLS client the script picked.
+
+import std.http
+import std.cryptography.tls13_server
+
+extern http_slow_clients_probe() -> int
+
+main() {
+    // Touch std.http so the build links the server.
+    s = http.server_create(0)
+    if s == 0 {
+        println("FAIL: server_create")
+        return
+    }
+    rc = http_slow_clients_probe()
+    if rc != 0 {
+        println("FAIL: probe returned ${rc}")
+    }
+    http.server_free(s)
+}
