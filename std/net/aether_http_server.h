@@ -199,10 +199,63 @@ typedef void (*HttpRequestHook)(HttpRequest* req,
 // HTTP Server
 struct HttpConn;
 
+// ============================================================================
+// Resource limits (#3750)
+// ============================================================================
+//
+// Every bound a server puts on what one client can make it hold (memory, a
+// worker, a connection), in one struct with one set of defaults. A server
+// starts with http_server_limits_default's values; each limit has a setter,
+// and the setters that existed before the struct (server_set_keepalive,
+// server_set_max_body, ...) write into it. docs/http-server.md "Resource
+// limits" is the same table for programs.
+//
+//   field                     default  setter (std.http)            past it
+//   idle_timeout_ms           30 s     server_set_keepalive (idle)  the wait fails, connection closed
+//   head_timeout_ms           30 s     server_set_head_timeout      408, connection closed
+//   max_body                  64 MiB   server_set_max_body          413 (HTTP/2: RST_STREAM CANCEL)
+//   max_chunked_body          8 MiB    none (clamped to max_body)   413, connection closed
+//   ws_max_message            64 MiB   server_set_ws_max_message    close 1009
+//   h2_max_concurrent_streams 100      server_set_h2                the new stream is reset
+//
+// A timeout of 0 turns that bound off; the sizes must be positive. Fixed
+// parse limits, not in the struct because a buffer is sized by them: a
+// request head 16 KiB (HTTP_CONN_BUF_CAP, 431), a request line 2 KiB (414),
+// a header line 1 KiB and 50 headers (431).
+
+#define HTTP_DEFAULT_IDLE_TIMEOUT_MS  30000
+#define HTTP_DEFAULT_HEAD_TIMEOUT_MS  30000
+#define HTTP_DEFAULT_MAX_BODY         ((int64_t)64 * 1024 * 1024)
+#define HTTP_DEFAULT_MAX_CHUNKED_BODY ((int64_t)8 * 1024 * 1024)
+#define HTTP_WS_DEFAULT_MAX_MESSAGE   ((size_t)64 * 1024 * 1024)
 // The SETTINGS_MAX_CONCURRENT_STREAMS an HTTP/2 server advertises when
 // http_server_set_h2_raw was given 0 (#3738). nghttp2's own local default is
 // unlimited, so without it a client could open streams without bound.
 #define HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS 100
+
+typedef struct HttpServerLimits {
+    // How long a connection may wait on its client with nothing arriving
+    // (each read of a request, and of a TLS handshake), and how long a send
+    // may make no progress; also how long a kept-alive connection waits for
+    // its next request.
+    int     idle_timeout_ms;
+    // How long a request head may take to arrive whole, from its first byte.
+    int     head_timeout_ms;
+    // The largest body http_request_body buffers; an HTTP/2 stream's body
+    // too, since HTTP/2 holds each whole.
+    int64_t max_body;
+    // The largest chunked request body, which is read whole before the
+    // handler runs; never more than max_body.
+    int64_t max_chunked_body;
+    // The largest WebSocket message a handle this server upgrades
+    // reassembles.
+    size_t  ws_max_message;
+    // SETTINGS_MAX_CONCURRENT_STREAMS on an HTTP/2 connection.
+    int     h2_max_concurrent_streams;
+} HttpServerLimits;
+
+// The defaults above, as a struct.
+void http_server_limits_default(HttpServerLimits* limits);
 
 typedef struct HttpServer {
     int socket_fd;
@@ -265,7 +318,6 @@ typedef struct HttpServer {
     //     apply uniformly.
     // Off by default; enable via http_server_set_h2_raw().
     int h2_enabled;
-    int h2_max_concurrent_streams;  /* SETTINGS_MAX_CONCURRENT_STREAMS; 0 → HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS (#3738) */
 
     // Per-stream concurrent dispatch worker count. When > 0, the
     // stream-level dispatch runs on the shared std.worker pool,
@@ -382,11 +434,10 @@ typedef struct HttpServer {
     // parsing successive requests until either:
     //   - the client sends Connection: close,
     //   - keep_alive_max requests have been served, or
-    //   - keep_alive_idle_ms elapses with no new bytes on the socket.
+    //   - limits.idle_timeout_ms elapses with no new bytes on the socket.
     // The default is 0 (single-request, matches pre-#260 behaviour).
     int keep_alive_enabled;
     int keep_alive_max;              // 0 means "unlimited"
-    int keep_alive_idle_ms;          // 0 means "use SO_RCVTIMEO default (30s)"
 
     // Accept-side I/O poller: wait for client data before dispatching to worker
     AetherIoPoller accept_poller;   // Platform poller for single-accept mode
@@ -454,20 +505,9 @@ typedef struct HttpServer {
     // setup), so a driver recomputes its cached plan only then
     // (http_server_loop_plan, #3269).
     _Atomic int loop_plan_gen;
-    // The cap on one WebSocket message reassembled by a handle this server
-    // upgrades (#3739): HTTP_WS_DEFAULT_MAX_MESSAGE unless
-    // http_server_set_ws_max_message_raw set another.
-    size_t ws_max_message;
-    // The largest request body http_request_body buffers, in bytes (#3740):
-    // HTTP_DEFAULT_MAX_BODY unless http_server_set_max_body_raw set another.
-    // A handler that reads its body with http_request_body_read streams it
-    // and is not bounded by this. HTTP/2 holds every stream's body whole, so
-    // there a stream whose DATA passes it is reset (#3738).
-    int64_t max_body;
-    // The longest a request head may take to arrive whole, in ms from its
-    // first byte, answered 408 past it (#3737): HTTP_DEFAULT_HEAD_TIMEOUT_MS
-    // unless http_server_set_head_timeout_raw set another; 0 for none.
-    int head_timeout_ms;
+    // Every resource limit, in one place (#3750): see HttpServerLimits.
+    // Set before the server starts; the request paths read it unlocked.
+    HttpServerLimits limits;
 } HttpServer;
 
 // ============================================================================
@@ -883,12 +923,11 @@ int http_ws_send_binary(HttpWsConn* ws, const void* data, int len);
 // 5.2, 5.4). Each returns -1.
 int http_ws_recv(HttpWsConn* ws);
 
-// The cap on one reassembled WebSocket message, by default (#3739). A
-// server applies its own (http_server_set_ws_max_message_raw) to the
-// handles it upgrades, and a handle can be given another with
-// http_ws_set_max_message_raw. The limit is what a message length (an int)
-// can report.
-#define HTTP_WS_DEFAULT_MAX_MESSAGE ((size_t)64 * 1024 * 1024)
+// The cap on one reassembled WebSocket message is HTTP_WS_DEFAULT_MAX_MESSAGE
+// by default (#3739, with the other limits above). A server applies its own
+// (http_server_set_ws_max_message_raw) to the handles it upgrades, and a
+// handle can be given another with http_ws_set_max_message_raw. No cap can
+// pass what a message length (an int) can report.
 #define HTTP_WS_MAX_MESSAGE_LIMIT   ((size_t)INT_MAX - 1)
 
 // The largest message `ws` reassembles from now on, in bytes. Returns ""
@@ -1126,16 +1165,10 @@ const char* http_request_path(HttpRequest* req);
 // any size and is not bounded by it.
 const char* http_request_body(HttpRequest* req);
 
-// The largest request body http_request_body buffers by default (#3740).
-#define HTTP_DEFAULT_MAX_BODY ((int64_t)64 * 1024 * 1024)
-
 // The largest request body http_request_body buffers on this server, in
-// bytes. Returns "" or why the value was refused (not positive).
+// bytes (limits.max_body, HTTP_DEFAULT_MAX_BODY by default). Returns "" or
+// why the value was refused (not positive).
 const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes);
-
-// The longest a request head may take to arrive whole, from its first byte,
-// by default (#3737).
-#define HTTP_DEFAULT_HEAD_TIMEOUT_MS 30000
 
 // The longest a request head may take to arrive whole, from its first byte;
 // past it the server answers 408 and closes. 0 turns the bound off, leaving

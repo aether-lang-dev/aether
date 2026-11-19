@@ -382,8 +382,8 @@ static int ng_on_data_chunk_recv(nghttp2_session* ng,
      * the stream with CANCEL rather than REFUSED_STREAM, which tells a
      * client the request may be retried as it was. What it sent is freed
      * and the stream is never dispatched. */
-    int64_t max_body = (s->server && s->server->max_body > 0)
-                     ? s->server->max_body : HTTP_DEFAULT_MAX_BODY;
+    int64_t max_body = (s->server && s->server->limits.max_body > 0)
+                     ? s->server->limits.max_body : HTTP_DEFAULT_MAX_BODY;
     if ((uint64_t)str->body_len + (uint64_t)len > (uint64_t)max_body) {
         free(str->body);
         str->body = NULL;
@@ -1018,8 +1018,8 @@ int aether_h2_session_send_initial_settings(AetherH2Session* sess) {
      * many streams as it liked on one connection, each holding a request
      * and its body. 100 is the floor RFC 9113 5.1.2 recommends. */
     iv[n].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
-    iv[n++].value     = sess->server->h2_max_concurrent_streams > 0
-                      ? (uint32_t)sess->server->h2_max_concurrent_streams
+    iv[n++].value     = sess->server->limits.h2_max_concurrent_streams > 0
+                      ? (uint32_t)sess->server->limits.h2_max_concurrent_streams
                       : (uint32_t)HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
 
     return nghttp2_submit_settings(sess->ng, NGHTTP2_FLAG_NONE, iv, (size_t)n);

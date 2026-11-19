@@ -110,6 +110,19 @@ const char* http_status_text(int code) {
     }
 }
 
+/* The defaults every server starts with, the one place they are set (#3750):
+ * the table is in the header, by HttpServerLimits. */
+void http_server_limits_default(HttpServerLimits* limits) {
+    if (!limits) return;
+    memset(limits, 0, sizeof(*limits));
+    limits->idle_timeout_ms           = HTTP_DEFAULT_IDLE_TIMEOUT_MS;
+    limits->head_timeout_ms           = HTTP_DEFAULT_HEAD_TIMEOUT_MS;
+    limits->max_body                  = HTTP_DEFAULT_MAX_BODY;
+    limits->max_chunked_body          = HTTP_DEFAULT_MAX_CHUNKED_BODY;
+    limits->ws_max_message            = HTTP_WS_DEFAULT_MAX_MESSAGE;
+    limits->h2_max_concurrent_streams = HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
+}
+
 #if !AETHER_HAS_NETWORKING
 // Stubs when networking is unavailable
 HttpServer* http_server_create(int p) { (void)p; return NULL; }
@@ -1263,7 +1276,7 @@ static void conn_buf_compact(HttpConn* c) {
 }
 
 /* Give back a read buffer grown past HTTP_RX_KEEP_MAX for one request (a
- * chunked body is decoded in it, up to HTTP_MAX_CHUNKED_BODY), once that
+ * chunked body is decoded in it, up to the server's chunked body limit), once that
  * request is done: back to its first size when what is left in it (the next
  * request, pipelined) fits. Kept, it pinned the largest body for as long as
  * the connection stayed open, parked included, where a pooled client
@@ -1510,7 +1523,6 @@ HttpServer* http_server_create(int port) {
     server->tls_key_pem = NULL;
     server->pure_creds = NULL;
     server->h2_enabled = 0;
-    server->h2_max_concurrent_streams = 0;  /* 0: advertise 100 (#3738) */
     /* HTTP/1.1 is persistent by default (RFC 9112 section 9.3), and a proxy
      * or client that dials this server pays a handshake per request when it
      * is not: the load balancer measured 3.7x behind nginx with 8% of
@@ -1520,10 +1532,7 @@ HttpServer* http_server_create(int port) {
      * length. 0 = unlimited requests, 0 = the 30s idle default. */
     server->keep_alive_enabled = 1;
     server->keep_alive_max = 0;
-    server->keep_alive_idle_ms = 0;
-    server->ws_max_message = HTTP_WS_DEFAULT_MAX_MESSAGE;
-    server->max_body = HTTP_DEFAULT_MAX_BODY;
-    server->head_timeout_ms = HTTP_DEFAULT_HEAD_TIMEOUT_MS;
+    http_server_limits_default(&server->limits);
     server->response_transformer_chain = NULL;
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
@@ -1594,7 +1603,9 @@ const char* http_server_set_keepalive_raw(HttpServer* server,
     int64_t idle_ms = idle_ns / 1000000LL;
     if (idle_ms < 0) idle_ms = 0;
     if (idle_ms > INT_MAX) idle_ms = INT_MAX;
-    server->keep_alive_idle_ms = (int)idle_ms;
+    /* 0 is the default, as it always was; the limit lives with the others
+     * (#3750). */
+    server->limits.idle_timeout_ms = idle_ms > 0 ? (int)idle_ms : HTTP_DEFAULT_IDLE_TIMEOUT_MS;
     return "";
 }
 
@@ -1606,7 +1617,7 @@ const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_b
     if (max_bytes <= 0) return "max message must be positive";
     if ((uint64_t)max_bytes > (uint64_t)HTTP_WS_MAX_MESSAGE_LIMIT)
         return "max message is past the 2 GiB a message length can report";
-    server->ws_max_message = (size_t)max_bytes;
+    server->limits.ws_max_message = (size_t)max_bytes;
     return "";
 }
 
@@ -1614,7 +1625,7 @@ const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_b
 const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes) {
     if (!server) return "server is null";
     if (max_bytes <= 0) return "max body must be positive";
-    server->max_body = max_bytes;
+    server->limits.max_body = max_bytes;
     return "";
 }
 
@@ -1627,7 +1638,7 @@ const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout
     int64_t ms = timeout_ns / 1000000LL;
     if (timeout_ns > 0 && ms == 0) ms = 1;
     if (ms > INT_MAX) ms = INT_MAX;
-    server->head_timeout_ms = (int)ms;
+    server->limits.head_timeout_ms = (int)ms;
     return "";
 }
 
@@ -2614,7 +2625,8 @@ const char* http_server_set_h2_raw(HttpServer* server,
     }
 #ifdef AETHER_HAS_NGHTTP2
     server->h2_enabled = 1;
-    server->h2_max_concurrent_streams = max_concurrent_streams;
+    server->limits.h2_max_concurrent_streams = max_concurrent_streams > 0
+        ? max_concurrent_streams : HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
     return "";
 #else
     (void)max_concurrent_streams;
@@ -5763,8 +5775,7 @@ static int keep_alive_decision(HttpServer* server, HttpRequest* req, int status,
 static void keep_alive_value(HttpServer* server, int requests_served, int max_requests,
                              char* out, size_t cap) {
     int remaining = max_requests - requests_served - 1;
-    int idle_sec = server->keep_alive_idle_ms > 0
-        ? server->keep_alive_idle_ms / 1000 : 30;
+    int idle_sec = server->limits.idle_timeout_ms / 1000;
     snprintf(out, cap, "timeout=%d, max=%d", idle_sec, remaining);
 }
 
@@ -6201,9 +6212,15 @@ int http_request_head_check(const char* head, const char* hdr_end,
     return HTTP_HEAD_OK;
 }
 
-/* The largest chunked request body this server will buffer. A chunked body
- * declares no length in advance, so nothing else bounds it. */
-#define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
+/* The largest chunked request body this server buffers: limits.max_chunked_body
+ * (HTTP_DEFAULT_MAX_CHUNKED_BODY), and never more than max_body, which bounds
+ * every other body request_body buffers. A chunked body declares no length in
+ * advance, so nothing else bounds it. */
+static int64_t server_chunked_body_cap(const HttpServer* server) {
+    int64_t cap = server->limits.max_chunked_body;
+    if (server->limits.max_body < cap) cap = server->limits.max_body;
+    return cap;
+}
 
 /* The request whose bytes start at `req` (`len` of them, read so far) is
  * known to be a HEAD: its request line begins with that method and the space
@@ -6394,7 +6411,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         conn->pending_req = NULL;
         conn->pending_res = NULL;
         res->takeover_conn = conn;
-        req->body_max = server->max_body;   /* #3740 */
+        req->body_max = server->limits.max_body;   /* #3740 */
         return dispatch_request(server, conn, req, res, conn->pending_from,
                                 conn->pending_t_start, requests_served, max_requests);
     }
@@ -6461,14 +6478,14 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
          * byte (#3737). The per-recv timeout alone let a client that sends
          * a byte just inside it hold this worker for as long as it liked;
          * each wait is now cut to what is left of the deadline as well. */
-        if (head_started_ms != 0 && server->head_timeout_ms > 0) {
-            int64_t left = head_started_ms + server->head_timeout_ms - conn_now_ms();
+        if (head_started_ms != 0 && server->limits.head_timeout_ms > 0) {
+            int64_t left = head_started_ms + server->limits.head_timeout_ms - conn_now_ms();
             if (left <= 0) {
                 conn_send_request_timeout(conn, conn->buf + conn->read_pos,
                                           (size_t)(conn->write_pos - conn->read_pos));
                 return 0;
             }
-            int per_recv = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+            int per_recv = server->limits.idle_timeout_ms;
             conn_set_recv_timeout(conn, left < per_recv ? (int)left : per_recv);
             head_deadline_applied = 1;
         }
@@ -6497,8 +6514,8 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             if (n < 0 && conn->write_pos == conn->read_pos && conn_recv_timed_out())
                 return HTTP_REQUEST_IDLE;
             /* The head's deadline passed during the wait: say so. */
-            if (n < 0 && head_started_ms != 0 && server->head_timeout_ms > 0 &&
-                conn_now_ms() - head_started_ms >= server->head_timeout_ms)
+            if (n < 0 && head_started_ms != 0 && server->limits.head_timeout_ms > 0 &&
+                conn_now_ms() - head_started_ms >= server->limits.head_timeout_ms)
                 conn_send_request_timeout(conn, conn->buf + conn->read_pos,
                                           (size_t)(conn->write_pos - conn->read_pos));
             return 0;  /* EOF / error */
@@ -6565,7 +6582,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                  * bound on it is the one this server imposes. Without one, a
                  * sender that never emits the terminal chunk grows this
                  * buffer for as long as it cares to keep writing. */
-                if (have > HTTP_MAX_CHUNKED_BODY) {
+                if ((int64_t)have > server_chunked_body_cap(server)) {
                     conn_send_payload_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
                     return 0;
                 }
@@ -6681,7 +6698,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
 
 
     /* The most of the body http_request_body may buffer (#3740). */
-    req->body_max = server->max_body;
+    req->body_max = server->limits.max_body;
 
     /* The peer, the local address and the TLS state, from the connection. */
     http_request_copy_conn_meta(req, conn);
@@ -6853,7 +6870,7 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
                         .conn = conn, .closed = 0,
                         .msg_buf = NULL, .msg_cap = 0,
                         .msg_len = 0, .msg_opcode = 0,
-                        .max_message = server->ws_max_message,
+                        .max_message = server->limits.ws_max_message,
                     };
                     wr->handler(req, &ws_handle, wr->user_data);
                     /* If the handler returned without closing,
@@ -6978,7 +6995,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
                                  HttpServerResponse* res) {
     if (!server || !req || !res) return;
     /* The most of the body http_request_body may hand back (#3740). */
-    req->body_max = server->max_body;
+    req->body_max = server->limits.max_body;
     int64_t t_start = http_now_us();
 
     /* Middleware chain — same shape as the HTTP/1.1 path. */
@@ -7211,8 +7228,7 @@ static void conn_set_recv_timeout(HttpConn* c, int ms) {
 /* Per-recv socket timeout, applied whenever a worker is about to block on
  * this connection. Also the idle guard against a slow-loris client. */
 static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
-    conn_set_recv_timeout(c, server->keep_alive_idle_ms > 0
-                             ? server->keep_alive_idle_ms : 30000);
+    conn_set_recv_timeout(c, server->limits.idle_timeout_ms);
 }
 
 /* The send timeout, the same idle timeout: a send that makes no progress for
@@ -7222,7 +7238,7 @@ static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
  * itself on POSIX (conn_wait_io); SO_SNDTIMEO is the bound on Windows, and
  * for the pure-Aether TLS server's writes, which std.tcp waits on by it. */
 static void conn_apply_send_timeout(HttpServer* server, HttpConn* c) {
-    int ms = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+    int ms = server->limits.idle_timeout_ms;
     if (c->applied_send_timeout_ms == ms) return;
     c->applied_send_timeout_ms = ms;
 #ifdef _WIN32
@@ -7413,8 +7429,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
             /* A stopping server keeps no idle connection (#2672): the lot
              * refuses it, and waiting here would hold up the stop. */
             if (!lot || atomic_load(&server->stopping)) break;
-            int idle_ms = server->keep_alive_idle_ms > 0
-                ? server->keep_alive_idle_ms : 30000;
+            int idle_ms = server->limits.idle_timeout_ms;
             if (idle_since_ms == 0) idle_since_ms = conn_now_ms();
             int64_t waited = conn_now_ms() - idle_since_ms;
             if (waited >= idle_ms) break;   /* silent past the deadline: close */
@@ -7452,8 +7467,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
          * pure cost; it waits not at all when every worker is busy, because
          * then the wait is time another connection spends queued. */
         if (lot && !atomic_load(&server->stopping) && !conn_next_request_imminent(conn)) {
-            int idle_ms = server->keep_alive_idle_ms > 0
-                ? server->keep_alive_idle_ms : 30000;
+            int idle_ms = server->limits.idle_timeout_ms;
             conn->parked_since_ms = conn_now_ms();
             if (http_park_add(lot, conn, idle_ms) == 0) {
                 atomic_fetch_sub(&server->inflight_connections, 1);
@@ -7478,7 +7492,7 @@ void http_server_resume_connection(HttpServer* server, HttpConn* conn) {
     HttpParkLot* lot = (HttpParkLot*)server->park_lot;
     if (lot && (conn->pure_tls || conn->ssl) && !atomic_load(&server->stopping) &&
         !conn_readable_has_request(conn)) {
-        int idle_ms = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+        int idle_ms = server->limits.idle_timeout_ms;
         int64_t left = (int64_t)idle_ms - (conn_now_ms() - conn->parked_since_ms);
         if (left <= 0) {
             conn_close(conn);

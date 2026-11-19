@@ -1366,8 +1366,7 @@ static void ev_arm_deadline(EvDriver* d, EvConn* c) {
  * that almost never fires (#3269). ev_sweep_idle closes the ones past it,
  * a few times a second. */
 static void ev_arm_idle(EvDriver* d, EvConn* c) {
-    int ms = d->loop->server->keep_alive_idle_ms > 0
-           ? d->loop->server->keep_alive_idle_ms : 30000;
+    int ms = d->loop->server->limits.idle_timeout_ms;
     c->idle_due = aether_proxy_now_ms() + ms;
 }
 
