@@ -22,6 +22,7 @@
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_wipe.h"
 #include "../../runtime/utils/aether_spawn.h"
+#include "../../runtime/aether_sandbox.h"   /* the files a server reads and writes */
 
 /* HTTP/2 (#260 Tier 2). Pull in the wrapper header up front so
  * handle_one_request's h2c-upgrade dispatch (RFC 7540 §3.2) can
@@ -1903,6 +1904,11 @@ const char* http_server_set_access_log_raw(HttpServer* server,
         st->fp = stderr;
         st->own_fp = 0;
     } else {
+        if (!aether_sandbox_check("fs_write", output_path)) {
+            free(st->format);
+            free(st);
+            return "cannot open access-log output_path for append: denied by the sandbox";
+        }
         st->fp = fopen(output_path, "ab");
         if (!st->fp) {
             free(st->format);
@@ -2294,6 +2300,10 @@ static void tls_text_wipe_free(char* p) {
  * NUL-terminated string the caller wipes and frees; NULL with why. */
 #define TLS_PEM_MAX (1 << 20)
 static char* tls_read_pem_file(const char* path, const char* what, char* why, size_t why_len) {
+    if (!aether_sandbox_check("fs_read", path)) {
+        snprintf(why, why_len, "cannot read the TLS %s: denied by the sandbox", what);
+        return NULL;
+    }
     FILE* f = fopen(path, "rb");
     if (!f) {
         snprintf(why, why_len, "cannot read the TLS %s: %s", what, strerror(errno));
@@ -8768,7 +8778,24 @@ const char* http_mime_type(const char* path) {
 // macro Windows uses to redirect the symbol at closesocket() also
 // makes mixing socket and file fds messy on this side; the buffered
 // path stays clean of the redefine.
+/* A file served is a file read, checked against the sandbox levels of the
+ * thread serving it. A refusal is 403 whether or not the file exists, so the
+ * status does not tell a client what is there. */
+static int http_serve_refused(HttpServerResponse* res, const char* filepath) {
+    if (aether_sandbox_check("fs_read", filepath)) return 0;
+    http_response_set_status(res, 403);
+    http_response_set_body(res, "403 - Forbidden");
+    return 1;
+}
+
+static void http_serve_file_unchecked(HttpServerResponse* res, const char* filepath);
+
 void http_serve_file(HttpServerResponse* res, const char* filepath) {
+    if (!filepath || http_serve_refused(res, filepath)) return;
+    http_serve_file_unchecked(res, filepath);
+}
+
+static void http_serve_file_unchecked(HttpServerResponse* res, const char* filepath) {
 #ifndef _WIN32
     int fd = open(filepath, O_RDONLY
 #ifdef O_CLOEXEC
@@ -9062,6 +9089,9 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
     // Build full path
     char filepath[1024];
     snprintf(filepath, sizeof(filepath), "%s/%s", dir, req_path);
+    // Checked before anything is looked up, so a refused path is 403 whether
+    // or not it exists; the check resolves it as realpath does below.
+    if (http_serve_refused(res, filepath)) return;
 
     // Security: resolve to canonical path and verify it's within the root dir
 #ifndef _WIN32
@@ -9108,7 +9138,7 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
          * return 404. */
     }
     // Serve the resolved, validated path (200 + Accept-Ranges).
-    http_serve_file(res, resolved);
+    http_serve_file_unchecked(res, resolved);
     http_response_set_header(res, "Accept-Ranges", "bytes");
 #else
     // The final paths of the file and of the root, each with every junction
@@ -9149,7 +9179,7 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
             }
         }
     }
-    http_serve_file(res, resolved);
+    http_serve_file_unchecked(res, resolved);
     http_response_set_header(res, "Accept-Ranges", "bytes");
 #endif
 }

@@ -311,9 +311,13 @@ static int is_frame(ASTNode* n) {
     }
 }
 
-/* A quote's body is a tree, not code of the function (docs/quote.md). */
+/* A quote's body is a tree, not code of the function (docs/quote.md). A
+ * `hide` / `seal except` list names what a block may reach and uses none
+ * of it: walked, `seal except xs` read as a use of `xs` before the body,
+ * so the body's own move of `xs` was reported as a use after the move. */
 static int is_opaque(ASTNode* n) {
-    return n && n->type == AST_QUOTE;
+    return n && (n->type == AST_QUOTE || n->type == AST_HIDE_DIRECTIVE ||
+                 n->type == AST_SEAL_DIRECTIVE);
 }
 
 static int has_marker(ASTNode* p, const char* tag) {

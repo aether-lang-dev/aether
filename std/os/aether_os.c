@@ -2337,6 +2337,11 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
         return out;
     }
     int has_cwd = cwd && cwd[0];
+    /* The child's working directory is a chdir, checked as os.chdir is. */
+    if (has_cwd && !aether_sandbox_check("fs", cwd)) {
+        out._3 = "denied by sandbox";
+        return out;
+    }
 
     /* The child's stderr, opened here so a failure is this call's to report:
      * /dev/null, or the file. Close-on-exec; the child installs it on 2. */
@@ -4512,6 +4517,11 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
     if (serr) { out._3 = serr; return out; }
     if (!aether_sandbox_check("exec", prog)) { out._3 = "denied by sandbox"; return out; }
     if (stderr_to == OS_STDERR_FILE && !aether_sandbox_check("fs", stderr_path)) {
+        out._3 = "denied by sandbox";
+        return out;
+    }
+    /* The child's working directory is a chdir, checked as os.chdir is. */
+    if (cwd && cwd[0] && !aether_sandbox_check("fs", cwd)) {
         out._3 = "denied by sandbox";
         return out;
     }

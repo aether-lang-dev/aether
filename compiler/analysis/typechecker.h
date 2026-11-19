@@ -102,6 +102,11 @@ typedef struct SymbolTable {
     NameNode* hidden_names;       // names blocked from outer scopes
     NameNode* seal_whitelist;     // if non-NULL, ONLY these names may resolve to outer scopes
     int is_sealed;                // 1 if a `seal except` directive is in effect (whitelist may be empty)
+    // 1 on a function's (or main's) own scope: its parameters and the
+    // locals hoisted to its top. A `seal except` on the body block right
+    // beneath it admits these, as a closure's seal admits its own
+    // parameters: they are the body's own names, not ambient ones.
+    int binds_body;
     // Issue #243 sealed scopes, #2614: when this scope (or any ancestor)
     // is code cloned in from a module by module_merge_into_program, the
     // registered name of that module (the node's origin_module, which
@@ -131,6 +136,9 @@ SymbolTable* create_symbol_table(SymbolTable* parent);
 void free_symbol_table(SymbolTable* table);
 void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, int is_function, int is_state);
 Symbol* lookup_symbol(SymbolTable* table, const char* name);
+/* The declaration of a type a value already has, hide / seal not asked:
+ * they restrict the names a block writes, not its values' types. */
+Symbol* lookup_type_symbol(SymbolTable* table, const char* name);
 Symbol* lookup_symbol_local(SymbolTable* table, const char* name);
 /* docs/quote.md: the program-level `const NAME`, or NULL. */
 ASTNode* tc_program_const(const char* name);

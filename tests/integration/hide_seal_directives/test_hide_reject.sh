@@ -388,6 +388,21 @@ main() {
 EOF
 run_accept "seal except permits local tuple-destructure bindings" $AE_TMP/ae_seal_local_destructure.ae
 
+# A struct literal writes its struct's name, which a seal must list; a value
+# of the struct reached without writing it keeps its type
+# (test_seal_codegen_identical.sh). The literal was refused only by
+# accident, as a local "of a type the program does not define" (E0302).
+cat > $AE_TMP/ae_seal_struct_literal.ae << 'EOF'
+struct T { a: int }
+f(n: int) -> int {
+    seal except n
+    e = T { a: n }
+    return e.a
+}
+main() { println("${f(1)}") }
+EOF
+run_reject_hidden "seal except refuses a literal of an unlisted struct" $AE_TMP/ae_seal_struct_literal.ae
+
 # One member of a module: `hide ns.member` and `import ns hiding (member)`
 # deny that member and leave the rest of the module visible (sae's kernel
 # imports all of ui but ui.open_url). A module of our own, beside the files.
@@ -525,6 +540,132 @@ boot() -> int { return shell.open_url("k") }
 EOF
 run_reject_hidden "import hiding in a module blocks the member there" $AE_TMP/member/hiding_per_file.ae
 cd "$ROOT"
+
+# A closure handed to a function of another module. The call is a member
+# call, so the closure's body also resolves names through the module as a
+# DSL receiver (`mm_<name>`); a seal used to end that whole lookup at the
+# sealed scope, so the closure could not see the sealed function's own
+# locals (E0300 'ctx'), while the same closure to a function of the file
+# could. A name from outside the seal stays refused.
+mkdir -p $AE_TMP/sealmod/mm
+cat > $AE_TMP/sealmod/mm/module.ae << 'EOF'
+exports (run_it, K, S, bump)
+const K = 7
+const S = "hi"
+run_it(f: @keep fn) { f() }
+bump(x: int) -> int { return x + K }
+EOF
+cat > $AE_TMP/sealmod/closure_module_call.ae << 'EOF'
+import mm
+helper(x: int) -> int { return x + 1 }
+f1(p: int, argv: int) -> int {
+    seal except p, argv, mm, helper
+    ctx = p + 1
+    seq = argv
+    mm.run_it(|| {
+        _x = helper(ctx + seq)
+    })
+    return 0
+}
+main() { println(f1(1, 2)) }
+EOF
+run_accept "closure passed to a module function sees the sealed function's locals" $AE_TMP/sealmod/closure_module_call.ae
+
+cat > $AE_TMP/sealmod/closure_module_outer.ae << 'EOF'
+import mm
+main() {
+    secret = 4
+    {
+        seal except mm
+        mm.run_it(|| {
+            _x = secret + 1
+        })
+    }
+}
+EOF
+run_reject_hidden "closure passed to a module function still cannot reach a sealed-out name" $AE_TMP/sealmod/closure_module_outer.ae
+
+# A module's exported constant through a listed prefix: `seal except mm`
+# admits `mm.K` as it admits `mm.bump(p)`. It was refused as "module 'mm'
+# has no export 'K'": the constant's merged name `mm_K`, which no seal can
+# list, was looked up through the seal. Without `mm` on the list, or under
+# `hide mm.K`, it is refused as hidden. Read again after the check (`mm.K as
+# uint32`, the type of `s = mm.S`), it was "unknown" under the seal too.
+cat > $AE_TMP/sealmod/module_const.ae << 'EOF'
+import mm
+f1(p: int) -> int {
+    seal except p, mm
+    a = mm.K
+    b = mm.K as uint32
+    s = mm.S
+    if s == "h${p}" { return 0 }
+    return a + (b as int) + mm.bump(p)
+}
+main() { println(f1(1)) }
+EOF
+run_accept "seal except admits a listed module's constant" $AE_TMP/sealmod/module_const.ae
+
+cat > $AE_TMP/sealmod/module_const_unlisted.ae << 'EOF'
+import mm
+f1(p: int) -> int {
+    seal except p
+    return mm.K
+}
+main() { println(f1(1)) }
+EOF
+run_reject_hidden "seal except without the module refuses its constant" $AE_TMP/sealmod/module_const_unlisted.ae
+
+cat > $AE_TMP/sealmod/module_const_hidden.ae << 'EOF'
+import mm
+f1(p: int) -> int {
+    hide mm.K
+    return mm.K + mm.bump(p)
+}
+main() { println(f1(1)) }
+EOF
+run_reject_hidden "hide ns.member refuses that constant" $AE_TMP/sealmod/module_const_hidden.ae
+
+# A function's own names: a seal on its body admits its parameters and the
+# locals hoisted to its top (an arm's local read after the `if`), as a
+# closure's seal always admitted its parameters. They had to be listed
+# (`seal except p`), and an arm local could not be listed in any useful
+# way. A seal on a block nested deeper does not admit them, and `hide`
+# still hides a parameter.
+cat > $AE_TMP/ae_seal_own_names.ae << 'EOF'
+helper(x: int) -> int { return x + 1 }
+f1(p: int, q: int) -> int {
+    seal except helper
+    if p > 0 { x = helper(p) } else { x = q }
+    q = q + x
+    return q
+}
+main() {
+    seal except f1, println
+    println("${f1(1, 2)}")
+}
+EOF
+run_accept "seal except admits the function's parameters and hoisted locals" $AE_TMP/ae_seal_own_names.ae
+
+cat > $AE_TMP/ae_seal_nested_param.ae << 'EOF'
+f1(p: int) -> int {
+    {
+        seal except println
+        println("${p}")
+    }
+    return 0
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_hidden "seal except in a nested block still refuses the function's parameter" $AE_TMP/ae_seal_nested_param.ae
+
+cat > $AE_TMP/ae_hide_param.ae << 'EOF'
+f1(p: int) -> int {
+    hide p
+    return p
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_hidden "hide still hides a parameter" $AE_TMP/ae_hide_param.ae
 
 # Cleanup
 rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out $AE_TMP/ae_hide_log

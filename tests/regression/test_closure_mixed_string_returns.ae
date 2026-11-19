@@ -66,6 +66,7 @@ main() {
     // every copy the caller freed.
     if string.equals(p.name, "zoe") != 1 { fail("the field's literal was damaged: '${p.name}'") }
     print("  PASS: the field's literal survived\n")
+    free(p)
 
     print("\n=== mixed-return closure test passed ===\n")
 }

@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "../../runtime/utils/aether_compiler.h"  // AETHER_TLS
+#include "../../runtime/aether_sandbox.h"   // the "native" check on a load
 
 #ifdef _WIN32
 #include <windows.h>
@@ -76,6 +77,13 @@ void* aether_dl_open_raw(const char* path) {
     dl_clear_error();
     if (path == NULL || path[0] == '\0') {
         dl_set_error("aether_dl_open_raw: path is empty");
+        return NULL;
+    }
+    /* Loading a library runs its code with the program's authority: the
+     * "native" grant (grant_native) the LD_PRELOAD layer checks dlopen
+     * against, checked here too, so an in-process level sees it. */
+    if (!aether_sandbox_check("native", path)) {
+        dl_set_error("aether_dl_open_raw: denied by the sandbox");
         return NULL;
     }
 #ifdef _WIN32

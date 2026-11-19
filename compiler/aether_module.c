@@ -5728,6 +5728,10 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklis
 static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
                                    const NameSet* locals, int in_dsl_block) {
     if (!node) return;
+    /* A `hide` / `seal except` list names what a block may reach; it calls
+     * nothing. Walked, `seal except bytes` kept every bytes function a
+     * name matched, so a seal changed what reached the C. */
+    if (node->type == AST_HIDE_DIRECTIVE || node->type == AST_SEAL_DIRECTIVE) return;
     /* #3142: an owned type's drop function is called by the code that
      * releases its values, which the tree does not spell. */
     if (node->type == AST_DISTINCT_TYPE_DEF && node->annotation &&

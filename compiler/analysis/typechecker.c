@@ -70,6 +70,7 @@ SymbolTable* create_symbol_table(SymbolTable* parent) {
     table->hidden_names = NULL;
     table->seal_whitelist = NULL;
     table->is_sealed = 0;
+    table->binds_body = 0;
     // Inherit the merged-body origin so nested scopes (loops, blocks,
     // closures inside a merged function) resolve qualified names against
     // the same module's imports.
@@ -174,6 +175,19 @@ static void scope_apply_visibility_directives(SymbolTable* table, ASTNode* block
     }
 }
 
+// A name a `seal except` on `t` admits although the list does not give it:
+// one the function whose body `t` is binds itself (a parameter, a local
+// hoisted to the function's top). A closure's parameters and hoisted locals
+// share its sealed scope, so they were always visible; a function's sit one
+// scope out, and every one of them had to be listed (`seal except p` for a
+// parameter `p`), which is no containment: the body's own names are not
+// ambient. NULL for every other name, and for a hoisted local not bound yet.
+static Symbol* seal_admits_own(SymbolTable* t, const char* name) {
+    if (!t || !t->is_sealed || !t->parent || !t->parent->binds_body) return NULL;
+    Symbol* s = lookup_symbol_local(t->parent, name);
+    return s && !s->hoist_pending ? s : NULL;
+}
+
 // Returns 1 if `name` was blocked by a `hide` or `seal except` directive
 // somewhere in the scope chain AND a real binding for it exists farther
 // up (above the blocking scope). Used to give a better error message than
@@ -183,7 +197,8 @@ static int name_blocked_by_hide(SymbolTable* table, const char* name) {
     SymbolTable* t = table;
     while (t) {
         int blocked_here = scope_name_is_hidden(t, name) ||
-                           (t->is_sealed && !scope_name_in_whitelist(t, name));
+                           (t->is_sealed && !scope_name_in_whitelist(t, name) &&
+                            !seal_admits_own(t, name));
         if (blocked_here) {
             // Walk upward from the parent looking for a real binding.
             for (SymbolTable* check = t->parent; check; check = check->parent) {
@@ -205,7 +220,8 @@ static int name_blocked_by_hide(SymbolTable* table, const char* name) {
 static int qualified_prefix_blocked(SymbolTable* table, const char* prefix) {
     for (SymbolTable* t = table; t; t = t->parent) {
         int blocked_here = scope_name_is_hidden(t, prefix) ||
-                           (t->is_sealed && !scope_name_in_whitelist(t, prefix));
+                           (t->is_sealed && !scope_name_in_whitelist(t, prefix) &&
+                            !seal_admits_own(t, prefix));
         if (blocked_here) {
             for (SymbolTable* c = table; c; c = c->parent) {
                 if (lookup_symbol_local(c, prefix)) return 0;
@@ -243,6 +259,8 @@ static int qualified_member_blocked(SymbolTable* table, const char* ns, const ch
 // `fs_exists`, a name the user never wrote and could never whitelist.
 // Checking it against hide/seal again made `seal except fs` refuse every
 // `fs.<member>` call, so walk the chain without those checks.
+static const char* enum_member_source_prefix(const ASTNode* nd);
+
 static Symbol* lookup_member_symbol(SymbolTable* table, const char* name) {
     for (SymbolTable* t = table; t; t = t->parent) {
         Symbol* s = lookup_symbol_local(t, name);
@@ -358,7 +376,8 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symtab_link(table, symbol);
 }
 
-static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from);
+static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from,
+                                int obey_directives);
 static const char* find_import_alias(const char* name);
 
 /* The program's own top-level `var`s (no origin_module), named once per
@@ -393,7 +412,19 @@ static void note_program_globals(ASTNode* program) {
 
 Symbol* lookup_symbol(SymbolTable* table, const char* name) {
     if (!table || !name) return NULL;
-    return lookup_symbol_in(table, name, table->merged_from);
+    return lookup_symbol_in(table, name, table->merged_from, 1);
+}
+
+/* The declaration of a type that a value in hand already has: the struct a
+ * `*Browser` parameter or a function's result points at, the actor of an
+ * `actor_ref[A]`. `hide` and `seal except` decide which names a block may
+ * write, not the types of the values it was handed, so this lookup does not
+ * ask them. Through lookup_symbol, a sealed body that never named `Browser`
+ * lost every field type of a `Browser` it held, with no diagnostic: a string
+ * field compared as a pointer, a closure field stored unretained. */
+Symbol* lookup_type_symbol(SymbolTable* table, const char* name) {
+    if (!table || !name) return NULL;
+    return lookup_symbol_in(table, name, table->merged_from, 0);
 }
 
 /* A bare `extern` is private to the file that declares it, but every
@@ -564,7 +595,8 @@ static Symbol* lookup_file_symbol_for_module(SymbolTable* table, const char* nam
 
 /* `merged_from` is the scope the lookup STARTED in: a merged body's, even
  * when the walk reaches a file scope whose own merged_from says otherwise. */
-static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from) {
+static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from,
+                                int obey_directives) {
     if (!table || !name) return NULL;
 
     // Local bindings always win — `hide` and `seal except` only block
@@ -627,11 +659,11 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
 
     // Leaving this scope, whether through a DSL receiver or the parent chain:
     // enforce hide / seal directives before resolving an outward name.
-    if (scope_name_is_hidden(table, name)) {
+    if (obey_directives && scope_name_is_hidden(table, name)) {
         return NULL;
     }
-    if (table->is_sealed && !scope_name_in_whitelist(table, name)) {
-        return NULL;
+    if (obey_directives && table->is_sealed && !scope_name_in_whitelist(table, name)) {
+        return seal_admits_own(table, name);
     }
 
     // Issue #333 DSL block receiver fallback: when this scope is the
@@ -654,10 +686,17 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
          * bytes, and a longer one reached another name (#3569). */
         const char* rewritten = aether_internf("%s_%s", table->dsl_receiver, name);
         for (SymbolTable* t = table; t; t = t->parent) {
-            if (t != table &&
+            /* A scope that hides or seals out `name` ends the search for
+             * the receiver's member, not the lookup: the plain walk below
+             * still finds a binding of `name` at or below that scope (the
+             * sealed function's own local), and refuses one beyond it. It
+             * returned NULL here, so a closure passed to a module function
+             * (`mm.run_it(|| { ctx })`, receiver `mm`) could not see the
+             * locals of the sealed function it was written in. */
+            if (t != table && obey_directives &&
                 (scope_name_is_hidden(t, name) ||
                  (t->is_sealed && !scope_name_in_whitelist(t, name)))) {
-                return NULL;
+                break;
             }
             Symbol* s = lookup_symbol_local(t, rewritten);
             if (s) return s;
@@ -665,7 +704,7 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
     }
 
     if (table->parent) {
-        return lookup_symbol_in(table->parent, name, merged_from);
+        return lookup_symbol_in(table->parent, name, merged_from, obey_directives);
     }
 
     return NULL;
@@ -4112,7 +4151,7 @@ int is_callable(Type* type) {
 static Type* optional_struct_field_type(SymbolTable* table, const char* struct_name,
                                         const char* field) {
     if (!struct_name || !field) return NULL;
-    Symbol* s = lookup_symbol(table, struct_name);
+    Symbol* s = lookup_type_symbol(table, struct_name);
     if (s && s->node) {
         for (int i = 0; i < s->node->child_count; i++) {
             ASTNode* f = s->node->children[i];
@@ -4141,7 +4180,7 @@ static Type* try_resolve_using_field(SymbolTable* table, ASTNode* struct_def,
             !uf->annotation || strcmp(uf->annotation, "using") != 0) continue;
         if (!uf->node_type || uf->node_type->kind != TYPE_STRUCT ||
             !uf->node_type->struct_name) continue;
-        Symbol* inner_sym = lookup_symbol(table, uf->node_type->struct_name);
+        Symbol* inner_sym = lookup_type_symbol(table, uf->node_type->struct_name);
         if (!inner_sym || !inner_sym->node) continue;
         ASTNode* inner_def = inner_sym->node;
         for (int ij = 0; ij < inner_def->child_count; ij++) {
@@ -4201,8 +4240,10 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
     if (expr->child_count > 0 && expr->children[0] &&
         expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
         is_visible_namespace(expr->children[0]->value, table) && expr->value) {
+        /* Past hide / seal, as typecheck_expression's member access looks
+         * it up: a seal admitting `mm` left `mm.K as uint32` "unknown". */
         const char* qualified = aether_internf("%s_%s", expr->children[0]->value, expr->value);
-        Symbol* sym = lookup_symbol(table, qualified);
+        Symbol* sym = lookup_member_symbol(table, qualified);
         /* #2631: the checked module file's own constant, which a
          * build merges as `<ns>_<name>`: the bare one it carries. */
         if ((!sym || !sym->type) && !(table && table->merged_from) &&
@@ -4265,7 +4306,7 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
         }
         // Struct field lookup
         if (obj->kind == TYPE_STRUCT && obj->struct_name) {
-            Symbol* struct_sym = lookup_symbol(table, obj->struct_name);
+            Symbol* struct_sym = lookup_type_symbol(table, obj->struct_name);
             if (struct_sym && struct_sym->node) {
                 ASTNode* struct_def = struct_sym->node;
                 int direct = 0;
@@ -4294,7 +4335,7 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
         if (obj->kind == TYPE_PTR && obj->element_type &&
             obj->element_type->kind == TYPE_STRUCT &&
             obj->element_type->struct_name) {
-            Symbol* struct_sym = lookup_symbol(table, obj->element_type->struct_name);
+            Symbol* struct_sym = lookup_type_symbol(table, obj->element_type->struct_name);
             if (struct_sym && struct_sym->node) {
                 ASTNode* struct_def = struct_sym->node;
                 for (int fi = 0; fi < struct_def->child_count; fi++) {
@@ -4310,7 +4351,7 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
         // Actor ref field lookup: look up state declarations in the actor definition
         if (obj->kind == TYPE_ACTOR_REF && obj->element_type &&
             obj->element_type->kind == TYPE_STRUCT && obj->element_type->struct_name) {
-            Symbol* actor_sym = lookup_symbol(table, obj->element_type->struct_name);
+            Symbol* actor_sym = lookup_type_symbol(table, obj->element_type->struct_name);
             if (actor_sym && actor_sym->node) {
                 ASTNode* actor_def = actor_sym->node;
                 for (int fi = 0; fi < actor_def->child_count; fi++) {
@@ -4792,7 +4833,11 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->annotation && strcmp(expr->annotation, "fn_value") == 0 && expr->node_type) {
                 return clone_type(expr->node_type);
             }
-            Symbol* symbol = lookup_symbol(table, expr->value);
+            /* A lowered `Color.Red` or `mm.K`: its prefix passed hide / seal
+             * where it was checked, and its C name is none a seal lists. */
+            Symbol* symbol = enum_member_source_prefix(expr)
+                                 ? lookup_member_symbol(table, expr->value)
+                                 : lookup_symbol(table, expr->value);
             return (symbol && symbol->type) ? clone_type(symbol->type) : create_type(TYPE_UNKNOWN);
         }
         
@@ -8253,6 +8298,7 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
             g_tc_fn_body = node->child_count > 0 ? node->children[0] : NULL;
             g_tc_return_owner = node;
             SymbolTable* main_table = create_symbol_table(table);
+            main_table->binds_body = 1;
             if (g_tc_fn_body) declare_if_branch_hoists(g_tc_fn_body, main_table);
             int ok = typecheck_statement(node, main_table);
             free_symbol_table(main_table);
@@ -8488,7 +8534,7 @@ static ASTNode* actor_ref_target_actor(Type* t, SymbolTable* table) {
     if (!t || t->kind != TYPE_ACTOR_REF || !t->element_type ||
         t->element_type->kind != TYPE_STRUCT || !t->element_type->struct_name)
         return NULL;
-    Symbol* s = lookup_symbol(table, t->element_type->struct_name);
+    Symbol* s = lookup_type_symbol(table, t->element_type->struct_name);
     return s && s->node && s->node->type == AST_ACTOR_DEFINITION ? s->node : NULL;
 }
 
@@ -9225,6 +9271,11 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
         case AST_BUILDER_FUNCTION:
         case AST_ACTOR_DEFINITION:
         case AST_QUOTE:
+            return;
+        /* A `hide` / `seal except` list names, it moves nothing: walked,
+         * `seal except iso` moved `iso` before the body used it. */
+        case AST_HIDE_DIRECTIVE:
+        case AST_SEAL_DIRECTIVE:
             return;
 
         case AST_CLOSURE: {
@@ -12785,10 +12836,11 @@ static void enum_rewrite_ast(ASTNode* nd, const char** names, int n) {
 }
 
 /* A qualified enum member is lowered to one identifier before lexical scopes
- * are checked. Preserve the prefix the source wrote so hide/seal decisions use
- * `Color`, not the generated `Color_Red` constant name. */
+ * are checked, and a module's constant (`mm.K`) once it is checked. Preserve
+ * the prefix the source wrote so hide/seal decisions use `Color` or `mm`, not
+ * the generated `Color_Red` or `mm_K`, which no seal can list. */
 static const char* enum_member_source_prefix(const ASTNode* nd) {
-    static const char marker[] = "enum_prefix:";
+    static const char marker[] = "member_of:";
     if (!nd || !nd->annotation) return NULL;
     size_t marker_len = sizeof(marker) - 1;
     for (const char* p = nd->annotation; (p = strstr(p, marker)) != NULL; p += marker_len) {
@@ -12822,7 +12874,7 @@ static void enum_rewrite_member_access(ASTNode* nd) {
         } else {
             const char* qualified = aether_internf("%s_%s", ename, nd->value);
             nd->annotation = annotation_add_marker(nd->annotation,
-                                                   aether_internf("enum_prefix:%s", ename));
+                                                   aether_internf("member_of:%s", ename));
             Type* et = create_type(TYPE_ENUM);
             et->struct_name = strdup(ename);
             free(nd->value);
@@ -13057,7 +13109,7 @@ static int symbol_names_type(Symbol* s) {
 static const char* type_unknown_name(Type* t, SymbolTable* table, int depth) {
     if (!t || depth > 32 || t->kind == TYPE_PTR) return NULL;
     if (t->kind == TYPE_STRUCT && t->struct_name && !strchr(t->struct_name, '.') &&
-        !symbol_names_type(lookup_symbol(table, t->struct_name)) &&
+        !symbol_names_type(lookup_type_symbol(table, t->struct_name)) &&
         !c_struct_def_node(t->struct_name) &&
         !aether_protocol_lookup(t->struct_name))   /* `actor_ref[P]` (#385) */
         return t->struct_name;
@@ -13094,6 +13146,7 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     if (!func || (func->type != AST_FUNCTION_DEFINITION && func->type != AST_BUILDER_FUNCTION)) return 0;
 
     SymbolTable* func_table = create_symbol_table(table);
+    func_table->binds_body = 1;
 
     // Issue #243 sealed scopes, #2614: a function cloned in from a module
     // resolves qualified calls against that module's imports. The origin
@@ -14498,7 +14551,7 @@ static int report_uncalled_function(ASTNode* e, SymbolTable* table) {
                e->children[0]->value && !value_hides_namespace(table, e->children[0]->value) &&
                is_visible_namespace(e->children[0]->value, table)) {
         /* `ns.name` reaches the C name the merge gave it, as a call does. */
-        sym = lookup_symbol(table, qualified_c_name(e->children[0]->value, e->value));
+        sym = lookup_member_symbol(table, qualified_c_name(e->children[0]->value, e->value));
         snprintf(shown, sizeof(shown), "%s.%s", e->children[0]->value, e->value);
     }
     if (!sym || !sym->is_function) return 0;
@@ -18218,6 +18271,17 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
         case AST_STRUCT_LITERAL: {
             // Type check struct literal field initializers
             Symbol* sdef_sym = expr->value ? lookup_symbol(table, expr->value) : NULL;
+            /* `T { ... }` writes the name `T`, so hide / seal decide it. It
+             * was refused only because the local it was bound to then named
+             * no type the program defines (E0302), which a value of an
+             * unlisted struct no longer does: say what it is. */
+            if (!sdef_sym && expr->value && name_blocked_by_hide(table, expr->value)) {
+                const char* msg = "";
+                msg = aether_internf("'%s' is hidden in this scope by `hide` or `seal except`",
+                                     expr->value);
+                type_error(msg, expr->line, expr->column);
+                return 0;
+            }
             ASTNode* sdef = (sdef_sym && sdef_sym->node &&
                              sdef_sym->node->type == AST_STRUCT_DEFINITION)
                             ? sdef_sym->node : NULL;
@@ -18414,9 +18478,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     type_error(msg, expr->line, expr->column);
                     return 0;
                 }
+                /* The prefix passed hide / seal above, so its member is
+                 * looked up past them, as a call through it is
+                 * (lookup_member_symbol): `mm_K` is a name the source never
+                 * wrote and no seal could list, and `seal except mm` refused
+                 * every `mm.K` as "no export 'K'". */
                 const char* qualified =
                     aether_internf("%s_%s", expr->children[0]->value, expr->value);
-                Symbol* sym = lookup_symbol(table, qualified);
+                Symbol* sym = lookup_member_symbol(table, qualified);
                 /* #924 re-export: `hub.X` where hub lists X in `exports` but
                  * imports it from another module. The local `hub_X` symbol
                  * doesn't exist; redirect to the defining module's symbol
@@ -18427,7 +18496,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (origin && origin->name) {
                         qualified = aether_internf("%s_%s", module_namespace_of(origin->name),
                                                    expr->value);
-                        sym = lookup_symbol(table, qualified);
+                        sym = lookup_member_symbol(table, qualified);
                     }
                 }
                 /* #2631: the checked module file's own constant, which a
@@ -18440,6 +18509,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (sym && sym->type) {
                     // Rewrite node in-place
                     expr->type = AST_IDENTIFIER;
+                    expr->annotation = annotation_add_marker(expr->annotation,
+                        aether_internf("member_of:%s", expr->children[0]->value));
                     free(expr->value);
                     expr->value = strdup(qualified);
                     set_node_type(expr, clone_type(sym->type));
@@ -18602,7 +18673,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 // Handle actor ref member access — look up state field type from actor definition
                 else if (base_type && base_type->kind == TYPE_ACTOR_REF && base_type->element_type &&
                          base_type->element_type->kind == TYPE_STRUCT && base_type->element_type->struct_name) {
-                    Symbol* actor_sym2 = lookup_symbol(table, base_type->element_type->struct_name);
+                    Symbol* actor_sym2 = lookup_type_symbol(table, base_type->element_type->struct_name);
                     if (actor_sym2 && actor_sym2->node && actor_sym2->node->type == AST_ACTOR_DEFINITION) {
                         ASTNode* actor_def2 = actor_sym2->node;
                         int found_state = 0;
@@ -18647,7 +18718,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (base_type->compound_node) {
                         children_owner = base_type->compound_node;
                     } else {
-                        Symbol* struct_sym = lookup_symbol(table, base_type->struct_name);
+                        Symbol* struct_sym = lookup_type_symbol(table, base_type->struct_name);
                         if (struct_sym && struct_sym->node) children_owner = struct_sym->node;
                     }
                     if (children_owner) {
@@ -18705,7 +18776,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                          base_type->element_type &&
                          base_type->element_type->kind == TYPE_STRUCT &&
                          base_type->element_type->struct_name) {
-                    Symbol* struct_sym = lookup_symbol(table, base_type->element_type->struct_name);
+                    Symbol* struct_sym = lookup_type_symbol(table, base_type->element_type->struct_name);
                     if (struct_sym && struct_sym->node) {
                         ASTNode* struct_def = struct_sym->node;
                         int found = 0;
@@ -19699,7 +19770,7 @@ static Type* local_struct_field_type(SymbolTable* table, const char* recv_name,
     } else {
         return NULL;
     }
-    Symbol* ss = lookup_symbol(table, sname);
+    Symbol* ss = lookup_type_symbol(table, sname);
     if (!ss || !ss->node) return NULL;
     for (int fi = 0; fi < ss->node->child_count; fi++) {
         ASTNode* f = ss->node->children[fi];

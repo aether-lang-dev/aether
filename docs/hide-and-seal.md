@@ -214,6 +214,39 @@ actor Server {
 This is particularly useful for actors with multiple state variables
 where individual receive arms should only touch a subset of state.
 
+### A function's own names need no listing
+
+A `seal except` on a function's body admits the function's parameters and
+every local of the body, including one an `if` arm binds and the body reads
+after it, without listing them:
+
+```aether
+helper(x: int) -> int { return x + 1 }
+
+f(p: int, q: int) -> int {
+    seal except helper
+    if p > 0 { x = helper(p) } else { x = q }
+    return q + x
+}
+
+main() { println("${f(1, 2)}") }
+```
+
+They are the body's own names, handed in or made there, not ambient state;
+a closure's seal always admitted its parameters. Listing them is allowed
+and changes nothing (the examples further down do). A seal on a block
+nested deeper in the function is a block of its own: the function's
+parameters are outer names there and need listing. `hide p` still hides a
+parameter. (Through 0.923.0 a function's parameters, and an arm local read
+after its `if`, had to be on the list; the arm local could not usefully be.)
+
+### Closures see the block's own locals
+
+A closure written in a sealed block sees that block's locals, as any nested
+block does, wherever the closure goes: to a function of the same file or
+to a module's (`mm.run_it(|| { ... ctx ... })`). Names from outside the
+seal stay refused inside it.
+
 ### Local bindings are always visible
 
 `hide` only affects lookups that walk OUT of the current block into a
@@ -227,6 +260,27 @@ always visible inside that block, regardless of what's hidden:
     println(local_thing)    // OK, local_thing is local, not from outside
 }
 ```
+
+### A value keeps its type
+
+The directives decide which *names* a block may write. They do not change
+the types of the values it holds. A parameter `b: *Browser` in a body sealed
+without `Browser` is still a `*Browser`: `b.app_dir` is its `string` field,
+compared, copied and released as a string. Writing the name `Browser` in
+that body (`heap.new(Browser)`, `Browser { ... }`) is reaching for the name,
+and needs it on the list. `hide Browser` is the same: values of the type
+keep it.
+
+### No change to the code generated
+
+A body that compiles both with and without a directive compiles to the same
+C. The list names what the block may reach; it is not a use of anything on
+it. (Through 0.923.0 it was: a struct the list did not name lost its field
+types, silently, so a string field compared as a pointer; and a name on the
+list counted as a use, so a listed function was taken for a function value
+and a listed local's last use copied instead of moving.
+`tests/integration/hide_seal_directives/test_seal_codegen_identical.sh`
+holds the shapes.)
 
 ## What `hide` is NOT
 
@@ -308,14 +362,14 @@ This is consistent with normal lexical shadowing and means
 | Form | Effect |
 |---|---|
 | `hide a, b, c` | Names `a`, `b`, `c` from outer scopes are not in this block (or any nested block within it). |
-| `seal except a, b, c` | EVERY name from outer scopes is invisible in this block, except `a`, `b`, `c`. Local bindings inside the block are still visible. |
+| `seal except a, b, c` | EVERY name from outer scopes is invisible in this block, except `a`, `b`, `c`. Local bindings inside the block are still visible, and on a function's body so are its parameters. |
 | `hide x` followed by `var x = …` in the same scope | Compile error, cannot redeclare a hidden name. |
 | `hide x` then a nested block declaring `var x = …` | OK, fresh binding in the child scope. |
 | `hide x` then calling a visible function that reads `x` from its own scope | OK, name resolution at the call site doesn't touch `x`. |
 | `seal except printf, malloc` then trying to call `free` | Compile error, `free` is not in the whitelist. |
 | `hide http` then `http.get("x")` | Compile error, qualified access blocked because the prefix is hidden (reported as `E0301` undefined, since the hidden prefix resolves to no symbol). |
 | `hide http` then `http.get("x")` in a nested block, `if` body or closure | Compile error, the same as at the hiding block's own level. |
-| `seal except http` then `http.get("x")`, at any depth | OK, a whitelisted prefix admits all of its exported members. |
+| `seal except http` then `http.get("x")` or `http.STATUS_OK`, at any depth | OK, a whitelisted prefix admits all of its exported members, functions and constants. |
 | `hide` or `seal except` inside an actor receive arm | Works, receive arm bodies are block scopes like any other. |
 
 ## Implementation note
@@ -330,8 +384,11 @@ before namespace resolution, so `hide http` blocks `http.get()` too.
 Local bindings always win, the hide/seal sets only affect the
 boundary crossing into outer scopes.
 
-There is no runtime overhead. There is no codegen change. The feature
-is a pure compile-time hygiene check.
+There is no runtime overhead. There is no codegen change: the type
+checker removes every directive once the program has checked
+(`ast_drop_scope_directives`), and the declaration of a type a value
+already has is looked up past them (`lookup_type_symbol`). The feature is a
+pure compile-time hygiene check.
 
 ---
 
