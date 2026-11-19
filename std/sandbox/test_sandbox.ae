@@ -69,6 +69,10 @@ fn execv_child(role: string, script: string) {
     sandbox.enforce(g) callback {
         _rc = os.execv(script, argv)
     }
+    // Refused: what the child made is released before it reports, so a
+    // leak check at exit (LeakSanitizer exits 23) does not hide the 3.
+    sandbox.free(g)
+    list.free(argv)
     exit(3)
 }
 
@@ -173,7 +177,34 @@ main() {
         }
     }
 
+    // grant_runtime's library directories are listed as well as read from:
+    // an interpreter fills its import cache by listing each directory on its
+    // path, and a grant of what is under a directory ("dir/*") does not grant
+    // listing the directory itself.
+    py_argv = list.new()
+    list.add(py_argv, "-I")
+    list.add(py_argv, "-c")
+    list.add(py_argv, "import os; print(os.path.dirname(os.path.realpath(os.__file__)))")
+    py_out, py_code, py_err = os.run_capture("python3", py_argv, null)
+    list.free(py_argv)
+    py_lib = string.trim(py_out)
+    have_py = 0
+    if py_err == "" && py_code == 0 && py_lib != "" { have_py = 1 }
+
     spec.describe(fw, "std.sandbox enforce") {
+        spec.it_when(have_py, "grant_runtime lets the runtime list its library directories", "no python3 here") callback {
+            g = sandbox.new("python") {
+                grant_runtime("python3")
+            }
+            listed = "not tried"
+            sandbox.enforce(g) callback {
+                l, lerr = fs.list_dir(py_lib)
+                listed = lerr
+                if lerr == "" { fs.dir_list_free(l) }
+            }
+            sandbox.free(g)
+            spec.assert_str_eq(listed, "", "the standard library's directory lists")
+        }
         spec.it("lets a granted env variable through and hides the rest") callback {
             g = sandbox.new("env") {
                 grant_env("AE_SANDBOX_TEST_OPEN")
