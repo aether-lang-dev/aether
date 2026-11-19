@@ -4,7 +4,8 @@
 //
 // A seed is a document: the shapes std/xml's tests read (test_xml_*.ae),
 // each well-formedness error the reader checks for, every kind of reference,
-// CDATA, comments, processing instructions and a declaration, and nesting.
+// CDATA, comments, processing instructions and a declaration, and nesting;
+// and the reproducers fuzzing found, kept as regression seeds (crash_*).
 import std.os
 import std.io
 import std.fs
@@ -81,4 +82,9 @@ main() {
     seed(dir, "lt_in_attr", "<a b=\"<\"/>")
     seed(dir, "no_root", "<?xml version=\"1.0\"?>")
     seed(dir, "empty", "")
+
+    // Reproducers fuzzing found, kept as regression seeds: a control byte
+    // inside a start tag was read as part of the element's name.
+    seed(dir, "crash_name_control", "<a><b\x0f><c>t</c></a>")
+    seed(dir, "name_quote_amp", "<a><b\"c/><d&e/></a>")
 }

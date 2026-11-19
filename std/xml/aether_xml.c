@@ -388,11 +388,18 @@ static int push_open(XmlParser* p, const char* name) {
     return 1;
 }
 
-/* XML name chars (lenient): not whitespace, and not one of < > / = ? */
+/* XML name chars (lenient): not whitespace, not one of < > / = ?, and not
+ * a byte no XML Name holds anywhere: a control character, DEL, a quote or
+ * '&'. A control byte inside a tag was read as part of the element's name
+ * (`<b\x0f>` named the element "b\x0f"), which no XML name can hold and
+ * which the pretty printer then wrote back out (#3749, found by the XML fuzz
+ * target). Names otherwise stay as lenient as they were: one starting with
+ * a digit, say, is still read. */
 static int is_name_char(char c) {
-    return !(c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+    unsigned char u = (unsigned char)c;
+    return !(u <= 0x20 || u == 0x7f ||
              c == '<' || c == '>' || c == '/' || c == '=' || c == '?' ||
-             c == '\0');
+             c == '"' || c == '\'' || c == '&');
 }
 
 /* Production [3] S: space, tab, CR, LF. */
