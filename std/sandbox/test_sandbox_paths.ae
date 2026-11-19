@@ -191,6 +191,76 @@ main() {
         }
     }
 
+    // A name is the one a Win32 call acts on (#3751): GetFullPathNameW drops
+    // a trailing dot or space and turns a device name into the device. The
+    // checked calls that make a name by NtCreateFile or NtSetInformationFile
+    // used to make it as written: "new." and "sp " literally, and a file
+    // called "CON", none of which a Win32 call reaches again.
+    windows = 0
+    if os.platform() == "windows" { windows = 1 }
+    win_only = "Windows names"
+    spec.describe(fw, "std.sandbox acts on the name Windows itself would") {
+        spec.it_when(windows, "drops a trailing dot or space, as Windows does", win_only) callback {
+            _w = fs.write("${box}/from.txt", "x")
+            e1 = "not tried"
+            e2 = "not tried"
+            sandbox.enforce(in_box) callback {
+                e1 = fs.create_dir("${box}/new.")
+                e2 = fs.rename("${box}/from.txt", "${box}/sp ")
+            }
+            spec.assert_str_eq(e1, "", "mkdir of 'new.' succeeds")
+            spec.assert_eq(fs.exists("${box}/new"), 1, "and makes 'new'")
+            spec.assert_str_eq(e2, "", "a rename to 'sp ' succeeds")
+            spec.assert_eq(fs.exists("${box}/sp"), 1, "and makes 'sp'")
+        }
+        // NUL is a device wherever it is spelt; CON is one only where this
+        // Windows still says so (GetFullPathNameW: Windows 11 makes "dir\CON"
+        // a file). Either way the call acts on what a Win32 call would.
+        spec.it_when(windows, "takes a device name for the device, not a file of the box", win_only) callback {
+            e_nul = ""
+            e_con = "not tried"
+            sandbox.enforce(in_box) callback {
+                e_nul = fs.write_atomic("${box}/NUL", string.bytes("x"))
+                e_con = fs.write_atomic("${box}/CON", string.bytes("x"))
+            }
+            spec.assert_true(e_nul != "", "write_atomic to NUL in the box is refused: NUL is not in the box")
+            named_nul = 0
+            l, lerr = fs.list_dir(box)
+            if lerr == "" {
+                n = fs.dir_list_count(l)
+                i = 0
+                while i < n {
+                    if string.to_lower(fs.dir_list_get(l, i)) == "nul" { named_nul = 1 }
+                    i = i + 1
+                }
+                fs.dir_list_free(l)
+            }
+            spec.assert_eq(named_nul, 0, "and no file called NUL is in the box")
+            if e_con == "" {
+                got, rerr = fs.read("${box}/CON")
+                spec.assert_str_eq(rerr, "", "a CON this Windows takes for a file is one a plain read reaches")
+                spec.assert_str_eq(got, "x", "with what was written")
+                _d = fs.delete("${box}/CON")
+            }
+        }
+        spec.it_when(windows, "writes NUL under grant_all, and refuses it where it is not granted", win_only) callback {
+            everything = sandbox.new("all") {
+                grant_all()
+            }
+            ea = "not tried"
+            eb = ""
+            sandbox.enforce(everything) callback {
+                ea = fs.write("NUL", "x")
+            }
+            sandbox.enforce(in_box) callback {
+                eb = fs.write("NUL", "x")
+            }
+            sandbox.free(everything)
+            spec.assert_str_eq(ea, "", "grant_all writes NUL")
+            spec.assert_true(eb != "", "a box grant does not cover NUL, as it does not cover /dev/null")
+        }
+    }
+
     spec.describe(fw, "std.sandbox enforce leaves nothing behind") {
         spec.it_when(have_links, "after a block, a dangling symlink is one again, and resolves as before", no_links) callback {
             before = fs.is_symlink("${box}/dangling")

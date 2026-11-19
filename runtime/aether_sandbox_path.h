@@ -150,16 +150,38 @@ static int aether_sandbox_final_of_handle(HANDLE h, char* out, size_t out_size) 
                                NULL, NULL) > 0;
 }
 
+// A Win32 device ("NUL", "CON", "COM1" and the rest): a name that
+// GetFullPathNameW gives as "\\.\NAME", wherever it is spelt ("C:\box\NUL"
+// is NUL too). It is no file, and no directory or link on the way changes
+// what it reaches, so it is its own resource: "\\.\NUL" as it stands,
+// covered by a grant that names it (or by "*"), as /dev/null is on POSIX.
+static int aether_sandbox_wdevice(const wchar_t* full) {
+    if (!(full[0] == L'\\' && full[1] == L'\\' && full[2] == L'.' && full[3] == L'\\' && full[4]))
+        return 0;
+    return wcschr(full + 4, L'\\') == NULL && wcschr(full + 4, L'/') == NULL;
+}
+
+// `in` (UTF-8) as GetFullPathNameW gives it: absolute, "." and ".."
+// resolved by the text, trailing dots and spaces taken off its last name,
+// as Windows itself treats a path before the file system sees it. Its
+// length, or 0.
+static DWORD aether_sandbox_wfull(const char* in, wchar_t* full) {
+    wchar_t win[AETHER_SANDBOX_WPATH];
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, in, -1, win, AETHER_SANDBOX_WPATH)) return 0;
+    DWORD fl = GetFullPathNameW(win, AETHER_SANDBOX_WPATH, full, NULL);
+    return (fl == 0 || fl >= AETHER_SANDBOX_WPATH) ? 0 : fl;
+}
+
 // Returns 1 with the resolved absolute path (UTF-8) in out, or 0 if it
 // cannot be resolved (out is then unspecified).
 static int aether_sandbox_canon_path(const char* in, char* out, size_t out_size) {
     if (!in || !*in || !out || out_size < 4) return 0;
-    wchar_t win[AETHER_SANDBOX_WPATH];
     wchar_t full[AETHER_SANDBOX_WPATH];
     wchar_t fin[AETHER_SANDBOX_WPATH];
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, in, -1, win, AETHER_SANDBOX_WPATH)) return 0;
-    DWORD fl = GetFullPathNameW(win, AETHER_SANDBOX_WPATH, full, NULL);
-    if (fl == 0 || fl >= AETHER_SANDBOX_WPATH) return 0;
+    DWORD fl = aether_sandbox_wfull(in, full);
+    if (fl == 0) return 0;
+    if (aether_sandbox_wdevice(full))
+        return WideCharToMultiByte(CP_UTF8, 0, full, -1, out, (int)out_size, NULL, NULL) > 0;
     size_t root = aether_sandbox_wroot(full);
     if (root == 0) return 0;
     size_t len = fl;
@@ -544,18 +566,55 @@ static int aether_sandbox_canon_entry(const char* in, char* out, size_t out_size
     if (n == 0 || (n == 1 && name[0] == '.') || (n == 2 && name[0] == '.' && name[1] == '.'))
         return aether_sandbox_canon_path(in, out, out_size);
 #ifdef _WIN32
-    // "C:name" names a file in the drive's current directory: whole.
-    if (s == 0 && len >= 2 && in[1] == ':') return aether_sandbox_canon_path(in, out, out_size);
-#endif
+    // The whole path as Windows takes it first (GetFullPathNameW), then
+    // split: the last name is the one a Win32 call would act on, its
+    // trailing dots and spaces gone ("new." is "new"), and the directory
+    // is resolved as aether_sandbox_canon_path resolves the whole path
+    // ("sub \x" is in "sub ", not "sub"). Taken as written, the name went
+    // to NtCreateFile and NtSetInformationFile, which made "new." and
+    // "sp " literally and a file called "CON", none of which a Win32 call
+    // can reach again. A device name is the device (aether_sandbox_wdevice).
+    {
+        wchar_t full[AETHER_SANDBOX_WPATH];
+        DWORD fl = aether_sandbox_wfull(in, full);
+        if (fl == 0) return 0;
+        if (aether_sandbox_wdevice(full))
+            return WideCharToMultiByte(CP_UTF8, 0, full, -1, out, (int)out_size, NULL, NULL) > 0;
+        size_t root = aether_sandbox_wroot(full);
+        if (root == 0) return 0;
+        size_t wl = fl;
+        while (wl > root && full[wl - 1] == L'\\') wl--;
+        full[wl] = L'\0';
+        if (wl <= root) return aether_sandbox_canon_path(in, out, out_size);   // a root
+        size_t ws = wl;
+        while (ws > root && full[ws - 1] != L'\\') ws--;
+        // full[0..ws) is the directory with its separator; a root keeps it.
+        wchar_t wname[AETHER_SANDBOX_WPATH];
+        memcpy(wname, full + ws, (wl - ws + 1) * sizeof(wchar_t));
+        full[ws > root ? ws - 1 : root] = L'\0';
+        char udir[PATH_MAX];
+        char uname[PATH_MAX];
+        char rdir[PATH_MAX];
+        if (WideCharToMultiByte(CP_UTF8, 0, full, -1, udir, (int)sizeof udir, NULL, NULL) <= 0 ||
+            WideCharToMultiByte(CP_UTF8, 0, wname, -1, uname, (int)sizeof uname, NULL, NULL) <= 0 ||
+            !aether_sandbox_canon_path(udir, rdir, sizeof rdir))
+            return 0;
+        size_t rl = strlen(rdir);
+        size_t ul = strlen(uname);
+        int sep = !(rl > 0 && rdir[rl - 1] == '\\');
+        if (rl + (size_t)sep + ul + 1 > out_size) return 0;
+        memcpy(out, rdir, rl);
+        if (sep) out[rl++] = '\\';
+        memcpy(out + rl, uname, ul + 1);
+        return 1;
+    }
+#else
     char dir[PATH_MAX];
     if (s == 0) {
         dir[0] = '.';
         dir[1] = '\0';
     } else {
         size_t dl = s > 1 ? s - 1 : 1;   // "/x" -> "/"
-#ifdef _WIN32
-        if (dl == 2 && in[1] == ':') dl = 3;   // "C:\x" -> "C:\"
-#endif
         if (dl >= sizeof dir) return 0;
         memcpy(dir, in, dl);
         dir[dl] = '\0';
@@ -566,14 +625,11 @@ static int aether_sandbox_canon_entry(const char* in, char* out, size_t out_size
     int sep = !(rl > 0 && AETHER_SBX_IS_SEP(rdir[rl - 1]));
     if (rl + (size_t)sep + n + 1 > out_size) return 0;
     memcpy(out, rdir, rl);
-#ifdef _WIN32
-    if (sep) out[rl++] = '\\';
-#else
     if (sep) out[rl++] = '/';
-#endif
     memcpy(out + rl, name, n);
     out[rl + n] = '\0';
     return 1;
+#endif
 #undef AETHER_SBX_IS_SEP
 }
 

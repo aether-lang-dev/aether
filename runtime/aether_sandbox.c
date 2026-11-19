@@ -711,6 +711,9 @@ static int win_wide(const char* s, wchar_t* out) {
  * resolution, or one the grants allow for `access` themselves (a name
  * created since the check, in the case the volume stores). */
 static int win_handle_is(HANDLE h, const char* resolved, int access) {
+    /* A device ("\\.\NUL", aether_sandbox_wdevice) has no final path; its
+     * name alone says what it is, with no directory or link to swap. */
+    if (strncmp(resolved, "\\\\.\\", 4) == 0) return GetFileType(h) == FILE_TYPE_CHAR;
     char fin[PATH_MAX];
     if (!aether_sandbox_final_of_handle(h, fin, sizeof fin)) return 0;
     if (strcmp(fin, resolved) == 0) return 1;
@@ -1234,7 +1237,8 @@ static HANDLE win_open_checked(const char* path, const WinOpenMode* m, int acces
         return INVALID_HANDLE_VALUE;
     }
     if ((want & DELETE) && !(m->access & DELETE)) h = win_drop_delete(h, m->access, m->flags);
-    if (m->truncate && !created) {
+    /* Only a file has an end to set: a device (NUL) is opened as it is. */
+    if (m->truncate && !created && GetFileType(h) == FILE_TYPE_DISK) {
         LARGE_INTEGER zero;
         zero.QuadPart = 0;
         if (!SetFilePointerEx(h, zero, NULL, FILE_BEGIN) || !SetEndOfFile(h)) {
