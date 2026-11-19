@@ -1149,7 +1149,9 @@ static int win_prog_is_batch(const char* prog) {
  * could not be written. */
 static int win_write_response_file(char* const* argv, char* out, size_t out_size) {
     static int seq = 0;
-    snprintf(out, out_size, "%s\\ae_args_%d_%d.rsp", get_temp_dir(), (int)_getpid(), seq++);
+    char name[64];
+    snprintf(name, sizeof(name), "args_%d.rsp", seq++);
+    if (!ae_private_temp_path(out, out_size, name)) return 0;   /* #3745 */
     FILE* f = fopen(out, "wb");
     if (!f) return 0;
     for (int i = 1; argv[i]; i++) {
@@ -1438,9 +1440,11 @@ static const char* exit_status_note(char* buf, size_t size, int rc) {
     return buf;
 }
 
-/* Where a compile step's stdout is parked so a failure can print it. */
+/* Where a compile step's stdout is parked so a failure can print it: this
+ * process's private temp directory (#3745). "" when it cannot be made, and
+ * run_cmd_capture_stdout then hides stdout instead of capturing it. */
 static const char* compile_log_path(char* buf, size_t size) {
-    snprintf(buf, size, "%s/ae_build_%d.out", get_temp_dir(), (int)getpid());
+    ae_private_temp_path(buf, size, "build.out");
     return buf;
 }
 
@@ -1454,6 +1458,7 @@ static const char* compile_log_path(char* buf, size_t size) {
  * C compiler that reports through it (emcc does) would fail with no
  * explanation at all. */
 int run_cmd_capture_stdout(const char* cmd, const char* path) {
+    if (!path || !path[0]) return run_command(cmd, 2, NULL);   /* nowhere to capture to */
     return run_command(cmd, 3, path);
 }
 
@@ -3709,7 +3714,7 @@ static const char* bracket_depth_flags(const char* cc) {
         return answer;
     }
     char probe_c[1100];
-    snprintf(probe_c, sizeof(probe_c), "%s/ae_bracket_probe_%d.c", get_temp_dir(), (int)getpid());
+    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "bracket_probe.c")) return answer;   /* #3745 */
     FILE* f = fopen(probe_c, "w");
     if (!f) return answer;
     fputs("int ae_bracket_probe;\n", f);
@@ -3939,10 +3944,10 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
     }
 
     char probe_c[1100], probe_out[1100], probe_o[1100], cmd[4096];
-    int pid = (int)getpid();
-    snprintf(probe_c, sizeof(probe_c), "%s/ae_avx_probe_%d.c", get_temp_dir(), pid);
-    snprintf(probe_out, sizeof(probe_out), "%s/ae_avx_probe_%d.txt", get_temp_dir(), pid);
-    snprintf(probe_o, sizeof(probe_o), "%s/ae_avx_probe_%d.o", get_temp_dir(), pid);
+    /* Compiled and read back: in the private temp directory (#3745). */
+    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "avx_probe.c") ||
+        !ae_private_temp_path(probe_out, sizeof(probe_out), "avx_probe.txt") ||
+        !ae_private_temp_path(probe_o, sizeof(probe_o), "avx_probe.o")) return flags;
     FILE* f = fopen(probe_c, "w");
     if (!f) return flags;
     fclose(f);
@@ -7163,7 +7168,14 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     char stem[256];
     snprintf(stem, sizeof(stem), "%s", pkg);
     for (char* p = stem; *p; p++) if (*p == '.') *p = '_';
-    char* dir = ae_path_printf("%s/ae-package-%d", get_temp_dir(), (int)getpid());
+    /* A directory compiled from: inside the private temp directory, where
+     * no one else can have made it first (#3745). */
+    const char* ptmp = ae_private_temp_dir();
+    if (!ptmp) {
+        ae_pkg_free(&mods);
+        return -1;
+    }
+    char* dir = ae_path_printf("%s/package", ptmp);
     mkdir_p(dir);
     ae_note_package_dir(dir);
     int fits = ae_sprintf(out, outcap, "%s/%s.ae", dir, stem) == 0;
@@ -7762,12 +7774,15 @@ static int cmd_run(int argc, char** argv) {
 
     // Determine temp .c file path and exe path
     // If caching: write exe directly to cache slot (no extra copy needed)
-    // Use PID in temp filenames to avoid symlink attacks and collisions
+    // Outside the tree, the C and an uncached exe go into this process's
+    // private temp directory (#3745): a pid in a name in the shared temp
+    // directory stopped neither a symlink planted there nor a file another
+    // user rewrote between the write and the compile.
     int pid = (int)getpid();
     if (tc.dev_mode) {
         snprintf(c_file, sizeof(c_file), "%s/build/_ae_%d.c", tc.root, pid);
-    } else {
-        snprintf(c_file, sizeof(c_file), "%s/_ae_%d.c", get_temp_dir(), pid);
+    } else if (!ae_private_temp_path(c_file, sizeof(c_file), "run.c")) {
+        return 1;
     }
     if (using_cache) {
         // Link into a private temp beside the slot, publish by rename
@@ -7776,8 +7791,8 @@ static int cmd_run(int argc, char** argv) {
         snprintf(exe_file, sizeof(exe_file), "%s.tmp.%d", cached_exe, pid);
     } else if (tc.dev_mode) {
         snprintf(exe_file, sizeof(exe_file), "%s/build/_ae_%d" EXE_EXT, tc.root, pid);
-    } else {
-        snprintf(exe_file, sizeof(exe_file), "%s/_ae_%d" EXE_EXT, get_temp_dir(), pid);
+    } else if (!ae_private_temp_path(exe_file, sizeof(exe_file), "run" EXE_EXT)) {
+        return 1;
     }
 
     // (The binary-import prepass ran before the cache check: see there.)
@@ -9955,7 +9970,11 @@ done:
  * whole: cut short in a fixed buffer, the tree removed was a prefix of it,
  * the temp directory itself when that was 1023 bytes long (#2899 review). */
 int cmd_build_namespace(int argc, char** argv) {
-    char* tmpdir = ae_path_printf("%s/aether_ns_%d", get_temp_dir(), (int)getpid());
+    /* In the private temp directory (#3745): a fixed name in the shared one
+     * could be made first, or swapped for a symlink, by another user. */
+    const char* ptmp = ae_private_temp_dir();
+    if (!ptmp) return 1;
+    char* tmpdir = ae_path_printf("%s/namespace", ptmp);
     if (!tmpdir) {
         fprintf(stderr, "Error: out of memory for the namespace build's temp directory\n");
         return 1;
@@ -10540,8 +10559,9 @@ static int cmd_build(int argc, char** argv) {
     char nominal_c[2048];
     snprintf(nominal_c, sizeof(nominal_c), "%s", c_file);
     if (!g_emit_csrc && !keep_generated_c()) {
-        snprintf(c_file, sizeof(c_file), "%s/ae_build_%d_%s.c",
-                 get_temp_dir(), (int)getpid(), base);
+        char cname[600];
+        snprintf(cname, sizeof(cname), "build_%s.c", base);
+        if (!ae_private_temp_path(c_file, sizeof(c_file), cname)) return 1;   /* #3745 */
     }
 
     // Override output extension for wasm target
@@ -11602,8 +11622,11 @@ static int cmd_test(int argc, char** argv) {
     }
     char** reports = (char**)calloc((size_t)test_count, sizeof(char*));
     int* child_rc = (int*)calloc((size_t)test_count, sizeof(int));   // <0 => compile/build error (no run); else exit code
-    if (!reports || !child_rc) {
-        fprintf(stderr, "Error: out of memory preparing %d test(s)\n", test_count);
+    /* Outside the tree the tests are built in the private temp directory
+     * (#3745); one that cannot be made has said why. */
+    if (!reports || !child_rc || (!tc.dev_mode && !ae_private_temp_dir())) {
+        if (!reports || !child_rc)
+            fprintf(stderr, "Error: out of memory preparing %d test(s)\n", test_count);
         free(reports);
         free(child_rc);
         test_files_free(test_files, test_count);
@@ -11628,16 +11651,25 @@ static int cmd_test(int argc, char** argv) {
          * share `build/_test_0.c` and `_ae_spec_0.txt`, so one run's
          * `remove` or rewrite landed on the other's — "FAIL (build)" for a
          * test that builds clean alone. `ae run` has keyed its temp files on
-         * the pid for the same reason (#1032). */
+         * the pid for the same reason (#1032). Outside the tree each process
+         * has a private temp directory of its own, which keeps two runs
+         * apart as well. */
         int pid = (int)getpid();
         if (tc.dev_mode) {
             snprintf(c_file, sizeof(c_file), "%s/build/_test_%d_%d.c", tc.root, pid, i);
             snprintf(exe_file, sizeof(exe_file), "%s/build/_test_%d_%d" EXE_EXT, tc.root, pid, i);
             snprintf(report_file, sizeof(report_file), "%s/build/_ae_spec_%d_%d.txt", tc.root, pid, i);
         } else {
-            snprintf(c_file, sizeof(c_file), "%s/_ae_test_%d_%d.c", get_temp_dir(), pid, i);
-            snprintf(exe_file, sizeof(exe_file), "%s/_ae_test_%d_%d" EXE_EXT, get_temp_dir(), pid, i);
-            snprintf(report_file, sizeof(report_file), "%s/_ae_spec_%d_%d.txt", get_temp_dir(), pid, i);
+            /* In the private temp directory (#3745): written, compiled and
+             * run, so no one else may be able to make or change them. The
+             * directory was made above, and these short names fit. */
+            char nc[64], ne[64], nr[64];
+            snprintf(nc, sizeof(nc), "test_%d.c", i);
+            snprintf(ne, sizeof(ne), "test_%d" EXE_EXT, i);
+            snprintf(nr, sizeof(nr), "spec_%d.txt", i);
+            ae_private_temp_path(c_file, sizeof(c_file), nc);
+            ae_private_temp_path(exe_file, sizeof(exe_file), ne);
+            ae_private_temp_path(report_file, sizeof(report_file), nr);
         }
 
         // Compile .ae to .c

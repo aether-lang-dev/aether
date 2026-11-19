@@ -27,6 +27,9 @@
 
 #include "ae_line.h"
 
+/* ae's private temp directory (tools/ae.c, #3745). */
+const char* ae_private_temp_dir(void);
+
 #include <stdarg.h>
 
 #ifdef _WIN32
@@ -576,13 +579,10 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
 
     BgSet set = { NULL, 0, 0 };
 
-    const char* tmp_dir = getenv("TMPDIR");
-#ifdef _WIN32
-    if (!tmp_dir || !*tmp_dir) tmp_dir = getenv("TEMP");
-    if (!tmp_dir || !*tmp_dir) tmp_dir = ".";
-#else
-    if (!tmp_dir || !*tmp_dir) tmp_dir = "/tmp";
-#endif
+    /* The probe sources are written, then compiled: in ae's private temp
+     * directory, not at a name in the shared one (#3745). */
+    const char* tmp_dir = ae_private_temp_dir();
+    if (!tmp_dir) return 1;
 
     int discovered = bg_discover(cc, header, include_flags, match, &set, tmp_dir);
     if (discovered <= 0) {

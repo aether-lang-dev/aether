@@ -178,10 +178,13 @@ int cmd_repl(void) {
     char line[REPL_LINE_LEN];
     int brace_depth = 0;
 
+    /* Each line is written, compiled and run from these: they live in the
+     * process's private temp directory, where no one else can make or
+     * change them between the write and the compile (#3745). */
     char ae_file[1024], c_file[1024], exe_file[1024];
-    snprintf(ae_file,  sizeof(ae_file),  "%s/_aether_repl_%d.ae",  get_temp_dir(), (int)getpid());
-    snprintf(c_file,   sizeof(c_file),   "%s/_aether_repl_%d.c",   get_temp_dir(), (int)getpid());
-    snprintf(exe_file, sizeof(exe_file), "%s/_aether_repl_%d" EXE_EXT, get_temp_dir(), (int)getpid());
+    if (!ae_private_temp_path(ae_file, sizeof(ae_file), "repl.ae") ||
+        !ae_private_temp_path(c_file, sizeof(c_file), "repl.c") ||
+        !ae_private_temp_path(exe_file, sizeof(exe_file), "repl" EXE_EXT)) return 1;
 
     while (1) {
         if (brace_depth > 0)

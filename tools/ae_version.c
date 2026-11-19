@@ -2458,13 +2458,14 @@ int cmd_version_doctor(int do_fix) {
         doc_fail(&d, "skipped: no compiler to probe with");
     } else {
         char src[1024], exe[1024], cmd[4096];
-        const char* tmp = getenv("TMPDIR");
-        if (!tmp || !*tmp) tmp = "/tmp";
-        snprintf(src, sizeof(src), "%s/ae_doctor_probe_%d.ae", tmp, (int)getpid());
-        snprintf(exe, sizeof(exe), "%s/ae_doctor_probe_%d.out", tmp, (int)getpid());
-        FILE* f = fopen(src, "w");
+        /* Written, compiled and run: in ae's private temp directory (#3745). */
+        const char* tmp = ae_private_temp_dir();
+        FILE* f = NULL;
+        if (tmp && ae_private_temp_path(src, sizeof(src), "doctor_probe.ae") &&
+            ae_private_temp_path(exe, sizeof(exe), "doctor_probe.out"))
+            f = fopen(src, "w");
         if (!f) {
-            doc_warn(&d, "could not write a probe program to %s", tmp);
+            doc_warn(&d, "could not write a probe program to %s", tmp ? tmp : "a private temp directory");
         } else {
             fprintf(f, "main() {\n    println(\"ok\")\n    return 0\n}\n");
             fclose(f);
