@@ -8401,6 +8401,32 @@ static void handle_client_connection(HttpServer* server, int client_fd) {
     http_server_drain_connection(server, client_fd);
 }
 
+/* How long the accept loops stop watching the listener after accept()
+ * found the process, or the system, out of descriptors or memory. */
+#define HTTP_ACCEPT_PAUSE_MS 100
+
+/* Did the last accept() fail for want of a descriptor or of memory? The
+ * connection stays in the listener's queue and the listener stays
+ * readable, so a loop that went straight back to poll and accept spun a
+ * core until a descriptor freed, which a client holding many connections
+ * open decides. The loops stop watching the listener for
+ * HTTP_ACCEPT_PAUSE_MS instead, as nginx disables its accept events: the
+ * queued connection is served once a descriptor frees, which is the usual
+ * end of it as idle connections time out. The reserve descriptor trick
+ * (close a spare, accept, close the connection, reopen the spare) turns
+ * that into refused connections for clients that would have been served a
+ * moment later, costs a descriptor per listener, and has no counterpart on
+ * Windows; the connection bounds (limits.loop_max_connections) keep
+ * exhaustion from being the steady state. */
+static int accept_out_of_descriptors(void) {
+#if defined(_WIN32)
+    int e = WSAGetLastError();
+    return e == WSAEMFILE || e == WSAENOBUFS;
+#else
+    return errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM;
+#endif
+}
+
 
 // ---------------------------------------------------------------------------
 // Accept thread context (one per core in multi-accept mode)
@@ -8618,23 +8644,35 @@ static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller
     AetherIoEvent events[256];
     AcceptWaiting waiting = { NULL, 0 };
 
+    /* While accept() is out of descriptors the listener is not re-armed
+     * until this time (accept_out_of_descriptors); 0 when it is armed. */
+    int64_t listen_paused_until = 0;
+
     while (server->is_running) {
+        if (listen_paused_until && conn_now_ms() >= listen_paused_until) {
+            listen_paused_until = 0;
+            aether_io_poller_add(poller, listen_fd, NULL, AETHER_IO_READ);
+        }
         int n = aether_io_poller_poll(poller, events, 256, 100);
 
         for (int i = 0; i < n; i++) {
             int fd = events[i].fd;
 
             if (fd == listen_fd) {
-                // Re-register listen fd (one-shot semantics auto-removed it)
-                aether_io_poller_add(poller, listen_fd, NULL, AETHER_IO_READ);
-
-                // Accept all pending connections
+                // Accept all pending connections, then re-register the
+                // listen fd (one-shot semantics auto-removed it), unless
+                // accept() ran out of descriptors: then it waits out a
+                // pause first rather than firing again at once.
+                int out_of_fds = 0;
                 while (1) {
                     struct sockaddr_storage client_addr;
                     socklen_t client_len = sizeof(client_addr);
                     int client_fd = accept(listen_fd,
                         (struct sockaddr*)&client_addr, &client_len);
-                    if (client_fd < 0) break;
+                    if (client_fd < 0) {
+                        out_of_fds = accept_out_of_descriptors();
+                        break;
+                    }
 
                     // Optimistic path: check if data already arrived (very common
                     // for HTTP — request follows TCP handshake immediately).
@@ -8657,6 +8695,10 @@ static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller
                         close(client_fd);
                     }
                 }
+                if (out_of_fds)
+                    listen_paused_until = conn_now_ms() + HTTP_ACCEPT_PAUSE_MS;
+                else
+                    aether_io_poller_add(poller, listen_fd, NULL, AETHER_IO_READ);
             } else {
                 // Data ready (from poller, one-shot already removed) — dispatch
                 accept_waiting_clear(&waiting, fd);
@@ -9005,7 +9047,12 @@ static int http_server_serve(HttpServer* server) {
 #endif
 
         // Fallback: poll + thread pool (non-Linux or no actor handler)
+        /* While accept() is out of descriptors, the listener is not watched
+         * until this time (accept_out_of_descriptors); 0 when it is. */
+        int64_t listen_paused_until = 0;
         while (server->is_running) {
+            int64_t pause_left = listen_paused_until ? listen_paused_until - conn_now_ms() : 0;
+            if (pause_left <= 0) listen_paused_until = 0;
 #if !defined(_WIN32)
             /* The wake pipe beside the socket: a stop writes to it, which
              * wakes this poll() everywhere (shutting the socket down wakes it
@@ -9015,6 +9062,15 @@ static int http_server_serve(HttpServer* server) {
                 { .fd = server->socket_fd, .events = POLLIN },
                 { .fd = server->wake_fds[0], .events = POLLIN },
             };
+            if (listen_paused_until) {
+                /* The wake pipe alone, for what is left of the pause. */
+                int woke = poll(&pfd[1], server->wake_fds[0] >= 0 ? 1 : 0, (int)pause_left);
+                if (woke > 0 && (pfd[1].revents & POLLIN)) {
+                    char drain[64];
+                    while (read(server->wake_fds[0], drain, sizeof(drain)) > 0) { }
+                }
+                continue;
+            }
             int ready = poll(pfd, server->wake_fds[0] >= 0 ? 2 : 1, 1000);
             if (ready <= 0) continue;
             if (server->wake_fds[0] >= 0 && (pfd[1].revents & POLLIN)) {
@@ -9034,6 +9090,15 @@ static int http_server_serve(HttpServer* server) {
                 { .fd = (SOCKET)server->socket_fd, .events = POLLRDNORM },
                 { .fd = (SOCKET)server->wake_fds[0], .events = POLLRDNORM },
             };
+            if (listen_paused_until) {
+                /* The wake socket alone, for what is left of the pause. */
+                if (server->wake_fds[0] < 0) { Sleep((DWORD)pause_left); continue; }
+                if (WSAPoll(&pfd[1], 1, (int)pause_left) > 0 && (pfd[1].revents & POLLRDNORM)) {
+                    char drain[64];
+                    while (recv((SOCKET)server->wake_fds[0], drain, (int)sizeof drain, 0) > 0) { }
+                }
+                continue;
+            }
             int ready = WSAPoll(pfd, server->wake_fds[0] >= 0 ? 2 : 1, 1000);
             if (ready <= 0) continue;
             if (server->wake_fds[0] >= 0 && (pfd[1].revents & POLLRDNORM)) {
@@ -9048,6 +9113,8 @@ static int http_server_serve(HttpServer* server) {
             int client_fd = accept(server->socket_fd, (struct sockaddr*)&client_addr, &client_len);
             if (client_fd < 0) {
                 if (!server->is_running) break;
+                if (accept_out_of_descriptors())
+                    listen_paused_until = conn_now_ms() + HTTP_ACCEPT_PAUSE_MS;
                 continue;
             }
 

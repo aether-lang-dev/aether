@@ -1183,6 +1183,15 @@ timer moves with every byte, as a receive timeout does, so before these
 budgets a client that sent a byte just inside it held a slot for ever.
 
 
+When the process runs out of descriptors, accept() fails with the
+connection still queued and the listener still readable. The accept loops
+then stop watching the listener for 100 ms, as nginx disables its accept
+events, so the queued connection is served once a descriptor frees rather
+than a core spinning on accept() until then. The reserve descriptor trick
+(close a spare, accept, close the connection) was not taken: it refuses
+clients that would have been served a moment later, and the connection
+bounds keep exhaustion from being the steady state.
+
 Fixed limits, which size buffers and have no setter: a request head
 16 KiB (`431`), a request line 2 KiB (`414`), a header line 1 KiB and 50
 headers (`431`).
