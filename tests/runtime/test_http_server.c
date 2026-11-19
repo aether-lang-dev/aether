@@ -1106,12 +1106,13 @@ TEST(http_proxy_cache_keeps_a_long_ttl) {
  * of /a evicts /b. The /a body is all 'a' and the /b body all 'b', both
  * 4 KiB; the reader checks each byte of each /a hit, twice, the second pass
  * after a pause that gives the writer time to evict. */
-enum { CACHE_RACE_BODY = 4096, CACHE_RACE_READS = 4000 };
+enum { CACHE_RACE_BODY = 4096, CACHE_RACE_HITS = 200, CACHE_RACE_TRIES = 400000 };
 
 typedef struct {
     AetherProxyCache* cache;
     HttpRequest* req;
     _Atomic int stop;
+    _Atomic int stored;   /* the writer has stored /a once */
     int bad;       /* hits whose body or headers were not /a's */
     int hits;
 } CacheRace;
@@ -1137,6 +1138,7 @@ static void* cache_race_writer(void* arg) {
                                  "X-Which: b\r\n", b, CACHE_RACE_BODY);
         aether_proxy_cache_store(r->cache, "GET", "/a", r->req, 200,
                                  "X-Which: a\r\n", a, CACHE_RACE_BODY);
+        atomic_store(&r->stored, 1);
     }
     free(a);
     free(b);
@@ -1152,9 +1154,13 @@ TEST(http_proxy_cache_hit_outlives_an_eviction) {
     ASSERT_NOT_NULL(r.req);
     pthread_t writer;
     ASSERT_EQ(0, pthread_create(&writer, NULL, cache_race_writer, &r));
-    for (int i = 0; i < CACHE_RACE_READS; i++) {
+    /* Lookups start once /a has been stored, and run until enough hits have
+     * been checked (bounded): on a fast machine a fixed number of lookups
+     * could all finish before the writer stored anything. */
+    while (!atomic_load(&r.stored)) sched_yield();
+    for (int i = 0; i < CACHE_RACE_TRIES && r.hits < CACHE_RACE_HITS; i++) {
         AetherProxyCacheEntry* e = aether_proxy_cache_lookup(r.cache, "GET", "/a", r.req);
-        if (!e) continue;
+        if (!e) { sched_yield(); continue; }
         r.hits++;
         int ok = cache_race_entry_ok(e);
         /* Room for the writer to evict /a and store /b in between. */
