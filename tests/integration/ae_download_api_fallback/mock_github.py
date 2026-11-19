@@ -5,7 +5,8 @@
 
 DIR holds the release asset(s). The "web" side (/<o>/<r>/releases/download/...)
 answers 504 whatever the file, as the real one did on 2026-11-09. The "API"
-side serves /repos/<o>/<r>/releases/tags/<tag> and /repos/<o>/<r>/releases/assets/<id>
+side serves /repos/<o>/<r>/releases (the release list, newest first),
+/repos/<o>/<r>/releases/tags/<tag> and /repos/<o>/<r>/releases/assets/<id>
 (the latter only with Accept: application/octet-stream, redirecting to /cdn/<file>
 the way the real one redirects to release-assets.githubusercontent.com).
 
@@ -13,6 +14,8 @@ MODE: ok          digest in the listing is right
       baddigest   digest in the listing is wrong
       noasset     the release lists no asset
       apidown     the API answers 504 too
+      badtag      the newest release's tag is shell and PowerShell syntax, not a
+                  version (test_ae_release_tag_refused.sh, #3744)
 Every request is appended to DIR/requests.log with its Authorization header.
 """
 import hashlib, json, os, re, sys
@@ -20,6 +23,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 port, d, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 files = sorted(f for f in os.listdir(d) if f.endswith(".tar.gz"))
+# Makes a file called "pwned" in the working directory if it reaches a POSIX
+# shell inside double quotes, or a PowerShell single-quoted string.
+BAD_TAG = "v9$(touch pwned)'+$(ni pwned)+'"
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -41,6 +47,9 @@ class H(BaseHTTPRequestHandler):
             return self._send(504, b"Gateway Timeout", "text/plain")
         if mode == "apidown" and p.startswith("/repos/"):
             return self._send(504, b"Gateway Timeout", "text/plain")
+        if re.match(r"^/repos/([^/]+)/([^/]+)/releases(\?.*)?$", p):
+            tag = BAD_TAG if mode == "badtag" else "v9.9.9"
+            return self._send(200, json.dumps([{"tag_name": tag}], indent=2).encode())
         m = re.match(r"^/repos/([^/]+)/([^/]+)/releases/tags/([^/]+)$", p)
         if m:
             assets = []

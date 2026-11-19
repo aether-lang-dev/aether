@@ -154,6 +154,15 @@ bool dir_exists(const char* path);
 void macos_prepare_binary(const char* path);
 
 const char* get_temp_dir(void);
+/* This process's private temp directory (mode 0700, a name no one can
+ * guess, removed at exit) and a file name inside it (#3745). Every temp
+ * file ae writes and then reads, compiles or runs goes there. */
+const char* ae_private_temp_dir(void);
+int ae_private_temp_path(char* out, size_t out_size, const char* name);
+/* A release tag or version: letters, digits, '.', '-', '_' and '+', and
+ * not "." or "..". Anything that reaches a URL, a path or a command line
+ * as a version is checked against it first (#3744). */
+int ae_version_ok(const char* v);
 int aetherc_capture_stdout(const char* arg1, const char* in_path,
                            const char* extra_flag,
                            char* out, size_t out_sz);

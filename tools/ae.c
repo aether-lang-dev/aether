@@ -4975,6 +4975,74 @@ static int ae_run_parallel(char* const* cmds, char* const* logs, int n, int jobs
     return failed;
 }
 
+/* One private directory per ae process, for every file ae writes to a temp
+ * place and then reads back, compiles or runs (#3745, #3744): generated C,
+ * binaries, compiler probes, captured output, downloaded JSON. A name in the
+ * shared temp directory such as $TMPDIR/_ae_<pid>.c can be made first by
+ * another local user, as a file or a symlink, and changed between the write
+ * and the compile; the pid in it guards against none of that. mkdtemp makes
+ * the directory under a name no one can guess, mode 0700, so no one else
+ * can make, replace or change anything inside it. It is made on first use
+ * and removed when the process that made it exits. %TEMP% on Windows is
+ * already the user's own, but the directory is made there too, so every
+ * platform keeps its temp files in one place. NULL, with a message, when it
+ * cannot be made. */
+static char g_private_tmp[1024];
+static int g_private_tmp_pid;
+
+static void ae_remove_private_tmp(void) {
+    /* Only in the process that made it: a forked child that leaves through
+     * exit() runs the atexit handlers it inherited. */
+    if (g_private_tmp[0] && g_private_tmp_pid == (int)getpid()) ae_remove_tree(g_private_tmp);
+    g_private_tmp[0] = '\0';
+}
+
+const char* ae_private_temp_dir(void) {
+    if (g_private_tmp[0] && g_private_tmp_pid == (int)getpid()) return g_private_tmp;
+    g_private_tmp[0] = '\0';
+#ifdef _WIN32
+    /* No mkdtemp: a fresh name, made with _mkdir, which fails when anything
+     * is there already, so a name is only ever used once it is ours. */
+    static unsigned seq = 0;
+    for (int tries = 0; tries < 100; tries++) {
+        snprintf(g_private_tmp, sizeof(g_private_tmp), "%s/ae-%d-%lu-%u", get_temp_dir(),
+                 (int)getpid(), (unsigned long)GetTickCount(), seq++);
+        for (char* q = g_private_tmp; *q; q++) if (*q == '\\') *q = '/';
+        if (_mkdir(g_private_tmp) == 0) break;
+        g_private_tmp[0] = '\0';
+    }
+#else
+    snprintf(g_private_tmp, sizeof(g_private_tmp), "%s/ae-XXXXXX", get_temp_dir());
+    if (!mkdtemp(g_private_tmp)) g_private_tmp[0] = '\0';
+#endif
+    if (!g_private_tmp[0]) {
+        fprintf(stderr, "ae: cannot make a private directory under %s: %s\n",
+                get_temp_dir(), strerror(errno));
+        return NULL;
+    }
+    static int registered = 0;
+    if (!registered) {
+        registered = 1;
+        atexit(ae_remove_private_tmp);
+    }
+    g_private_tmp_pid = (int)getpid();
+    return g_private_tmp;
+}
+
+/* `name` inside ae_private_temp_dir, into out. 0 when the directory cannot
+ * be made or the path does not fit (out is then ""). */
+int ae_private_temp_path(char* out, size_t out_size, const char* name) {
+    const char* dir = ae_private_temp_dir();
+    if (out_size) out[0] = '\0';
+    if (!dir) return 0;
+    int n = snprintf(out, out_size, "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= out_size) {
+        if (out_size) out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
 /* The object directory of this process's source build, removed at exit. */
 static char g_rt_obj_dir[1024];
 
@@ -12096,8 +12164,10 @@ static int ae_package_name_ok(const char* package) {
 }
 
 /* A version is a tag name: letters, digits, `.`, `-`, `_` and `+`, and not
- * `.` or `..`. It goes into a URL and into aether.toml. */
-static int ae_version_ok(const char* v) {
+ * `.` or `..`. It goes into a URL and into aether.toml, and the version
+ * manager (ae_version.c) checks every release tag against it before one
+ * reaches a path or a shell or PowerShell command line (#3744). */
+int ae_version_ok(const char* v) {
     if (!v || !*v || strlen(v) > 100) return 0;
     for (const char* p = v; *p; p++) {
         if (isalnum((unsigned char)*p) || *p == '.' || *p == '-' || *p == '_' || *p == '+') continue;
