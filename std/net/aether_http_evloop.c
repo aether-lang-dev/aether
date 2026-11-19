@@ -1260,6 +1260,13 @@ static int ev_dial(EvDriver* d, EvConn* c, int next_addr) {
     memset(&c->x, 0, sizeof(c->x));
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
+    /* The response limit the proxy gave the request (its body cap with room
+     * for the head, px_build), as the blocking client reads it (#3750): the
+     * exchange here is the loop's own, which init leaves unbounded, so an
+     * upstream that kept sending grew this buffer until the upstream
+     * timeout. */
+    int64_t max_response = http_request_max_response_of(c->px.outbound);
+    c->x.max_len = max_response > 0 ? (size_t)max_response : 0;
     ev_lend_rxbuf(c);
     /* A dial a lookup held up keeps the deadline its wait armed (#3283). */
     if (c->lookup_deadline) c->lookup_deadline = 0;
@@ -2004,6 +2011,17 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
              * peer sent a reset rather than a clean end, so the read fails
              * instead of returning nothing. Same conclusion as the other two,
              * since nothing had arrived: dial fresh and send once more. */
+            if (r < 0 && c->x.too_large) {
+                /* Past the proxy's cap (#3750): the upstream answered, too
+                 * much. In the blocking client's words, which the proxy
+                 * answers 502 response_too_large, with no retry and nothing
+                 * charged to the upstream's breaker. */
+                char why[192];
+                http_response_too_large_text((int64_t)c->x.max_len, why, sizeof(why));
+                r = ev_upstream_failed(d, c, why, 1);
+                if (r <= 0) return r;
+                continue;
+            }
             if (r < 0 && c->x.len == 0 && c->up.reused && !c->up_stale_retried) {
                 c->up_stale_retried = 1;
                 c->dial_fresh = 1;          /* #3260 */

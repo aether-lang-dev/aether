@@ -79,6 +79,9 @@ typedef struct {
     int    chunked;
     int    definite;
     int    invalid;    /* the response did not say where its body ends */
+    /* A chunked body's payload so far, its framing not counted: what a
+     * response limit counts of it (http_exchange_recv, #3750). */
+    size_t body_decoded;
 } HttpRespFraming;
 
 typedef struct {
@@ -106,8 +109,10 @@ typedef struct {
      * ends when the caller's budget does. */
     int64_t deadline_ms;
     int    timed_out;    /* the deadline passed before the response ended */
-    /* The most of the response the exchange holds, head and body, 0 for no
-     * bound (#3750); too_large is set when the next read would pass it. */
+    /* The most of the response the exchange holds, its head and its body's
+     * payload (a chunked body's framing is not counted, though what the
+     * buffer holds of it is bounded too), 0 for no bound (#3750);
+     * too_large is set once a read passes it. */
     size_t max_len;
     int    too_large;
 } HttpExchange;
@@ -206,6 +211,11 @@ const char* http_request_method_of(const HttpClientRequest* req);
 const char* http_request_url_of(const HttpClientRequest* req);
 const char* http_request_body_of(const HttpClientRequest* req, int* out_len);
 const char* http_request_content_type_of(const HttpClientRequest* req);
+/* The most of a response the request holds (its own limit, else the
+ * client's default), 0 for no bound; and the error past it, as the
+ * blocking client words it (#3750). */
+int64_t http_request_max_response_of(const HttpClientRequest* req);
+void http_response_too_large_text(int64_t max, char* out, size_t cap);
 
 
 /* An empty response object, and filling one in from a complete buffer. */

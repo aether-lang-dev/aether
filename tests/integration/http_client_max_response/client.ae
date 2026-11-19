@@ -121,6 +121,19 @@ main() {
     bad = bad + expect("70 MB with no limit (0) arrives whole",
         get(port, "/big/70000000", 0, 1, 0, 30), "200 len=70000000")
 
+    // A chunked body counts by its payload, not its framing: 8 MiB in
+    // 512-byte chunks is 8.1 MiB on the wire, which passed a limit of
+    // 8 MiB and room for the head. What the buffer holds of the framing is
+    // bounded too, at twice the limit: one-byte chunks take six bytes each.
+    bad = bad + expect("8 MiB in 512-byte chunks under an 8 MiB + 64 KiB limit arrives whole",
+        get(port, "/chunked/8388608/512", 8 * MIB + 65536, 1, 0, 30), "200 len=8388608")
+    bad = bad + expect_prefix("4 MiB in 512-byte chunks past a 1 MiB limit fails",
+        get(port, "/chunked/4194304/512", MIB, 1, 0, 30),
+        "error response is larger than the client's limit of 1048576 bytes")
+    bad = bad + expect_prefix("600000 bytes in one-byte chunks past twice a 1 MiB limit on the wire fails",
+        get(port, "/chunked/600000/1", MIB, 1, 0, 30),
+        "error response is larger than the client's limit of 1048576 bytes")
+
     // A streamed response's head: bounded by the limit, and by the timeout
     // as a whole.
     bad = bad + expect_prefix("an endless streamed head past 64 KiB fails",
@@ -145,6 +158,9 @@ main() {
         get("${small}", "/big/4194304", 0, 0, 0, 30), "502 len=36 [response_too_large]")
     bad = bad + expect("a proxy with an 80 MiB cap passes a 70 MB upstream answer",
         get("${big}", "/big/70000000", 0, 1, 0, 60), "200 len=70000000")
+    mid = gateway(port, 8 * MIB)
+    bad = bad + expect("a proxy with an 8 MiB cap passes 8 MiB in 512-byte chunks",
+        get("${mid}", "/chunked/8388608/512", 0, 1, 0, 30), "200 len=8388608")
 
     if bad != 0 {
         println("FAIL: ${bad} case(s)")

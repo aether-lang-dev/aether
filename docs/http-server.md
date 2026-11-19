@@ -1224,7 +1224,7 @@ The HTTP client has one limit of the same kind (`HttpClientLimits` in
 
 | Limit | Default | Set with | Past it |
 |---|---|---|---|
-| A buffered response, head and body; a streamed response's head | 64 MiB | `client.set_max_response(req, n)`, `client.set_default_max_response(n)`; `0` for none | the request fails: "response is larger than the client's limit of N bytes" |
+| A buffered response, head and body (a chunked body by its payload, its framing held to twice the limit); a streamed response's head | 64 MiB | `client.set_max_response(req, n)`, `client.set_default_max_response(n)`; `0` for none | the request fails: "response is larger than the client's limit of N bytes" |
 
 A request's timeout (`client.set_timeout`) bounds the whole exchange, a
 streamed response's head included. A response you want whole past 64 MiB

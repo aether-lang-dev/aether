@@ -270,7 +270,9 @@ int http_request_set_timeout_ns_raw(HttpClientRequest* req, int64_t timeout_ns);
 // max_response bounds the bytes a buffered response holds, head and body: a
 // server could make the client grow its buffer for as long as it kept
 // sending. A streamed response (set_stream) holds one window of its body,
-// and only its head is bounded by this. 0 for no bound.
+// and only its head is bounded by this. A chunked body counts by its
+// payload, not its chunk framing, which the client holds no more than
+// twice the limit of. 0 for no bound.
 #define HTTP_CLIENT_DEFAULT_MAX_RESPONSE ((int64_t)64 * 1024 * 1024)
 // How the error of a response past max_response begins, for a caller (the
 // reverse proxy) that answers it differently from a failed transport.

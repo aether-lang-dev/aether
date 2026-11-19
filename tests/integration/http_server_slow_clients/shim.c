@@ -61,6 +61,9 @@
  *               the head's clock (both TLS backends)
  *   per ip linger
  *               a connection refused for its address lingers 500 ms, not 2 s
+ *   loop endless upstream
+ *               the loop holds an upstream's answer to the proxy's cap:
+ *               502 response_too_large at once, not 504 after the timeout
  */
 
 #include <stdio.h>
@@ -536,11 +539,14 @@ void* aether_proxy_opts_new(void);
 const char* aether_proxy_use_reverse_proxy(HttpServer* server, const char* path_prefix,
                                            void* pool, void* opts);
 void aether_proxy_opts_free(void* opts);
+const char* aether_proxy_opts_set_body_cap(void* opts, int max_body_bytes);
 void aether_proxy_pool_free(void* pool);
 int http_server_evloop_connections(HttpServer* server);
 
 static HttpServer* g_upstream;
 static int g_loop_per_ip;   /* a per-address limit for the next gateway */
+static int g_gw_upstream_port;   /* the next gateway's upstream, 0 for g_upstream */
+static int g_gw_body_cap;        /* the next gateway's proxy body cap, 0 for its default */
 static int g_gw_rate_window;     /* the next gateway's body rate window in ms, 0 for its default */
 static int g_upstream_port;
 
@@ -589,8 +595,9 @@ static Gateway loop_gateway(const char* label, int tls, int max_conns) {
     }
     void* pool = aether_proxy_pool_new(0 /* round robin */, 10, 0, 0);
     char up[64];
-    snprintf(up, sizeof(up), "http://127.0.0.1:%d", g_upstream_port);
+    snprintf(up, sizeof(up), "http://127.0.0.1:%d", g_gw_upstream_port ? g_gw_upstream_port : g_upstream_port);
     void* opts = aether_proxy_opts_new();
+    if (opts && g_gw_body_cap) aether_proxy_opts_set_body_cap(opts, g_gw_body_cap);
     if (!pool || !opts || *aether_proxy_upstream_add(pool, up, 1) ||
         *aether_proxy_use_reverse_proxy(s, "/", pool, opts) ||
         http_server_bind_raw(s, "127.0.0.1", 0) < 0 ||
@@ -1381,6 +1388,102 @@ static void round_per_ip_linger(void) {
 }
 
 #ifndef _WIN32
+/* An upstream that answers any request with a 1 GiB Content-Length, sends
+ * 64 MiB of it, and then waits: one connection, then it closes. */
+typedef struct { int listener; } EndlessUpstream;
+
+static void endless_upstream(void* p) {
+    EndlessUpstream* u = (EndlessUpstream*)p;
+    int c = (int)accept(u->listener, NULL, NULL);
+    if (c < 0) return;
+    char head[4096];
+    int have = 0;
+    while (have < (int)sizeof(head) - 1) {
+        int n = (int)recv(c, head + have, 1, 0);
+        if (n <= 0) break;
+        have += n;
+        head[have] = '\0';
+        if (have >= 4 && memcmp(head + have - 4, "\r\n\r\n", 4) == 0) break;
+    }
+    static const char resp[] = "HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\n";
+    static char chunk[65536];
+    memset(chunk, 'e', sizeof(chunk));
+    int ok = send_nosig(c, resp, (int)sizeof(resp) - 1) > 0;
+    for (int i = 0; ok && i < 1024; i++) {
+        int off = 0;
+        while (off < (int)sizeof(chunk)) {
+            int n = send_nosig(c, chunk + off, (int)sizeof(chunk) - off);
+            if (n <= 0) { ok = 0; break; }
+            off += n;
+        }
+    }
+    /* Then nothing, until the gateway lets go or 12 s pass. */
+    for (int i = 0; ok && i < 120; i++) {
+        char b;
+        if (readable(c, 100) && recv(c, &b, 1, 0) <= 0) break;
+    }
+    close(c);
+}
+
+/* A gateway with a 1 MiB body cap before that upstream. The loop's own
+ * exchange read the upstream with no limit (the proxy's cap was on the
+ * request, which the loop does not read through), so it buffered the
+ * 64 MiB and waited for the rest until the upstream timeout, 504 after
+ * 10 s. It stops at the cap: 502 response_too_large, at once. */
+static void round_loop_endless(void) {
+    const char* label = "loop endless upstream";
+    int ls = (int)socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t al = sizeof(a);
+    if (ls < 0 || bind(ls, (struct sockaddr*)&a, sizeof(a)) != 0 || listen(ls, 4) != 0 ||
+        getsockname(ls, (struct sockaddr*)&a, &al) != 0) {
+        report(label, 0, -1, -1, "upstream listen");
+        if (ls >= 0) close(ls);
+        return;
+    }
+    EndlessUpstream up = { ls };
+    SlowThreadArg arg = { endless_upstream, &up };
+    slow_thread t;
+    if (slow_thread_start(&t, &arg) != 0) { report(label, 0, -1, -1, "thread"); close(ls); return; }
+    g_gw_upstream_port = ntohs(a.sin_port);
+    g_gw_body_cap = 1024 * 1024;
+    Gateway g = loop_gateway(label, 0, 0);
+    g_gw_upstream_port = 0;
+    g_gw_body_cap = 0;
+    char head[2048] = "";
+    int64_t elapsed = -1;
+    if (g.server) {
+        client_sock s = client_connect(http_server_port(g.server));
+        if (s != CLIENT_BAD) {
+            static const char req[] = "GET /big HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+            int64_t t0 = now_ms();
+            send_all(s, req, (int)sizeof(req) - 1);
+            int have = 0;
+            while (have < (int)sizeof(head) - 1 && readable(s, 12000)) {
+                int n = (int)recv(s, head + have, (int)sizeof(head) - 1 - have, 0);
+                if (n <= 0) break;
+                have += n;
+                head[have] = '\0';
+                if (strstr(head, "\r\n\r\n")) break;
+            }
+            elapsed = now_ms() - t0;
+            client_close(s);
+        }
+    }
+    int ran = g.server && on_loop(g, label);
+    loop_gateway_free(g);
+    shutdown(ls, SHUT_RDWR);
+    slow_thread_join(t);
+    close(ls);
+    if (!ran) return;
+    int status = strncmp(head, "HTTP/1.1 ", 9) == 0 ? atoi(head + 9) : -1;
+    report(label, status == 502 && strstr(head, "response_too_large") && elapsed < 3000,
+           elapsed, status, strstr(head, "response_too_large") ? "response_too_large" : "");
+}
+
 /* The burst and trickle through the loop: 408 within the rate window. */
 static void round_loop_burst(void) {
     const char* label = "loop burst";
@@ -1444,6 +1547,7 @@ int http_slow_clients_probe(void) {
         round_loop_rate();
         round_loop_slots();
         round_loop_burst();
+        round_loop_endless();
     }
     if (WANT("perip")) round_loop_per_ip();
     if (WANT("descriptors")) round_descriptors();

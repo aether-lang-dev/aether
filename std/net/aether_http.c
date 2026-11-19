@@ -1244,7 +1244,10 @@ static int http_chunk_size_line(const char* line, size_t n, uint64_t* size) {
  * one grammar. 1 when all of it is there, with *frame_len the bytes it takes
  * (its trailer section and the CRLF that ends it included); 0 when more has
  * to arrive; -1 when it is not chunked framing. With `out`, the data of each
- * chunk is copied there as well and *out_len is the payload's length.
+ * chunk is copied there as well and *out_len is the payload's length. When
+ * more has to arrive, *out_len is the payload so far, what there is of the
+ * chunk being read included (nothing is copied then): a response limit
+ * counts it (#3750).
  *
  * Framing and decoding are this one walk, so the length a server buffers and
  * the bytes it then decodes cannot disagree: they did, when the framing check
@@ -1255,7 +1258,10 @@ static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
     size_t off = 0, oi = 0;
     for (;;) {
         const char* lf = (const char*)memchr(buf + off, '\n', len - off);
-        if (!lf) return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        if (!lf) {
+            if (out_len) *out_len = oi;
+            return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        }
         size_t line_len = (size_t)(lf - (buf + off));
         uint64_t size = 0;
         if (line_len > HTTP_CHUNK_LINE_MAX ||
@@ -1265,6 +1271,10 @@ static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
         if ((uint64_t)(len - off) < size + 2) {
             /* What is there of the CRLF after the data has to be one. */
             if ((uint64_t)(len - off) > size && buf[off + size] != '\r') return -1;
+            if (out_len) {
+                uint64_t have = (uint64_t)(len - off);
+                *out_len = oi + (size_t)(have < size ? have : size);
+            }
             return 0;
         }
         if (out) memcpy(out + oi, buf + off, (size_t)size);
@@ -1278,7 +1288,10 @@ static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
      * line ends in CRLF and carries no CR of its own. */
     for (;;) {
         const char* lf = (const char*)memchr(buf + off, '\n', len - off);
-        if (!lf) return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        if (!lf) {
+            if (out_len) *out_len = oi;
+            return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        }
         size_t line_len = (size_t)(lf - (buf + off));
         if (line_len > HTTP_CHUNK_LINE_MAX || line_len == 0 ||
             buf[off + line_len - 1] != '\r' ||
@@ -1727,14 +1740,23 @@ static int64_t http_request_max_response(const HttpClientRequest* req) {
     return atomic_load(&http_client_max_response);
 }
 
-/* The error a response past it fails with, saying which limit and how to
- * change it. */
-static AetherString* http_response_too_large_error(int64_t max) {
-    char msg[192];
-    snprintf(msg, sizeof(msg),
+int64_t http_request_max_response_of(const HttpClientRequest* req) {
+    return http_request_max_response(req);
+}
+
+/* The error a response past `max` fails with, saying which limit and how
+ * to change it: the blocking client's, and the proxy event loop's for an
+ * upstream's answer (#3750), which the proxy reads by its prefix. */
+void http_response_too_large_text(int64_t max, char* out, size_t cap) {
+    snprintf(out, cap,
              HTTP_CLIENT_TOO_LARGE_PREFIX " of %lld bytes "
              "(set_max_response, or set_stream to read it in pieces)",
              (long long)max);
+}
+
+static AetherString* http_response_too_large_error(int64_t max) {
+    char msg[192];
+    http_response_too_large_text(max, msg, sizeof(msg));
     return string_new(msg);
 }
 
@@ -3190,7 +3212,9 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
     if (f->invalid) return 1;      /* stop reading; the driver reports it */
     if (!f->definite) return 0;
     if (f->chunked) {
-        int rc = http_chunked_frame(buf + f->header_bytes, len - f->header_bytes, NULL);
+        size_t frame = 0;
+        int rc = http_chunked_walk(buf + f->header_bytes, len - f->header_bytes, &frame,
+                                   NULL, &f->body_decoded);
         /* Framing that is not chunked framing has not said where the body
          * ends either: reading on would wait for an end that never comes. */
         if (rc < 0) f->invalid = 1;
@@ -3859,10 +3883,20 @@ int http_exchange_recv(HttpExchange* x) {
         if (n < 0)  return http_io_would_block() ? AE_X_WANT_READ : AE_X_ERROR;
         /* Past the response limit, the read ends there (#3750): a server
          * could make the client grow this buffer for as long as it kept
-         * sending. */
-        if (x->max_len && x->len + (size_t)n > x->max_len) {
-            x->too_large = 1;
-            return AE_X_ERROR;
+         * sending. The limit is on the head and the body's payload: a
+         * chunked body's framing is not the response's size, and counted
+         * it put a body of the limit's size in 512-byte chunks past it, so
+         * a proxy refused what fit its cap. What the buffer holds of a
+         * chunked body is bounded at twice the limit, framing and all, so
+         * chunks of a byte each cannot grow it without bound either. */
+        if (x->max_len) {
+            size_t cap = x->max_len;
+            if (x->framing.chunked)
+                cap = x->max_len > (SIZE_MAX - 65536) / 2 ? SIZE_MAX : x->max_len * 2 + 65536;
+            if (x->len + (size_t)n > cap) {
+                x->too_large = 1;
+                return AE_X_ERROR;
+            }
         }
 
         if (x->len + (size_t)n + 1 > x->cap) {
@@ -3882,7 +3916,13 @@ int http_exchange_recv(HttpExchange* x) {
         x->len += (size_t)n;
         x->buf[x->len] = '\0';
 
-        if (http_response_is_complete(&x->framing, x->buf, x->len, x->method)) {
+        int done = http_response_is_complete(&x->framing, x->buf, x->len, x->method);
+        if (x->max_len && x->framing.chunked &&
+            x->framing.header_bytes + x->framing.body_decoded > x->max_len) {
+            x->too_large = 1;
+            return AE_X_ERROR;
+        }
+        if (done) {
             x->complete = 1;
             return AE_X_DONE;
         }

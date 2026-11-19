@@ -2,6 +2,7 @@
  * server sends, over a raw socket, one connection at a time.
  *
  *   GET /big/<n>        200 with a Content-Length of n and n bytes of 'b'
+ *   GET /chunked/<n>/<k> 200 with n bytes of 'c', chunked, k bytes a chunk
  *   GET /endless_head   a status line, then header lines without end, 4 MiB
  *                       of them, then the close
  *   GET /drip_head      a status line, then one byte of a header every
@@ -41,6 +42,21 @@ static void serve(raw_sock c) {
             if (raw_send_all(c, chunk, take) != 0) return;   /* the client gave up */
             n -= (long long)take;
         }
+    } else if (strncmp(head, "GET /chunked/", 13) == 0) {
+        long long n = atoll(head + 13);
+        const char* slash = strchr(head + 13, '/');
+        long long k = slash ? atoll(slash + 1) : 0;
+        if (k <= 0 || k > (long long)sizeof(chunk) - 32) k = 512;
+        raw_sendf(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+        while (n > 0) {
+            long long take = n < k ? n : k;
+            int h = snprintf(chunk, sizeof(chunk), "%llx\r\n", take);
+            memset(chunk + h, 'c', (size_t)take);
+            memcpy(chunk + h + take, "\r\n", 2);
+            if (raw_send_all(c, chunk, (size_t)(h + take + 2)) != 0) return;
+            n -= take;
+        }
+        raw_sendf(c, "0\r\n\r\n");
     } else if (strncmp(head, "GET /endless_head ", 18) == 0) {
         raw_sendf(c, "HTTP/1.1 200 OK\r\n");
         memset(chunk, 'a', sizeof(chunk));
