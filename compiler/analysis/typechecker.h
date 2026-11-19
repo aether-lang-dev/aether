@@ -131,6 +131,9 @@ SymbolTable* create_symbol_table(SymbolTable* parent);
 void free_symbol_table(SymbolTable* table);
 void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, int is_function, int is_state);
 Symbol* lookup_symbol(SymbolTable* table, const char* name);
+/* The declaration of a type a value already has, hide / seal not asked:
+ * they restrict the names a block writes, not its values' types. */
+Symbol* lookup_type_symbol(SymbolTable* table, const char* name);
 Symbol* lookup_symbol_local(SymbolTable* table, const char* name);
 /* docs/quote.md: the program-level `const NAME`, or NULL. */
 ASTNode* tc_program_const(const char* name);

@@ -228,6 +228,27 @@ always visible inside that block, regardless of what's hidden:
 }
 ```
 
+### A value keeps its type
+
+The directives decide which *names* a block may write. They do not change
+the types of the values it holds. A parameter `b: *Browser` in a body sealed
+without `Browser` is still a `*Browser`: `b.app_dir` is its `string` field,
+compared, copied and released as a string. Writing the name `Browser` in
+that body (`heap.new(Browser)`, `Browser { ... }`) is reaching for the name,
+and needs it on the list. `hide Browser` is the same: values of the type
+keep it.
+
+### No change to the code generated
+
+A body that compiles both with and without a directive compiles to the same
+C. The list names what the block may reach; it is not a use of anything on
+it. (Through 0.923.0 it was: a struct the list did not name lost its field
+types, silently, so a string field compared as a pointer; and a name on the
+list counted as a use, so a listed function was taken for a function value
+and a listed local's last use copied instead of moving.
+`tests/integration/hide_seal_directives/test_seal_codegen_identical.sh`
+holds the shapes.)
+
 ## What `hide` is NOT
 
 - **Not an effect system.** It cannot prevent a function you call from
@@ -330,8 +351,11 @@ before namespace resolution, so `hide http` blocks `http.get()` too.
 Local bindings always win, the hide/seal sets only affect the
 boundary crossing into outer scopes.
 
-There is no runtime overhead. There is no codegen change. The feature
-is a pure compile-time hygiene check.
+There is no runtime overhead. There is no codegen change: the type
+checker removes every directive once the program has checked
+(`ast_drop_scope_directives`), and the declaration of a type a value
+already has is looked up past them (`lookup_type_symbol`). The feature is a
+pure compile-time hygiene check.
 
 ---
 

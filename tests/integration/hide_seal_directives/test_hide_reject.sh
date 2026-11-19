@@ -388,6 +388,21 @@ main() {
 EOF
 run_accept "seal except permits local tuple-destructure bindings" $AE_TMP/ae_seal_local_destructure.ae
 
+# A struct literal writes its struct's name, which a seal must list; a value
+# of the struct reached without writing it keeps its type
+# (test_seal_codegen_identical.sh). The literal was refused only by
+# accident, as a local "of a type the program does not define" (E0302).
+cat > $AE_TMP/ae_seal_struct_literal.ae << 'EOF'
+struct T { a: int }
+f(n: int) -> int {
+    seal except n
+    e = T { a: n }
+    return e.a
+}
+main() { println("${f(1)}") }
+EOF
+run_reject_hidden "seal except refuses a literal of an unlisted struct" $AE_TMP/ae_seal_struct_literal.ae
+
 # One member of a module: `hide ns.member` and `import ns hiding (member)`
 # deny that member and leave the rest of the module visible (sae's kernel
 # imports all of ui but ui.open_url). A module of our own, beside the files.

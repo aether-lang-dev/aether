@@ -1843,6 +1843,9 @@ int compile_source(const char* input_path, const char* output_path) {
         return 0;
     }
     phase_mark("typecheck");
+    /* A seal or hide has said all it has to by now; codegen must emit the
+     * body as it would without one (docs/hide-and-seal.md). */
+    ast_drop_scope_directives(program);
 
     if (verbose_mode) printf("Type checking successful\n");
     if (check_only_mode && !emit_short_names_mode) typecheck_warn_short_names();
