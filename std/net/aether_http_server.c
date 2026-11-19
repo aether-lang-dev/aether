@@ -3960,6 +3960,28 @@ void* http_server_proxy_opts(HttpServer* server) {
     return NULL;
 }
 
+/* Room for one more header in `res`'s arrays: 1, or 0 when it cannot be
+ * made. They start with 50 slots (http_response_create, or the lazy
+ * allocation in the setters) and double when full. The capacity is not
+ * stored, since the struct's layout is part of the ABI, so it is the one the
+ * count implies: 50, then 100, 200 and so on. A response held 50 headers and
+ * dropped the rest without a word, so a proxied response with more lost
+ * them on the copying path while the pass-through forwarded them (#3749,
+ * found by the proxy-response fuzzer). */
+static int response_header_room(HttpServerResponse* res) {
+    int cap = 50;
+    while (cap < res->header_count && cap <= INT_MAX / 4) cap *= 2;
+    if (res->header_count < cap) return 1;
+    if (cap > INT_MAX / 4) return 0;
+    char** keys = (char**)realloc(res->header_keys, sizeof(char*) * (size_t)cap * 2);
+    if (!keys) return 0;
+    res->header_keys = keys;
+    char** values = (char**)realloc(res->header_values, sizeof(char*) * (size_t)cap * 2);
+    if (!values) return 0;
+    res->header_values = values;
+    return 1;
+}
+
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
     if (!res) return;
     /* A header carrying a line ending would be written into the response head
@@ -3992,10 +4014,10 @@ void http_response_set_header(HttpServerResponse* res, const char* key, const ch
         }
     }
 
-    // Add new header (max 50). Store only if both copies succeed; a NULL key
-    // would crash the strcasecmp above on the next call, a NULL value the
-    // serializer's strlen.
-    if (res->header_count >= 50) return;
+    // Add new header, growing the arrays when full. Store only if both copies
+    // succeed; a NULL key would crash the strcasecmp above on the next call,
+    // a NULL value the serializer's strlen.
+    if (!response_header_room(res)) return;
     char* kd = strdup(key);
     char* vd = strdup(value);
     if (!kd || !vd) { free(kd); free(vd); return; }
@@ -4034,7 +4056,7 @@ void http_response_clear_headers(HttpServerResponse* res) {
 // multiplicity that the serializer at line 1149 emits as separate
 // `Name: Value\r\n` lines.
 //
-// 50-header cap is shared with `set_header`; over-cap silently drops.
+// The arrays grow as set_header's do (response_header_room).
 void http_response_add_header(HttpServerResponse* res, const char* key, const char* value) {
     if (!res) return;
     /* Same rejection as set_header: a line ending here splits the response. */
@@ -4045,7 +4067,7 @@ void http_response_add_header(HttpServerResponse* res, const char* key, const ch
         res->header_count = 0;
         if (!res->header_keys || !res->header_values) return;
     }
-    if (res->header_count >= 50) return;
+    if (!response_header_room(res)) return;
     char* kd = strdup(key);
     char* vd = strdup(value);
     if (!kd || !vd) { free(kd); free(vd); return; }

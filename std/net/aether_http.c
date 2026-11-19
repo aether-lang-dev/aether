@@ -3370,6 +3370,14 @@ void http_response_fill_from_bytes(HttpResponse* response,
     char* header_end = (char*)http_find_header_end(buf, len);
     if (!header_end) {
         response->body = string_new_with_length(buf, len);
+        /* No head at all: nothing, or bytes that are not HTTP, before the
+         * peer closed. It came back as status 0 with no error, which the
+         * reverse proxy copied onto its own reply as "HTTP/1.1 0" (#3749,
+         * found by the proxy-response fuzzer), and a client read as a
+         * response. It is an error, as a head with no status is. */
+        if (!response->error)
+            response->error = string_new(len ? "the response has no complete head"
+                                             : "the connection closed with no response");
         return;
     }
     size_t header_bytes = (size_t)((header_end + 4) - buf);

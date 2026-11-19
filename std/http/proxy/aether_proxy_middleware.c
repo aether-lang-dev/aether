@@ -127,6 +127,22 @@ static int is_hop_by_hop(const char* name) {
     return 0;
 }
 
+/* Put one of the upstream's header fields on `res`. A field the response
+ * object holds once replaces it where it is: Content-Type and Server, which
+ * it is created holding, and Content-Length, which states the body this
+ * proxy sends. Every other field is added, so a repeated one (Set-Cookie
+ * above all, which cannot be folded into one line) reaches the client as
+ * many times as the upstream sent it. Each was set, which kept the last of
+ * them only, while the pass-through forwarded them all (#3749, found by the
+ * proxy-response fuzzer). */
+static void proxy_put_header(HttpServerResponse* res, const char* key, const char* value) {
+    if (strcasecmp(key, "Content-Type") == 0 || strcasecmp(key, "Server") == 0 ||
+        strcasecmp(key, "Content-Length") == 0)
+        http_response_set_header(res, key, value);
+    else
+        http_response_add_header(res, key, value);
+}
+
 static int token_list_contains(const char* csv, const char* needle) {
     if (!csv || !*csv) return 1;
     if (!needle || !*needle) return 0;
@@ -370,7 +386,7 @@ static void serve_from_cache(HttpServerResponse* res, const HttpRequest* req,
     for (int i = 0; i < e->header_count; i++) {
         if (is_hop_by_hop(e->header_keys[i])) continue;
         if (strcasecmp(e->header_keys[i], "X-Cache") == 0) continue;
-        http_response_set_header(res, e->header_keys[i], e->header_values[i]);
+        proxy_put_header(res, e->header_keys[i], e->header_values[i]);
     }
     http_response_set_header(res, "X-Cache", "HIT");
     proxy_set_body(res, req, e->body, (int)e->body_length);
@@ -951,7 +967,7 @@ static int px_copy(AetherProxyExchange* px) {
                         }
                         memcpy(val, v, vl);
                         val[vl] = '\0';
-                        http_response_set_header(res, keybuf, val);
+                        proxy_put_header(res, keybuf, val);
                         if (strcasecmp(keybuf, "Content-Type") == 0) seen_content_type = 1;
                         if (val != stackval) free(val);
                     }
@@ -1070,6 +1086,13 @@ int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
 
     int status = direct_status_of(raw, header_bytes);
     if (status == 0) return -1;      /* no status line: not ours to pass on */
+    /* An interim response (1xx) ahead of the final one: the framing's
+     * header_bytes ends after the final head, but this path reads the head
+     * from the start of the bytes, so it answered with the interim status
+     * and the interim's fields in front of the final ones (#3749, found by
+     * the proxy-response fuzzer). The copying path's reader skips interim
+     * responses; it answers these. */
+    if (status < 200) return -1;
 
     /* Everything that can decline is decided before anything is recorded.
      * A decline sends the caller down the copying path, which does its own
@@ -1206,6 +1229,14 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
          * in the upstream's position so the header order matches. */
         /* An answer to HEAD keeps the upstream's, which states the GET's
          * length (RFC 9110 9.3.2), and is copied below like any field. */
+        /* Once: an upstream may repeat the field with one value (RFC 9112
+         * 6.3), and the copying path holds it in one slot, at the first
+         * one's position (#3749). */
+        if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && saw_content_length) {
+            p = cr + 2;
+            continue;
+        }
+        if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && d->head_only) saw_content_length = 1;
         if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && !d->head_only) {
             char cl[48];
             size_t cn = 16;
