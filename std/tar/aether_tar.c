@@ -20,7 +20,10 @@
 
 int aether_tar_set_mtime_raw(const char* path, int64_t mtime, int is_symlink) {
     if (!path) return 0;
-    if (!aether_sandbox_check("fs_write", path)) return 0;
+    // A symlink's own times are its own: the link is checked, not what it
+    // leads to (#3751).
+    if (!(is_symlink ? aether_sandbox_check_entry("fs_write", path)
+                     : aether_sandbox_check("fs_write", path))) return 0;
 
 #ifdef _WIN32
     // Windows implementation with UTF-8 to UTF-16 path conversion

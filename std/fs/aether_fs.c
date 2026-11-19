@@ -406,21 +406,6 @@ static inline const char* fs_unwrap_bytes(const char* data, int explicit_len, si
 File* file_open_raw(const char* path, const char* mode) {
     if (!path || !mode) { errno = 0; return NULL; }
 
-    // Sandbox check: what the mode asks of the file. "r+" reads and writes,
-    // so it needs fs_read and fs_write; it used to pass as a read (#3742).
-    // A refusal reads as EACCES, as libaether_sandbox_preload's refusals
-    // do, so a caller that renders errno says "Permission denied" rather
-    // than a stale reason.
-    int access = aether_fopen_access(mode);
-    if ((access & AETHER_ACCESS_READ) && !aether_sandbox_check("fs_read", path)) {
-        errno = EACCES;
-        return NULL;
-    }
-    if ((access & AETHER_ACCESS_WRITE) && !aether_sandbox_check("fs_write", path)) {
-        errno = EACCES;
-        return NULL;
-    }
-
     /* Verbatim bytes on every platform. fs.read / fs.write / read_binary /
      * write_binary / std.io all open binary; this was the one entry point
      * that handed the caller's mode to fopen as written, so on Windows
@@ -438,7 +423,12 @@ File* file_open_raw(const char* path, const char* mode) {
         snprintf(bmode, sizeof(bmode), "%sb", mode);
         mode = bmode;
     }
-    FILE* fp = fopen(path, mode);
+    // The sandbox checks what the mode asks of the file: "r+" reads and
+    // writes, so it needs fs_read and fs_write (#3742). The file opened is
+    // the one checked (aether_sandbox_fopen, #3751). A refusal reads as
+    // EACCES, as libaether_sandbox_preload's refusals do, so a caller that
+    // renders errno says "Permission denied" rather than a stale reason.
+    FILE* fp = (FILE*)aether_sandbox_fopen(path, mode);
     if (!fp) return NULL;
 
     File* file = (File*)aether_caps_malloc(sizeof(File));
@@ -823,7 +813,8 @@ int file_exists(const char* path) {
  * shell idiom. Empty / NULL path returns 0. */
 int fs_path_exists(const char* path) {
     if (!path || !*path) return 0;
-    if (!aether_sandbox_check("fs_read", path)) return 0;
+    // lstat looks at a symlink itself: its name is checked (#3751).
+    if (!aether_sandbox_check_entry("fs_read", path)) return 0;
 
 #ifdef _WIN32
     /* Windows lacks lstat; stat is fine — symlinks behave like
@@ -838,8 +829,14 @@ int fs_path_exists(const char* path) {
 
 int file_delete_raw(const char* path) {
     if (!path) return 0;
-    if (!aether_sandbox_check("fs_write", path)) return 0;
+    // remove() takes a symlink away, not what it leads to: its name is
+    // checked, and on POSIX removed as checked (#3751).
+#ifdef _WIN32
+    if (!aether_sandbox_check_entry("fs_write", path)) return 0;
     return remove(path) == 0 ? 1 : 0;
+#else
+    return aether_sandbox_remove(path) == 0 ? 1 : 0;
+#endif
 }
 
 /* 64-bit stat shim (#1021). The size/mtime surfaces below return
@@ -901,8 +898,14 @@ int dir_exists(const char* path) {
 
 int dir_create_raw(const char* path) {
     if (!path) return 0;
-    if (!aether_sandbox_check("fs_write", path)) return 0;   /* as fs_mkdir_p_raw, #3743 */
+    /* fs_write on the new name, as fs_mkdir_p_raw (#3743), made as checked
+     * on POSIX (#3751). */
+#ifdef _WIN32
+    if (!aether_sandbox_check_entry("fs_write", path)) return 0;
     return mkdir(path, 0755) == 0 ? 1 : 0;
+#else
+    return aether_sandbox_mkdir(path, 0755) == 0 ? 1 : 0;
+#endif
 }
 
 // Like dir_create_raw, but with an explicit mode. Lets users create
@@ -942,15 +945,20 @@ static int dir_create_mode_os(const char* path, int mode) {
     aether_caps_free(wpath, wbytes);
     return aether_fs_win_kind(err);
 #else
-    return mkdir(path, (mode_t)(mode & 0777)) == 0 ? aether_fs_errno_to_kind(0)
+    return aether_sandbox_mkdir(path, mode & 0777) == 0 ? aether_fs_errno_to_kind(0)
                                                    : aether_fs_errno_to_kind(errno);
 #endif
 }
 
 int dir_delete_raw(const char* path) {
     if (!path) return 0;
-    if (!aether_sandbox_check("fs_write", path)) return 0;   /* #3743 */
+    /* #3743; the name itself, removed as checked on POSIX (#3751). */
+#ifdef _WIN32
+    if (!aether_sandbox_check_entry("fs_write", path)) return 0;
     return rmdir(path) == 0 ? 1 : 0;
+#else
+    return aether_sandbox_rmdir(path) == 0 ? 1 : 0;
+#endif
 }
 
 // `mkdir -p` semantics: walk through each '/' in `path`, creating each
@@ -966,6 +974,12 @@ int dir_delete_raw(const char* path) {
 // is the only valid shape, and that's already an existing root).
 int fs_mkdir_p_raw(const char* path) {
     if (!path || !*path) return 0;
+#if defined(AETHER_HAS_SANDBOX) && !defined(_WIN32)
+    /* Inside an enforce block the whole path is checked once, as here
+     * always, and each directory made from the one before it, none
+     * followed (#3751). */
+    if (aether_sandbox_levels_here() > 0) return aether_sandbox_mkdir_p(path, 0755) == 0 ? 1 : 0;
+#endif
     if (!aether_sandbox_check("fs_write", path)) return 0;
 
     char buf[4096];
@@ -1018,23 +1032,24 @@ int fs_mkdir_p_raw(const char* path) {
 // is recorded verbatim — relative targets stay relative.
 int fs_symlink_raw(const char* target, const char* link_path) {
     if (!target || !link_path) return 0;
-    if (!aether_sandbox_check("fs_write", link_path)) return 0;
-    return symlink(target, link_path) == 0 ? 1 : 0;
+    // The new name is checked and made as checked (#3751).
+    return aether_sandbox_symlink(target, link_path) == 0 ? 1 : 0;
 }
 
 // Create a hard link: a second directory entry for the same file. Both
 // names must be on one filesystem; directories cannot be hard-linked.
 int fs_hard_link_raw(const char* target, const char* link_path) {
     if (!target || !link_path) return 0;
-    if (!aether_sandbox_check("fs_write", link_path)) return 0;
-    return link(target, link_path) == 0 ? 1 : 0;
+    // The new name needs fs_write, and may not reach the file more than the
+    // old one may (aether_sandbox_link, #3751).
+    return aether_sandbox_link(target, link_path) == 0 ? 1 : 0;
 }
 
 // Read a symbolic link. Returns the target as a counted string the caller
 // owns, or NULL if `path` isn't a symlink or can't be read.
 char* fs_readlink_raw(const char* path) {
     if (!path) return NULL;
-    if (!aether_sandbox_check("fs_read", path)) return NULL;
+    if (!aether_sandbox_check_entry("fs_read", path)) return NULL;   /* the link itself, #3751 */
 
     char buf[4096];
     ssize_t n = readlink(path, buf, sizeof(buf) - 1);
@@ -1094,7 +1109,7 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
 // exist.
 int fs_is_symlink(const char* path) {
     if (!path) return 0;
-    if (!aether_sandbox_check("fs_read", path)) return 0;
+    if (!aether_sandbox_check_entry("fs_read", path)) return 0;   /* the link itself, #3751 */
 
     struct stat st;
     if (lstat(path, &st) != 0) return 0;
@@ -1120,7 +1135,7 @@ int fs_is_socket(const char* path) {
 // KIND_IS_DIR on every platform: Linux says EISDIR, but macOS and the BSDs
 // say EPERM, which would otherwise read as a permission problem.
 static int fs_unlink_os(const char* path) {
-    if (unlink(path) == 0) return aether_fs_errno_to_kind(0);
+    if (aether_sandbox_unlink(path) == 0) return aether_fs_errno_to_kind(0);
     int err = errno;
     struct stat st;
     if ((err == EPERM || err == EACCES || err == EISDIR) &&
@@ -1168,7 +1183,9 @@ typedef struct {
 /* A hard link on Windows: CreateHardLinkW (NTFS; same volume; files only). */
 int fs_hard_link_raw(const char* target, const char* link_path) {
     if (!target || !link_path) return 0;
-    if (!aether_sandbox_check("fs_write", link_path)) return 0;
+    // The new name needs fs_write, and may not reach the file more than the
+    // old one may (#3751).
+    if (!aether_sandbox_check_link(target, link_path)) return 0;
     size_t wt_bytes = 0, wl_bytes = 0;
     wchar_t* wt = fs_win_wide(target, &wt_bytes);
     wchar_t* wl = fs_win_wide(link_path, &wl_bytes);
@@ -1193,7 +1210,7 @@ int fs_hard_link_raw(const char* target, const char* link_path) {
  * without it. */
 int fs_symlink_raw(const char* target, const char* link_path) {
     if (!target || !link_path) return 0;
-    if (!aether_sandbox_check("fs_write", link_path)) return 0;
+    if (!aether_sandbox_check_entry("fs_write", link_path)) return 0;   /* the new name, #3751 */
     size_t wt_bytes = 0, wl_bytes = 0;
     wchar_t* wt = fs_win_wide(target, &wt_bytes);
     wchar_t* wl = fs_win_wide(link_path, &wl_bytes);
@@ -1250,7 +1267,7 @@ int fs_symlink_raw(const char* target, const char* link_path) {
  * `path` is not a symlink or cannot be read — the POSIX contract. */
 char* fs_readlink_raw(const char* path) {
     if (!path) return NULL;
-    if (!aether_sandbox_check("fs_read", path)) return NULL;
+    if (!aether_sandbox_check_entry("fs_read", path)) return NULL;   /* the link itself, #3751 */
     size_t wp_bytes = 0;
     wchar_t* wp = fs_win_wide(path, &wp_bytes);
     if (!wp) return NULL;
@@ -1339,7 +1356,7 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
  * ordinary files. */
 int fs_is_symlink(const char* path) {
     if (!path) return 0;
-    if (!aether_sandbox_check("fs_read", path)) return 0;
+    if (!aether_sandbox_check_entry("fs_read", path)) return 0;   /* the link itself, #3751 */
     size_t wp_bytes = 0;
     wchar_t* wp = fs_win_wide(path, &wp_bytes);
     if (!wp) return 0;
@@ -1393,12 +1410,12 @@ static int fs_unlink_os(const char* path) {
  * which has no OS reason and takes the caller's fallback text. */
 int fs_write_binary_raw(const char* path, const char* data, int length) {
     if (!path || length < 0 || (length > 0 && !data)) { errno = 0; return 0; }
-    if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
 
     size_t want;
     const char* bytes = fs_unwrap_bytes(data, length, &want);
 
-    FILE* fp = fopen(path, "wb");
+    // fs_write, and the file opened is the one checked (#3751).
+    FILE* fp = (FILE*)aether_sandbox_fopen(path, "wb");
     if (!fp) return 0;
 
     size_t written = (want > 0) ? fwrite(bytes, 1, want, fp) : 0;
@@ -1462,7 +1479,8 @@ static int aether_fs_rename_over(const char* from, const char* to) {
 
 int fs_write_atomic_raw(const char* path, const char* data, int length) {
     if (!path || length < 0 || (length > 0 && !data)) { errno = 0; return 0; }
-    if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
+    // The rename below replaces the name itself: it is checked (#3751).
+    if (!aether_sandbox_check_entry("fs_write", path)) { errno = EACCES; return 0; }
 
     size_t want;
     const char* bytes = fs_unwrap_bytes(data, length, &want);
@@ -1536,7 +1554,9 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
         _unlink(tmp);
 #else
         close(fd);
+        aether_sandbox_stage(tmp, path);
         unlink(tmp);
+        aether_sandbox_stage(NULL, NULL);
 #endif
         errno = err_save;
         return 0;
@@ -1580,8 +1600,13 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
         }
     }
 
+    // The temporary's removal and its rename over `path` are staged as its
+    // open was: under the preload they are checked as writes of `path`
+    // (#3751, which wraps rename, unlink and remove there).
     if (!fwrite_ok || !fsync_ok) {
+        aether_sandbox_stage(tmp, path);
         remove(tmp);  // don't leak a half-written tmp file
+        aether_sandbox_stage(NULL, NULL);
         errno = err_save;
         return 0;
     }
@@ -1591,22 +1616,31 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     // right next to the destination. aether_fs_rename_over replaces the
     // destination on Windows too, in one MoveFileExW, so a reader there
     // never finds it missing either.
+    aether_sandbox_stage(tmp, path);
     if (aether_fs_rename_over(tmp, path) != 0) {
         int err_rename = errno;
         remove(tmp);
+        aether_sandbox_stage(NULL, NULL);
         errno = err_rename;
         return 0;
     }
+    aether_sandbox_stage(NULL, NULL);
     return 1;
 }
 
 int fs_rename_raw(const char* from, const char* to) {
     if (!from || !to) { errno = 0; return 0; }
-    if (!aether_sandbox_check("fs_write", from) || !aether_sandbox_check("fs_write", to)) {
+    // Both names are checked themselves (a symlink is moved, not what it
+    // leads to), and on POSIX renamed as checked (#3751).
+#ifdef _WIN32
+    if (!aether_sandbox_check_entry("fs_write", from) || !aether_sandbox_check_entry("fs_write", to)) {
         errno = EACCES;
         return 0;
     }
     return aether_fs_rename_over(from, to) == 0 ? 1 : 0;
+#else
+    return aether_sandbox_rename(from, to) == 0 ? 1 : 0;
+#endif
 }
 
 // Kind encoding for fs_stat_raw's out_kind:
@@ -1816,8 +1850,7 @@ static void fs_mountinfo_unescape(char* s) {
 int fs_try_mounts(void) {
     fs_release_mounts();
 #if defined(__linux__)
-    if (!aether_sandbox_check("fs_read", "/proc/self/mountinfo")) return -1;
-    FILE* fp = fopen("/proc/self/mountinfo", "r");
+    FILE* fp = (FILE*)aether_sandbox_fopen("/proc/self/mountinfo", "r");   /* fs_read, #3743 */
     if (!fp) return -1;
     char line[4096];
     while (fgets(line, sizeof(line), fp)) {
@@ -1955,8 +1988,7 @@ static AETHER_FS_TLS char    s_blk_transport[16] = "";
 /* Reads under /sys are file reads like any other, checked as fs_try_mounts
  * checks /proc/self/mountinfo (#3743). */
 static int fs_read_sysfs_line(const char* path, char* out, size_t cap) {
-    if (!aether_sandbox_check("fs_read", path)) return 0;
-    FILE* fp = fopen(path, "r");
+    FILE* fp = (FILE*)aether_sandbox_fopen(path, "r");
     if (!fp) return 0;
     int ok = fgets(out, (int)cap, fp) != NULL;
     fclose(fp);
@@ -2218,13 +2250,12 @@ char* fs_read_binary_raw(const char* path, int* out_len) {
     /* A sandbox refusal is a POLICY decision, not an I/O error: the file may be
      * present and perfectly readable. Reporting it as a filesystem failure sends
      * whoever is debugging a grant list looking at the filesystem instead. */
-    if (!aether_sandbox_check("fs_read", path)) {
+    errno = 0;
+    FILE* fp = (FILE*)aether_sandbox_fopen(path, "rb");   /* the file checked is the one read, #3751 */
+    if (!fp && aether_sandbox_refused()) {
         aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SANDBOX, 0);
         return NULL;
     }
-
-    errno = 0;
-    FILE* fp = fopen(path, "rb");
     if (!fp) {
         aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, errno);
         return NULL;
@@ -2564,6 +2595,9 @@ _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
     if (!src || !dst) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
     }
+    /* On POSIX the opens below check src and dst, and open the files they
+     * checked (#3751). */
+#ifdef _WIN32
     if (!aether_sandbox_check("fs_read", src)) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot read src");
@@ -2572,6 +2606,7 @@ _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot write dst");
     }
+#endif
     /* Lexical equality reject — POSIX `cp` also refuses. Doesn't catch
      * the same-file-via-different-paths case; that's the caller's
      * responsibility (would require resolving both via `realpath`,
@@ -2673,35 +2708,41 @@ _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
     if (_stat64(dst, &win_st) == 0) bytes = (long long)win_st.st_size;
     return aether_fs_iks_ok(bytes);
 #else
-    /* POSIX path. */
-    struct stat src_st;
-    if (stat(src, &src_st) != 0) {
+    /* POSIX path. src is opened first and looked at through its descriptor,
+     * so the file checked, the file looked at and the file read are one
+     * (aether_sandbox_open, #3751). */
+    int in_fd = aether_sandbox_open(src, O_RDONLY | O_CLOEXEC, 0);
+    if (in_fd < 0 && aether_sandbox_refused()) {
+        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "sandbox: cannot read src");
+    }
+    if (in_fd < 0) {
         int kind = aether_fs_errno_to_kind(errno);
         return aether_fs_iks_err(kind, "stat src failed");
     }
+    struct stat src_st;
+    if (fstat(in_fd, &src_st) != 0) {
+        int kind = aether_fs_errno_to_kind(errno);
+        close(in_fd);
+        return aether_fs_iks_err(kind, "stat src failed");
+    }
     if (S_ISDIR(src_st.st_mode)) {
+        close(in_fd);
         return aether_fs_iks_err(AETHER_FS_KIND_IS_DIR, "src is a directory");
     }
-
-    int in_fd = open(src, O_RDONLY);
-    if (in_fd < 0) {
-        int kind = aether_fs_errno_to_kind(errno);
-        return aether_fs_iks_err(kind, "open src failed");
-    }
-    /* Reject if dst already exists as a directory — overwriting onto
-     * a directory is not what the caller meant. POSIX open(O_CREAT)
-     * would EISDIR here; we surface that as KIND_IS_DIR cleanly. */
-    struct stat dst_st;
-    if (stat(dst, &dst_st) == 0 && S_ISDIR(dst_st.st_mode)) {
+    /* A directory at dst is not what the caller meant to overwrite: the
+     * open fails with EISDIR, which is KIND_IS_DIR. Asked of the open, not
+     * of a stat before it, so a dst the sandbox refuses says so first. */
+    int out_fd = aether_sandbox_open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                                     (int)(src_st.st_mode & 07777));
+    if (out_fd < 0 && aether_sandbox_refused()) {
         close(in_fd);
-        return aether_fs_iks_err(AETHER_FS_KIND_IS_DIR, "dst is a directory");
+        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "sandbox: cannot write dst");
     }
-    int out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC,
-                      (mode_t)(src_st.st_mode & 07777));
     if (out_fd < 0) {
-        int kind = aether_fs_errno_to_kind(errno);
+        int err = errno;
+        int kind = err == EISDIR ? AETHER_FS_KIND_IS_DIR : aether_fs_errno_to_kind(err);
         close(in_fd);
-        return aether_fs_iks_err(kind, "open dst failed");
+        return aether_fs_iks_err(kind, err == EISDIR ? "dst is a directory" : "open dst failed");
     }
 
     long long total = 0;
@@ -2814,11 +2855,13 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
     if (!src || !dst) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
     }
-    if (!aether_sandbox_check("fs_write", src)) {
+    /* A move takes the names themselves (a symlink is moved, not what it
+     * leads to), and on POSIX renames them as checked (#3751). */
+    if (!aether_sandbox_check_entry("fs_write", src)) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot remove src");
     }
-    if (!aether_sandbox_check("fs_write", dst)) {
+    if (!aether_sandbox_check_entry("fs_write", dst)) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot write dst");
     }
@@ -2868,7 +2911,7 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
     _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
     return out;
 #else
-    if (rename(src, dst) == 0) {
+    if (aether_sandbox_rename(src, dst) == 0) {
         _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
         return out;
     }
@@ -2887,7 +2930,7 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
          * Surface the copy's kind so the caller knows what failed. */
         return aether_fs_iks_err(copy_result._1, copy_result._2);
     }
-    if (unlink(src) != 0) {
+    if (aether_sandbox_unlink(src) != 0) {
         /* Data is now in dst (good) but src is still there (bad).
          * Half-move state. Surface as KIND_IO with a clear message;
          * caller may want to retry the unlink or accept the duplicate. */
@@ -3056,11 +3099,11 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     if (!path) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
     }
+#ifdef _WIN32
     if (!aether_sandbox_check("fs_write", path)) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot chmod path");
     }
-#ifdef _WIN32
     int wpath_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
     if (wpath_len <= 0) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "path UTF-8 invalid");
@@ -3127,17 +3170,20 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     return out;
 #else
     mode_t bits = (mode_t)(mode & 07777);
-    int rc = chmod(path, bits);
+    /* The file checked is the file changed (#3751). */
+    int rc = aether_sandbox_chmod(path, (int)bits);
 #ifdef EFTYPE
     /* FreeBSD (and the other BSDs) refuse the sticky bit on a
      * non-directory for a non-root caller with EFTYPE; Linux and
      * macOS accept it and ignore it. The bit means nothing on a file,
      * so drop it and set the rest, as the other platforms do. */
     if (rc != 0 && errno == EFTYPE && (bits & S_ISVTX)) {
-        rc = chmod(path, bits & (mode_t)~S_ISVTX);
+        rc = aether_sandbox_chmod(path, (int)(bits & (mode_t)~S_ISVTX));
     }
 #endif
     if (rc != 0) {
+        if (aether_sandbox_refused())
+            return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "sandbox: cannot chmod path");
         int kind = aether_fs_errno_to_kind(errno);
         return aether_fs_iks_err(kind, "chmod failed");
     }
@@ -3171,11 +3217,17 @@ static const char* aether_fs_kind_text(int kind) {
 _tuple_int_int_string fs_unlink_raw(const char* path) {
     s_last_os_error = 0;   /* #1378: report only this call's code */
     if (!path) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
-    if (!aether_sandbox_check("fs_write", path)) {
+    /* The name itself is checked (a symlink is removed, not what it leads
+     * to), and on POSIX removed as checked (#3751). */
+#ifdef _WIN32
+    if (!aether_sandbox_check_entry("fs_write", path)) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot unlink path");
     }
+#endif
     int kind = fs_unlink_os(path);
+    if (kind != AETHER_FS_KIND_OK && aether_sandbox_refused())
+        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "sandbox: cannot unlink path");
     if (kind != AETHER_FS_KIND_OK) return aether_fs_iks_err(kind, aether_fs_kind_text(kind));
     _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
     return out;
@@ -3191,11 +3243,16 @@ _tuple_int_int_string fs_unlink_raw(const char* path) {
 _tuple_int_int_string dir_create_mode_raw(const char* path, int mode) {
     s_last_os_error = 0;
     if (!path) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
-    if (!aether_sandbox_check("fs_write", path)) {   /* #3743 */
+#ifdef _WIN32
+    if (!aether_sandbox_check_entry("fs_write", path)) {   /* #3743 */
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot create directory");
     }
+#endif
+    /* On POSIX the new name is checked, and made as checked (#3751). */
     int kind = dir_create_mode_os(path, mode);
+    if (kind != AETHER_FS_KIND_OK && aether_sandbox_refused())
+        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "sandbox: cannot create directory");
     if (kind != AETHER_FS_KIND_OK) return aether_fs_iks_err(kind, aether_fs_kind_text(kind));
     _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
     return out;
@@ -3417,13 +3474,24 @@ DirList* dir_list_raw(const char* path) {
     /* Listing reads the directory: fs_read on it, as fs.walk checks its
      * root (#3743). A refusal is NULL, which the wrappers report as
      * "cannot list directory". */
+#ifdef _WIN32
     if (!aether_sandbox_check("fs_read", path)) return NULL;
+#else
+    /* On POSIX the directory listed is the one checked (#3751). */
+    DIR* dir = (DIR*)aether_sandbox_opendir(path);
+    if (!dir && aether_sandbox_refused()) return NULL;
+#endif
 
     /* #462: a directory with many entries is an unbounded surface — a
      * sandboxed plugin can list a huge tree. Gate the DirList struct,
      * the entries array, and every entry name through the cap. */
     DirList* list = (DirList*)aether_caps_malloc(sizeof(DirList));
-    if (!list) return NULL;
+    if (!list) {
+#ifndef _WIN32
+        if (dir) closedir(dir);
+#endif
+        return NULL;
+    }
     list->entries = NULL;
     list->count = 0;
     list->capacity = 0;
@@ -3472,7 +3540,6 @@ DirList* dir_list_raw(const char* path) {
 
     FindClose(hFind);
     #else
-    DIR* dir = opendir(path);
     if (!dir) return list;
 
     int cap = 0;
@@ -4167,10 +4234,14 @@ static int fs_walk_stat_kind(const char* path) {
  * NUL-terminated); entries are appended as "/name" for the callback and the
  * buffer is truncated back after each. Returns 2 as soon as the callback
  * asks to stop (propagates all the way out), 0 otherwise. */
+/* `parent_fd` (POSIX): the directory `buf`'s last name is opened from,
+ * not followed, so a subdirectory swapped for a symlink during the walk is
+ * not entered (#3751); -1 for the root, opened as the sandbox checked it. */
 static int fs_walk_recurse(char* buf, size_t len, int depth,
                            int (*cb)(void*, const char*, int, int), void* env,
-                           int* count) {
+                           int* count, int parent_fd) {
 #ifdef _WIN32
+    (void)parent_fd;
     /* Build the search pattern in the shared path buffer (append the
      * slash-wildcard suffix, FindFirstFile copies it, restore) — no
      * per-recursion-level stack array, so deep trees cost no stack. */
@@ -4195,7 +4266,7 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
         if (rc == 2) { buf[len] = '\0'; FindClose(h); return 2; }
         if (rc != 1 && kind == FS_STAT_KIND_DIR) {
             if (fs_walk_recurse(buf, len + 1 + nlen, depth + 1,
-                                cb, env, count) == 2) {
+                                cb, env, count, -1) == 2) {
                 buf[len] = '\0';
                 FindClose(h);
                 return 2;
@@ -4205,7 +4276,16 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 #else
-    DIR* dir = opendir(buf);
+    DIR* dir;
+    if (parent_fd < 0) {
+        dir = (DIR*)aether_sandbox_opendir(buf);
+    } else {
+        const char* name = buf + len;
+        while (name > buf && name[-1] != '/') name--;
+        int fd = openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        dir = fd < 0 ? NULL : fdopendir(fd);
+        if (!dir && fd >= 0) close(fd);
+    }
     if (!dir) return 0;                         /* unreadable dir — skip */
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
@@ -4224,7 +4304,7 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
             /* Only genuine directories are entered — a symlink to a
              * directory reports kind 3 and is never followed (no cycles). */
             if (fs_walk_recurse(buf, len + 1 + nlen, depth + 1,
-                                cb, env, count) == 2) {
+                                cb, env, count, dirfd(dir)) == 2) {
                 buf[len] = '\0';
                 closedir(dir);
                 return 2;
@@ -4260,7 +4340,7 @@ int fs_walk_raw(const char* root, void* cb_box) {
     int count = 1;
     int rc = cb(clo.env, buf, root_kind, 0);    /* the root is visited too */
     if (rc != 1 && rc != 2 && root_kind == FS_STAT_KIND_DIR) {
-        fs_walk_recurse(buf, rlen, 1, cb, clo.env, &count);
+        fs_walk_recurse(buf, rlen, 1, cb, clo.env, &count, -1);
     }
 
     aether_caps_free(buf, FS_WALK_PATH_CAP);
@@ -4719,13 +4799,13 @@ _tuple_int_int_string fs_unlock_raw(int fd) {
 _tuple_int_int_string fs_create_exclusive_raw(const char* path, int mode) {
     _tuple_int_int_string bad = { -1, 0, "" };
     if (!path) { bad._1 = AETHER_FS_KIND_INVALID; bad._2 = "create_exclusive: null path"; return bad; }
+#ifdef _WIN32
     if (!aether_sandbox_check("fs_write", path)) {
         errno = EACCES;
         bad._1 = aether_fs_errno_to_kind(errno);
         bad._2 = "create_exclusive: denied by the sandbox";
         return bad;
     }
-#ifdef _WIN32
     size_t wbytes = 0;
     wchar_t* wpath = fs_win_wide(path, &wbytes);
     if (!wpath) { bad._1 = AETHER_FS_KIND_INVALID; bad._2 = "create_exclusive: bad path"; return bad; }
@@ -4743,10 +4823,12 @@ _tuple_int_int_string fs_create_exclusive_raw(const char* path, int mode) {
     }
     return aether_fs_iks_val(fd);
 #else
-    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, (mode_t)(mode & 07777));
+    /* fs_write on the new name, and it is made where it was checked (#3751). */
+    int fd = aether_sandbox_open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode & 07777);
     if (fd < 0) {
         bad._1 = aether_fs_errno_to_kind(errno);
-        bad._2 = "create_exclusive failed";
+        bad._2 = aether_sandbox_refused() ? "create_exclusive: denied by the sandbox"
+                                          : "create_exclusive failed";
         return bad;
     }
     return aether_fs_iks_val(fd);

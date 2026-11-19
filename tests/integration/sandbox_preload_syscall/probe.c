@@ -142,8 +142,8 @@ int main(int argc, char** argv) {
     line("raw_unlinkat", rc == 0, errno);
     rc = syscall(SYS_renameat, AT_FDCWD, b1, AT_FDCWD, b2);
     line("raw_renameat", rc == 0, errno);
-    // libc's unlink(): this library has no wrapper for it, so the libc call
-    // gets the kernel's answer whatever the policy (the raw call does not).
+    // libc's unlink(): held to the fs grants since #3751 (a level granting
+    // nothing refuses it with EACCES), where the raw call is held by name.
     rc = unlink(a2);
     line("libc_unlink", rc == 0, errno);
 

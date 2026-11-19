@@ -110,6 +110,28 @@ unc:
     return at;
 }
 
+// A final path without its namespace prefix, in place: \\?\D:\p is D:\p,
+// and \\?\UNC\server\share\p is \\server\share\p.
+static wchar_t* aether_sandbox_wunprefix(wchar_t* fin) {
+    if (wcsncmp(fin, L"\\\\?\\UNC\\", 8) == 0) {
+        fin[6] = L'\\';
+        fin[7] = L'\\';
+        return fin + 6;
+    }
+    if (wcsncmp(fin, L"\\\\?\\", 4) == 0) return fin + 4;
+    return fin;
+}
+
+// The final path (UTF-8, no namespace prefix) of what handle `h` is open
+// on: 1, or 0 when it has none.
+static int aether_sandbox_final_of_handle(HANDLE h, char* out, size_t out_size) {
+    wchar_t fin[AETHER_SANDBOX_WPATH];
+    DWORD n = GetFinalPathNameByHandleW(h, fin, AETHER_SANDBOX_WPATH, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (n == 0 || n >= AETHER_SANDBOX_WPATH) return 0;
+    return WideCharToMultiByte(CP_UTF8, 0, aether_sandbox_wunprefix(fin), -1, out, (int)out_size,
+                               NULL, NULL) > 0;
+}
+
 // Returns 1 with the resolved absolute path (UTF-8) in out, or 0 if it
 // cannot be resolved (out is then unspecified).
 static int aether_sandbox_canon_path(const char* in, char* out, size_t out_size) {
@@ -140,15 +162,7 @@ static int aether_sandbox_canon_path(const char* in, char* out, size_t out_size)
         while (c > root && full[c - 1] != L'\\') c--;
         cut = c > root ? c - 1 : root;
     }
-    // \\?\D:\p is D:\p, and \\?\UNC\server\share\p is \\server\share\p.
-    wchar_t* res = fin;
-    if (wcsncmp(fin, L"\\\\?\\UNC\\", 8) == 0) {
-        res = fin + 6;
-        res[0] = L'\\';
-        res[1] = L'\\';
-    } else if (wcsncmp(fin, L"\\\\?\\", 4) == 0) {
-        res = fin + 4;
-    }
+    wchar_t* res = aether_sandbox_wunprefix(fin);
     size_t rl = wcslen(res);
     const wchar_t* tail = full + cut;   // "" or "\name..." (or "name..." after a root)
     size_t tl = wcslen(tail);
@@ -233,7 +247,262 @@ static int aether_sandbox_canon_path(const char* in, char* out, size_t out_size)
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Using a path as it was checked (#3751)
+// ---------------------------------------------------------------------------
+//
+// A check resolves a path and matches where it leads; the call that follows
+// used to be given the path as written, and the kernel resolved it again.
+// Anything that changed in between (a directory swapped for a symlink by
+// another thread or process) was followed by the second resolution and not
+// the first, so the check passed for one file and the call reached another.
+//
+// So the call is made on the resolution itself. aether_sandbox_canon_path's
+// result holds no symlink and no "." or "..", and aether_sandbox_walk opens
+// it following none: on Linux with openat2 and RESOLVE_NO_SYMLINKS, one
+// call that fails if any component has become a symlink; elsewhere, or
+// where openat2 is missing or refused, one component at a time from "/",
+// each directory opened with O_NOFOLLOW relative to the one before. A
+// component that turned into a symlink since the check fails the call
+// (EACCES): it is the race, and nothing is reached through it. Calls that
+// act on a name in a directory (unlink, rename, mkdir and the rest) are made
+// with the *at variant from the directory aether_sandbox_anchor opens the
+// same way.
+//
+// Directories on the way are opened as anchors only: O_PATH on Linux,
+// O_SEARCH where the system has it, else O_RDONLY. With O_RDONLY a directory
+// that may be searched but not read cannot be an anchor; the walk then makes
+// the call on the whole resolved path with O_NOFOLLOW, which still refuses a
+// final symlink, and leaves only the intermediate directories to the race.
+//
+// The calls are made through `ops`: libc's own for the in-process checks,
+// and for the LD_PRELOAD library the functions behind its wrappers, so its
+// own steps are not checked again.
+
+#include <fcntl.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
+
+// The open(2) flags an fopen() mode stands for: "r" O_RDONLY, "w"
+// O_WRONLY|O_CREAT|O_TRUNC, "a" O_WRONLY|O_CREAT|O_APPEND, "+" O_RDWR, "x"
+// O_EXCL, "e" O_CLOEXEC; read up to a ',' as aether_fopen_access reads it.
+// -1 for a mode fopen refuses.
+static int aether_fopen_flags(const char* mode) {
+    if (!mode) return -1;
+    int flags;
+    if (mode[0] == 'r') flags = O_RDONLY;
+    else if (mode[0] == 'w') flags = O_WRONLY | O_CREAT | O_TRUNC;
+    else if (mode[0] == 'a') flags = O_WRONLY | O_CREAT | O_APPEND;
+    else return -1;
+    for (const char* m = mode + 1; *m && *m != ','; m++) {
+        if (*m == '+') flags = (flags & ~O_ACCMODE) | O_RDWR;
+        else if (*m == 'x') flags |= O_EXCL;
+        else if (*m == 'e') flags |= O_CLOEXEC;
+    }
+    return flags;
+}
+
+typedef struct {
+    int (*openat)(int, const char*, int, ...);
+    int (*close)(int);
+    // The raw system call, for openat2 (Linux); NULL to walk instead.
+    long (*syscall)(long, ...);
+} AetherSandboxFsOps;
+
+#if defined(O_PATH)
+#  define AETHER_SANDBOX_ANCHOR (O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+#  define AETHER_SANDBOX_ANCHOR_SEARCH_ONLY 1
+#elif defined(O_SEARCH)
+#  define AETHER_SANDBOX_ANCHOR (O_SEARCH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+#  define AETHER_SANDBOX_ANCHOR_SEARCH_ONLY 1
+#else
+#  define AETHER_SANDBOX_ANCHOR (O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+#  define AETHER_SANDBOX_ANCHOR_SEARCH_ONLY 0
+#endif
+
+#if defined(__linux__) && defined(SYS_openat2)
+// struct open_how and RESOLVE_NO_SYMLINKS, from <linux/openat2.h>, which
+// older C libraries do not ship.
+struct aether_open_how {
+    unsigned long long flags;
+    unsigned long long mode;
+    unsigned long long resolve;
+};
+#  define AETHER_RESOLVE_NO_SYMLINKS 0x04
+// 1 opened (fd in *out), 0 refused because a symlink is on the way (errno
+// EACCES), -1 failed otherwise (errno), 2 not available here: walk.
+static int aether_sandbox_openat2(const char* resolved, int flags, unsigned mode,
+                                  const AetherSandboxFsOps* ops, int* out) {
+    static volatile int missing = 0;   // ENOSYS once: never again
+    if (!ops->syscall || missing) return 2;
+    struct aether_open_how how;
+    memset(&how, 0, sizeof how);
+    how.flags = (unsigned long long)(unsigned)flags;
+    if (flags & O_CREAT
+#  ifdef O_TMPFILE
+        || (flags & O_TMPFILE) == O_TMPFILE
+#  endif
+    )
+        how.mode = mode & 07777;
+    how.resolve = AETHER_RESOLVE_NO_SYMLINKS;
+    long fd = ops->syscall(SYS_openat2, (long)AT_FDCWD, resolved, &how, (long)sizeof how);
+    if (fd >= 0) { *out = (int)fd; return 1; }
+    if (errno == ENOSYS) { missing = 1; return 2; }
+    // A seccomp filter, a flag openat2 rejects that openat ignores, a
+    // struct this kernel does not know: walk instead.
+    if (errno == EPERM || errno == EINVAL || errno == E2BIG || errno == EOPNOTSUPP) return 2;
+    if (errno == ELOOP) { errno = EACCES; return 0; }
+    return -1;
+}
+#endif
+
+// Did the walk meet a symlink at `name` in `dirfd`, where the check saw none?
+static int aether_sandbox_met_link(int dirfd, const char* name, int err) {
+    if (err == ELOOP || err == EMLINK) return 1;
+    if (err != ENOTDIR) return 0;
+    struct stat st;
+    return fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode);
+}
+
+// Opens `resolved` (absolute, as aether_sandbox_canon_path gives it) with
+// `flags` and `mode`, following no symlink on the way or at its end.
+// Returns the descriptor, or -1 with errno set: EACCES when a component is
+// a symlink now (the path changed since the check).
+static int aether_sandbox_walk(const char* resolved, int flags, unsigned mode,
+                               const AetherSandboxFsOps* ops) {
+    if (!resolved || resolved[0] != '/') { errno = EINVAL; return -1; }
+    // A caller that asked for O_NOFOLLOW itself gets ELOOP for a symlink at
+    // the end, as the kernel says it, not the race's EACCES.
+    int own_nofollow = (flags & O_NOFOLLOW) != 0;
+    flags |= O_NOFOLLOW;
+#if defined(__linux__) && defined(SYS_openat2)
+    if (!own_nofollow) {
+        int fd = -1;
+        int r = aether_sandbox_openat2(resolved, flags, mode, ops, &fd);
+        if (r == 1) return fd;
+        if (r == 0 || r == -1) return -1;
+    }
+#endif
+    const char* p = resolved;
+    while (*p == '/') p++;
+    if (!*p) return ops->openat(AT_FDCWD, "/", flags & ~O_NOFOLLOW, mode);
+    int dir = ops->openat(AT_FDCWD, "/", AETHER_SANDBOX_ANCHOR);
+    if (dir < 0) return -1;
+    char name[PATH_MAX];
+    for (;;) {
+        const char* e = p;
+        while (*e && *e != '/') e++;
+        size_t n = (size_t)(e - p);
+        if (n >= sizeof name) { ops->close(dir); errno = ENAMETOOLONG; return -1; }
+        memcpy(name, p, n);
+        name[n] = '\0';
+        while (*e == '/') e++;
+        int last = *e == '\0';
+        int fd = last ? ops->openat(dir, name, flags, mode)
+                      : ops->openat(dir, name, AETHER_SANDBOX_ANCHOR);
+        if (fd < 0) {
+            int err = errno;
+            int link = aether_sandbox_met_link(dir, name, err);
+            ops->close(dir);
+            if (link) { errno = last && own_nofollow ? ELOOP : EACCES; return -1; }
+            if (!last && err == EACCES && !AETHER_SANDBOX_ANCHOR_SEARCH_ONLY) {
+                // A directory that may be searched but not read: no anchor
+                // on this system, so the whole path, its end not followed.
+                return ops->openat(AT_FDCWD, resolved, flags, mode);
+            }
+            errno = err;
+            return -1;
+        }
+        ops->close(dir);
+        if (last) return fd;
+        dir = fd;
+        p = e;
+    }
+}
+
+// The directory `resolved` is in, opened by aether_sandbox_walk as an
+// anchor, and its last name copied to `name`: a call on a name in a
+// directory (unlinkat, mkdirat, renameat...) is made from there. -1 with
+// errno set when there is no such directory, or `resolved` is "/" (EBUSY).
+static int aether_sandbox_anchor(const char* resolved, char* name, size_t cap,
+                                 const AetherSandboxFsOps* ops) {
+    if (!resolved || resolved[0] != '/') { errno = EINVAL; return -1; }
+    size_t len = strlen(resolved);
+    while (len > 1 && resolved[len - 1] == '/') len--;
+    size_t s = len;
+    while (s > 0 && resolved[s - 1] != '/') s--;
+    if (s == len) { errno = EBUSY; return -1; }   // "/" itself
+    size_t n = len - s;
+    if (n + 1 > cap || s >= PATH_MAX) { errno = ENAMETOOLONG; return -1; }
+    memcpy(name, resolved + s, n);
+    name[n] = '\0';
+    char parent[PATH_MAX];
+    size_t pl = s > 1 ? s - 1 : 1;   // "/a/b" -> "/a"; "/a" -> "/"
+    memcpy(parent, resolved, pl);
+    parent[pl] = '\0';
+    // O_PATH and O_SEARCH anchors already say "directory" and "not
+    // followed"; O_NOFOLLOW is added by the walk.
+    return aether_sandbox_walk(parent, AETHER_SANDBOX_ANCHOR & ~O_NOFOLLOW, 0, ops);
+}
+
 #endif // _WIN32
+
+// A path whose last name is the thing a call acts on, not where it leads:
+// unlink, rmdir, rename, the new name of link and symlink, mkdir, and an
+// open with O_NOFOLLOW act on a symlink itself. Its directory is resolved
+// (aether_sandbox_canon_path) and the last name kept as written. A last
+// name of "." or ".." is resolved with the rest. Checking where such a link
+// leads would refuse removing a link that points out of a grant, and allow
+// removing one outside the grant that points in (#3751).
+static int aether_sandbox_canon_entry(const char* in, char* out, size_t out_size) {
+    if (!in || !*in || !out) return 0;
+    size_t len = strlen(in);
+#ifdef _WIN32
+#  define AETHER_SBX_IS_SEP(c) ((c) == '/' || (c) == '\\')
+#else
+#  define AETHER_SBX_IS_SEP(c) ((c) == '/')
+#endif
+    while (len > 1 && AETHER_SBX_IS_SEP(in[len - 1])) len--;
+    size_t s = len;
+    while (s > 0 && !AETHER_SBX_IS_SEP(in[s - 1])) s--;
+    size_t n = len - s;
+    const char* name = in + s;
+    if (n == 0 || (n == 1 && name[0] == '.') || (n == 2 && name[0] == '.' && name[1] == '.'))
+        return aether_sandbox_canon_path(in, out, out_size);
+#ifdef _WIN32
+    // "C:name" names a file in the drive's current directory: whole.
+    if (s == 0 && len >= 2 && in[1] == ':') return aether_sandbox_canon_path(in, out, out_size);
+#endif
+    char dir[PATH_MAX];
+    if (s == 0) {
+        dir[0] = '.';
+        dir[1] = '\0';
+    } else {
+        size_t dl = s > 1 ? s - 1 : 1;   // "/x" -> "/"
+#ifdef _WIN32
+        if (dl == 2 && in[1] == ':') dl = 3;   // "C:\x" -> "C:\"
+#endif
+        if (dl >= sizeof dir) return 0;
+        memcpy(dir, in, dl);
+        dir[dl] = '\0';
+    }
+    char rdir[PATH_MAX];
+    if (!aether_sandbox_canon_path(dir, rdir, sizeof rdir)) return 0;
+    size_t rl = strlen(rdir);
+    int sep = !(rl > 0 && AETHER_SBX_IS_SEP(rdir[rl - 1]));
+    if (rl + (size_t)sep + n + 1 > out_size) return 0;
+    memcpy(out, rdir, rl);
+#ifdef _WIN32
+    if (sep) out[rl++] = '\\';
+#else
+    if (sep) out[rl++] = '/';
+#endif
+    memcpy(out + rl, name, n);
+    out[rl + n] = '\0';
+    return 1;
+#undef AETHER_SBX_IS_SEP
+}
 
 // A grant pattern for an fs category, resolved the same way, so a grant and
 // the paths it covers are compared in one form ("/var/x/*" and a path under

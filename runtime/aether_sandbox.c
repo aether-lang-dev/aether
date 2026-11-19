@@ -31,7 +31,11 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
-#elif defined(__unix__) || defined(__APPLE__)
+#  include <io.h>            /* _get_osfhandle: aether_sandbox_fopen */
+#else
+#  include <dirent.h>        /* fdopendir: aether_sandbox_opendir */
+#endif
+#if !defined(_WIN32) && (defined(__unix__) || defined(__APPLE__))
 #  include <dlfcn.h>
 #  if defined(__APPLE__)
 #    include <mach-o/dyld.h>
@@ -439,13 +443,14 @@ static int grants_allow(void* grants, const char* category, const char* resource
 
 static atomic_int g_foreign_reported;
 
-/* 1 allowed, 0 refused, -1 nothing in force on this thread. */
-static int decide(const char* category, const char* resource) {
+/* 1 allowed, 0 refused, -1 nothing in force on this thread. `audit` 0 asks
+ * without recording the answer (what a hard link would widen to). */
+static int decide_as(const char* category, const char* resource, int audit) {
     SandboxThread* t = &t_sbx;
     int total = rv()->levels(0);
     if (total == 0 && t->depth == t->floor) return -1;
     if (atomic_load_explicit(&g_hooks_unserved, memory_order_acquire)) {
-        aether_sandbox_audit(category, resource, 0);   /* unserved: refused more, never less */
+        if (audit) aether_sandbox_audit(category, resource, 0);   /* unserved: refused more, never less */
         return 0;
     }
     if (total > t->depth - t->floor) {
@@ -458,7 +463,7 @@ static int decide(const char* category, const char* resource) {
                     "copy cannot read; refusing %s %s. Build the libraries with --shared-runtime "
                     "to nest sandboxes across them. (reported once)\n",
                     category ? category : "", resource ? resource : "");
-        aether_sandbox_audit(category, resource, 0);
+        if (audit) aether_sandbox_audit(category, resource, 0);
         return 0;
     }
     /* From the top down, a trusted call's barrier jumping over the levels
@@ -472,8 +477,12 @@ static int decide(const char* category, const char* resource) {
         if (!grants_allow(t->level[l].grants, category, resource)) { allowed = 0; break; }
     }
     if (!in_force) return 1;
-    aether_sandbox_audit(category, resource, allowed);
+    if (audit) aether_sandbox_audit(category, resource, allowed);
     return allowed;
+}
+
+static int decide(const char* category, const char* resource) {
+    return decide_as(category, resource, 1);
 }
 
 // The check sees an fs path where it leads (aether_sandbox_path.h). A path
@@ -521,6 +530,437 @@ char* aether_sandbox_grant_pattern(const char* category, const char* pattern) {
     }
     return strdup(pattern);
 }
+
+// ---------------------------------------------------------------------------
+// Calls made on the path that was checked (#3751)
+// ---------------------------------------------------------------------------
+//
+// aether_sandbox_check resolves a path and matches where it leads; a caller
+// that then hands the path as written to libc has it resolved a second time,
+// and anything swapped in between (a directory turned into a symlink by
+// another thread or process) is followed by the second resolution only. The
+// calls below resolve once, check that resolution, and make the call on it
+// following no symlink (aether_sandbox_walk, aether_sandbox_anchor). std.fs
+// makes its opens and the calls that change a directory through them.
+
+/* Whether this thread's last checked call was refused by the sandbox,
+ * for std to tell a refusal from the system's own EACCES. */
+static AETHER_TLS_SHARED int t_fs_refused;
+
+int aether_sandbox_refused(void) {
+    return t_fs_refused;
+}
+
+static void fs_refused(void) {
+    t_fs_refused = 1;
+    errno = EACCES;
+}
+
+/* A level in force on this thread, in this copy or another. Without one
+ * the calls below are the plain libc call, as before. */
+static int fs_levels_here(void) {
+    t_fs_refused = 0;
+    const AetherSandboxRendezvous* r = rv();
+    if (atomic_load_explicit(r->threads, memory_order_relaxed) == 0) return 0;
+    return r->levels(0) != 0 || t_sbx.depth != t_sbx.floor;
+}
+
+int aether_sandbox_check_entry(const char* category, const char* resource) {
+    if (!fs_levels_here()) return 1;
+    char resolved[PATH_MAX];
+    if (!resource || !aether_sandbox_canon_entry(resource, resolved, sizeof resolved)) return 0;
+    return decide(category ? category : "", resolved) != 0;
+}
+
+/* What an access (AETHER_ACCESS_READ, _WRITE) of `resolved` needs. */
+static int fs_access_allowed(const char* resolved, int access) {
+    if ((access & AETHER_ACCESS_READ) && decide("fs_read", resolved) == 0) return 0;
+    if ((access & AETHER_ACCESS_WRITE) && decide("fs_write", resolved) == 0) return 0;
+    return 1;
+}
+
+/* The entry `path` names, checked for fs_write: 1 with it in `resolved`. */
+static int fs_entry_writable(const char* path, char resolved[PATH_MAX]) {
+    if (!path || !aether_sandbox_canon_entry(path, resolved, PATH_MAX) ||
+        decide("fs_write", resolved) == 0) {
+        fs_refused();
+        return 0;
+    }
+    return 1;
+}
+
+/* A hard link: fs_write on the new name, which reaches the file as the old
+ * name does, so it may not be granted more of it than the old name is
+ * (fs_read and fs_write on `target` for whichever the new name has), or a
+ * link into a writable directory would make any file there writable. A link
+ * is made of the name `target` (linkat links a symlink itself), so that is
+ * what is checked. 1 with both resolutions in `rt` and `rl`. */
+static int fs_link_allowed(const char* target, const char* linkpath,
+                           char rt[PATH_MAX], char rl[PATH_MAX]) {
+    if (!fs_entry_writable(linkpath, rl)) return 0;
+    if (!target || !aether_sandbox_canon_entry(target, rt, PATH_MAX)) {
+        fs_refused();
+        return 0;
+    }
+    static const char* const cats[2] = { "fs_read", "fs_write" };
+    for (int i = 0; i < 2; i++) {
+        if (decide_as(cats[i], rl, 0) == 1 && decide(cats[i], rt) == 0) {
+            fs_refused();
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int aether_sandbox_check_link(const char* target, const char* linkpath) {
+    if (!fs_levels_here()) return 1;
+    char rt[PATH_MAX], rl[PATH_MAX];
+    return fs_link_allowed(target, linkpath, rt, rl);
+}
+
+#ifdef _WIN32
+
+/* Windows: no descriptor-relative calls to make the open from, so the file
+ * is opened as before and what was opened is checked again: the final path
+ * of its handle, every junction and symlink followed, must be granted too.
+ * A junction swapped in between the check and the open is caught there,
+ * after the open: a "w" open has then truncated the file it reached. */
+void* aether_sandbox_fopen(const char* path, const char* mode) {
+    if (!path || !mode || !fs_levels_here()) return fopen(path, mode);
+    char resolved[PATH_MAX];
+    int access = aether_fopen_access(mode);
+    if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
+        !fs_access_allowed(resolved, access)) {
+        fs_refused();
+        return NULL;
+    }
+    FILE* fp = fopen(path, mode);
+    if (!fp) return NULL;
+    char fin[PATH_MAX];
+    HANDLE h = (HANDLE)_get_osfhandle(_fileno(fp));
+    if (h == INVALID_HANDLE_VALUE || !aether_sandbox_final_of_handle(h, fin, sizeof fin) ||
+        (strcmp(fin, resolved) != 0 && !fs_access_allowed(fin, access))) {
+        fclose(fp);
+        fs_refused();
+        return NULL;
+    }
+    return fp;
+}
+
+#else
+
+static const AetherSandboxFsOps g_libc_ops = {
+    openat, close,
+#if defined(__linux__)
+    syscall,
+#else
+    NULL,
+#endif
+};
+
+/* Under the LD_PRELOAD library a call is passed to its wrapper with the
+ * resolved path: the wrapper checks its own policy and walks with the
+ * functions behind it. Walking here would go through its wrappers one
+ * directory at a time, each checked as an open of that directory. */
+static int fs_preload_here(void) {
+#ifdef RTLD_DEFAULT
+    static _Atomic int known = 0;   /* 1 absent, 2 present */
+    int k = atomic_load_explicit(&known, memory_order_relaxed);
+    if (!k) {
+        k = dlsym(RTLD_DEFAULT, "aether_sandbox_preload_present") ? 2 : 1;
+        atomic_store_explicit(&known, k, memory_order_relaxed);
+    }
+    return k == 2;
+#else
+    return 0;
+#endif
+}
+
+/* What an open with `flags` asks of the file (as the preload's open). */
+static int fs_open_access(int flags) {
+    int acc = flags & O_ACCMODE;
+    int access = 0;
+    if (acc == O_RDONLY || acc == O_RDWR) access |= AETHER_ACCESS_READ;
+    if (acc != O_RDONLY || (flags & (O_CREAT | O_APPEND | O_TRUNC))) access |= AETHER_ACCESS_WRITE;
+    return access;
+}
+
+int aether_sandbox_open(const char* path, int flags, int mode) {
+    if (!path) { errno = EFAULT; return -1; }
+    if (!fs_levels_here()) return open(path, flags, mode);
+    /* O_NOFOLLOW and O_CREAT|O_EXCL act on a symlink at the end itself. */
+    int entry = (flags & O_NOFOLLOW) || (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+    char resolved[PATH_MAX];
+    int ok = entry ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
+                   : aether_sandbox_canon_path(path, resolved, sizeof resolved);
+    if (!ok || !fs_access_allowed(resolved, fs_open_access(flags))) {
+        fs_refused();
+        return -1;
+    }
+    if (fs_preload_here()) return open(resolved, flags, mode);
+    return aether_sandbox_walk(resolved, flags, (unsigned)mode, &g_libc_ops);
+}
+
+void* aether_sandbox_fopen(const char* path, const char* mode) {
+    if (!path || !mode || !fs_levels_here()) return fopen(path, mode);
+    int flags = aether_fopen_flags(mode);
+    if (flags < 0) { errno = EINVAL; return NULL; }
+    int fd = aether_sandbox_open(path, flags, 0666);
+    if (fd < 0) return NULL;
+    FILE* fp = fdopen(fd, mode);
+    if (!fp) {
+        int err = errno;
+        close(fd);
+        errno = err;
+    }
+    return fp;
+}
+
+void* aether_sandbox_opendir(const char* path) {
+    if (!path || !fs_levels_here()) return opendir(path);
+    char resolved[PATH_MAX];
+    if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
+        decide("fs_read", resolved) == 0) {
+        fs_refused();
+        return NULL;
+    }
+    if (fs_preload_here()) return opendir(resolved);
+    int fd = aether_sandbox_walk(resolved, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0, &g_libc_ops);
+    if (fd < 0) return NULL;
+    DIR* d = fdopendir(fd);
+    if (!d) {
+        int err = errno;
+        close(fd);
+        errno = err;
+    }
+    return d;
+}
+
+/* `resolved`'s directory opened as an anchor, `fn` called with it and the
+ * last name, the anchor closed; fn's result and errno kept. */
+typedef int (*fs_at_fn)(int dirfd, const char* name, const void* arg);
+static int fs_at(const char* resolved, fs_at_fn fn, const void* arg) {
+    char name[PATH_MAX];
+    int d = aether_sandbox_anchor(resolved, name, sizeof name, &g_libc_ops);
+    if (d < 0) return -1;
+    int r = fn(d, name, arg);
+    int err = errno;
+    close(d);
+    errno = err;
+    return r;
+}
+
+static int at_unlink(int d, const char* n, const void* a) { (void)a; return unlinkat(d, n, 0); }
+static int at_rmdir(int d, const char* n, const void* a) { (void)a; return unlinkat(d, n, AT_REMOVEDIR); }
+static int at_remove(int d, const char* n, const void* a) {
+    (void)a;
+    struct stat st;
+    if (fstatat(d, n, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode))
+        return unlinkat(d, n, AT_REMOVEDIR);
+    return unlinkat(d, n, 0);
+}
+static int at_mkdir(int d, const char* n, const void* a) { return mkdirat(d, n, (mode_t)*(const int*)a); }
+static int at_symlink(int d, const char* n, const void* a) { return symlinkat((const char*)a, d, n); }
+static int at_chmod(int d, const char* n, const void* a) {
+#if defined(__wasi__)
+    (void)d; (void)n; (void)a;
+    errno = ENOTSUP;   /* WASI has no permission bits to change */
+    return -1;
+#else
+    mode_t mode = (mode_t)*(const int*)a;
+    if (fchmodat(d, n, mode, AT_SYMLINK_NOFOLLOW) == 0) return 0;
+    if (errno != ENOTSUP && errno != EOPNOTSUPP && errno != EINVAL) return -1;
+    /* No chmod of a name without following it here (glibc before 2.32, or
+     * a symlink): the name was resolved, so a symlink there now is the
+     * race. Otherwise chmod it by name; only the last name is then open to
+     * a swap, between this look and the call. */
+    struct stat st;
+    if (fstatat(d, n, &st, AT_SYMLINK_NOFOLLOW) != 0) return -1;
+    if (S_ISLNK(st.st_mode)) { fs_refused(); return -1; }
+    return fchmodat(d, n, mode, 0);
+#endif
+}
+
+int aether_sandbox_unlink(const char* path) {
+    if (!path || !fs_levels_here()) return unlink(path);
+    char resolved[PATH_MAX];
+    if (!fs_entry_writable(path, resolved)) return -1;
+    if (fs_preload_here()) return unlink(resolved);
+    return fs_at(resolved, at_unlink, NULL);
+}
+
+int aether_sandbox_rmdir(const char* path) {
+    if (!path || !fs_levels_here()) return rmdir(path);
+    char resolved[PATH_MAX];
+    if (!fs_entry_writable(path, resolved)) return -1;
+    if (fs_preload_here()) return rmdir(resolved);
+    return fs_at(resolved, at_rmdir, NULL);
+}
+
+int aether_sandbox_remove(const char* path) {
+    if (!path || !fs_levels_here()) return remove(path);
+    char resolved[PATH_MAX];
+    if (!fs_entry_writable(path, resolved)) return -1;
+    if (fs_preload_here()) return remove(resolved);
+    return fs_at(resolved, at_remove, NULL);
+}
+
+int aether_sandbox_mkdir(const char* path, int mode) {
+    if (!path || !fs_levels_here()) return mkdir(path, (mode_t)mode);
+    char resolved[PATH_MAX];
+    if (!fs_entry_writable(path, resolved)) return -1;
+    if (fs_preload_here()) return mkdir(resolved, (mode_t)mode);
+    return fs_at(resolved, at_mkdir, &mode);
+}
+
+/* mkdir of each prefix of `p` in turn, an existing directory taken as made. */
+static int fs_mkdir_each(const char* p, int mode) {
+    char buf[PATH_MAX];
+    size_t len = strlen(p);
+    if (len >= sizeof buf) { errno = ENAMETOOLONG; return -1; }
+    memcpy(buf, p, len + 1);
+    for (size_t i = 1; i <= len; i++) {
+        if (buf[i] != '/' && buf[i] != '\0') continue;
+        char saved = buf[i];
+        buf[i] = '\0';
+        if (mkdir(buf, (mode_t)mode) != 0) {
+            int err = errno;
+            struct stat st;
+            if (err != EEXIST || stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) {
+                errno = err == EEXIST ? ENOTDIR : err;
+                return -1;
+            }
+        }
+        buf[i] = saved;
+    }
+    return 0;
+}
+
+int aether_sandbox_mkdir_p(const char* path, int mode) {
+    if (!path || !*path) { errno = EINVAL; return -1; }
+    if (!fs_levels_here()) return fs_mkdir_each(path, mode);
+    char resolved[PATH_MAX];
+    if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
+        decide("fs_write", resolved) == 0) {
+        fs_refused();
+        return -1;
+    }
+    if (fs_preload_here()) return fs_mkdir_each(resolved, mode);
+    /* From "/" down, each directory opened as an anchor from the one before
+     * (O_NOFOLLOW), and made first where it is missing. */
+    int d = open("/", AETHER_SANDBOX_ANCHOR);
+    if (d < 0) return -1;
+    const char* p = resolved;
+    char name[PATH_MAX];
+    for (;;) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char* e = p;
+        while (*e && *e != '/') e++;
+        size_t n = (size_t)(e - p);
+        memcpy(name, p, n);
+        name[n] = '\0';
+        int nd = openat(d, name, AETHER_SANDBOX_ANCHOR);
+        if (nd < 0 && errno == ENOENT) {
+            if (mkdirat(d, name, (mode_t)mode) != 0 && errno != EEXIST) {
+                int err = errno;
+                close(d);
+                errno = err;
+                return -1;
+            }
+            nd = openat(d, name, AETHER_SANDBOX_ANCHOR);
+        }
+        if (nd < 0) {
+            int err = errno;
+            int link = aether_sandbox_met_link(d, name, err);
+            close(d);
+            errno = link ? EACCES : err;
+            return -1;
+        }
+        close(d);
+        d = nd;
+        p = e;
+    }
+    close(d);
+    return 0;
+}
+
+int aether_sandbox_rename(const char* from, const char* to) {
+    if (!from || !to || !fs_levels_here()) return rename(from, to);
+    char rf[PATH_MAX], rt[PATH_MAX];
+    if (!fs_entry_writable(from, rf) || !fs_entry_writable(to, rt)) return -1;
+    if (fs_preload_here()) return rename(rf, rt);
+    char nf[PATH_MAX], nt[PATH_MAX];
+    int df = aether_sandbox_anchor(rf, nf, sizeof nf, &g_libc_ops);
+    if (df < 0) return -1;
+    int dt = aether_sandbox_anchor(rt, nt, sizeof nt, &g_libc_ops);
+    if (dt < 0) {
+        int err = errno;
+        close(df);
+        errno = err;
+        return -1;
+    }
+    int r = renameat(df, nf, dt, nt);
+    int err = errno;
+    close(df);
+    close(dt);
+    errno = err;
+    return r;
+}
+
+int aether_sandbox_symlink(const char* target, const char* linkpath) {
+    if (!target || !linkpath || !fs_levels_here()) return symlink(target, linkpath);
+    /* The target is text the link holds; whatever opens the link later is
+     * checked where it leads. */
+    char resolved[PATH_MAX];
+    if (!fs_entry_writable(linkpath, resolved)) return -1;
+    if (fs_preload_here()) return symlink(target, resolved);
+    return fs_at(resolved, at_symlink, target);
+}
+
+int aether_sandbox_link(const char* target, const char* linkpath) {
+    if (!target || !linkpath || !fs_levels_here()) return link(target, linkpath);
+    char rl[PATH_MAX], rt[PATH_MAX];
+    if (!fs_link_allowed(target, linkpath, rt, rl)) return -1;
+    if (fs_preload_here()) return link(rt, rl);
+    char nt[PATH_MAX], nl[PATH_MAX];
+    int dt = aether_sandbox_anchor(rt, nt, sizeof nt, &g_libc_ops);
+    if (dt < 0) return -1;
+    int dl = aether_sandbox_anchor(rl, nl, sizeof nl, &g_libc_ops);
+    if (dl < 0) {
+        int err = errno;
+        close(dt);
+        errno = err;
+        return -1;
+    }
+    int r = linkat(dt, nt, dl, nl, 0);
+    int err = errno;
+    close(dt);
+    close(dl);
+    errno = err;
+    return r;
+}
+
+int aether_sandbox_chmod(const char* path, int mode) {
+#if defined(__wasi__)
+    if (!path || !fs_levels_here()) { errno = ENOTSUP; return -1; }
+#else
+    if (!path || !fs_levels_here()) return chmod(path, (mode_t)mode);
+#endif
+    /* chmod follows a symlink: the file it reaches is checked. */
+    char resolved[PATH_MAX];
+    if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
+        decide("fs_write", resolved) == 0) {
+        fs_refused();
+        return -1;
+    }
+#if !defined(__wasi__)
+    if (fs_preload_here()) return chmod(resolved, (mode_t)mode);
+#endif
+    return fs_at(resolved, at_chmod, &mode);
+}
+
+#endif /* _WIN32 */
 
 // ---------------------------------------------------------------------------
 // A staged write (fs.write_atomic)

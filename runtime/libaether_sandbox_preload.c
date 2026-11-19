@@ -30,6 +30,24 @@
 #include <netdb.h>
 #include <stdarg.h>
 #include <spawn.h>
+#include <stddef.h>              // offsetof: scandir's copies
+#include <dirent.h>
+#include <glob.h>
+#include <ftw.h>
+#include <utime.h>
+#include <sys/time.h>
+#if defined(__linux__)
+#include <sys/xattr.h>
+#include <sys/mount.h>
+#endif
+// fts: glibc and the BSDs ship it; musl does not.
+#if defined(__GLIBC__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
+    defined(__APPLE__)
+#include <fts.h>
+#define AETHER_PRELOAD_HAS_FTS 1
+#else
+#define AETHER_PRELOAD_HAS_FTS 0
+#endif
 #if !defined(__OpenBSD__)
 #include <wordexp.h>             // OpenBSD's libc has no wordexp to intercept
 #endif
@@ -101,31 +119,16 @@ static void log_deny(const char* category, const char* resource) {
     }
 }
 
-static int check_grant(const char* category, const char* resource) {
-    // For fs_* categories, resolve the path BEFORE matching so a grant
-    // for `/tmp/*` can't be subverted with `/tmp/../etc/shadow` or a
-    // symlink under /tmp. tcp/env/exec resources stay as-is — realpath
-    // is meaningful only for filesystem paths.
-    char resolved[PATH_MAX];
-    const char* match_target = resource;
-    if (category && strncmp(category, "fs_", 3) == 0 && resource) {
-        if (!aether_sandbox_canon_path(resource, resolved, sizeof(resolved))) {
-            int in_process = aether_sandbox_levels_here ? aether_sandbox_levels_here() : 0;
-            if (in_process > 0 || sandbox_active) {
-                log_deny(category, resource);
-                return 0;
-            }
-            return 1;
-        }
-        match_target = resolved;
-    }
-
+// The grant check proper, for a resource already resolved (an fs path from
+// aether_sandbox_canon_path or aether_sandbox_canon_entry): the calling
+// thread's in-process levels, then the grant file's.
+static int check_resolved(const char* category, const char* resource) {
     // An embedded policy and preload grants are independent boundaries.
     // When both are active, the operation must satisfy both policies.
     if (aether_sandbox_check_resolved) {
-        int result = aether_sandbox_check_resolved(category, match_target);
+        int result = aether_sandbox_check_resolved(category, resource);
         if (result == 0) {
-            log_deny(category, match_target);
+            log_deny(category, resource);
             return 0;
         }
     }
@@ -134,11 +137,46 @@ static int check_grant(const char* category, const char* resource) {
     for (int i = 0; i < grant_count; i++) {
         if (grants[i].cat[0] == '*' && grants[i].pat[0] == '*') return 1;
         if (strcmp(grants[i].cat, category) == 0) {
-            if (aether_grant_match(category, grants[i].pat, match_target)) return 1;
+            if (aether_grant_match(category, grants[i].pat, resource)) return 1;
         }
     }
-    log_deny(category, match_target);
+    log_deny(category, resource);
     return 0;
+}
+
+// Would the policy grant `category` on the resolved `resource`? Asked to
+// see what a hard link's new name would reach, so a no is not logged. The
+// in-process levels answer through their audit, as for any check.
+static int grant_covers(const char* category, const char* resource) {
+    if (aether_sandbox_check_resolved && aether_sandbox_check_resolved(category, resource) == 0)
+        return 0;
+    if (!sandbox_active) return 1;
+    for (int i = 0; i < grant_count; i++) {
+        if (grants[i].cat[0] == '*' && grants[i].pat[0] == '*') return 1;
+        if (strcmp(grants[i].cat, category) == 0 &&
+            aether_grant_match(category, grants[i].pat, resource)) return 1;
+    }
+    return 0;
+}
+
+static int check_grant(const char* category, const char* resource) {
+    // For fs_* categories, resolve the path BEFORE matching so a grant
+    // for `/tmp/*` can't be subverted with `/tmp/../etc/shadow` or a
+    // symlink under /tmp. tcp/env/exec resources stay as they are: realpath
+    // is meaningful only for filesystem paths.
+    if (category && strncmp(category, "fs_", 3) == 0 && resource) {
+        char resolved[PATH_MAX];
+        if (!aether_sandbox_canon_path(resource, resolved, sizeof(resolved))) {
+            int in_process = aether_sandbox_levels_here ? aether_sandbox_levels_here() : 0;
+            if (in_process > 0 || sandbox_active) {
+                log_deny(category, resource);
+                return 0;
+            }
+            return 1;
+        }
+        return check_resolved(category, resolved);
+    }
+    return check_resolved(category, resource);
 }
 
 // Parse grant lines from a buffer (shared by file and shm paths)
@@ -390,37 +428,29 @@ char* getenv(const char* name) {
 // this process's pid, and an open that creates a new file (O_CREAT|O_EXCL):
 // any other open of any other name is checked as it is, so the stage can
 // never be used to open an existing file or one that is not beside `path`.
-static const char* staged_write_target(const char* path, int flags) {
-    if ((flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL)) return path;
-    const char* target = aether_sandbox_staged_for ? aether_sandbox_staged_for(path) : NULL;
-    if (!target) return path;
+// The file `path` stands for when it is the temporary staged on this thread
+// and has exactly its shape, `<target>.tmp.<this pid>.<digits>`; NULL for any
+// other name. The rename of it onto that file and its removal are checked
+// as writes of the file (#3751), as the open that creates it is.
+static const char* staged_sibling_target(const char* path) {
+    const char* target = aether_sandbox_staged_for && path ? aether_sandbox_staged_for(path) : NULL;
+    if (!target) return NULL;
     size_t n = strlen(target);
-    if (strncmp(path, target, n) != 0 || strncmp(path + n, ".tmp.", 5) != 0) return path;
+    if (strncmp(path, target, n) != 0 || strncmp(path + n, ".tmp.", 5) != 0) return NULL;
     const char* p = path + n + 5;
     char* end = NULL;
     long pid = strtol(p, &end, 10);
-    if (end == p || *end != '.' || pid != (long)getpid()) return path;
+    if (end == p || *end != '.' || pid != (long)getpid()) return NULL;
     p = end + 1;
-    if (*p < '0' || *p > '9') return path;
+    if (*p < '0' || *p > '9') return NULL;
     while (*p >= '0' && *p <= '9') p++;
-    return *p ? path : target;
+    return *p ? NULL : target;
 }
 
-// What an open() asks of the file (#3742): a read when its access mode is
-// O_RDONLY or O_RDWR, a write when it is O_WRONLY or O_RDWR or when it
-// creates, appends to or truncates the file. O_RDWR needs both grants, as
-// fopen's "r+" does; it used to be checked as a write only, so a write-only
-// grant let the file be read. Landlock asks the same of a child that
-// spawn_sandboxed starts (READ_FILE and WRITE_FILE).
-static int open_flags_allowed(const char* path, int flags) {
-    int acc = flags & O_ACCMODE;
-    int reads = acc == O_RDONLY || acc == O_RDWR;
-    int writes = acc != O_RDONLY || (flags & (O_CREAT | O_APPEND | O_TRUNC));
-    if (reads && !check_grant("fs_read", path)) return 0;
-    // A staged write_atomic temporary is checked as a write of the file it
-    // stands for (staged_write_target); every other open as itself.
-    if (writes && !check_grant("fs_write", staged_write_target(path, flags))) return 0;
-    return 1;
+static const char* staged_write_target(const char* path, int flags) {
+    if ((flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL)) return path;
+    const char* target = staged_sibling_target(path);
+    return target ? target : path;
 }
 
 // The same for an fopen() mode (aether_fopen_access in
@@ -431,87 +461,6 @@ static int fopen_mode_allowed(const char* path, const char* mode) {
     if ((access & AETHER_ACCESS_READ) && !check_grant("fs_read", path)) return 0;
     if ((access & AETHER_ACCESS_WRITE) && !check_grant("fs_write", path)) return 0;
     return 1;
-}
-
-// open
-int open(const char* path, int flags, ...) {
-    if (!real_open) real_open = dlsym(RTLD_NEXT, "open");
-    if (path) {
-        if (!open_flags_allowed(path, flags)) {
-            errno = EACCES;
-            return -1;
-        }
-    }
-    // Handle variadic mode argument
-    if (flags & O_CREAT) {
-        va_list ap;
-        __builtin_va_start(ap, flags);
-        int mode = __builtin_va_arg(ap, int);
-        __builtin_va_end(ap);
-        return real_open(path, flags, mode);
-    }
-    return real_open(path, flags);
-}
-
-// fopen
-FILE* fopen(const char* path, const char* mode) {
-    if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
-    if (path && !fopen_mode_allowed(path, mode)) {
-        errno = EACCES;
-        return NULL;
-    }
-    return real_fopen(path, mode);
-}
-
-// freopen. glibc opens the new file on its internal open, which the open()
-// above never sees, so it gets fopen's rule here. With no path it reopens
-// the stream's own file in the new mode: glibc does that through
-// /proc/self/fd/N, which can widen a read-only stream to "r+", so on Linux
-// that path is what is checked (it resolves to the file). The BSD libcs and
-// musl only change the flags of the descriptor they have, which cannot
-// widen its access, so there nothing new is opened. On a refusal the stream
-// is closed, as freopen closes it whatever happens.
-//
-// fdopen needs no wrapper: it opens nothing, and every libc refuses a mode
-// the descriptor's own access does not allow.
-static int freopen_allowed(const char* path, const char* mode, FILE* stream) {
-    if (path) return fopen_mode_allowed(path, mode);
-#if defined(__linux__)
-    int fd = stream ? fileno(stream) : -1;
-    if (fd < 0) return 1;   // nothing to reopen: libc fails it
-    // A reopen of the same descriptor for no more than it already holds
-    // gains nothing, so it needs no grant: freopen(NULL, "rb", stdin), the
-    // portable way to put stdin in binary mode, reopens a pipe, a socket or
-    // a terminal, whose /proc/self/fd link names no path a grant can match
-    // (pipe:[123], /dev/pts/N), and was refused, with stdin closed. Asking
-    // for more (a read-only descriptor reopened for writing, which the
-    // reopen through /proc can grant) is checked against the path.
-    int fl = fcntl(fd, F_GETFL);
-    if (fl >= 0) {
-        int held = (fl & O_ACCMODE) == O_RDWR   ? AETHER_ACCESS_READ | AETHER_ACCESS_WRITE
-                 : (fl & O_ACCMODE) == O_WRONLY ? AETHER_ACCESS_WRITE
-                                                : AETHER_ACCESS_READ;
-        if ((aether_fopen_access(mode) & ~held) == 0) return 1;
-    }
-    char self[64];
-    snprintf(self, sizeof self, "/proc/self/fd/%d", fd);
-    return fopen_mode_allowed(self, mode);
-#else
-    (void)mode;
-    (void)stream;
-    return 1;
-#endif
-}
-
-static FILE* (*real_freopen)(const char*, const char*, FILE*) = NULL;
-FILE* freopen(const char* path, const char* mode, FILE* stream) {
-    if (!real_freopen) real_freopen = dlsym(RTLD_NEXT, "freopen");
-    if (!freopen_allowed(path, mode, stream)) {
-        if (stream) fclose(stream);
-        errno = EACCES;
-        return NULL;
-    }
-    return real_freopen(path, mode, stream);
 }
 
 // connect
@@ -576,91 +525,1553 @@ int accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen) {
     return real_accept(sockfd, addr, addrlen);
 }
 
-// openat (modern Linux uses this instead of open)
+// ---------------------------------------------------------------------------
+// The file system (#3751)
+// ---------------------------------------------------------------------------
+//
+// Every libc call that opens, lists or changes something by path comes
+// through here. With no policy in force (no grant file, and no level of the
+// calling thread's in-process sandbox) each wrapper is the plain call. With
+// one, a call is made in three steps:
+//
+//   1. The path is resolved: where it leads (aether_sandbox_canon_path), or,
+//      for a call that acts on a name itself (unlink, rmdir, rename, mkdir,
+//      the new name of link and symlink, mknod, an open with O_NOFOLLOW or
+//      O_CREAT|O_EXCL), its directory, with the last name kept
+//      (aether_sandbox_canon_entry). A path given to an *at call is taken
+//      relative to the directory descriptor, whose own path is read from
+//      the kernel (fd_path); it used to be taken relative to the working
+//      directory, so a descriptor from an opendir reached anything.
+//   2. The grant is checked on that resolution: fs_read for what reads or
+//      lists, fs_write for what writes, creates, removes or changes.
+//   3. The call is made on the resolution, following no symlink: an open
+//      by aether_sandbox_walk, a call on a name with its *at variant from
+//      the directory aether_sandbox_anchor opens. A symlink swapped into
+//      the path after the check (by another thread or process) fails the
+//      call instead of being followed out of the grant.
+//
+// Lookups that read no file's content and change nothing are not wrapped:
+// stat and its kin, access, readlink, realpath, getxattr and listxattr,
+// statfs and statvfs, pathconf. They say that a name exists and what it
+// is, never what it holds, and libc and the program's runtime make them
+// for their own needs (a PATH search, the resolution in step 1). The
+// in-process checks of std (fs.exists, fs.stat) do ask fs_read for them.
+// tests/integration/sandbox_preload_fs_coverage lists every path call of
+// the C library and fails on one that is neither wrapped nor listed here.
+
+static int fd_path(int fd, char out[PATH_MAX], char run[PATH_MAX]);
+static int policy_in_force(void);
+
+// The function behind a wrapper, looked up the first time it is needed.
+#define FS_REAL(name) \
+    (real_##name ? real_##name : (real_##name = (__typeof__(real_##name))dlsym(RTLD_NEXT, #name)))
+
+static int fs_real_openat(int dirfd, const char* path, int flags, ...);
+
+#if defined(__linux__)
+// The raw system call, for openat2 in aether_sandbox_walk. The syscall()
+// wrapper below refuses openat2 under a policy, so not through it.
+static long fs_real_syscall(long number, ...) {
+    static long (*fn)(long, ...) = NULL;
+    if (!fn) fn = (long (*)(long, ...))dlsym(RTLD_NEXT, "syscall");
+    va_list ap;
+    va_start(ap, number);
+    long a = va_arg(ap, long);
+    long b = va_arg(ap, long);
+    long c = va_arg(ap, long);
+    long d = va_arg(ap, long);
+    va_end(ap);
+    if (!fn) { errno = ENOSYS; return -1; }
+    return fn(number, a, b, c, d);
+}
+#endif
+
+static const AetherSandboxFsOps preload_ops = {
+    fs_real_openat, close,
+#if defined(__linux__)
+    fs_real_syscall,
+#else
+    NULL,
+#endif
+};
+
+// The in-process runtime finds this to pass a call it checked to the
+// wrappers with its resolved path, rather than walk through them itself
+// (aether_sandbox.c, fs_preload_here).
+__attribute__((visibility("default"))) int aether_sandbox_preload_present(void) { return 1; }
+
+// `path` as an absolute name: relative to the directory `dirfd` is open
+// on, or to the working directory for AT_FDCWD. An empty path (AT_EMPTY_PATH)
+// is the descriptor's own file. 0 when the descriptor names no path.
+static int fs_at_path(int dirfd, const char* path, char out[PATH_MAX]) {
+    if (!path) return 0;
+    if (path[0] == '/' || (dirfd == AT_FDCWD && path[0])) {
+        size_t n = strlen(path);
+        if (n >= PATH_MAX) return 0;
+        memcpy(out, path, n + 1);
+        return 1;
+    }
+    char dir[PATH_MAX];
+    char run[PATH_MAX];
+    if (dirfd == AT_FDCWD) {
+        if (!getcwd(dir, sizeof dir)) return 0;
+    } else if (!fd_path(dirfd, dir, run)) {
+        return 0;
+    }
+    size_t dl = strlen(dir);
+    size_t pl = strlen(path);
+    if (pl == 0) {
+        memcpy(out, dir, dl + 1);
+        return 1;
+    }
+    if (dl + 1 + pl + 1 > PATH_MAX) return 0;
+    memcpy(out, dir, dl);
+    out[dl] = '/';
+    memcpy(out + dl + 1, path, pl + 1);
+    return 1;
+}
+
+// Steps 1 and 2: `path` (relative to `dirfd`) resolved, the last name kept
+// with `entry`, and checked for `access` (AETHER_ACCESS_READ, _WRITE). 1 with
+// the resolution in `out`; 0 refused, logged, errno EACCES.
+static int fs_allowed(int dirfd, const char* path, int entry, int access, char out[PATH_MAX]) {
+    char joined[PATH_MAX];
+    int ok = fs_at_path(dirfd, path, joined) &&
+             (entry ? aether_sandbox_canon_entry(joined, out, PATH_MAX)
+                    : aether_sandbox_canon_path(joined, out, PATH_MAX));
+    if (!ok) {
+        log_deny((access & AETHER_ACCESS_WRITE) ? "fs_write" : "fs_read", path ? path : "(null)");
+        errno = EACCES;
+        return 0;
+    }
+    if ((access & AETHER_ACCESS_READ) && !check_resolved("fs_read", out)) { errno = EACCES; return 0; }
+    if ((access & AETHER_ACCESS_WRITE) && !check_resolved("fs_write", out)) { errno = EACCES; return 0; }
+    return 1;
+}
+
+static int fs_needs_mode(int flags) {
+#ifdef O_TMPFILE
+    if ((flags & O_TMPFILE) == O_TMPFILE) return 1;
+#endif
+    return (flags & O_CREAT) != 0;
+}
+
+#define FS_MODE_ARG(flags)                    \
+    unsigned mode = 0;                        \
+    if (fs_needs_mode(flags)) {               \
+        va_list ap;                           \
+        va_start(ap, flags);                  \
+        mode = va_arg(ap, unsigned);          \
+        va_end(ap);                           \
+    }
+
 static int (*real_openat)(int, const char*, int, ...) = NULL;
+static int fs_real_openat(int dirfd, const char* path, int flags, ...) {
+    FS_MODE_ARG(flags)
+    return FS_REAL(openat)(dirfd, path, flags, mode);
+}
+
+// What an open() asks of the file (#3742): a read when its access mode is
+// O_RDONLY or O_RDWR, a write when it is O_WRONLY or O_RDWR or when it
+// creates, appends to or truncates the file. O_RDWR needs both grants, as
+// fopen's "r+" does. Landlock asks the same of a child that spawn_sandboxed
+// starts (READ_FILE and WRITE_FILE).
+static int fs_open_access(int flags) {
+    int acc = flags & O_ACCMODE;
+    int access = 0;
+    if (acc == O_RDONLY || acc == O_RDWR) access |= AETHER_ACCESS_READ;
+    if (acc != O_RDONLY || (flags & (O_CREAT | O_APPEND | O_TRUNC))) access |= AETHER_ACCESS_WRITE;
+    return access;
+}
+
+// open and every open of a path, under a policy: steps 1 to 3. O_NOFOLLOW
+// and O_CREAT|O_EXCL act on a symlink at the end itself, so for them the
+// last name is what is checked. A staged write_atomic temporary is checked
+// as a write of the file it stands for (staged_write_target); it is
+// opened, as itself, in that file's directory.
+static int fs_open_checked(int dirfd, const char* path, int flags, unsigned mode) {
+    int entry = (flags & O_NOFOLLOW) || (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+    int access = fs_open_access(flags);
+    char resolved[PATH_MAX];
+    const char* target = (dirfd == AT_FDCWD && path) ? staged_write_target(path, flags) : path;
+    if (target != path) {
+        char rt[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, target, 1, AETHER_ACCESS_WRITE, rt)) return -1;
+        if (!fs_at_path(AT_FDCWD, path, rt) ||
+            !aether_sandbox_canon_entry(rt, resolved, sizeof resolved)) {
+            errno = EACCES;
+            return -1;
+        }
+        if ((access & AETHER_ACCESS_READ) && !check_resolved("fs_read", resolved)) {
+            errno = EACCES;
+            return -1;
+        }
+    } else if (!fs_allowed(dirfd, path, entry, access, resolved)) {
+        return -1;
+    }
+    return aether_sandbox_walk(resolved, flags, mode, &preload_ops);
+}
+
+int open(const char* path, int flags, ...) {
+    FS_MODE_ARG(flags)
+    if (!policy_in_force()) return FS_REAL(open)(path, flags, mode);
+    return fs_open_checked(AT_FDCWD, path, flags, mode);
+}
+
 int openat(int dirfd, const char* path, int flags, ...) {
-    if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
-    if (path) {
-        if (!open_flags_allowed(path, flags)) {
+    FS_MODE_ARG(flags)
+    if (!policy_in_force()) return FS_REAL(openat)(dirfd, path, flags, mode);
+    return fs_open_checked(dirfd, path, flags, mode);
+}
+
+static int (*real_creat)(const char*, mode_t) = NULL;
+int creat(const char* path, mode_t mode) {
+    if (!policy_in_force()) return FS_REAL(creat)(path, mode);
+    return fs_open_checked(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC, (unsigned)mode);
+}
+
+// fopen under a policy: the open of steps 1 to 3, then a stream on it.
+static FILE* fs_fopen_checked(const char* path, const char* mode, int extra_flags) {
+    int flags = aether_fopen_flags(mode);
+    if (flags < 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+    int fd = fs_open_checked(AT_FDCWD, path, flags | extra_flags, 0666);
+    if (fd < 0) return NULL;
+    FILE* fp = fdopen(fd, mode);
+    if (!fp) {
+        int err = errno;
+        close(fd);
+        errno = err;
+    }
+    return fp;
+}
+
+FILE* fopen(const char* path, const char* mode) {
+    if (!policy_in_force()) return FS_REAL(fopen)(path, mode);
+    return fs_fopen_checked(path, mode, 0);
+}
+
+// freopen. glibc opens the new file on its internal open, which the open()
+// above never sees, so it gets fopen's rule here. With no path it reopens
+// the stream's own file in the new mode: glibc does that through
+// /proc/self/fd/N, which can widen a read-only stream to "r+", so on Linux
+// that path is what is checked (it resolves to the file). The BSD libcs and
+// musl only change the flags of the descriptor they have, which cannot
+// widen its access, so there nothing new is opened. On a refusal the stream
+// is closed, as freopen closes it whatever happens.
+//
+// With a path, the file is opened by steps 1 to 3 and the stream reopened
+// on that descriptor through /proc/self/fd/N, which names the file opened
+// and nothing a swap can change; where /proc is not mounted (and on
+// FreeBSD), on the resolved path, which leaves the directories on its way
+// to a swap between the check and the reopen.
+//
+// fdopen needs no wrapper: it opens nothing, and every libc refuses a mode
+// the descriptor's own access does not allow.
+static int freopen_allowed(const char* path, const char* mode, FILE* stream) {
+    if (path) return fopen_mode_allowed(path, mode);
+#if defined(__linux__)
+    int fd = stream ? fileno(stream) : -1;
+    if (fd < 0) return 1;   // nothing to reopen: libc fails it
+    // A reopen of the same descriptor for no more than it already holds
+    // gains nothing, so it needs no grant: freopen(NULL, "rb", stdin), the
+    // portable way to put stdin in binary mode, reopens a pipe, a socket or
+    // a terminal, whose /proc/self/fd link names no path a grant can match
+    // (pipe:[123], /dev/pts/N), and was refused, with stdin closed. Asking
+    // for more (a read-only descriptor reopened for writing, which the
+    // reopen through /proc can grant) is checked against the path.
+    int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0) {
+        int held = (fl & O_ACCMODE) == O_RDWR   ? AETHER_ACCESS_READ | AETHER_ACCESS_WRITE
+                 : (fl & O_ACCMODE) == O_WRONLY ? AETHER_ACCESS_WRITE
+                                                : AETHER_ACCESS_READ;
+        if ((aether_fopen_access(mode) & ~held) == 0) return 1;
+    }
+    char self[64];
+    snprintf(self, sizeof self, "/proc/self/fd/%d", fd);
+    return fopen_mode_allowed(self, mode);
+#else
+    (void)mode;
+    (void)stream;
+    return 1;
+#endif
+}
+
+typedef FILE* (*freopen_fn)(const char*, const char*, FILE*);
+static FILE* fs_freopen(freopen_fn real, const char* path, const char* mode, FILE* stream, int extra_flags) {
+    if (!policy_in_force()) return real(path, mode, stream);
+    if (!path) {
+        if (!freopen_allowed(NULL, mode, stream)) {
+            if (stream) fclose(stream);
+            errno = EACCES;
+            return NULL;
+        }
+        return real(NULL, mode, stream);
+    }
+    int flags = aether_fopen_flags(mode);
+    char resolved[PATH_MAX];
+    int fd = -1;
+    if (flags < 0) {
+        errno = EINVAL;
+    } else {
+        flags |= extra_flags | O_CLOEXEC;
+        int entry = (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+        if (fs_allowed(AT_FDCWD, path, entry, fs_open_access(flags), resolved))
+            fd = aether_sandbox_walk(resolved, flags, 0666, &preload_ops);
+    }
+    if (fd < 0) {
+        int err = errno;
+        if (stream) fclose(stream);
+        errno = err;
+        return NULL;
+    }
+    // The reopen is of the file already open, made and truncated as the
+    // mode asked: "x" would now find it there.
+    char again[16];
+    size_t m = 0;
+    for (const char* c = mode; *c && m + 1 < sizeof again; c++) {
+        if (*c != 'x') again[m++] = *c;
+    }
+    again[m] = '\0';
+    const char* name = resolved;
+#if defined(__linux__)
+    char self[64];
+    snprintf(self, sizeof self, "/proc/self/fd/%d", fd);
+    if (access(self, F_OK) == 0) name = self;
+#endif
+    FILE* fp = real(name, again, stream);
+    int err = errno;
+    close(fd);
+    errno = err;
+    return fp;
+}
+
+static FILE* (*real_freopen)(const char*, const char*, FILE*) = NULL;
+FILE* freopen(const char* path, const char* mode, FILE* stream) {
+    return fs_freopen(FS_REAL(freopen), path, mode, stream, 0);
+}
+
+static DIR* (*real_opendir)(const char*) = NULL;
+DIR* opendir(const char* path) {
+    if (!policy_in_force()) return FS_REAL(opendir)(path);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, path, 0, AETHER_ACCESS_READ, resolved)) return NULL;
+    int fd = aether_sandbox_walk(resolved, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0, &preload_ops);
+    if (fd < 0) return NULL;
+    DIR* d = fdopendir(fd);
+    if (!d) {
+        int err = errno;
+        close(fd);
+        errno = err;
+    }
+    return d;
+}
+
+// scandir lists a directory through libc's own opendir, which the wrapper
+// above never sees. Under a policy the directory is opened by steps 1 to 3
+// and listed here, as scandir lists it: each entry the filter keeps, copied,
+// then sorted.
+#define FS_SCANDIR(NAME, DIRENT, READDIR)                                                     \
+    static int (*real_##NAME)(const char*, struct DIRENT***, int (*)(const struct DIRENT*),   \
+                              int (*)(const struct DIRENT**, const struct DIRENT**)) = NULL;   \
+    static int fs_list_##NAME(int dirfd, const char* path, struct DIRENT*** list,             \
+                              int (*filter)(const struct DIRENT*),                          \
+                              int (*compar)(const struct DIRENT**, const struct DIRENT**)) { \
+        char resolved[PATH_MAX];                                                              \
+        if (!fs_allowed(dirfd, path, 0, AETHER_ACCESS_READ, resolved)) return -1;             \
+        int fd = aether_sandbox_walk(resolved, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0,         \
+                                     &preload_ops);                                           \
+        if (fd < 0) return -1;                                                                \
+        DIR* d = fdopendir(fd);                                                               \
+        if (!d) {                                                                             \
+            int err = errno;                                                                  \
+            close(fd);                                                                        \
+            errno = err;                                                                      \
+            return -1;                                                                        \
+        }                                                                                     \
+        struct DIRENT** out = NULL;                                                           \
+        size_t n = 0, cap = 0;                                                                \
+        struct DIRENT* e;                                                                     \
+        int failed = 0;                                                                       \
+        errno = 0;                                                                            \
+        while ((e = READDIR(d)) != NULL) {                                                    \
+            if (filter && !filter(e)) continue;                                               \
+            size_t size = offsetof(struct DIRENT, d_name) + strlen(e->d_name) + 1;            \
+            if (size < e->d_reclen) size = e->d_reclen;                                       \
+            struct DIRENT* copy = (struct DIRENT*)malloc(size);                               \
+            if (n == cap) {                                                                   \
+                size_t ncap = cap ? cap * 2 : 16;                                             \
+                struct DIRENT** grown =                                                       \
+                    copy ? (struct DIRENT**)realloc(out, ncap * sizeof *out) : NULL;          \
+                if (grown) { out = grown; cap = ncap; }                                       \
+                else { free(copy); copy = NULL; }                                             \
+            }                                                                                 \
+            if (!copy) { failed = ENOMEM; break; }                                            \
+            memcpy(copy, e, size < e->d_reclen ? size : e->d_reclen);                         \
+            memcpy(copy->d_name, e->d_name, strlen(e->d_name) + 1);                           \
+            out[n++] = copy;                                                                  \
+            errno = 0;                                                                        \
+        }                                                                                     \
+        if (!failed && errno) failed = errno;                                                 \
+        closedir(d);                                                                          \
+        if (failed || n > INT_MAX) {                                                          \
+            for (size_t i = 0; i < n; i++) free(out[i]);                                      \
+            free(out);                                                                        \
+            errno = failed ? failed : EOVERFLOW;                                              \
+            return -1;                                                                        \
+        }                                                                                     \
+        if (compar && n > 1)                                                                  \
+            qsort(out, n, sizeof *out, (int (*)(const void*, const void*))compar);            \
+        *list = out;                                                                          \
+        return (int)n;                                                                        \
+    }                                                                                         \
+    int NAME(const char* path, struct DIRENT*** list, int (*filter)(const struct DIRENT*),    \
+             int (*compar)(const struct DIRENT**, const struct DIRENT**)) {                   \
+        if (!policy_in_force()) return FS_REAL(NAME)(path, list, filter, compar);             \
+        return fs_list_##NAME(AT_FDCWD, path, list, filter, compar);                          \
+    }
+FS_SCANDIR(scandir, dirent, readdir)
+
+// scandirat: the same, its path relative to a directory descriptor.
+#define FS_SCANDIRAT(NAME, LIST, DIRENT)                                                       \
+    static int (*real_##NAME)(int, const char*, struct DIRENT***,                              \
+                              int (*)(const struct DIRENT*),                                   \
+                              int (*)(const struct DIRENT**, const struct DIRENT**)) = NULL;    \
+    int NAME(int dirfd, const char* path, struct DIRENT*** list,                               \
+             int (*filter)(const struct DIRENT*),                                              \
+             int (*compar)(const struct DIRENT**, const struct DIRENT**)) {                    \
+        if (!policy_in_force()) return FS_REAL(NAME)(dirfd, path, list, filter, compar);       \
+        return LIST(dirfd, path, list, filter, compar);                                        \
+    }
+#if defined(__GLIBC__) || defined(__FreeBSD__)
+FS_SCANDIRAT(scandirat, fs_list_scandir, dirent)
+#endif
+
+// Calls on a name: unlink, rmdir, remove, mkdir, mknod, mkfifo, symlink.
+// Each checks fs_write on the name (step 1 keeps the last name) and makes
+// its *at variant from the anchor of its directory (step 3).
+static int fs_on_name(int dirfd, const char* path, char name[PATH_MAX]) {
+    char resolved[PATH_MAX];
+    if (!fs_allowed(dirfd, path, 1, AETHER_ACCESS_WRITE, resolved)) return -1;
+    return aether_sandbox_anchor(resolved, name, PATH_MAX, &preload_ops);
+}
+
+// fs.write_atomic's temporary (staged_sibling_target): fs_write on the file
+// it stands for, then its directory anchored and its last name in `name`.
+// -2 when `path` is not that temporary.
+static int fs_on_staged(const char* path, char name[PATH_MAX]) {
+    const char* target = staged_sibling_target(path);
+    if (!target) return -2;
+    char rt[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, target, 1, AETHER_ACCESS_WRITE, rt)) return -1;
+    char joined[PATH_MAX];
+    char resolved[PATH_MAX];
+    if (!fs_at_path(AT_FDCWD, path, joined) ||
+        !aether_sandbox_canon_entry(joined, resolved, sizeof resolved)) {
+        errno = EACCES;
+        return -1;
+    }
+    return aether_sandbox_anchor(resolved, name, PATH_MAX, &preload_ops);
+}
+
+// The call `expr`, made from the anchor `d` with `name`; the anchor closed
+// after, the call's errno kept.
+#define FS_AT_CALL(d, expr)          \
+    do {                             \
+        int fs_r_ = (expr);          \
+        int fs_e_ = errno;           \
+        close(d);                    \
+        errno = fs_e_;               \
+        return fs_r_;                \
+    } while (0)
+
+static int (*real_unlinkat)(int, const char*, int) = NULL;
+static int (*real_unlink)(const char*) = NULL;
+int unlink(const char* path) {
+    if (!policy_in_force()) return FS_REAL(unlink)(path);
+    char name[PATH_MAX];
+    int d = fs_on_staged(path, name);
+    if (d == -2) d = fs_on_name(AT_FDCWD, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(unlinkat)(d, name, 0));
+}
+
+int unlinkat(int dirfd, const char* path, int flags) {
+    if (!policy_in_force()) return FS_REAL(unlinkat)(dirfd, path, flags);
+    char name[PATH_MAX];
+    int d = fs_on_name(dirfd, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(unlinkat)(d, name, flags));
+}
+
+static int (*real_rmdir)(const char*) = NULL;
+int rmdir(const char* path) {
+    if (!policy_in_force()) return FS_REAL(rmdir)(path);
+    char name[PATH_MAX];
+    int d = fs_on_name(AT_FDCWD, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(unlinkat)(d, name, AT_REMOVEDIR));
+}
+
+// remove: unlink, or rmdir for a directory, as libc's remove decides.
+static int (*real_remove)(const char*) = NULL;
+int remove(const char* path) {
+    if (!policy_in_force()) return FS_REAL(remove)(path);
+    char name[PATH_MAX];
+    int d = fs_on_staged(path, name);
+    if (d == -2) d = fs_on_name(AT_FDCWD, path, name);
+    if (d < 0) return -1;
+    struct stat st;
+    int dir = fstatat(d, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode);
+    FS_AT_CALL(d, FS_REAL(unlinkat)(d, name, dir ? AT_REMOVEDIR : 0));
+}
+
+// mkdir of a name that is already there says EEXIST without a grant: a
+// lookup tells as much (stat is not wrapped), and `mkdir -p` meets every
+// directory above the one it makes. A refusal would stop it at "/".
+static int (*real_mkdirat)(int, const char*, mode_t) = NULL;
+static int fs_mkdirat(int dirfd, const char* path, mode_t mode) {
+    char joined[PATH_MAX];
+    struct stat st;
+    if (fs_at_path(dirfd, path, joined) && lstat(joined, &st) == 0) {
+        errno = EEXIST;
+        return -1;
+    }
+    char name[PATH_MAX];
+    int d = fs_on_name(dirfd, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(mkdirat)(d, name, mode));
+}
+
+static int (*real_mkdir)(const char*, mode_t) = NULL;
+int mkdir(const char* path, mode_t mode) {
+    if (!policy_in_force()) return FS_REAL(mkdir)(path, mode);
+    return fs_mkdirat(AT_FDCWD, path, mode);
+}
+
+int mkdirat(int dirfd, const char* path, mode_t mode) {
+    if (!policy_in_force()) return FS_REAL(mkdirat)(dirfd, path, mode);
+    return fs_mkdirat(dirfd, path, mode);
+}
+
+static int (*real_mknodat)(int, const char*, mode_t, dev_t) = NULL;
+static int (*real_mknod)(const char*, mode_t, dev_t) = NULL;
+int mknod(const char* path, mode_t mode, dev_t dev) {
+    if (!policy_in_force()) return FS_REAL(mknod)(path, mode, dev);
+    char name[PATH_MAX];
+    int d = fs_on_name(AT_FDCWD, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(mknodat)(d, name, mode, dev));
+}
+
+int mknodat(int dirfd, const char* path, mode_t mode, dev_t dev) {
+    if (!policy_in_force()) return FS_REAL(mknodat)(dirfd, path, mode, dev);
+    char name[PATH_MAX];
+    int d = fs_on_name(dirfd, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(mknodat)(d, name, mode, dev));
+}
+
+static int (*real_mkfifoat)(int, const char*, mode_t) = NULL;
+static int (*real_mkfifo)(const char*, mode_t) = NULL;
+int mkfifo(const char* path, mode_t mode) {
+    if (!policy_in_force()) return FS_REAL(mkfifo)(path, mode);
+    char name[PATH_MAX];
+    int d = fs_on_name(AT_FDCWD, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(mkfifoat)(d, name, mode));
+}
+
+int mkfifoat(int dirfd, const char* path, mode_t mode) {
+    if (!policy_in_force()) return FS_REAL(mkfifoat)(dirfd, path, mode);
+    char name[PATH_MAX];
+    int d = fs_on_name(dirfd, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(mkfifoat)(d, name, mode));
+}
+
+// symlink: the new name is checked. The target is text the link holds;
+// whatever opens the link later is checked where it leads.
+static int (*real_symlinkat)(const char*, int, const char*) = NULL;
+static int (*real_symlink)(const char*, const char*) = NULL;
+int symlink(const char* target, const char* linkpath) {
+    if (!policy_in_force()) return FS_REAL(symlink)(target, linkpath);
+    char name[PATH_MAX];
+    int d = fs_on_name(AT_FDCWD, linkpath, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(symlinkat)(target, d, name));
+}
+
+int symlinkat(const char* target, int dirfd, const char* linkpath) {
+    if (!policy_in_force()) return FS_REAL(symlinkat)(target, dirfd, linkpath);
+    char name[PATH_MAX];
+    int d = fs_on_name(dirfd, linkpath, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(symlinkat)(target, d, name));
+}
+
+// Two names, each checked and anchored: rename's, and link's.
+static int fs_two_names(int d1, const char* p1, int d2, const char* p2,
+                        int* a1, char n1[PATH_MAX], int* a2, char n2[PATH_MAX]) {
+    *a1 = fs_on_name(d1, p1, n1);
+    if (*a1 < 0) return -1;
+    *a2 = fs_on_name(d2, p2, n2);
+    if (*a2 < 0) {
+        int err = errno;
+        close(*a1);
+        errno = err;
+        return -1;
+    }
+    return 0;
+}
+
+#define FS_AT_CALL2(a1, a2, expr)    \
+    do {                             \
+        int fs_r_ = (expr);          \
+        int fs_e_ = errno;           \
+        close(a1);                   \
+        close(a2);                   \
+        errno = fs_e_;               \
+        return fs_r_;                \
+    } while (0)
+
+static int (*real_renameat)(int, const char*, int, const char*) = NULL;
+static int (*real_rename)(const char*, const char*) = NULL;
+int rename(const char* from, const char* to) {
+    if (!policy_in_force()) return FS_REAL(rename)(from, to);
+    int a1, a2;
+    char n1[PATH_MAX], n2[PATH_MAX];
+    const char* staged = staged_sibling_target(from);
+    if (staged && to && strcmp(staged, to) == 0) {
+        // fs.write_atomic's temporary onto the file it stands for.
+        a1 = fs_on_staged(from, n1);
+        if (a1 < 0) return -1;
+        a2 = fs_on_name(AT_FDCWD, to, n2);
+        if (a2 < 0) {
+            int err = errno;
+            close(a1);
+            errno = err;
+            return -1;
+        }
+    } else if (fs_two_names(AT_FDCWD, from, AT_FDCWD, to, &a1, n1, &a2, n2) != 0) {
+        return -1;
+    }
+    FS_AT_CALL2(a1, a2, FS_REAL(renameat)(a1, n1, a2, n2));
+}
+
+int renameat(int fromfd, const char* from, int tofd, const char* to) {
+    if (!policy_in_force()) return FS_REAL(renameat)(fromfd, from, tofd, to);
+    int a1, a2;
+    char n1[PATH_MAX], n2[PATH_MAX];
+    if (fs_two_names(fromfd, from, tofd, to, &a1, n1, &a2, n2) != 0) return -1;
+    FS_AT_CALL2(a1, a2, FS_REAL(renameat)(a1, n1, a2, n2));
+}
+#if defined(__linux__)
+static int (*real_renameat2)(int, const char*, int, const char*, unsigned) = NULL;
+int renameat2(int fromfd, const char* from, int tofd, const char* to, unsigned flags) {
+    if (!policy_in_force()) return FS_REAL(renameat2)(fromfd, from, tofd, to, flags);
+    int a1, a2;
+    char n1[PATH_MAX], n2[PATH_MAX];
+    if (fs_two_names(fromfd, from, tofd, to, &a1, n1, &a2, n2) != 0) return -1;
+    FS_AT_CALL2(a1, a2, FS_REAL(renameat2)(a1, n1, a2, n2, flags));
+}
+#endif
+
+// A hard link is a second name for the target's file. The new name needs
+// fs_write, and may not reach the file more than the old one may: fs_read
+// and fs_write on the target for whichever the new name is granted, or a
+// link into a writable directory would make any file there writable. With
+// AT_SYMLINK_FOLLOW the target is where its symlink leads.
+static int (*real_linkat)(int, const char*, int, const char*, int) = NULL;
+static int fs_link_checked(int d1, const char* target, int d2, const char* linkpath, int flags) {
+    char rt[PATH_MAX], rl[PATH_MAX];
+    if (!fs_allowed(d2, linkpath, 1, AETHER_ACCESS_WRITE, rl)) return -1;
+    char joined[PATH_MAX];
+    int follow = (flags & AT_SYMLINK_FOLLOW) != 0;
+    if (!fs_at_path(d1, target, joined) ||
+        !(follow ? aether_sandbox_canon_path(joined, rt, sizeof rt)
+                 : aether_sandbox_canon_entry(joined, rt, sizeof rt))) {
+        log_deny("fs_read", target ? target : "(null)");
+        errno = EACCES;
+        return -1;
+    }
+    static const char* const cats[2] = { "fs_read", "fs_write" };
+    for (int i = 0; i < 2; i++) {
+        if (grant_covers(cats[i], rl) && !check_resolved(cats[i], rt)) {
             errno = EACCES;
             return -1;
         }
     }
-    if (flags & O_CREAT) {
-        va_list ap;
-        __builtin_va_start(ap, flags);
-        int mode = __builtin_va_arg(ap, int);
-        __builtin_va_end(ap);
-        return real_openat(dirfd, path, flags, mode);
+    char n1[PATH_MAX], n2[PATH_MAX];
+    int a1 = aether_sandbox_anchor(rt, n1, sizeof n1, &preload_ops);
+    if (a1 < 0) return -1;
+    int a2 = aether_sandbox_anchor(rl, n2, sizeof n2, &preload_ops);
+    if (a2 < 0) {
+        int err = errno;
+        close(a1);
+        errno = err;
+        return -1;
     }
-    return real_openat(dirfd, path, flags);
+    FS_AT_CALL2(a1, a2, FS_REAL(linkat)(a1, n1, a2, n2, 0));
 }
 
-// open64 / openat64 / fopen64 / freopen64: glibc large-file variants. These symbols
-// exist only on glibc/Linux; FreeBSD's off_t is 64-bit natively and has
-// no *64 suffixed entry points, so the whole block is Linux-gated.
-#if defined(__linux__)
+static int (*real_link)(const char*, const char*) = NULL;
+int link(const char* target, const char* linkpath) {
+    if (!policy_in_force()) return FS_REAL(link)(target, linkpath);
+    return fs_link_checked(AT_FDCWD, target, AT_FDCWD, linkpath, 0);
+}
 
-// open64 — glibc large file variant (skip if glibc already redirects open→open64)
+int linkat(int d1, const char* target, int d2, const char* linkpath, int flags) {
+    if (!policy_in_force()) return FS_REAL(linkat)(d1, target, d2, linkpath, flags);
+    return fs_link_checked(d1, target, d2, linkpath, flags);
+}
+
+// Calls that change a file where its path leads: chmod, chown, truncate,
+// the times, the extended attributes. fs_write on the resolution, and the
+// call made on the file opened by step 3 where an fd call exists; else on
+// the name from its anchor, not following it, which fails if the name has
+// become a symlink.
+static int fs_changed_file(int dirfd, const char* path, int nofollow, char resolved[PATH_MAX]) {
+    return fs_allowed(dirfd, path, nofollow, AETHER_ACCESS_WRITE, resolved);
+}
+
+// chmod and its kin, by name from the anchor (fchmodat with
+// AT_SYMLINK_NOFOLLOW: the name was resolved, so a symlink there now is the
+// race; where the C library cannot chmod a name without following it, a
+// look first, leaving only that name to a swap between the look and the
+// call).
+static int (*real_fchmodat)(int, const char*, mode_t, int) = NULL;
+static int fs_chmod_at(const char* resolved, mode_t mode) {
+    char name[PATH_MAX];
+    int d = aether_sandbox_anchor(resolved, name, sizeof name, &preload_ops);
+    if (d < 0) return -1;
+    int r = FS_REAL(fchmodat)(d, name, mode, AT_SYMLINK_NOFOLLOW);
+    if (r != 0 && (errno == ENOTSUP || errno == EOPNOTSUPP || errno == EINVAL)) {
+        struct stat st;
+        if (fstatat(d, name, &st, AT_SYMLINK_NOFOLLOW) != 0) r = -1;
+        else if (S_ISLNK(st.st_mode)) { errno = EACCES; r = -1; }
+        else r = FS_REAL(fchmodat)(d, name, mode, 0);
+    }
+    FS_AT_CALL(d, r);
+}
+
+static int (*real_chmod)(const char*, mode_t) = NULL;
+int chmod(const char* path, mode_t mode) {
+    if (!policy_in_force()) return FS_REAL(chmod)(path, mode);
+    char resolved[PATH_MAX];
+    if (!fs_changed_file(AT_FDCWD, path, 0, resolved)) return -1;
+    return fs_chmod_at(resolved, mode);
+}
+
+int fchmodat(int dirfd, const char* path, mode_t mode, int flags) {
+    if (!policy_in_force()) return FS_REAL(fchmodat)(dirfd, path, mode, flags);
+    char resolved[PATH_MAX];
+    if (!fs_changed_file(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW) != 0, resolved)) return -1;
+    if (flags & AT_SYMLINK_NOFOLLOW) {
+        char name[PATH_MAX];
+        int d = aether_sandbox_anchor(resolved, name, sizeof name, &preload_ops);
+        if (d < 0) return -1;
+        FS_AT_CALL(d, FS_REAL(fchmodat)(d, name, mode, AT_SYMLINK_NOFOLLOW));
+    }
+    return fs_chmod_at(resolved, mode);
+}
+
+#if (defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 32))) || \
+    (defined(__linux__) && !defined(__GLIBC__)) || defined(__FreeBSD__) || defined(__NetBSD__)
+static int (*real_lchmod)(const char*, mode_t) = NULL;
+int lchmod(const char* path, mode_t mode) {
+    if (!policy_in_force()) return FS_REAL(lchmod)(path, mode);
+    char resolved[PATH_MAX];
+    if (!fs_changed_file(AT_FDCWD, path, 1, resolved)) return -1;
+    char name[PATH_MAX];
+    int d = aether_sandbox_anchor(resolved, name, sizeof name, &preload_ops);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(fchmodat)(d, name, mode, AT_SYMLINK_NOFOLLOW));
+}
+#endif
+
+// chown follows the name, lchown does not; both made from the anchor with
+// AT_SYMLINK_NOFOLLOW on the resolution (chown's resolution has no symlink
+// left at its end, so a symlink there now is the race and is not followed).
+static int (*real_fchownat)(int, const char*, uid_t, gid_t, int) = NULL;
+static int fs_chown_at(int dirfd, const char* path, uid_t uid, gid_t gid, int nofollow) {
+    char resolved[PATH_MAX];
+    if (!fs_changed_file(dirfd, path, nofollow, resolved)) return -1;
+    char name[PATH_MAX];
+    int d = aether_sandbox_anchor(resolved, name, sizeof name, &preload_ops);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(fchownat)(d, name, uid, gid, AT_SYMLINK_NOFOLLOW));
+}
+
+static int (*real_chown)(const char*, uid_t, gid_t) = NULL;
+int chown(const char* path, uid_t uid, gid_t gid) {
+    if (!policy_in_force()) return FS_REAL(chown)(path, uid, gid);
+    return fs_chown_at(AT_FDCWD, path, uid, gid, 0);
+}
+
+static int (*real_lchown)(const char*, uid_t, gid_t) = NULL;
+int lchown(const char* path, uid_t uid, gid_t gid) {
+    if (!policy_in_force()) return FS_REAL(lchown)(path, uid, gid);
+    return fs_chown_at(AT_FDCWD, path, uid, gid, 1);
+}
+
+int fchownat(int dirfd, const char* path, uid_t uid, gid_t gid, int flags) {
+    if (!policy_in_force()) return FS_REAL(fchownat)(dirfd, path, uid, gid, flags);
+#ifdef AT_EMPTY_PATH
+    if (path && !*path && (flags & AT_EMPTY_PATH)) {
+        // The descriptor's own file: fs_write on its path.
+        char resolved[PATH_MAX];
+        if (!fs_changed_file(dirfd, "", 0, resolved)) return -1;
+        return FS_REAL(fchownat)(dirfd, path, uid, gid, flags);
+    }
+#endif
+    return fs_chown_at(dirfd, path, uid, gid, (flags & AT_SYMLINK_NOFOLLOW) != 0);
+}
+
+// truncate: the file opened for writing by step 3, then ftruncate.
+static int fs_truncate(const char* path, off_t length) {
+    int fd = fs_open_checked(AT_FDCWD, path, O_WRONLY | O_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    int r = ftruncate(fd, length);
+    int err = errno;
+    close(fd);
+    errno = err;
+    return r;
+}
+
+static int (*real_truncate)(const char*, off_t) = NULL;
+int truncate(const char* path, off_t length) {
+    if (!policy_in_force()) return FS_REAL(truncate)(path, length);
+    return fs_truncate(path, length);
+}
+
+// The times: utimensat by name from the anchor, not following (the
+// resolution has no symlink left at its end); utime, utimes and futimesat
+// through it.
+static int (*real_utimensat)(int, const char*, const struct timespec[2], int) = NULL;
+static int fs_utimens(int dirfd, const char* path, const struct timespec ts[2], int nofollow) {
+    char resolved[PATH_MAX];
+    if (!fs_changed_file(dirfd, path, nofollow, resolved)) return -1;
+    char name[PATH_MAX];
+    int d = aether_sandbox_anchor(resolved, name, sizeof name, &preload_ops);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(utimensat)(d, name, ts, AT_SYMLINK_NOFOLLOW));
+}
+
+int utimensat(int dirfd, const char* path, const struct timespec ts[2], int flags) {
+    if (!policy_in_force() || !path) return FS_REAL(utimensat)(dirfd, path, ts, flags);
+#ifdef AT_EMPTY_PATH
+    if (!*path && (flags & AT_EMPTY_PATH)) {
+        char resolved[PATH_MAX];
+        if (!fs_changed_file(dirfd, "", 0, resolved)) return -1;
+        return FS_REAL(utimensat)(dirfd, path, ts, flags);
+    }
+#endif
+    return fs_utimens(dirfd, path, ts, (flags & AT_SYMLINK_NOFOLLOW) != 0);
+}
+
+// struct timeval pairs (utimes, lutimes, futimesat) and a struct utimbuf
+// (utime) as utimensat's timespecs; NULL is "now".
+static const struct timespec* fs_tv_to_ts(const struct timeval tv[2], struct timespec ts[2]) {
+    if (!tv) return NULL;
+    for (int i = 0; i < 2; i++) {
+        ts[i].tv_sec = tv[i].tv_sec;
+        ts[i].tv_nsec = (long)tv[i].tv_usec * 1000;
+    }
+    return ts;
+}
+
+static int (*real_utimes)(const char*, const struct timeval[2]) = NULL;
+int utimes(const char* path, const struct timeval tv[2]) {
+    if (!policy_in_force()) return FS_REAL(utimes)(path, tv);
+    struct timespec ts[2];
+    return fs_utimens(AT_FDCWD, path, fs_tv_to_ts(tv, ts), 0);
+}
+
+static int (*real_lutimes)(const char*, const struct timeval[2]) = NULL;
+int lutimes(const char* path, const struct timeval tv[2]) {
+    if (!policy_in_force()) return FS_REAL(lutimes)(path, tv);
+    struct timespec ts[2];
+    return fs_utimens(AT_FDCWD, path, fs_tv_to_ts(tv, ts), 1);
+}
+
+static int (*real_futimesat)(int, const char*, const struct timeval[2]) = NULL;
+int futimesat(int dirfd, const char* path, const struct timeval tv[2]) {
+    if (!policy_in_force()) return FS_REAL(futimesat)(dirfd, path, tv);
+    struct timespec ts[2];
+    if (!path) {
+        // The descriptor's own file.
+        char resolved[PATH_MAX];
+        if (!fs_changed_file(dirfd, "", 0, resolved)) return -1;
+        return FS_REAL(futimesat)(dirfd, path, tv);
+    }
+    return fs_utimens(dirfd, path, fs_tv_to_ts(tv, ts), 0);
+}
+
+static int (*real_utime)(const char*, const struct utimbuf*) = NULL;
+int utime(const char* path, const struct utimbuf* times) {
+    if (!policy_in_force()) return FS_REAL(utime)(path, times);
+    struct timespec ts[2];
+    const struct timespec* t = NULL;
+    if (times) {
+        ts[0].tv_sec = times->actime;
+        ts[0].tv_nsec = 0;
+        ts[1].tv_sec = times->modtime;
+        ts[1].tv_nsec = 0;
+        t = ts;
+    }
+    return fs_utimens(AT_FDCWD, path, t, 0);
+}
+
+#if defined(__linux__)
+// Extended attributes, set or removed: fs_write on the file, the call made
+// on it opened by step 3 (O_PATH cannot carry them, so O_RDONLY, or
+// O_WRONLY for a file that cannot be read), with the f* variant. lsetxattr
+// and lremovexattr act on a symlink itself: by its resolved name.
+static int fs_xattr_fd(const char* path, int nofollow, char resolved[PATH_MAX]) {
+    if (!fs_changed_file(AT_FDCWD, path, nofollow, resolved)) return -1;
+    if (nofollow) return -2;   // by name, below
+    int fd = aether_sandbox_walk(resolved, O_RDONLY | O_CLOEXEC, 0, &preload_ops);
+    if (fd < 0 && errno == EACCES) fd = aether_sandbox_walk(resolved, O_WRONLY | O_CLOEXEC, 0, &preload_ops);
+    return fd;
+}
+
+static int (*real_setxattr)(const char*, const char*, const void*, size_t, int) = NULL;
+int setxattr(const char* path, const char* key, const void* value, size_t size, int flags) {
+    if (!policy_in_force()) return FS_REAL(setxattr)(path, key, value, size, flags);
+    char resolved[PATH_MAX];
+    int fd = fs_xattr_fd(path, 0, resolved);
+    if (fd < 0) return -1;
+    int r = fsetxattr(fd, key, value, size, flags);
+    FS_AT_CALL(fd, r);
+}
+
+static int (*real_lsetxattr)(const char*, const char*, const void*, size_t, int) = NULL;
+int lsetxattr(const char* path, const char* key, const void* value, size_t size, int flags) {
+    if (!policy_in_force()) return FS_REAL(lsetxattr)(path, key, value, size, flags);
+    char resolved[PATH_MAX];
+    if (fs_xattr_fd(path, 1, resolved) == -1) return -1;
+    return FS_REAL(lsetxattr)(resolved, key, value, size, flags);
+}
+
+static int (*real_removexattr)(const char*, const char*) = NULL;
+int removexattr(const char* path, const char* key) {
+    if (!policy_in_force()) return FS_REAL(removexattr)(path, key);
+    char resolved[PATH_MAX];
+    int fd = fs_xattr_fd(path, 0, resolved);
+    if (fd < 0) return -1;
+    int r = fremovexattr(fd, key);
+    FS_AT_CALL(fd, r);
+}
+
+static int (*real_lremovexattr)(const char*, const char*) = NULL;
+int lremovexattr(const char* path, const char* key) {
+    if (!policy_in_force()) return FS_REAL(lremovexattr)(path, key);
+    char resolved[PATH_MAX];
+    if (fs_xattr_fd(path, 1, resolved) == -1) return -1;
+    return FS_REAL(lremovexattr)(resolved, key);
+}
+#endif // __linux__ (xattr)
+
+// Temporary files and directories: libc makes them on its own internal
+// open and mkdir, which the wrappers above never see. Under a policy the
+// name is made here, as libc makes it (the template's trailing XXXXXX
+// replaced, `suffix` bytes after them kept), and created by steps 1 to 3
+// with O_CREAT|O_EXCL, or mkdir, on a fresh name until one is free.
+static int fs_temp_fill(char* tmpl, int suffix) {
+    size_t len = strlen(tmpl);
+    if (suffix < 0 || len < (size_t)suffix + 6) { errno = EINVAL; return 0; }
+    char* x = tmpl + len - (size_t)suffix - 6;
+    for (int i = 0; i < 6; i++) {
+        if (x[i] != 'X') { errno = EINVAL; return 0; }
+    }
+    static const char chars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    unsigned char r[6];
+    int got = 0;
+#if defined(__linux__) || defined(__FreeBSD__)
+    int ufd = FS_REAL(openat)(AT_FDCWD, "/dev/urandom", O_RDONLY | O_CLOEXEC, 0);
+    if (ufd >= 0) {
+        got = read(ufd, r, sizeof r) == (ssize_t)sizeof r;
+        close(ufd);
+    }
+#endif
+    if (!got) {
+        static unsigned long counter = 0;
+        unsigned long v = (unsigned long)getpid() * 2654435761u ^ (unsigned long)(++counter * 40503u) ^
+                          (unsigned long)(size_t)&r;
+        for (int i = 0; i < 6; i++) { r[i] = (unsigned char)v; v = v * 6364136223846793005ull + 1; }
+    }
+    for (int i = 0; i < 6; i++) x[i] = chars[r[i] % (sizeof chars - 1)];
+    return 1;
+}
+
+static int fs_mkstemps(char* tmpl, int suffix, int flags) {
+    size_t len = tmpl ? strlen(tmpl) : 0;
+    if (!tmpl || suffix < 0 || len < (size_t)suffix + 6) { errno = EINVAL; return -1; }
+    char keep[6];
+    memcpy(keep, tmpl + len - (size_t)suffix - 6, 6);
+    for (int attempt = 0; attempt < 100; attempt++) {
+        memcpy(tmpl + len - (size_t)suffix - 6, keep, 6);
+        if (!fs_temp_fill(tmpl, suffix)) return -1;
+        int fd = fs_open_checked(AT_FDCWD, tmpl,
+                                 O_RDWR | O_CREAT | O_EXCL | (flags & ~O_ACCMODE), 0600);
+        if (fd >= 0 || errno != EEXIST) return fd;
+    }
+    errno = EEXIST;
+    return -1;
+}
+
+static int (*real_mkstemp)(char*) = NULL;
+int mkstemp(char* tmpl) {
+    if (!policy_in_force()) return FS_REAL(mkstemp)(tmpl);
+    return fs_mkstemps(tmpl, 0, 0);
+}
+
+static int (*real_mkostemp)(char*, int) = NULL;
+int mkostemp(char* tmpl, int flags) {
+    if (!policy_in_force()) return FS_REAL(mkostemp)(tmpl, flags);
+    return fs_mkstemps(tmpl, 0, flags);
+}
+
+static int (*real_mkstemps)(char*, int) = NULL;
+int mkstemps(char* tmpl, int suffix) {
+    if (!policy_in_force()) return FS_REAL(mkstemps)(tmpl, suffix);
+    return fs_mkstemps(tmpl, suffix, 0);
+}
+
+static int (*real_mkostemps)(char*, int, int) = NULL;
+int mkostemps(char* tmpl, int suffix, int flags) {
+    if (!policy_in_force()) return FS_REAL(mkostemps)(tmpl, suffix, flags);
+    return fs_mkstemps(tmpl, suffix, flags);
+}
+
+static char* (*real_mkdtemp)(char*) = NULL;
+char* mkdtemp(char* tmpl) {
+    if (!policy_in_force()) return FS_REAL(mkdtemp)(tmpl);
+    size_t len = tmpl ? strlen(tmpl) : 0;
+    if (len < 6) { errno = EINVAL; return NULL; }
+    char keep[6];
+    memcpy(keep, tmpl + len - 6, 6);
+    for (int attempt = 0; attempt < 100; attempt++) {
+        memcpy(tmpl + len - 6, keep, 6);
+        if (!fs_temp_fill(tmpl, 0)) return NULL;
+        char name[PATH_MAX];
+        int d = fs_on_name(AT_FDCWD, tmpl, name);
+        if (d < 0) return NULL;
+        int r = FS_REAL(mkdirat)(d, name, 0700);
+        int err = errno;
+        close(d);
+        if (r == 0) return tmpl;
+        if (err != EEXIST) { errno = err; return NULL; }
+    }
+    errno = EEXIST;
+    return NULL;
+}
+
+// tmpfile makes an unnamed file in the temporary directory: fs_write on a
+// name there ("<P_tmpdir>/tmpfile", which a grant for "<P_tmpdir>/*"
+// covers), then libc's own.
+static FILE* (*real_tmpfile)(void) = NULL;
+FILE* tmpfile(void) {
+    if (!policy_in_force()) return FS_REAL(tmpfile)();
+    char resolved[PATH_MAX];
+#ifdef P_tmpdir
+    const char* dir = P_tmpdir;
+#else
+    const char* dir = "/tmp";
+#endif
+    char name[PATH_MAX];
+    snprintf(name, sizeof name, "%s/tmpfile", dir);
+    if (!fs_allowed(AT_FDCWD, name, 1, AETHER_ACCESS_WRITE, resolved)) return NULL;
+    return FS_REAL(tmpfile)();
+}
+
+// glob lists directories through libc's own opendir. Under a policy the
+// directory its pattern starts in needs fs_read (as std's fs.glob asks),
+// and a match the policy may not read is taken out of the result. Where the
+// C library allocates each match on its own (glibc, the BSDs) it is freed
+// here as globfree would free it; where it does not (musl), a glob that
+// matched something the policy refuses fails as a read error (GLOB_ABORTED)
+// rather than return it.
+static int fs_glob_start_allowed(const char* pattern) {
+    char dir[PATH_MAX];
+    size_t first = strcspn(pattern, "*?[");
+    if (pattern[first] == '\0') return 1;   // no wildcard: the matches are checked
+    size_t cut = first;
+    while (cut > 0 && pattern[cut - 1] != '/') cut--;
+    if (cut == 0) { dir[0] = '.'; dir[1] = '\0'; }
+    else {
+        if (cut >= sizeof dir) return 0;
+        memcpy(dir, pattern, cut);
+        dir[cut] = '\0';
+    }
+    char resolved[PATH_MAX];
+    return fs_allowed(AT_FDCWD, dir, 0, AETHER_ACCESS_READ, resolved);
+}
+
+// Each match from index `from` the policy may read is kept. Where the C
+// library allocates each match on its own (glibc, the BSDs, macOS) a
+// refused one is freed as globfree would free it and taken out; elsewhere
+// (musl) nothing is changed and 0 says the glob must fail instead.
+#if defined(__GLIBC__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
+    defined(__APPLE__)
+#define FS_GLOB_FILTER(NAME, GLOB_T)                                              \
+    static int NAME(GLOB_T* g, size_t from) {                                     \
+        size_t kept = from;                                                       \
+        for (size_t i = from; i < g->gl_pathc; i++) {                             \
+            char* p = g->gl_pathv[g->gl_offs + i];                                \
+            if (p && fs_glob_match_allowed(p)) {                                  \
+                g->gl_pathv[g->gl_offs + kept++] = p;                             \
+                continue;                                                         \
+            }                                                                     \
+            free(p);                                                              \
+        }                                                                         \
+        g->gl_pathc = kept;                                                       \
+        g->gl_pathv[g->gl_offs + kept] = NULL;                                    \
+        return 1;                                                                 \
+    }
+#else
+#define FS_GLOB_FILTER(NAME, GLOB_T)                                              \
+    static int NAME(GLOB_T* g, size_t from) {                                     \
+        for (size_t i = from; i < g->gl_pathc; i++) {                             \
+            char* p = g->gl_pathv[g->gl_offs + i];                                \
+            if (!p || !fs_glob_match_allowed(p)) return 0;                        \
+        }                                                                         \
+        return 1;                                                                 \
+    }
+#endif
+
+static int fs_glob_match_allowed(const char* p) {
+    char resolved[PATH_MAX];
+    return aether_sandbox_canon_path(p, resolved, sizeof resolved) &&
+           check_resolved("fs_read", resolved);
+}
+
+FS_GLOB_FILTER(fs_glob_filter, glob_t)
+
+typedef int (*glob_errfn)(const char*, int);
+static int (*real_glob)(const char*, int, glob_errfn, glob_t*) = NULL;
+int glob(const char* pattern, int flags, glob_errfn errfunc, glob_t* g) {
+    if (!policy_in_force()) return FS_REAL(glob)(pattern, flags, errfunc, g);
+    if (!pattern || !g) return FS_REAL(glob)(pattern, flags, errfunc, g);
+    if (!fs_glob_start_allowed(pattern)) return GLOB_ABORTED;
+    size_t before = (flags & GLOB_APPEND) ? g->gl_pathc : 0;
+    int r = FS_REAL(glob)(pattern, flags, errfunc, g);
+    if (r != 0 && r != GLOB_NOMATCH) return r;
+    if (g->gl_pathv && !fs_glob_filter(g, before)) return GLOB_ABORTED;
+    if (r == 0 && g->gl_pathc == before) return GLOB_NOMATCH;
+    return r;
+}
+
+// nftw and ftw walk a tree through libc's own opendir. Under a policy the
+// root needs fs_read, and the caller's function is called only for entries
+// the policy may read; the walk's own descent is libc's, the entries it
+// reaches through a symlink are checked where they lead like any other.
+typedef int (*nftw_fn)(const char*, const struct stat*, int, struct FTW*);
+typedef int (*ftw_fn)(const char*, const struct stat*, int);
+static __thread nftw_fn fs_nftw_user;
+static __thread ftw_fn fs_ftw_user;
+
+static int fs_tree_entry_allowed(const char* path) {
+    char resolved[PATH_MAX];
+    return aether_sandbox_canon_entry(path, resolved, sizeof resolved) &&
+           check_resolved("fs_read", resolved);
+}
+
+static int fs_nftw_call(const char* path, const struct stat* st, int type, struct FTW* f) {
+    if (!fs_tree_entry_allowed(path)) return 0;
+    return fs_nftw_user(path, st, type, f);
+}
+
+static int fs_ftw_call(const char* path, const struct stat* st, int type) {
+    if (!fs_tree_entry_allowed(path)) return 0;
+    return fs_ftw_user(path, st, type);
+}
+
+static int (*real_nftw)(const char*, nftw_fn, int, int) = NULL;
+int nftw(const char* root, nftw_fn fn, int fds, int flags) {
+    if (!policy_in_force() || !fn) return FS_REAL(nftw)(root, fn, fds, flags);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) return -1;
+    nftw_fn outer = fs_nftw_user;
+    fs_nftw_user = fn;
+    int r = FS_REAL(nftw)(root, fs_nftw_call, fds, flags);
+    fs_nftw_user = outer;
+    return r;
+}
+
+static int (*real_ftw)(const char*, ftw_fn, int) = NULL;
+int ftw(const char* root, ftw_fn fn, int fds) {
+    if (!policy_in_force() || !fn) return FS_REAL(ftw)(root, fn, fds);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) return -1;
+    ftw_fn outer = fs_ftw_user;
+    fs_ftw_user = fn;
+    int r = FS_REAL(ftw)(root, fs_ftw_call, fds);
+    fs_ftw_user = outer;
+    return r;
+}
+
+#if AETHER_PRELOAD_HAS_FTS
+// fts walks a tree through libc's own open: each root needs fs_read, and
+// fts_read passes over an entry the policy may not read (and does not
+// descend into it). fts_children lists the entry fts_read returned last,
+// which was checked.
+// FreeBSD's comparison takes its entries as const pointers to const.
+#if defined(__FreeBSD__)
+typedef int (*fts_compar_fn)(const FTSENT* const*, const FTSENT* const*);
+#else
+typedef int (*fts_compar_fn)(const FTSENT**, const FTSENT**);
+#endif
+static FTS* (*real_fts_open)(char* const*, int, fts_compar_fn) = NULL;
+FTS* fts_open(char* const* roots, int options, fts_compar_fn compar) {
+    if (!policy_in_force() || !roots) return FS_REAL(fts_open)(roots, options, compar);
+    for (char* const* r = roots; *r; r++) {
+        char resolved[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, *r, 0, AETHER_ACCESS_READ, resolved)) return NULL;
+    }
+    return FS_REAL(fts_open)(roots, options, compar);
+}
+
+static FTSENT* (*real_fts_read)(FTS*) = NULL;
+FTSENT* fts_read(FTS* ftsp) {
+    for (;;) {
+        FTSENT* e = FS_REAL(fts_read)(ftsp);
+        if (!e || !policy_in_force() || fs_tree_entry_allowed(e->fts_path)) return e;
+        if (e->fts_info == FTS_D) fts_set(ftsp, e, FTS_SKIP);
+    }
+}
+#endif // AETHER_PRELOAD_HAS_FTS
+
+// open_by_handle_at opens by a handle, not a path: the file it opened is
+// named (fd_path) and checked, and closed again if the policy refuses it.
+#if defined(__linux__)
+static int (*real_open_by_handle_at)(int, struct file_handle*, int) = NULL;
+int open_by_handle_at(int mountfd, struct file_handle* handle, int flags) {
+    int fd = FS_REAL(open_by_handle_at)(mountfd, handle, flags);
+    if (fd < 0 || !policy_in_force()) return fd;
+    char target[PATH_MAX], run[PATH_MAX], resolved[PATH_MAX];
+    int access = fs_open_access(flags);
+    if (!fd_path(fd, target, run) || !aether_sandbox_canon_path(target, resolved, sizeof resolved) ||
+        ((access & AETHER_ACCESS_READ) && !check_resolved("fs_read", resolved)) ||
+        ((access & AETHER_ACCESS_WRITE) && !check_resolved("fs_write", resolved))) {
+        if (!fd_path(fd, target, run)) log_deny("fs_read", "open_by_handle_at: a file with no path");
+        close(fd);
+        errno = EACCES;
+        return -1;
+    }
+    return fd;
+}
+#endif
+
+// mount and its undoing change what a path leads to: fs_write on the
+// mount point, then the call.
+#if defined(__linux__)
+static int (*real_mount)(const char*, const char*, const char*, unsigned long, const void*) = NULL;
+int mount(const char* source, const char* target, const char* type, unsigned long flags,
+          const void* data) {
+    if (policy_in_force()) {
+        char resolved[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    }
+    return FS_REAL(mount)(source, target, type, flags, data);
+}
+
+static int (*real_umount2)(const char*, int) = NULL;
+int umount2(const char* target, int flags) {
+    if (policy_in_force()) {
+        char resolved[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    }
+    return FS_REAL(umount2)(target, flags);
+}
+
+static int (*real_umount)(const char*) = NULL;
+int umount(const char* target) {
+    if (policy_in_force()) {
+        char resolved[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, target, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    }
+    return FS_REAL(umount)(target);
+}
+#endif
+
+// The glibc entry points of the calls above: the large-file variants
+// (*64), and the _FORTIFY_SOURCE opens (__open_2 and its kin), which a
+// program built with -D_FORTIFY_SOURCE calls instead of open. Each is its
+// call above with O_LARGEFILE where that means anything.
+#if defined(__linux__)
+// glibc names the 64-bit types; on musl they are the plain ones, which are
+// 64-bit already (and its headers no longer name the *64 types).
+#if defined(__GLIBC__)
+#define AE_OFF64 off64_t
+#define AE_DIRENT64 dirent64
+#define AE_READDIR64 readdir64
+#define AE_STAT64 stat64
+#define AE_GLOB64 glob64_t
+#define AE_FTRUNCATE64 ftruncate64
+#else
+#define AE_OFF64 off_t
+#define AE_DIRENT64 dirent
+#define AE_READDIR64 readdir
+#define AE_STAT64 stat
+#define AE_GLOB64 glob_t
+#define AE_FTRUNCATE64 ftruncate
+#endif
+#ifndef O_LARGEFILE
+#define O_LARGEFILE 0
+#endif
+
 #ifndef open64
+static int (*real_open64)(const char*, int, ...) = NULL;
 int open64(const char* path, int flags, ...) {
-    if (!real_open) real_open = dlsym(RTLD_NEXT, "open64");
-    if (path) {
-        if (!open_flags_allowed(path, flags)) { errno = EACCES; return -1; }
-    }
-    if (flags & O_CREAT) {
-        va_list ap; __builtin_va_start(ap, flags);
-        int mode = __builtin_va_arg(ap, int); __builtin_va_end(ap);
-        return real_open(path, flags, mode);
-    }
-    return real_open(path, flags);
+    FS_MODE_ARG(flags)
+    if (!policy_in_force()) return FS_REAL(open64)(path, flags, mode);
+    return fs_open_checked(AT_FDCWD, path, flags | O_LARGEFILE, mode);
 }
 #endif
 
 #ifndef openat64
+static int (*real_openat64)(int, const char*, int, ...) = NULL;
 int openat64(int dirfd, const char* path, int flags, ...) {
-    if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat64");
-    if (path) {
-        if (!open_flags_allowed(path, flags)) {
-            errno = EACCES;
-            return -1;
-        }
-    }
-    if (flags & O_CREAT) {
-        va_list ap;
-        __builtin_va_start(ap, flags);
-        int mode = __builtin_va_arg(ap, int);
-        __builtin_va_end(ap);
-        return real_openat(dirfd, path, flags, mode);
-    }
-    return real_openat(dirfd, path, flags);
+    FS_MODE_ARG(flags)
+    if (!policy_in_force()) return FS_REAL(openat64)(dirfd, path, flags, mode);
+    return fs_open_checked(dirfd, path, flags | O_LARGEFILE, mode);
 }
 #endif
 
-// fopen64 — glibc large file variant
+#ifndef creat64
+static int (*real_creat64)(const char*, mode_t) = NULL;
+int creat64(const char* path, mode_t mode) {
+    if (!policy_in_force()) return FS_REAL(creat64)(path, mode);
+    return fs_open_checked(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE, (unsigned)mode);
+}
+#endif
+
+static int (*real___open_2)(const char*, int) = NULL;
+int __open_2(const char* path, int flags) {
+    if (!policy_in_force()) return FS_REAL(__open_2)(path, flags);
+    return fs_open_checked(AT_FDCWD, path, flags, 0);
+}
+
+static int (*real___open64_2)(const char*, int) = NULL;
+int __open64_2(const char* path, int flags) {
+    if (!policy_in_force()) return FS_REAL(__open64_2)(path, flags);
+    return fs_open_checked(AT_FDCWD, path, flags | O_LARGEFILE, 0);
+}
+
+static int (*real___openat_2)(int, const char*, int) = NULL;
+int __openat_2(int dirfd, const char* path, int flags) {
+    if (!policy_in_force()) return FS_REAL(__openat_2)(dirfd, path, flags);
+    return fs_open_checked(dirfd, path, flags, 0);
+}
+
+static int (*real___openat64_2)(int, const char*, int) = NULL;
+int __openat64_2(int dirfd, const char* path, int flags) {
+    if (!policy_in_force()) return FS_REAL(__openat64_2)(dirfd, path, flags);
+    return fs_open_checked(dirfd, path, flags | O_LARGEFILE, 0);
+}
+
 #ifndef fopen64
+static FILE* (*real_fopen64)(const char*, const char*) = NULL;
 FILE* fopen64(const char* path, const char* mode) {
-    if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen64");
-    if (path && !fopen_mode_allowed(path, mode)) { errno = EACCES; return NULL; }
-    return real_fopen(path, mode);
+    if (!policy_in_force()) return FS_REAL(fopen64)(path, mode);
+    return fs_fopen_checked(path, mode, O_LARGEFILE);
 }
 #endif
 
-// freopen64: the glibc large-file variant of freopen above
 #ifndef freopen64
 static FILE* (*real_freopen64)(const char*, const char*, FILE*) = NULL;
 FILE* freopen64(const char* path, const char* mode, FILE* stream) {
-    if (!real_freopen64) real_freopen64 = dlsym(RTLD_NEXT, "freopen64");
-    if (!freopen_allowed(path, mode, stream)) {
-        if (stream) fclose(stream);
-        errno = EACCES;
-        return NULL;
-    }
-    return real_freopen64(path, mode, stream);
+    return fs_freopen(FS_REAL(freopen64), path, mode, stream, O_LARGEFILE);
 }
 #endif
 
-#endif // __linux__ (open64 / openat64 / fopen64 / freopen64)
+#ifndef truncate64
+static int (*real_truncate64)(const char*, AE_OFF64) = NULL;
+int truncate64(const char* path, AE_OFF64 length) {
+    if (!policy_in_force()) return FS_REAL(truncate64)(path, length);
+    int fd = fs_open_checked(AT_FDCWD, path, O_WRONLY | O_CLOEXEC | O_LARGEFILE, 0);
+    if (fd < 0) return -1;
+    int r = AE_FTRUNCATE64(fd, length);
+    FS_AT_CALL(fd, r);
+}
+#endif
+
+#ifndef mkstemp64
+static int (*real_mkstemp64)(char*) = NULL;
+int mkstemp64(char* tmpl) {
+    if (!policy_in_force()) return FS_REAL(mkstemp64)(tmpl);
+    return fs_mkstemps(tmpl, 0, O_LARGEFILE);
+}
+#endif
+
+#ifndef mkostemp64
+static int (*real_mkostemp64)(char*, int) = NULL;
+int mkostemp64(char* tmpl, int flags) {
+    if (!policy_in_force()) return FS_REAL(mkostemp64)(tmpl, flags);
+    return fs_mkstemps(tmpl, 0, flags | O_LARGEFILE);
+}
+#endif
+
+#ifndef mkstemps64
+static int (*real_mkstemps64)(char*, int) = NULL;
+int mkstemps64(char* tmpl, int suffix) {
+    if (!policy_in_force()) return FS_REAL(mkstemps64)(tmpl, suffix);
+    return fs_mkstemps(tmpl, suffix, O_LARGEFILE);
+}
+#endif
+
+#ifndef mkostemps64
+static int (*real_mkostemps64)(char*, int, int) = NULL;
+int mkostemps64(char* tmpl, int suffix, int flags) {
+    if (!policy_in_force()) return FS_REAL(mkostemps64)(tmpl, suffix, flags);
+    return fs_mkstemps(tmpl, suffix, flags | O_LARGEFILE);
+}
+#endif
+
+#ifndef tmpfile64
+static FILE* (*real_tmpfile64)(void) = NULL;
+FILE* tmpfile64(void) {
+    if (!policy_in_force()) return FS_REAL(tmpfile64)();
+    char resolved[PATH_MAX];
+    char name[PATH_MAX];
+    snprintf(name, sizeof name, "%s/tmpfile", P_tmpdir);
+    if (!fs_allowed(AT_FDCWD, name, 1, AETHER_ACCESS_WRITE, resolved)) return NULL;
+    return FS_REAL(tmpfile64)();
+}
+#endif
+
+#ifndef scandir64
+FS_SCANDIR(scandir64, AE_DIRENT64, AE_READDIR64)
+#ifndef scandirat64
+FS_SCANDIRAT(scandirat64, fs_list_scandir64, AE_DIRENT64)
+#endif
+#endif
+
+// __open and __open64: glibc exports them beside open, and a program can
+// call them by name.
+static int (*real___open)(const char*, int, ...) = NULL;
+int __open(const char* path, int flags, ...) {
+    FS_MODE_ARG(flags)
+    if (!policy_in_force()) return FS_REAL(__open)(path, flags, mode);
+    return fs_open_checked(AT_FDCWD, path, flags, mode);
+}
+
+static int (*real___open64)(const char*, int, ...) = NULL;
+int __open64(const char* path, int flags, ...) {
+    FS_MODE_ARG(flags)
+    if (!policy_in_force()) return FS_REAL(__open64)(path, flags, mode);
+    return fs_open_checked(AT_FDCWD, path, flags | O_LARGEFILE, mode);
+}
+
+#if defined(__GLIBC__)
+// __xmknod and __xmknodat: what mknod and mknodat compiled to before glibc
+// 2.33, still exported for those programs.
+static int (*real___xmknodat)(int, int, const char*, mode_t, dev_t*) = NULL;
+static int (*real___xmknod)(int, const char*, mode_t, dev_t*) = NULL;
+int __xmknod(int ver, const char* path, mode_t mode, dev_t* dev) {
+    if (!policy_in_force()) return FS_REAL(__xmknod)(ver, path, mode, dev);
+    char name[PATH_MAX];
+    int d = fs_on_name(AT_FDCWD, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(__xmknodat)(ver, d, name, mode, dev));
+}
+
+int __xmknodat(int ver, int dirfd, const char* path, mode_t mode, dev_t* dev) {
+    if (!policy_in_force()) return FS_REAL(__xmknodat)(ver, dirfd, path, mode, dev);
+    char name[PATH_MAX];
+    int d = fs_on_name(dirfd, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(__xmknodat)(ver, d, name, mode, dev));
+}
+#endif
+
+#ifndef glob64
+#if defined(__GLIBC__)
+FS_GLOB_FILTER(fs_glob64_filter, glob64_t)
+#else
+#define fs_glob64_filter fs_glob_filter
+#endif
+static int (*real_glob64)(const char*, int, glob_errfn, AE_GLOB64*) = NULL;
+int glob64(const char* pattern, int flags, glob_errfn errfunc, AE_GLOB64* g) {
+    if (!policy_in_force() || !pattern || !g) return FS_REAL(glob64)(pattern, flags, errfunc, g);
+    if (!fs_glob_start_allowed(pattern)) return GLOB_ABORTED;
+    size_t before = (flags & GLOB_APPEND) ? g->gl_pathc : 0;
+    int r = FS_REAL(glob64)(pattern, flags, errfunc, g);
+    if (r != 0 && r != GLOB_NOMATCH) return r;
+    if (g->gl_pathv && !fs_glob64_filter(g, before)) return GLOB_ABORTED;
+    if (r == 0 && g->gl_pathc == before) return GLOB_NOMATCH;
+    return r;
+}
+#endif
+
+#ifndef nftw64
+typedef int (*nftw64_fn)(const char*, const struct AE_STAT64*, int, struct FTW*);
+static __thread nftw64_fn fs_nftw64_user;
+static int fs_nftw64_call(const char* path, const struct AE_STAT64* st, int type, struct FTW* f) {
+    if (!fs_tree_entry_allowed(path)) return 0;
+    return fs_nftw64_user(path, st, type, f);
+}
+static int (*real_nftw64)(const char*, nftw64_fn, int, int) = NULL;
+int nftw64(const char* root, nftw64_fn fn, int fds, int flags) {
+    if (!policy_in_force() || !fn) return FS_REAL(nftw64)(root, fn, fds, flags);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) return -1;
+    nftw64_fn outer = fs_nftw64_user;
+    fs_nftw64_user = fn;
+    int r = FS_REAL(nftw64)(root, fs_nftw64_call, fds, flags);
+    fs_nftw64_user = outer;
+    return r;
+}
+#endif
+
+#ifndef ftw64
+typedef int (*ftw64_fn)(const char*, const struct AE_STAT64*, int);
+static __thread ftw64_fn fs_ftw64_user;
+static int fs_ftw64_call(const char* path, const struct AE_STAT64* st, int type) {
+    if (!fs_tree_entry_allowed(path)) return 0;
+    return fs_ftw64_user(path, st, type);
+}
+static int (*real_ftw64)(const char*, ftw64_fn, int) = NULL;
+int ftw64(const char* root, ftw64_fn fn, int fds) {
+    if (!policy_in_force() || !fn) return FS_REAL(ftw64)(root, fn, fds);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) return -1;
+    ftw64_fn outer = fs_ftw64_user;
+    fs_ftw64_user = fn;
+    int r = FS_REAL(ftw64)(root, fs_ftw64_call, fds);
+    fs_ftw64_user = outer;
+    return r;
+}
+#endif
+
+#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34)
+// glibc 2.34's fts64 (fts with _FILE_OFFSET_BITS=64 on 32-bit systems).
+static FTS64* (*real_fts64_open)(char* const*, int, int (*)(const FTSENT64**, const FTSENT64**)) = NULL;
+FTS64* fts64_open(char* const* roots, int options, int (*compar)(const FTSENT64**, const FTSENT64**)) {
+    if (!policy_in_force() || !roots) return FS_REAL(fts64_open)(roots, options, compar);
+    for (char* const* r = roots; *r; r++) {
+        char resolved[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, *r, 0, AETHER_ACCESS_READ, resolved)) return NULL;
+    }
+    return FS_REAL(fts64_open)(roots, options, compar);
+}
+
+static FTSENT64* (*real_fts64_read)(FTS64*) = NULL;
+FTSENT64* fts64_read(FTS64* ftsp) {
+    for (;;) {
+        FTSENT64* e = FS_REAL(fts64_read)(ftsp);
+        if (!e || !policy_in_force() || fs_tree_entry_allowed(e->fts_path)) return e;
+        if (e->fts_info == FTS_D) fts64_set(ftsp, e, FTS_SKIP);
+    }
+}
+#endif
+
+#endif // __linux__ (large-file and fortify entry points)
+
 
 #define MAX_EXEC_ENV_ENTRIES 4096
 extern char** environ;
@@ -1329,14 +2740,23 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
 // mmap is already 64-bit and exposes no mmap64 symbol; the plain mmap
 // interception above covers it.
 #if defined(__linux__)
-void* mmap64(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    if (!real_mmap) real_mmap = dlsym(RTLD_NEXT, "mmap64");
+// Its own function behind it, and glibc's 64-bit offset: on a 32-bit
+// system off_t is 32 bits, so the old shape (off_t, and plain mmap behind
+// it) did not compile there and cut the offset.
+#if defined(__GLIBC__)
+typedef off64_t aether_mmap64_off;
+#else
+typedef off_t aether_mmap64_off;
+#endif
+static void* (*real_mmap64)(void*, size_t, int, int, int, aether_mmap64_off) = NULL;
+void* mmap64(void* addr, size_t length, int prot, int flags, int fd, aether_mmap64_off offset) {
+    if (!real_mmap64) real_mmap64 = dlsym(RTLD_NEXT, "mmap64");
     if (sandbox_active && (prot & 0x4) && fd == -1) {
         log_deny("native", "mmap_exec_anonymous");
         errno = EACCES;
         return (void*)-1;
     }
-    return real_mmap(addr, length, prot, flags, fd, offset);
+    return real_mmap64(addr, length, prot, flags, fd, offset);
 }
 #endif // __linux__ (mmap64)
 
@@ -1490,6 +2910,40 @@ void* dlopen(const char* filename, int flags) {
         return NULL;
     }
     return h;
+}
+
+#if defined(__GLIBC__)
+// dlmopen loads into a link-map namespace. Into the base one it is dlopen.
+// Into any other it brings a copy of the C library of its own, whose calls
+// no wrapper here sees, so under a policy that needs the "native" grant for
+// the file, as a dlopen of libc itself does.
+static void* (*real_dlmopen)(Lmid_t, const char*, int) = NULL;
+void* dlmopen(Lmid_t lmid, const char* filename, int flags) {
+    if (!real_dlmopen) real_dlmopen = dlsym(RTLD_NEXT, "dlmopen");
+    if (lmid == LM_ID_BASE) return dlopen(filename, flags);
+    aether_dlerror_pending = 0;
+    if (filename && policy_in_force() && !check_grant("native", filename)) {
+        aether_dlopen_refused(filename);
+        return NULL;
+    }
+    return real_dlmopen(lmid, filename, flags);
+}
+#endif
+
+// posix_spawn_file_actions_addopen: the child opens the file between its
+// fork and its exec, on libc's own open, which no wrapper sees. Under a
+// policy the path is resolved and checked here, for what the flags ask, and
+// the action is given the resolved path.
+static int (*real_posix_spawn_file_actions_addopen)(posix_spawn_file_actions_t*, int, const char*,
+                                                    int, mode_t) = NULL;
+int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t* fa, int fd, const char* path,
+                                     int oflag, mode_t mode) {
+    if (!policy_in_force() || !path)
+        return FS_REAL(posix_spawn_file_actions_addopen)(fa, fd, path, oflag, mode);
+    int entry = (oflag & O_NOFOLLOW) || (oflag & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(AT_FDCWD, path, entry, fs_open_access(oflag), resolved)) return EACCES;
+    return FS_REAL(posix_spawn_file_actions_addopen)(fa, fd, resolved, oflag, mode);
 }
 
 // syscall(): the raw escape hatch (Perl's syscall(), Python's ctypes
