@@ -85,7 +85,26 @@ fi
 # under the sweep's 420 s, the processes still running under it are
 # stopped (ps, walking its tree until no new one appears), printed and
 # killed, and the test fails naming them.
+#
+# A step's limit is also what is left of the sweep's own budget for this
+# test (AE_SH_TEST_DEADLINE, from tests/scripts/run_ae_sh_dir.sh), less
+# DEADLINE_MARGIN for the report: eight steps of up to 180 s each fit in
+# 420 s only when most are quick, and on a slow macOS x86_64 runner they
+# were not (2026-11-12). The sweep then killed the test mid-step, before
+# any step reached its own limit, and the hang went unexplained again.
 STEP_LIMIT="${AE_IOS_STEP_TIMEOUT:-180}"
+DEADLINE_MARGIN=30
+
+# step_limit: the seconds the next step may take.
+step_limit() {
+    lim="$STEP_LIMIT"
+    if [ -n "${AE_SH_TEST_DEADLINE:-}" ]; then
+        left=$((AE_SH_TEST_DEADLINE - $(date +%s) - DEADLINE_MARGIN))
+        [ "$left" -lt "$lim" ] && lim="$left"
+        [ "$lim" -lt 1 ] && lim=1
+    fi
+    echo "$lim"
+}
 
 # proc_tree <pid>: <pid> and every process descended from it.
 proc_tree() {
@@ -117,16 +136,20 @@ running() {
 }
 
 # bounded <label> <command...>: runs the command with its output in
-# $TMP/log and returns its status, or, past STEP_LIMIT seconds, freezes
-# what is still running under it, reports it, kills it and fails.
+# $TMP/log and returns its status, or, past step_limit seconds of wall
+# time, freezes what is still running under it, reports it, kills it and
+# fails. Each step's time is printed, so a slow run says where it went.
 bounded() {
     label="$1"
     shift
+    limit=$(step_limit)
+    started=$(date +%s)
     "$@" >"$TMP/log" 2>&1 &
     bpid=$!
     waited=0
     while running "$bpid"; do
-        if [ "$waited" -ge "$STEP_LIMIT" ]; then
+        waited=$(($(date +%s) - started))
+        if [ "$waited" -ge "$limit" ]; then
             # Frozen before it is read, so nothing under the step starts a
             # process the kill below would miss: the step is stopped, then
             # each process a walk finds under it, until a walk finds none
@@ -147,7 +170,7 @@ bounded() {
                 for p in $fresh; do kill -STOP "$p" 2>/dev/null || true; done
                 tree="$tree$fresh"
             done
-            echo "  TIMEOUT: $label still running after ${STEP_LIMIT}s; its processes:"
+            echo "  TIMEOUT: $label still running after ${waited}s (limit ${limit}s); its processes:"
             echo "      PID  PPID     ELAPSED COMMAND"
             stuck=""
             for p in $tree; do
@@ -166,13 +189,13 @@ bounded() {
             wait "$bpid" 2>/dev/null || true
             echo "  output so far:"
             sed 's/^/    /' "$TMP/log"
-            fail "$label hung: killed after ${STEP_LIMIT}s; still running under it:${stuck:- nothing but the step itself}"
+            fail "$label hung: killed after ${waited}s (limit ${limit}s); still running under it:${stuck:- nothing but the step itself}"
         fi
         sleep 1
-        waited=$((waited + 1))
     done
     rc=0
     wait "$bpid" || rc=$?
+    echo "  step: $label took $(($(date +%s) - started))s"
     return $rc
 }
 
