@@ -4,8 +4,14 @@
   ever. Now:
   - with no stream open for the idle timeout the server sends GOAWAY and
     closes; PINGs and SETTINGS do not count as activity, and a connection
-    with streams open but nothing arriving for the idle timeout, and no
-    handler running, closes too;
+    with streams open but nothing moving for the idle timeout (no bytes
+    either way, no handler running or finishing), closes too, so a handler
+    that runs past the idle timeout still has its whole response go out as
+    the client's flow-control window lets it;
+  - a server stop refuses the streams whose requests have not arrived whole
+    (REFUSED_STREAM, nothing of them handled) and gives the rest the idle
+    timeout to finish: a stream its client kept trickling, PINGs and all,
+    held `http_server_stop` for as long as the client liked;
   - a stream whose request does not arrive whole within the head and body
     budgets (#3737) of its first HEADERS is reset with CANCEL, so a body
     sent a byte at a time no longer holds the connection;

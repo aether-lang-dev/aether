@@ -11,3 +11,4 @@ int slow_tls_record(void* t, const void* buf, int len, unsigned char* out, int c
 }
 int slow_tls_read(void* t, char* buf, int cap) { (void)t; (void)buf; (void)cap; return -1; }
 void slow_tls_free(void* t) { (void)t; }
+int slow_tls_key_update(void* t) { (void)t; return -1; }

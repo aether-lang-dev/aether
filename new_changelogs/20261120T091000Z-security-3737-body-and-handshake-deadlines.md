@@ -10,11 +10,19 @@
     time it waits, so a slow handler does not use up the client's budget.
     Past it the answer is 408 and the connection closes, whether the server
     reads the body before the handler (a chunked body, a small one) or the
-    handler reads it with `request_body` or `request_body_read`;
+    handler reads it with `request_body` or `request_body_read`. The rate
+    is held over a sliding window, 60 s unless
+    `http.server_set_body_rate_window` sets another: what the budget has
+    left never grows past it through bytes received, so a client that sends
+    a burst and then trickles below the rate is cut off within the window,
+    where a 60 MiB burst had earned 35 hours. The same holds on HTTP/2
+    streams and on the proxy event loop;
   - the head's 30 s deadline from its first byte now also cuts off a TLS
     record that arrives a byte at a time, and, on a server with HTTP/2 on,
     counts the bytes read to look for the HTTP/2 preface, which were read
-    with no deadline at all.
+    with no deadline at all. Records that carry no data (a TLS 1.3
+    KeyUpdate, on either TLS backend) do not start it: a kept-alive
+    connection is still idle after one.
 
   A body that stopped arriving for the idle timeout while the handler read
   it used to end short with no sign: the handler answered the cut body as if

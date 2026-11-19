@@ -45,6 +45,7 @@ exports(
     http_server_set_max_body_raw, server_set_max_body,
     http_server_set_head_timeout_raw, server_set_head_timeout,
     http_server_set_body_timeout_raw, server_set_body_timeout,
+    http_server_set_body_rate_window_raw, server_set_body_rate_window,
     http_server_set_tls_handshake_timeout_raw, server_set_tls_handshake_timeout,
     http_server_set_h2_max_age_raw, server_set_h2_max_age,
     http_server_set_loop_max_connections_raw, server_set_loop_max_connections,
@@ -471,6 +472,21 @@ extern http_server_set_body_timeout_raw(server: ptr, timeout_ns: long, min_rate:
 
 server_set_body_timeout(server: ptr, timeout: Duration, min_rate_bytes: long) -> string {
     return http_server_set_body_timeout_raw(server, timeout.ns, min_rate_bytes)
+}
+
+// The window over which the body's minimum rate is held (#3737); 60 s
+// unless set here. The bytes a client sends extend its body's budget
+// (server_set_body_timeout), but never so that what is left of it passes
+// this window: a client that sent a burst and then trickled below the
+// minimum rate is cut off within the window of falling behind, where the
+// burst's whole credit let it hold a worker for hours (60 MiB at 500 bytes
+// a second is 35 hours). A client at or above the rate is never cut off by
+// it. Applies on the worker path, the proxy event loop and HTTP/2. 0ns
+// keeps every byte's credit. Returns "" or why the value was refused.
+extern http_server_set_body_rate_window_raw(server: ptr, window_ns: long) -> string
+
+server_set_body_rate_window(server: ptr, window: Duration) -> string {
+    return http_server_set_body_rate_window_raw(server, window.ns)
 }
 
 // The longest a TLS handshake may take as a whole (#3737), on both TLS

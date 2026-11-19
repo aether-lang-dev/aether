@@ -140,6 +140,11 @@ typedef struct EvConn {
      * client that sent one just inside it held its slot for ever. */
     int64_t  req_started_ms;     /* the request's first byte */
     int64_t  body_started_ms;    /* the end of its head */
+    /* The body's deadline as it stands, and the bytes of the body that
+     * have extended it so far: the minimum rate's credit is held to the
+     * rate window as each read adds to it (http_body_budget_credit). */
+    int64_t  body_due_ms;
+    size_t   body_credited;
     int64_t  req_due_ms;
     /* Its share of its client address's count (limits.
      * max_connections_per_ip, #3750), given back on close and on hand-back. */
@@ -404,6 +409,8 @@ static void ev_conn_reset_request(EvDriver* d, EvConn* c) {
     c->in_hdr_end = 0;
     c->req_started_ms = 0;   /* the next request's clocks start afresh */
     c->body_started_ms = 0;
+    c->body_due_ms = 0;
+    c->body_credited = 0;
     c->req_due_ms = 0;
 
     /* The head buffer stays with the connection and is only grown. Every
@@ -1407,7 +1414,9 @@ static void ev_arm_idle(EvDriver* d, EvConn* c) {
  * a client that sent one just inside it hold this slot for ever, and enough
  * such clients every descriptor the process has. By the clock: the loop
  * reads a body before anything runs on it, so all of its time is time spent
- * waiting on the client. Called each time the request's read waits. */
+ * waiting on the client. The credit those bytes earn is held to the rate
+ * window (limits.body_rate_window_ms): kept whole, a burst then a trickle
+ * held the slot for hours. Called each time the request's read waits. */
 static void ev_arm_request(EvDriver* d, EvConn* c) {
     const HttpServerLimits* lim = &d->loop->server->limits;
     c->req_due_ms = 0;
@@ -1420,10 +1429,16 @@ static void ev_arm_request(EvDriver* d, EvConn* c) {
     }
     if (!c->body_started_ms) c->body_started_ms = now;
     if (lim->body_timeout_ms > 0) {
-        int64_t due = c->body_started_ms + lim->body_timeout_ms;
-        if (lim->body_min_rate > 0)
-            due += (int64_t)(c->in_len - c->in_hdr_end) * 1000 / lim->body_min_rate;
-        c->req_due_ms = due;
+        if (!c->body_due_ms) c->body_due_ms = c->body_started_ms + lim->body_timeout_ms;
+        size_t got = c->in_len - c->in_hdr_end;
+        if (lim->body_min_rate > 0 && got > c->body_credited) {
+            int64_t credit = (int64_t)got * 1000 / lim->body_min_rate -
+                             (int64_t)c->body_credited * 1000 / lim->body_min_rate;
+            c->body_due_ms = now + http_body_budget_credit(c->body_due_ms - now, credit,
+                                                           lim->body_rate_window_ms);
+            c->body_credited = got;
+        }
+        c->req_due_ms = c->body_due_ms;
     }
 }
 

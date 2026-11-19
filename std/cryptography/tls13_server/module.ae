@@ -2035,7 +2035,9 @@ pure_tls_server_recv(sconn: ptr, buf: ptr, len: int) -> int {
 // holds as conn_recv does: a KeyUpdate, an empty record or a warning is
 // handled and is not data (#3405), so a connection with only those left is
 // parked, not read from. A record that ends the connection or fails it
-// answers 1, so the next read reports that at once. Else 0.
+// answers 1, so the next read reports that at once. -1 when what is left
+// is part of a record: a request may be on its way, a record at a time
+// (std.http starts the head's clock then, #3737). Else 0: nothing held.
 @c_callback("aether_pure_tls_server_pending")
 pure_tls_server_pending(sconn: ptr) -> int {
     if sconn == null { return 0 }
@@ -2049,7 +2051,7 @@ pure_tls_server_pending(sconn: ptr) -> int {
     while recio_whole_record(r) == 0 && tcp.available(r.sock) > 0 {
         if recio_fill(r) <= 0 { return 1 }
     }
-    if recio_whole_record(r) == 0 { return 0 }
+    if recio_whole_record(r) == 0 { return recio_part_held(r) }
     c.buffered_only = 1
     p, n, _err = conn_recv(sconn)
     c.buffered_only = 0
@@ -2061,6 +2063,12 @@ pure_tls_server_pending(sconn: ptr) -> int {
     }
     if p != null { bytes.wipe_free(p) }
     if c.closed != 0 { return 1 }
+    return recio_part_held(r)
+}
+
+// -1 when the record reader holds part of a record, else 0.
+fn recio_part_held(r: *RecordIO) -> int {
+    if r.len - r.off > 0 { return -1 }
     return 0
 }
 

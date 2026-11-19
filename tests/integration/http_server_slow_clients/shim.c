@@ -42,6 +42,25 @@
  * And where the descriptor limit binds sockets: with the process out of
  * descriptors and a connection queued, the server must not spin on a
  * listener that stays readable (under 500 ms of CPU in 2 s).
+ *
+ * The review rounds (#3737, #3738, #3750):
+ *
+ *   burst       100000 bytes of a body at once, then a byte a tick: the
+ *               burst's credit is held to the 1 s rate window, so 408 (on
+ *               HTTP/2 the stream reset, on the loop 408) within the
+ *               budget, where the whole credit held it for 100 s
+ *   h2 probe short request
+ *               an 18-byte HTTP/1.0 request on a server with HTTP/2 on is
+ *               answered at once, not after the head's deadline
+ *   h2 stop     a stop with a stream its client keeps trickling returns at
+ *               once, the stream refused (REFUSED_STREAM)
+ *   h2 slow handler
+ *               a handler past the idle timeout answering 1 MiB to a client
+ *               with a 64 KiB window: all of it arrives
+ *   key update  a TLS 1.3 KeyUpdate before the first request does not start
+ *               the head's clock (both TLS backends)
+ *   per ip linger
+ *               a connection refused for its address lingers 500 ms, not 2 s
  */
 
 #include <stdio.h>
@@ -81,6 +100,7 @@ int slow_tls_write(void* t, const void* buf, int len);
 int slow_tls_record(void* t, const void* buf, int len, unsigned char* out, int cap);
 int slow_tls_read(void* t, char* buf, int cap);
 void slow_tls_free(void* t);
+int slow_tls_key_update(void* t);
 
 #define IDLE_MS        600
 #define BUDGET_MS      1000
@@ -521,6 +541,7 @@ int http_server_evloop_connections(HttpServer* server);
 
 static HttpServer* g_upstream;
 static int g_loop_per_ip;   /* a per-address limit for the next gateway */
+static int g_gw_rate_window;     /* the next gateway's body rate window in ms, 0 for its default */
 static int g_upstream_port;
 
 /* The upstream every gateway proxies to: a worker-path server. */
@@ -552,6 +573,8 @@ static Gateway loop_gateway(const char* label, int tls, int max_conns) {
     if (!*err) err = http_server_set_tls_handshake_timeout_raw(s, (int64_t)BUDGET_MS * 1000000LL);
     if (!*err && max_conns) err = http_server_set_loop_max_connections_raw(s, max_conns);
     if (!*err && g_loop_per_ip) err = http_server_set_max_connections_per_ip_raw(s, g_loop_per_ip, 64);
+    if (!*err && g_gw_rate_window)
+        err = http_server_set_body_rate_window_raw(s, (int64_t)g_gw_rate_window * 1000000LL);
     if (*err) {
         printf("FAIL: [%s] a limit setter refused: %s\n", label, err);
         g_fail++;
@@ -925,6 +948,465 @@ static void round_descriptors(void) {
 }
 #endif
 
+/* ---- threads, for the rounds that need two things at once ---- */
+
+typedef void (*slow_thread_fn)(void*);
+typedef struct { slow_thread_fn fn; void* arg; } SlowThreadArg;
+#ifdef _WIN32
+typedef HANDLE slow_thread;
+static DWORD WINAPI slow_thread_tramp(LPVOID p) {
+    SlowThreadArg* a = (SlowThreadArg*)p;
+    a->fn(a->arg);
+    return 0;
+}
+static int slow_thread_start(slow_thread* t, SlowThreadArg* a) {
+    *t = CreateThread(NULL, 0, slow_thread_tramp, a, 0, NULL);
+    return *t ? 0 : -1;
+}
+static void slow_thread_join(slow_thread t) {
+    WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+}
+#else
+#include <pthread.h>
+typedef pthread_t slow_thread;
+static void* slow_thread_tramp(void* p) {
+    SlowThreadArg* a = (SlowThreadArg*)p;
+    a->fn(a->arg);
+    return NULL;
+}
+static int slow_thread_start(slow_thread* t, SlowThreadArg* a) {
+    return pthread_create(t, NULL, slow_thread_tramp, a) == 0 ? 0 : -1;
+}
+static void slow_thread_join(slow_thread t) { pthread_join(t, NULL); }
+#endif
+
+/* A send that fails rather than raising SIGPIPE once the server has gone. */
+static int send_nosig(client_sock s, const void* p, int len) {
+#ifdef MSG_NOSIGNAL
+    return (int)send(s, (const char*)p, len, MSG_NOSIGNAL);
+#else
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+    return (int)send(s, (const char*)p, len, 0);
+#endif
+}
+
+/* A request body sent in a burst, then a byte every tick: the burst
+ * earned the minimum rate's credit for 100 s (1000 bytes a second), and the
+ * trickle after it is far below the rate. With the rate window at 1 s the
+ * server cuts it off within the window; with the burst's whole credit kept
+ * it held the worker past the trickle (#3737). */
+static void round_burst_plain(void) {
+    const char* label = "burst plain";
+    HttpServer* server = start_server(PLAIN, 0, label);
+    if (!server) return;
+    const char* err = http_server_set_body_rate_window_raw(server, (int64_t)BUDGET_MS * 1000000LL);
+    if (*err) { report(label, 0, -1, -1, err); http_server_free(server); return; }
+    client_sock s = client_connect(http_server_port(server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "connect"); http_server_free(server); return; }
+    static const char head[] = "POST /len HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 200000\r\n\r\n";
+    static char burst[100000];
+    memset(burst, 'b', sizeof(burst));
+    send_all(s, head, (int)sizeof(head) - 1);
+    send_all(s, burst, (int)sizeof(burst));
+    static char slow[512];
+    memset(slow, 'y', sizeof(slow));
+    int64_t t0 = now_ms();
+    int64_t elapsed = trickle(s, slow, (int)sizeof(slow), t0);
+    int status = elapsed >= 0 ? read_status(s, NULL, NULL, 0) : -1;
+    client_close(s);
+    http_server_free(server);
+    expect_cut(label, elapsed, status, 408);
+}
+
+/* ---- raw HTTP/2 frames, for the h2 rounds ---- */
+
+static int h2_recv_n(client_sock s, unsigned char* buf, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        int r = (int)recv(s, (char*)buf + got, (int)(n - got), 0);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+static int h2_send_frame(client_sock s, int type, int flags, unsigned stream,
+                         const unsigned char* payload, size_t len) {
+    unsigned char h[9];
+    h[0] = (unsigned char)(len >> 16);
+    h[1] = (unsigned char)(len >> 8);
+    h[2] = (unsigned char)len;
+    h[3] = (unsigned char)type;
+    h[4] = (unsigned char)flags;
+    h[5] = (unsigned char)((stream >> 24) & 0x7F);
+    h[6] = (unsigned char)(stream >> 16);
+    h[7] = (unsigned char)(stream >> 8);
+    h[8] = (unsigned char)stream;
+    if (send_all(s, h, 9) != 0) return -1;
+    return len ? send_all(s, payload, (int)len) : 0;
+}
+
+/* One frame: its type, flags, stream and payload (up to cap). The payload
+ * length, or -1 on the end, a timeout or an overflow. */
+static long h2_read_frame(client_sock s, int* type, int* flags, unsigned* stream,
+                          unsigned char* buf, size_t cap) {
+    unsigned char h[9];
+    if (h2_recv_n(s, h, 9) != 0) return -1;
+    size_t len = ((size_t)h[0] << 16) | ((size_t)h[1] << 8) | h[2];
+    *type = h[3];
+    *flags = h[4];
+    *stream = ((unsigned)(h[5] & 0x7F) << 24) | ((unsigned)h[6] << 16) |
+              ((unsigned)h[7] << 8) | h[8];
+    if (len > cap) return -1;
+    if (len && h2_recv_n(s, buf, len) != 0) return -1;
+    return (long)len;
+}
+
+/* HPACK "literal header field without indexing, new name", lengths under
+ * 127, no Huffman. */
+static size_t h2_literal(unsigned char* out, const char* name, const char* value) {
+    size_t n = 0, nl = strlen(name), vl = strlen(value);
+    out[n++] = 0x00;
+    out[n++] = (unsigned char)nl;
+    memcpy(out + n, name, nl); n += nl;
+    out[n++] = (unsigned char)vl;
+    memcpy(out + n, value, vl); n += vl;
+    return n;
+}
+
+static int h2_send_headers(client_sock s, unsigned stream, const char* method,
+                           const char* path, int end_stream) {
+    unsigned char block[256];
+    size_t n = 0;
+    n += h2_literal(block + n, ":method", method);
+    n += h2_literal(block + n, ":scheme", "http");
+    n += h2_literal(block + n, ":path", path);
+    n += h2_literal(block + n, ":authority", "127.0.0.1");
+    return h2_send_frame(s, 0x1, 0x4 | (end_stream ? 0x1 : 0), stream, block, n);
+}
+
+/* A prior-knowledge HTTP/2 connection, the preface and SETTINGS
+ * exchanged, or CLIENT_BAD. */
+static client_sock h2_connect(int port) {
+    client_sock s = client_connect(port);
+    if (s == CLIENT_BAD) return CLIENT_BAD;
+    static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    send_all(s, preface, (int)sizeof(preface) - 1);
+    h2_send_frame(s, 0x4, 0, 0, NULL, 0);
+    static unsigned char buf[65536];
+    int type = 0, flags = 0;
+    unsigned stream = 0;
+    for (;;) {
+        long n = h2_read_frame(s, &type, &flags, &stream, buf, sizeof(buf));
+        if (n < 0) { client_close(s); return CLIENT_BAD; }
+        if (type == 0x4 && !(flags & 0x1)) break;
+    }
+    h2_send_frame(s, 0x4, 0x1, 0, NULL, 0);
+    return s;
+}
+
+static long h2_rst_code(const unsigned char* b) {
+    return ((long)b[0] << 24) | ((long)b[1] << 16) | ((long)b[2] << 8) | b[3];
+}
+
+/* The same burst and trickle on an HTTP/2 stream: 60000 bytes of DATA (the
+ * stream's first window), then a byte of DATA every tick. Its request is
+ * reset (CANCEL) within its head and body budgets (2 s) and a margin,
+ * where the burst's whole credit kept it for 62 s. */
+static void round_burst_h2(void) {
+    const char* label = "burst h2";
+    HttpServer* server = start_server(PLAIN, 1, label);
+    if (!server) return;
+    const char* err = http_server_set_body_rate_window_raw(server, (int64_t)BUDGET_MS * 1000000LL);
+    if (*err) { report(label, 0, -1, -1, err); http_server_free(server); return; }
+    client_sock s = h2_connect(http_server_port(server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "h2 connect"); http_server_free(server); return; }
+    static unsigned char data[15000];
+    memset(data, 'b', sizeof(data));
+    static unsigned char buf[65536];
+    int64_t t0 = now_ms();
+    h2_send_headers(s, 1, "POST", "/len", 0);
+    for (int i = 0; i < 4; i++) h2_send_frame(s, 0x0, 0, 1, data, sizeof(data));
+    long code = -1;
+    int type = 0, flags = 0;
+    unsigned stream = 0;
+    while (now_ms() - t0 < TRICKLE_MS && code < 0) {
+        if (readable(s, TICK_MS)) {
+            long n = h2_read_frame(s, &type, &flags, &stream, buf, sizeof(buf));
+            if (n < 0) break;
+            if (type == 0x3 && stream == 1 && n == 4) code = h2_rst_code(buf);
+            continue;
+        }
+        h2_send_frame(s, 0x0, 0, 1, data, 1);
+    }
+    int64_t elapsed = now_ms() - t0;
+    client_close(s);
+    http_server_free(server);
+    char note[64];
+    snprintf(note, sizeof(note), "RST_STREAM %ld", code);
+    report(label, code == 0x8 && elapsed < 3000, elapsed, 0, note);
+}
+
+/* A whole HTTP/1.0 request shorter than the HTTP/2 preface's 24 bytes, on a
+ * server with HTTP/2 on: the probe for the preface read until it had 24
+ * bytes, so this waited out the head's deadline and was answered 408. It
+ * is answered at once. */
+static void round_h2_short(void) {
+    const char* label = "h2 probe short request";
+    HttpServer* server = start_server(PLAIN, 1, label);
+    if (!server) return;
+    client_sock s = client_connect(http_server_port(server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "connect"); http_server_free(server); return; }
+    static const char req[] = "GET /ping HTTP/1.0\r\n\r\n";
+    int64_t t0 = now_ms();
+    send_all(s, req, (int)sizeof(req) - 1);
+    char buf[512];
+    int have = 0;
+    while (have < (int)sizeof(buf) - 1 && readable(s, CLIENT_WAIT_MS)) {
+        int n = (int)recv(s, buf + have, (int)sizeof(buf) - 1 - have, 0);
+        if (n <= 0) break;
+        have += n;
+        buf[have] = '\0';
+        if (strstr(buf, "pong")) break;
+    }
+    buf[have] = '\0';
+    int64_t elapsed = now_ms() - t0;
+    client_close(s);
+    http_server_free(server);
+    int status = have > 12 ? atoi(buf + 9) : -1;
+    report(label, status == 200 && strstr(buf, "pong") && elapsed < 500, elapsed, status,
+           "an 18-byte HTTP/1.0 request");
+}
+
+typedef struct { HttpServer* server; int delay_ms; int64_t took_ms; } StopJob;
+
+static void stop_job(void* p) {
+    StopJob* j = (StopJob*)p;
+    sleep_ms(j->delay_ms);
+    int64_t t = now_ms();
+    http_server_stop(j->server);
+    j->took_ms = now_ms() - t;
+}
+
+/* A stop with an HTTP/2 stream open whose client keeps it going, a byte of
+ * DATA and a PING every tick, under budgets of 30 s: the stop sent GOAWAY
+ * and waited for the stream, which waited for its client, so the stop
+ * returned only once the client gave up. The stream's request is refused
+ * (RST_STREAM REFUSED_STREAM) and the stop returns at once. */
+static void round_h2_stop(void) {
+    const char* label = "h2 stop";
+    HttpServer* server = start_server(PLAIN, 1, label);
+    if (!server) return;
+    const char* err = http_server_set_head_timeout_raw(server, 30000LL * 1000000LL);
+    if (!*err) err = http_server_set_body_timeout_raw(server, 30000LL * 1000000LL, MIN_RATE);
+    if (*err) { report(label, 0, -1, -1, err); http_server_free(server); return; }
+    client_sock s = h2_connect(http_server_port(server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "h2 connect"); http_server_free(server); return; }
+    static const unsigned char one[1] = { 'x' };
+    static const unsigned char ping[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    static unsigned char buf[65536];
+    h2_send_headers(s, 1, "POST", "/len", 0);
+    h2_send_frame(s, 0x0, 0, 1, one, 1);
+    StopJob job = { server, 300, -1 };
+    SlowThreadArg arg = { stop_job, &job };
+    slow_thread t;
+    if (slow_thread_start(&t, &arg) != 0) {
+        report(label, 0, -1, -1, "thread");
+        client_close(s);
+        http_server_free(server);
+        return;
+    }
+    int64_t t0 = now_ms();
+    long code = -1;
+    int type = 0, flags = 0;
+    unsigned stream = 0;
+    while (now_ms() - t0 < 8000) {
+        if (readable(s, TICK_MS)) {
+            long n = h2_read_frame(s, &type, &flags, &stream, buf, sizeof(buf));
+            if (n < 0) break;   /* closed */
+            if (type == 0x3 && stream == 1 && n == 4) code = h2_rst_code(buf);
+            continue;
+        }
+        if (code < 0) h2_send_frame(s, 0x0, 0, 1, one, 1);
+        h2_send_frame(s, 0x6, 0, 0, ping, sizeof(ping));
+    }
+    slow_thread_join(t);
+    client_close(s);
+    http_server_free(server);
+    char note[64];
+    snprintf(note, sizeof(note), "the stop took %lld ms, RST_STREAM %ld", (long long)job.took_ms, code);
+    report(label, job.took_ms >= 0 && job.took_ms < 1500 && code == 0x7, job.took_ms, 0, note);
+}
+
+/* 1 MiB after 1.5 s: past the 600 ms idle timeout. */
+static void slow_big_handler(HttpRequest* req, HttpServerResponse* res, void* ud) {
+    (void)req; (void)ud;
+    static char big[1024 * 1024 + 1];
+    if (!big[0]) memset(big, 'q', sizeof(big) - 1);
+    sleep_ms(1500);
+    http_response_set_status(res, 200);
+    http_response_set_body(res, big);
+}
+
+/* A handler that runs past the idle timeout and answers 1 MiB, to a client
+ * with HTTP/2's first window of 64 KiB that sends WINDOW_UPDATE for each
+ * DATA frame it reads. The connection's idle clock ran from the client's
+ * last bytes, the request, so the first window went out and then a GOAWAY
+ * before the client's WINDOW_UPDATE let the rest follow. All of it
+ * arrives. */
+static void round_h2_slow_handler(void) {
+    const char* label = "h2 slow handler";
+    HttpServer* server = start_server(PLAIN, 1, label);
+    if (!server) return;
+    http_server_get(server, "/slowbig", slow_big_handler, NULL);
+    client_sock s = h2_connect(http_server_port(server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "h2 connect"); http_server_free(server); return; }
+    static unsigned char buf[65536];
+    int64_t t0 = now_ms();
+    h2_send_headers(s, 1, "GET", "/slowbig", 1);
+    long got = 0;
+    int ended = 0, goaway = 0;
+    int type = 0, flags = 0;
+    unsigned stream = 0;
+    while (!ended && now_ms() - t0 < 10000) {
+        long n = h2_read_frame(s, &type, &flags, &stream, buf, sizeof(buf));
+        if (n < 0) break;
+        if (type == 0x7) goaway = 1;
+        if (type == 0x0 && stream == 1) {
+            got += n;
+            if (n > 0) {
+                unsigned char inc[4] = { (unsigned char)(n >> 24), (unsigned char)(n >> 16),
+                                         (unsigned char)(n >> 8), (unsigned char)n };
+                h2_send_frame(s, 0x8, 0, 1, inc, 4);
+                h2_send_frame(s, 0x8, 0, 0, inc, 4);
+            }
+            if (flags & 0x1) ended = 1;
+        }
+    }
+    int64_t elapsed = now_ms() - t0;
+    client_close(s);
+    http_server_free(server);
+    char note[96];
+    snprintf(note, sizeof(note), "%ld of %d bytes, end_stream=%d goaway=%d", got, 1024 * 1024,
+             ended, goaway);
+    report(label, ended && got == 1024 * 1024, elapsed, 0, note);
+}
+
+/* A client a TLS 1.3 KeyUpdate before its first request, on a server whose
+ * idle timeout is 3 s and head budget 1 s: the record carries no data, so
+ * the connection is still idle and its request, 1.5 s later, is answered.
+ * The head's clock started at the KeyUpdate's bytes, and the request met a
+ * 408. */
+static void round_key_update(int backend) {
+    char label[64];
+    snprintf(label, sizeof(label), "key update %s", backend_name[backend]);
+    HttpServer* server = start_server(backend, 0, label);
+    if (!server) return;
+    const char* err = http_server_set_keepalive_raw(server, 1, 0, 3000LL * 1000000LL);
+    if (*err) { report(label, 0, -1, -1, err); http_server_free(server); return; }
+    client_sock s = client_connect(http_server_port(server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "connect"); http_server_free(server); return; }
+    void* tls = slow_tls_connect((int)s);
+    if (!tls || slow_tls_key_update(tls) != 0) {
+        printf("round[%s]: skipped, %s\n", label,
+               !slow_tls_available() ? "no TLS client in this build"
+               : !tls ? "the TLS handshake failed" : "no TLS 1.3 KeyUpdate");
+        if (slow_tls_available() && !tls) g_fail++;
+        slow_tls_free(tls);
+        client_close(s);
+        http_server_free(server);
+        return;
+    }
+    sleep_ms(1500);
+    static const char req[] = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    int64_t t0 = now_ms();
+    slow_tls_write(tls, req, (int)sizeof(req) - 1);
+    char body[64] = "";
+    int status = read_status(s, tls, body, (int)sizeof(body));
+    int64_t elapsed = now_ms() - t0;
+    slow_tls_free(tls);
+    client_close(s);
+    http_server_free(server);
+    report(label, status == 200 && strcmp(body, "pong") == 0, elapsed, status, body);
+}
+
+/* One address past its limit (1 here) is answered 503, and what it sends
+ * after is read and dropped for a while so the 503 is not reset away. A
+ * client that keeps sending held the worker for 2 s each time, and could
+ * open the next at once; the linger is 500 ms, as the event loop's. Timed
+ * by the client: its sends fail once the server has closed. */
+static void round_per_ip_linger(void) {
+    const char* label = "per ip linger";
+    HttpServer* server = http_server_create(0);
+    if (!server) { report(label, 0, -1, -1, "server_create"); return; }
+    http_server_get(server, "/ping", ping_handler, NULL);
+    const char* err = http_server_set_keepalive_raw(server, 1, 0, 10000LL * 1000000LL);
+    if (!*err) err = http_server_set_max_connections_per_ip_raw(server, 1, 64);
+    if (*err || http_server_bind_raw(server, "127.0.0.1", 0) < 0 ||
+        http_server_start_background_raw(server) < 0) {
+        report(label, 0, -1, -1, *err ? err : "bind or start");
+        http_server_free(server);
+        return;
+    }
+    int port = http_server_port(server);
+    static const char req[] = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    client_sock held = client_connect(port);
+    int first = -1;
+    if (held != CLIENT_BAD) {
+        send_all(held, req, (int)sizeof(req) - 1);
+        first = readable(held, 3000) ? read_status(held, NULL, NULL, 0) : -1;
+    }
+    client_sock s = client_connect(port);
+    int status = -1;
+    int64_t elapsed = -1;
+    if (s != CLIENT_BAD) {
+        status = readable(s, 3000) ? read_status(s, NULL, NULL, 0) : -1;
+        int64_t t0 = now_ms();
+        while (now_ms() - t0 < 4000) {
+            if (send_nosig(s, "x", 1) != 1) { elapsed = now_ms() - t0; break; }
+            sleep_ms(100);
+        }
+        client_close(s);
+    }
+    if (held != CLIENT_BAD) client_close(held);
+    http_server_free(server);
+    char note[96];
+    snprintf(note, sizeof(note), "first %d, the refused one %d, its sends failed after %lld ms",
+             first, status, (long long)elapsed);
+    report(label, first == 200 && status == 503 && elapsed >= 0 && elapsed < 1300, elapsed, status, note);
+}
+
+#ifndef _WIN32
+/* The burst and trickle through the loop: 408 within the rate window. */
+static void round_loop_burst(void) {
+    const char* label = "loop burst";
+    g_gw_rate_window = BUDGET_MS;
+    Gateway g = loop_gateway(label, 0, 0);
+    g_gw_rate_window = 0;
+    if (!g.server) return;
+    client_sock s = client_connect(http_server_port(g.server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "connect"); loop_gateway_free(g); return; }
+    static const char head[] = "POST /len HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 200000\r\n\r\n";
+    static char burst[100000];
+    memset(burst, 'b', sizeof(burst));
+    send_all(s, head, (int)sizeof(head) - 1);
+    send_all(s, burst, (int)sizeof(burst));
+    static char slow[512];
+    memset(slow, 'y', sizeof(slow));
+    int64_t t0 = now_ms();
+    int64_t elapsed = trickle(s, slow, (int)sizeof(slow), t0);
+    int status = elapsed >= 0 ? read_status(s, NULL, NULL, 0) : -1;
+    client_close(s);
+    int ran = on_loop(g, label);
+    loop_gateway_free(g);
+    if (ran) expect_cut(label, elapsed, status, 408);
+}
+#endif
+
 int http_slow_clients_probe(void) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -948,6 +1430,12 @@ int http_slow_clients_probe(void) {
     if (WANT("sleep")) round_sleep();
     if (WANT("park")) round_park();
     if (WANT("perip")) { round_per_ip(0); round_per_ip(1); }
+    if (WANT("burst")) { round_burst_plain(); round_burst_h2(); }
+    if (WANT("h2short")) round_h2_short();
+    if (WANT("h2stop")) round_h2_stop();
+    if (WANT("h2slow")) round_h2_slow_handler();
+    if (WANT("keyupdate")) for (int b = OPENSSL; b <= AETHER; b++) round_key_update(b);
+    if (WANT("linger")) round_per_ip_linger();
 #ifndef _WIN32
     if (WANT("loop")) {
         round_loop_slow("head");
@@ -955,6 +1443,7 @@ int http_slow_clients_probe(void) {
         round_loop_slow("handshake");
         round_loop_rate();
         round_loop_slots();
+        round_loop_burst();
     }
     if (WANT("perip")) round_loop_per_ip();
     if (WANT("descriptors")) round_descriptors();

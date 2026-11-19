@@ -221,6 +221,7 @@ struct HttpConn;
 //   head_timeout_ms           30 s     server_set_head_timeout           408, connection closed
 //   body_timeout_ms           30 s     server_set_body_timeout           408, connection closed
 //   body_min_rate             500 B/s  server_set_body_timeout           (extends body_timeout_ms)
+//   body_rate_window_ms       60 s     server_set_body_rate_window       (the most body_min_rate credit kept)
 //   max_body                  64 MiB   server_set_max_body               413 (HTTP/2: RST_STREAM CANCEL)
 //   max_chunked_body          8 MiB    none (clamped to max_body)        413, connection closed
 //   ws_max_message            64 MiB   server_set_ws_max_message         close 1009
@@ -243,14 +244,19 @@ struct HttpConn;
 // HTTP/2 also holds no more than max_body of request bodies on one
 // connection (a stream past it is refused), resets a stream whose request
 // is not whole within the head and body budgets, and closes a connection
-// with no stream open for idle_timeout_ms. The HTTP client's limits are
-// HttpClientLimits in aether_http.h.
+// with no stream open for idle_timeout_ms. On a stop it refuses the streams
+// whose requests have not arrived whole and gives the rest idle_timeout_ms
+// to finish. The HTTP client's limits are HttpClientLimits in aether_http.h.
 //
 // The body's budget: the server waits on the client for a body no longer
 // than body_timeout_ms plus one second for every body_min_rate bytes it has
 // received, counting only the time it waits (not the handler's between
 // reads). body_min_rate 0 makes body_timeout_ms an absolute bound on that
-// wait.
+// wait. The rate is held over a sliding window: what the budget has left
+// never grows past body_rate_window_ms through bytes received, so a client
+// that sends a burst and then trickles below body_min_rate is cut off
+// within that window of falling behind, not after the burst's whole
+// credit (a 60 MiB burst earned 35 hours). 0 keeps the whole credit.
 //
 // A timeout of 0 turns that bound off; the sizes must be positive. Fixed
 // parse limits, not in the struct because a buffer is sized by them: a
@@ -262,6 +268,7 @@ struct HttpConn;
 #define HTTP_DEFAULT_TLS_HANDSHAKE_TIMEOUT_MS 30000
 #define HTTP_DEFAULT_BODY_TIMEOUT_MS  30000
 #define HTTP_DEFAULT_BODY_MIN_RATE    500
+#define HTTP_DEFAULT_BODY_RATE_WINDOW_MS 60000
 #define HTTP_DEFAULT_MAX_BODY         ((int64_t)64 * 1024 * 1024)
 #define HTTP_DEFAULT_MAX_CHUNKED_BODY ((int64_t)8 * 1024 * 1024)
 #define HTTP_WS_DEFAULT_MAX_MESSAGE   ((size_t)64 * 1024 * 1024)
@@ -287,6 +294,9 @@ typedef struct HttpServerLimits {
     // second that extends it.
     int     body_timeout_ms;
     int     body_min_rate;
+    // The most the body's budget keeps of the time bytes earned it: the
+    // window over which body_min_rate is held (above).
+    int     body_rate_window_ms;
     // The largest body http_request_body buffers; an HTTP/2 stream's body
     // too, since HTTP/2 holds each whole.
     int64_t max_body;
@@ -1289,6 +1299,24 @@ const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout
 // the values were refused.
 const char* http_server_set_body_timeout_raw(HttpServer* server, int64_t timeout_ns,
                                              int64_t min_rate);
+
+// The window over which the body's minimum rate is held (#3737), 60 s by
+// default: what is left of the body's budget never grows past it through
+// bytes received, so a client that sent a burst and then fell behind
+// body_min_rate is cut off within it. 0 keeps every byte's credit, as
+// before. Returns "" or why the value was refused.
+const char* http_server_set_body_rate_window_raw(HttpServer* server, int64_t window_ns);
+
+// What is left of a body's budget, `left_ms`, after bytes earned it
+// `credit_ms` more: never past `window_ms` (0 for no bound) through the
+// credit, though a budget already past it is kept. The one rule for the
+// worker path, the proxy event loop and HTTP/2.
+static inline int64_t http_body_budget_credit(int64_t left_ms, int64_t credit_ms,
+                                              int window_ms) {
+    int64_t n = left_ms + credit_ms;
+    if (window_ms > 0 && n > window_ms) n = left_ms > window_ms ? left_ms : window_ms;
+    return n;
+}
 
 // The longest a TLS handshake may take as a whole (#3737), on both TLS
 // backends; past it the connection is closed. 0 leaves only the idle

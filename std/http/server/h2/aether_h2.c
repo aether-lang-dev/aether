@@ -101,6 +101,11 @@ typedef struct AetherH2Stream {
      * clock: its request must be whole by the deadline that starts here
      * (aether_h2_session_expire, #3738). */
     int64_t opened_ms;
+    /* The request's deadline as it stands, 0 until first worked out, and
+     * the body bytes that have extended it so far: the minimum rate's credit
+     * is held to the rate window (http_body_budget_credit). */
+    int64_t due_ms;
+    size_t  body_credited;
     /* The request's header list so far, counted as
      * SETTINGS_MAX_HEADER_LIST_SIZE counts one (each field's name and value
      * and 32), and whether it passed the server's h2_max_header_list: the
@@ -182,6 +187,9 @@ struct AetherH2Session {
      * answered within one turn of the connection's loop is never seen open
      * there. */
     int64_t          last_active_ms;
+    /* When a response was last submitted or bytes last went to the client
+     * (aether_h2_session_last_progress). */
+    int64_t          last_progress_ms;
 
 #ifdef AETHER_H2_HAS_POOL
     /* Per-session async-dispatch state. The worker pool is the shared
@@ -1005,6 +1013,9 @@ static void submit_response_for_stream(AetherH2Session* s,
                                      str->response_header_count,
                                      data_prd);
     str->response_submitted = 1;
+    /* The connection's idle clock starts over: a handler that took longer
+     * than the idle timeout has its response go out in full (#3738). */
+    s->last_progress_ms = aether_h2_now_ms();
 
     http_request_free(req);
     http_server_response_free(res);
@@ -1183,6 +1194,7 @@ int aether_h2_session_drain(AetherH2Session* sess,
         int written = write_fn(sess->conn_userdata,
                                sess->out_buf, sess->out_buf_len);
         if (written < 0) return -1;
+        if (written > 0) sess->last_progress_ms = aether_h2_now_ms();
         if ((size_t)written < sess->out_buf_len) {
             memmove(sess->out_buf, sess->out_buf + written,
                     sess->out_buf_len - written);
@@ -1275,6 +1287,25 @@ int64_t aether_h2_session_last_active(AetherH2Session* sess) {
     return sess ? sess->last_active_ms : 0;
 }
 
+int64_t aether_h2_session_last_progress(AetherH2Session* sess) {
+    return sess ? sess->last_progress_ms : 0;
+}
+
+void aether_h2_session_refuse_incomplete(AetherH2Session* sess) {
+    if (!sess || !sess->ng) return;
+    for (AetherH2Stream* str = sess->streams; str; str = str->next) {
+        if (str->request_done || str->response_submitted) continue;
+        sess->body_held -= str->body_len <= sess->body_held ? str->body_len : sess->body_held;
+        free(str->body);
+        str->body = NULL;
+        str->body_len = str->body_cap = 0;
+        str->body_refused = 1;
+        str->response_submitted = 1;
+        nghttp2_submit_rst_stream(sess->ng, NGHTTP2_FLAG_NONE, str->stream_id,
+                                  NGHTTP2_REFUSED_STREAM);
+    }
+}
+
 int aether_h2_session_busy(AetherH2Session* sess) {
     if (!sess) return 0;
 #ifdef AETHER_H2_HAS_POOL
@@ -1294,7 +1325,9 @@ int aether_h2_session_busy(AetherH2Session* sess) {
  * clock, since one connection carries many streams and no read waits on any
  * one of them. A stream that sent a DATA frame now and then, each inside
  * the idle timeout, held its request open, and its connection and worker
- * with it, for as long as it liked. A late stream is reset with CANCEL and
+ * with it, for as long as it liked. The credit a stream's bytes earn is held
+ * to the rate window (limits.body_rate_window_ms): kept whole, a burst then a
+ * trickle held the stream for hours. A late stream is reset with CANCEL and
  * what it sent is freed. A stream being handled, or answered, is past it. */
 int64_t aether_h2_session_expire(AetherH2Session* sess, int64_t now_ms) {
     if (!sess || !sess->ng || !sess->server) return 0;
@@ -1305,9 +1338,15 @@ int64_t aether_h2_session_expire(AetherH2Session* sess, int64_t now_ms) {
     int64_t next = 0;
     for (AetherH2Stream* str = sess->streams; str; str = str->next) {
         if (str->request_done || str->response_submitted) continue;
-        int64_t due = str->opened_ms + head + body;
-        if (lim->body_min_rate > 0)
-            due += (int64_t)str->body_len * 1000 / lim->body_min_rate;
+        if (!str->due_ms) str->due_ms = str->opened_ms + head + body;
+        if (lim->body_min_rate > 0 && str->body_len > str->body_credited) {
+            int64_t credit = (int64_t)str->body_len * 1000 / lim->body_min_rate -
+                             (int64_t)str->body_credited * 1000 / lim->body_min_rate;
+            str->due_ms = now_ms + http_body_budget_credit(str->due_ms - now_ms, credit,
+                                                           lim->body_rate_window_ms);
+            str->body_credited = str->body_len;
+        }
+        int64_t due = str->due_ms;
         if (now_ms >= due) {
             sess->body_held -= str->body_len <= sess->body_held ? str->body_len : sess->body_held;
             free(str->body);
@@ -1458,6 +1497,12 @@ int aether_h2_session_busy(AetherH2Session* sess) {
 }
 int64_t aether_h2_session_last_active(AetherH2Session* sess) {
     (void)sess; return 0;
+}
+int64_t aether_h2_session_last_progress(AetherH2Session* sess) {
+    (void)sess; return 0;
+}
+void aether_h2_session_refuse_incomplete(AetherH2Session* sess) {
+    (void)sess;
 }
 int64_t aether_h2_session_expire(AetherH2Session* sess, int64_t now_ms) {
     (void)sess; (void)now_ms; return 0;

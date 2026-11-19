@@ -127,6 +127,19 @@ int aether_h2_session_busy(AetherH2Session* sess);
  * none has. */
 int64_t aether_h2_session_last_active(AetherH2Session* sess);
 
+/* When the session last made progress on its own side, in aether_h2_now_ms's
+ * clock, 0 when it has not: a response submitted, or bytes written to the
+ * client. The connection's idle clock restarts at it, so a response that
+ * waits on the client's flow-control window is not cut off while it is
+ * still going out (#3738). */
+int64_t aether_h2_session_last_progress(AetherH2Session* sess);
+
+/* Reset every stream whose request has not arrived whole (REFUSED_STREAM:
+ * nothing of it was handled, so a client may send it again elsewhere) and
+ * free what it sent. For a stopping server: streams being handled or
+ * answered finish, and none is left waiting on its client (#3738). */
+void aether_h2_session_refuse_incomplete(AetherH2Session* sess);
+
 /* Reset every stream whose request has not arrived whole in time (#3738):
  * the server's head_timeout_ms and body_timeout_ms from the stream's first
  * HEADERS, plus a second for each body_min_rate bytes of body it sent.

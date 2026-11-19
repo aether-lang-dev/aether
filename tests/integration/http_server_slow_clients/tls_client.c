@@ -79,6 +79,19 @@ int slow_tls_record(void* t, const void* buf, int len, unsigned char* out, int c
     return got;
 }
 
+/* A TLS 1.3 KeyUpdate, sent now: a record that carries no application
+ * data. 0 once it is out, -1 when it could not be (not TLS 1.3). */
+int slow_tls_key_update(void* t) {
+    SSL* ssl = (SSL*)t;
+    if (SSL_version(ssl) != TLS1_3_VERSION ||
+        SSL_key_update(ssl, SSL_KEY_UPDATE_NOT_REQUESTED) != 1 ||
+        SSL_do_handshake(ssl) != 1) {
+        ERR_clear_error();
+        return -1;
+    }
+    return 0;
+}
+
 /* Up to `cap` bytes: >0 read, 0 the server closed, -1 an error. */
 int slow_tls_read(void* t, char* buf, int cap) {
     int n = SSL_read((SSL*)t, buf, cap);

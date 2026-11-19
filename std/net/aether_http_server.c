@@ -145,6 +145,7 @@ void http_server_limits_default(HttpServerLimits* limits) {
     limits->head_timeout_ms           = HTTP_DEFAULT_HEAD_TIMEOUT_MS;
     limits->body_timeout_ms           = HTTP_DEFAULT_BODY_TIMEOUT_MS;
     limits->body_min_rate             = HTTP_DEFAULT_BODY_MIN_RATE;
+    limits->body_rate_window_ms       = HTTP_DEFAULT_BODY_RATE_WINDOW_MS;
     limits->max_body                  = HTTP_DEFAULT_MAX_BODY;
     limits->max_chunked_body          = HTTP_DEFAULT_MAX_CHUNKED_BODY;
     limits->ws_max_message            = HTTP_WS_DEFAULT_MAX_MESSAGE;
@@ -196,6 +197,7 @@ void http_server_drain_connection(HttpServer* s, int fd) { (void)s; (void)fd; }
 void http_server_thread_enter(HttpServer* s) { (void)s; }
 void http_server_thread_leave(HttpServer* s) { (void)s; }
 const char* http_server_shutdown_graceful_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return ""; }
+const char* http_server_set_body_rate_window_raw(HttpServer* s, int64_t w) { (void)s; (void)w; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_health_probes_raw(HttpServer* s, const char* lp, const char* rp,
                                               HttpReadyCheck rc, void* ud) {
     (void)s; (void)lp; (void)rp; (void)rc; (void)ud; return "";
@@ -461,7 +463,8 @@ AETHER_WEAK int aether_pure_tls_server_recv(void* pure_conn, void* buf, int len)
 }
 /* What the pure server holds that a read returns without waiting on the
  * socket (#3384): the bytes of a record a recv could not hand over whole,
- * or 1 for a whole record already read. poll(2) sees neither. */
+ * or 1 for a whole record already read; -1 for part of one (#3737). poll(2)
+ * sees none of them. */
 AETHER_WEAK int aether_pure_tls_server_pending(void* pure_conn) {
     (void)pure_conn;
     return 0;
@@ -713,8 +716,10 @@ typedef struct HttpConn {
     int   nonblocking;
     /* Set when the server refused a request it had not finished reading, so
      * the client may still be sending: conn_close then closes in stages
-     * (conn_linger) rather than resetting the refusal away. */
+     * (conn_linger) rather than resetting the refusal away, for no longer
+     * than linger_max_ms (0 for HTTP_LINGER_MAX_MS). */
     int   linger_on_close;
+    int   linger_max_ms;
     /* A request the proxy event loop took through the middleware ahead of
      * its proxy mount, handed over with its connection when the mount did
      * not take it (http_server_adopt_request, #3214): handle_one_request
@@ -740,11 +745,14 @@ typedef struct HttpConn {
     /* The current request's body budget (#3737): the server waits on the
      * client for its body no longer than body_timeout_ms, plus a second for
      * each body_min_rate bytes received. Only time spent waiting counts,
-     * not the handler's between reads. Copied from the server's limits when
-     * the request's head is read; body_timed_out is set once it ran out. */
+     * not the handler's between reads, and what bytes earn never takes what
+     * is left past body_window_ms. Copied from the server's limits when the
+     * request's head is read; body_left_ms is what is left of it, and
+     * body_timed_out is set once it ran out. */
     int     body_timeout_ms;
     int     body_min_rate;
-    int64_t body_waited_ms;
+    int     body_window_ms;
+    int64_t body_left_ms;
     int64_t body_got;
     int     body_timed_out;
     /* This connection's share of its client address's count
@@ -976,7 +984,8 @@ static int conn_recv_timed_out(void);
 static void conn_body_budget_start(HttpConn* c, const HttpServerLimits* limits) {
     c->body_timeout_ms = limits->body_timeout_ms;
     c->body_min_rate   = limits->body_min_rate;
-    c->body_waited_ms  = 0;
+    c->body_window_ms  = limits->body_rate_window_ms;
+    c->body_left_ms    = limits->body_timeout_ms;
     c->body_got        = 0;
     c->body_timed_out  = 0;
 }
@@ -986,8 +995,10 @@ static void conn_body_budget_start(HttpConn* c, const HttpServerLimits* limits) 
  * has sent, of the server's waiting. Only the time spent here counts: a
  * handler that takes its time between reads does not use up the client's.
  * The per-read idle timeout alone let a client that sent a byte just inside
- * it hold the worker for as long as it liked. Once the budget is spent the
- * read fails as a timed-out one does and body_timed_out is set. */
+ * it hold the worker for as long as it liked. What bytes earn is held to
+ * the rate window (http_body_budget_credit): a burst's credit kept whole
+ * let the trickle after it hold the worker for hours. Once the budget is
+ * spent the read fails as a timed-out one does and body_timed_out is set. */
 static int conn_recv_body(HttpConn* c, void* buf, int len) {
     if (c->body_timed_out) {
         conn_set_timeout_error();
@@ -1002,8 +1013,7 @@ static int conn_recv_body(HttpConn* c, void* buf, int len) {
         if (n < 0 && conn_recv_timed_out()) c->body_timed_out = 1;
         return n;
     }
-    int64_t budget = (int64_t)c->body_timeout_ms - c->body_waited_ms;
-    if (c->body_min_rate > 0) budget += c->body_got * 1000 / c->body_min_rate;
+    int64_t budget = c->body_left_ms;
     if (budget <= 0) {
         c->body_timed_out = 1;
         conn_set_timeout_error();
@@ -1014,8 +1024,16 @@ static int conn_recv_body(HttpConn* c, void* buf, int len) {
     int n = conn_recv(c, buf, len);
     int timed_out = n < 0 && (c->read_due_hit || conn_recv_timed_out());
     conn_read_due_clear(c);
-    c->body_waited_ms += conn_now_ms() - t0;
-    if (n > 0) c->body_got += n;
+    c->body_left_ms -= conn_now_ms() - t0;
+    if (n > 0) {
+        int64_t before = c->body_got;
+        c->body_got += n;
+        if (c->body_min_rate > 0)
+            c->body_left_ms = http_body_budget_credit(
+                c->body_left_ms,
+                c->body_got * 1000 / c->body_min_rate - before * 1000 / c->body_min_rate,
+                c->body_window_ms);
+    }
     /* Past the budget, or past the idle timeout waiting for the next byte:
      * either way the body did not arrive, and the handler must not answer
      * as if it had. */
@@ -1476,6 +1494,11 @@ static int64_t conn_now_ms(void);
  * stopped sending. See conn_linger. */
 #define HTTP_LINGER_MAX_MS  2000
 #define HTTP_LINGER_IDLE_MS 500
+/* The bound for a connection refused before anything of it was read (one
+ * address past its limit, #3750), as the proxy event loop's for its own
+ * (EV_LINGER_FULL_MS): such a client can open one after another, and each
+ * held a worker for up to HTTP_LINGER_MAX_MS. */
+#define HTTP_LINGER_FULL_MS 500
 
 /* Close in stages, as RFC 9112 9.6 asks of a server that stops reading a
  * request part-way. A refusal (413, 414, 431, a framing 400) goes out while
@@ -1489,14 +1512,15 @@ static int64_t conn_now_ms(void);
  * discarding until the client closes, stops sending for HTTP_LINGER_IDLE_MS,
  * or HTTP_LINGER_MAX_MS has passed, leaves nothing unread for the kernel to
  * reset over while the client is still catching up. Bounded both ways so a
- * client that never stops costs a worker two seconds, not the idle timeout. */
-static void conn_linger(int fd) {
+ * client that never stops costs a worker two seconds, not the idle timeout;
+ * `max_ms` a shorter bound, 0 for that one. */
+static void conn_linger(int fd, int max_ms) {
 #ifdef _WIN32
     shutdown(fd, SD_SEND);
 #else
     shutdown(fd, SHUT_WR);
 #endif
-    int64_t deadline = conn_now_ms() + HTTP_LINGER_MAX_MS;
+    int64_t deadline = conn_now_ms() + (max_ms > 0 ? max_ms : HTTP_LINGER_MAX_MS);
     char scratch[4096];
     for (;;) {
         int64_t left = deadline - conn_now_ms();
@@ -1546,7 +1570,6 @@ static void conn_tls_close(HttpConn* c) {
 #endif
 
 static void conn_close(HttpConn* c) {
-    if (c->ip_server) http_server_ip_release(c->ip_server, &c->ip);
     if (c->pure_tls) {
         pt_server_close(c->pure_tls);
         c->pure_tls = NULL;
@@ -1558,10 +1581,14 @@ static void conn_close(HttpConn* c) {
     if (c->ssl) conn_tls_close(c);
 #endif
     if (c->fd >= 0) {
-        if (c->linger_on_close) conn_linger(c->fd);
+        if (c->linger_on_close) conn_linger(c->fd, c->linger_max_ms);
         close(c->fd);
         c->fd = -1;
     }
+    /* The address's count goes down once the connection is gone, its
+     * linger over: a client whose refusals linger holds that many
+     * connections meanwhile, as it held them before (#3750). */
+    if (c->ip_server) http_server_ip_release(c->ip_server, &c->ip);
     if (c->buf) {
         /* Cap-aware (#343): the per-connection read buffer is grown
          * via conn_buf_ensure (caps_realloc) and freed only here; its
@@ -2014,6 +2041,15 @@ const char* http_server_set_body_timeout_raw(HttpServer* server, int64_t timeout
     if (min_rate > INT_MAX) return "body minimum rate is past 2 GiB a second";
     server->limits.body_timeout_ms = limits_timeout_ms(timeout_ns);
     server->limits.body_min_rate = (int)min_rate;
+    return "";
+}
+
+/* The window over which the body's minimum rate is held (#3737); 0 keeps
+ * every byte's credit (http_body_budget_credit). */
+const char* http_server_set_body_rate_window_raw(HttpServer* server, int64_t window_ns) {
+    if (!server) return "server is null";
+    if (window_ns < 0) return "body rate window must not be negative";
+    server->limits.body_rate_window_ms = limits_timeout_ms(window_ns);
     return "";
 }
 
@@ -6007,7 +6043,7 @@ void http_ws_client_free(HttpWsConn* ws) {
         if (ws->conn->fd >= 0) {
             /* After a protocol failure (ws_fail) the failed frame is unread;
              * drain it so the close frame is not lost to a reset. */
-            if (ws->conn->linger_on_close) conn_linger(ws->conn->fd);
+            if (ws->conn->linger_on_close) conn_linger(ws->conn->fd, ws->conn->linger_max_ms);
             close(ws->conn->fd);
         }
         free(ws->conn);
@@ -6573,8 +6609,16 @@ static void conn_live_remove(HttpServer* server, int fd) {
  * the head's deadline already. So the wait for that first byte is a poll
  * under the idle timeout, and the read after it runs under the deadline.
  * A plain recv returns at its first byte, and its caller starts the clock.
- * *started is set when the clock started here. */
+ * *started is set when the clock started here.
+ *
+ * Bytes on the socket that turn out to be whole records carrying no data (a
+ * TLS 1.3 KeyUpdate, an empty record, a warning alert) are no request: the
+ * connection is still idle, and the wait ends as an idle one does, with no
+ * clock started (conn_tls_idle_probe). Started at those bytes, the head's
+ * deadline passed while the client sent nothing more, and a kept-alive
+ * connection whose client updated its keys was answered 408. */
 static int conn_tls_buffered(HttpConn* conn);
+static int conn_tls_idle_probe(HttpConn* conn);
 static int conn_recv_request_start(HttpServer* server, HttpConn* conn,
                                    void* buf, int len, int64_t* started) {
     int fd = conn->fd;
@@ -6584,16 +6628,27 @@ static int conn_recv_request_start(HttpServer* server, HttpConn* conn,
         int head_ms = server->limits.head_timeout_ms;
         if (head_ms > 0 && (conn->ssl || conn->pure_tls) && !conn_tls_buffered(conn)) {
             int idle = conn->applied_recv_timeout_ms > 0 ? conn->applied_recv_timeout_ms : -1;
-            int r = conn_poll_fd(fd, POLLIN, idle);
-            if (r == 0) {
-                conn_set_timeout_error();
-                n = -1;
-            } else if (r < 0) {
-                n = -1;
-            } else {
-                *started = conn_now_ms();
-                conn_read_due_set(conn, *started + head_ms);
-                n = conn_recv(conn, buf, len);
+            int64_t idle_end = idle > 0 ? conn_now_ms() + idle : 0;
+            for (;;) {
+                int wait = -1;
+                if (idle_end) {
+                    int64_t left = idle_end - conn_now_ms();
+                    wait = left > 0 ? (int)left : 0;
+                }
+                int r = conn_poll_fd(fd, POLLIN, wait);
+                if (r == 0) {
+                    conn_set_timeout_error();
+                    n = -1;
+                } else if (r < 0) {
+                    n = -1;
+                } else if (conn_tls_idle_probe(conn) == 0) {
+                    continue;   /* records with no data: still idle, the same wait */
+                } else {
+                    *started = conn_now_ms();
+                    conn_read_due_set(conn, *started + head_ms);
+                    n = conn_recv(conn, buf, len);
+                }
+                break;
             }
         } else {
             n = conn_recv(conn, buf, len);
@@ -6601,6 +6656,44 @@ static int conn_recv_request_start(HttpServer* server, HttpConn* conn,
     }
     conn_live_remove(server, fd);
     return n;
+}
+
+/* After the socket turned readable with no request begun, what its bytes
+ * are (#3737): 1 plaintext to read, 0 nothing but whole records that carry
+ * no data, which the TLS backend has now handled (a KeyUpdate, an empty
+ * record, a warning alert), with nothing more on the socket, -1 part of a
+ * record, or the end or an error, which the read that follows reports. Only
+ * at 0 is the connection still idle: a record begun is a request begun, as
+ * far as the head's clock goes, since one can arrive a byte at a time with
+ * nothing of it decrypted until it is whole. */
+static int conn_tls_idle_probe(HttpConn* conn) {
+#ifdef AETHER_HAS_OPENSSL
+    if (conn->ssl) {
+        SSL* ssl = (SSL*)conn->ssl;
+        unsigned char b;
+        conn_sock_nonblocking(conn, 1);
+        ERR_clear_error();
+        int r = SSL_peek(ssl, &b, 1);
+        int e = r > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, r);
+        ERR_clear_error();
+#ifdef _WIN32
+        conn_sock_nonblocking(conn, 0);
+#endif
+        if (r > 0) return 1;
+        if (e == SSL_ERROR_WANT_READ && !SSL_has_pending(ssl)) return 0;
+        return -1;
+    }
+#endif
+    if (conn->pure_tls) {
+        /* The pure server handles the whole records the socket holds, and
+         * says whether data, part of a record, or nothing is left (#3405). */
+        int p = pt_server_pending(conn->pure_tls);
+        if (p != 0) return p > 0 ? 1 : -1;
+        /* Nothing held: unless more arrived meanwhile, or the client closed
+         * (readable with nothing to read), the connection is idle. */
+        return conn_poll_fd(conn->fd, POLLIN, 0) > 0 ? -1 : 0;
+    }
+    return 1;
 }
 
 /* Plaintext a TLS backend already holds, which a read returns without
@@ -7151,14 +7244,18 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * the HTTP/1.1 parse; on match, hand the connection to the h2
      * driver and return 0 so the outer keep-alive loop stops. */
     if (server->h2_enabled && requests_served == 0 && !conn->is_h2) {
-        /* Buffer at least the 24-byte preface before deciding. The
-         * existing read loop only reads when looking for \r\n\r\n;
-         * pre-fetch a little here so the probe has bytes to inspect. */
+        /* Read until the bytes in hand either are the 24-byte preface or
+         * differ from it. The existing read loop only reads when looking
+         * for \r\n\r\n; pre-fetch a little here so the probe has bytes to
+         * inspect. It read until it had 24 bytes whatever they were, so a
+         * whole HTTP/1.0 request shorter than that ("GET / HTTP/1.0\r\n\r\n"
+         * is 18) waited for bytes its client would never send, and was
+         * answered 408. The first byte that differs settles it. */
         /* These bytes are the head's first, so its deadline runs from the
          * first of them (#3737): read one at a time, each inside the idle
          * timeout, they held the worker for 23 idle timeouts before the
          * head's clock started. */
-        while ((conn->write_pos - conn->read_pos) < 24) {
+        while (conn_buffered_is_h2_preface(conn) < 0) {
             if (conn->write_pos + 1 >= conn->buf_cap) break;
             int n = conn_recv_head(server, conn, conn->buf + conn->write_pos,
                                    conn->buf_cap - conn->write_pos - 1, &head_started_ms);
@@ -7831,18 +7928,35 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
     /* The connection's clocks (#3738). It runs on a worker for its whole
      * life, so it must end: when no stream has been open for the idle
      * timeout (frames that open none, PINGs or SETTINGS, do not keep it),
-     * when streams are open but nothing has arrived for the idle timeout
-     * and no handler is running, and h2_max_age_ms after it began, by a
-     * GOAWAY that lets its streams finish within the idle timeout. Each
-     * stream's request has its own deadline (aether_h2_session_expire).
-     * The loop waited for the client with no bound, and on the dispatch
-     * pool's path went round its one-second poll for ever. */
+     * when streams are open but nothing has moved for the idle timeout and
+     * no handler is running, and h2_max_age_ms after it began, by a GOAWAY
+     * that lets its streams finish within the idle timeout. Each stream's
+     * request has its own deadline (aether_h2_session_expire). The loop
+     * waited for the client with no bound, and on the dispatch pool's path
+     * went round its one-second poll for ever.
+     *
+     * "Moved" is progress either way: bytes from the client, a handler
+     * running or finishing (its response submitted), bytes written to the
+     * client. Counted from the client's last bytes alone, a handler that ran
+     * past the idle timeout had the connection closed under its response:
+     * the first window of it went out, and the GOAWAY came before the
+     * client's WINDOW_UPDATE could let the rest follow.
+     *
+     * A stop sends the GOAWAY, resets the streams whose requests have not
+     * arrived whole (nothing of them was handled), and gives the rest the
+     * idle timeout to finish, as an aged connection's streams get: a stream
+     * the client kept trickling, PINGs and all, held the stop for as long
+     * as the client liked. The loop sees a stop within its one-second poll:
+     * an HTTP/2 connection is not in live_fds, which the stop shuts down to
+     * wake the waits for a next request, since shutting it down would cut
+     * off the streams it lets finish. */
     const HttpServerLimits* lim = &server->limits;
     int idle_ms = lim->idle_timeout_ms > 0 ? lim->idle_timeout_ms : HTTP_DEFAULT_IDLE_TIMEOUT_MS;
     int64_t started = aether_h2_now_ms();
     int64_t idle_since = started;   /* when the last stream closed; 0 while one is open */
-    int64_t last_rx = started;      /* when bytes last arrived from the client */
-    int64_t close_by = 0;           /* past max age: the end, whatever is left */
+    int64_t last_progress = started;   /* when the connection last moved (above) */
+    int64_t close_by = 0;           /* past max age or stopped: the end, whatever is left */
+    int stop_seen = 0;
     while (1) {
         /* Graceful shutdown bridge (#260 Tier 3 + h2). When
          * http_server_stop / http_server_shutdown_graceful flips
@@ -7856,9 +7970,19 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
          * is_running was 0 from the first turn and every HTTP/2
          * connection it served got a GOAWAY before its first
          * request. */
-        if (!goaway_sent && atomic_load(&server->stopping)) {
-            aether_h2_session_initiate_goaway(sess);
-            goaway_sent = 1;
+        if (atomic_load(&server->stopping)) {
+            if (!goaway_sent) {
+                aether_h2_session_initiate_goaway(sess);
+                goaway_sent = 1;
+            }
+            /* Every turn: a stream the client opened before it saw the
+             * GOAWAY is refused as well. */
+            aether_h2_session_refuse_incomplete(sess);
+            if (!stop_seen) {
+                int64_t by = aether_h2_now_ms() + idle_ms;
+                if (!close_by || by < close_by) close_by = by;
+                stop_seen = 1;
+            }
         }
 
         /* Drain any worker-completed responses BEFORE the wire
@@ -7876,6 +8000,8 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
         int64_t now = aether_h2_now_ms();
         int64_t next = aether_h2_session_expire(sess, now);
         int busy = aether_h2_session_busy(sess);
+        int64_t progress = aether_h2_session_last_progress(sess);
+        if (progress > last_progress) last_progress = progress;
         int64_t idle_due = 0;
         if (busy == 0) {
             /* Idle since the last stream closed: one opened and answered
@@ -7886,7 +8012,10 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
             idle_due = idle_since + idle_ms;
         } else {
             idle_since = 0;
-            if (busy == 1) idle_due = last_rx + idle_ms;
+            /* A handler running is progress; once it is done the clock
+             * runs from then. */
+            if (busy == 2) last_progress = now;
+            else idle_due = last_progress + idle_ms;
         }
         if (idle_due && now >= idle_due) {
             /* Idle past the timeout: say so with a GOAWAY, and close. */
@@ -7950,14 +8079,22 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
 #endif
         }
 
-        /* One read, as a whole within the idle timeout: a TLS record that
-         * arrives a byte at a time is cut off (#3737). */
-        conn_read_due_set(conn, conn_now_ms() + idle_ms);
+        /* One read, as a whole within the idle timeout, and no later than
+         * the connection's end: a TLS record that arrives a byte at a time
+         * is cut off (#3737). */
+        int64_t read_due = conn_now_ms() + idle_ms;
+        if (close_by) {
+            int64_t end_in = close_by - aether_h2_now_ms();
+            if (end_in < idle_ms) read_due = conn_now_ms() + (end_in > 0 ? end_in : 1);
+        }
+        conn_read_due_set(conn, read_due);
         int n = conn_recv(conn, inbuf, (int)sizeof(inbuf));
         conn_read_due_clear(conn);
         if (n <= 0) break;  /* EOF / timeout / error */
-        last_rx = aether_h2_now_ms();
         if (aether_h2_session_feed(sess, inbuf, (size_t)n) < 0) break;
+        /* After the feed: a handler it ran here (no dispatch pool) is
+         * progress too. */
+        last_progress = aether_h2_now_ms();
     }
 
     /* Final drain — any worker tasks still queued must complete or
@@ -8099,7 +8236,7 @@ static int conn_readable_has_request(HttpConn* conn) {
          * that held no data (a KeyUpdate) leave the socket empty after it,
          * and only a socket empty before it is the peer's end. */
         long before = conn_fd_unread(conn->fd);
-        if (pt_server_pending(conn->pure_tls) != 0) return 1;
+        if (pt_server_pending(conn->pure_tls) > 0) return 1;   /* not part of a record */
         return before <= 0;
     }
 #ifdef AETHER_HAS_OPENSSL
@@ -8507,7 +8644,11 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
                 "too many connections\n";
             conn_apply_send_timeout(server, conn);
             conn_send(conn, full, (int)sizeof(full) - 1);
+            /* Its request, if it sent one yet, is read and dropped so the
+             * answer is not reset away, for no longer than the event loop's
+             * refusal lingers: this client can open the next at once. */
             conn->linger_on_close = 1;
+            conn->linger_max_ms = HTTP_LINGER_FULL_MS;
         }
         conn_close(conn);
         free(conn);

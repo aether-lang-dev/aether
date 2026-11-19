@@ -68,6 +68,8 @@
     <li><a href="#server_set_head_timeout">server_set_head_timeout</a></li>
     <li><a href="#server_set_body_timeout_raw">server_set_body_timeout_raw</a></li>
     <li><a href="#server_set_body_timeout">server_set_body_timeout</a></li>
+    <li><a href="#server_set_body_rate_window_raw">server_set_body_rate_window_raw</a></li>
+    <li><a href="#server_set_body_rate_window">server_set_body_rate_window</a></li>
     <li><a href="#server_set_tls_handshake_timeout_raw">server_set_tls_handshake_timeout_raw</a></li>
     <li><a href="#server_set_tls_handshake_timeout">server_set_tls_handshake_timeout</a></li>
     <li><a href="#server_set_h2_max_age_raw">server_set_h2_max_age_raw</a></li>
@@ -573,6 +575,17 @@
       <h3 class="function-name">server_set_body_timeout <span class="kind">fn</span></h3>
       <pre class="usage"><code>server_set_body_timeout(server, timeout, min_rate_bytes) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, timeout: Duration, min_rate_bytes: long</span></p>
+    </div>
+    <div class="function" id="server_set_body_rate_window_raw" data-name="server_set_body_rate_window_raw">
+      <h3 class="function-name">server_set_body_rate_window_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_body_rate_window_raw(server, window_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, window_ns: long</span></p>
+      <p class="doc">The window over which the body's minimum rate is held (#3737); 60 s unless set here. The bytes a client sends extend its body's budget (server_set_body_timeout), but never so that what is left of it passes this window: a client that sent a burst and then trickled below the minimum rate is cut off within the window of falling behind, where the burst's whole credit let it hold a worker for hours (60 MiB at 500 bytes a second is 35 hours). A client at or above the rate is never cut off by it. Applies on the worker path, the proxy event loop and HTTP/2. 0ns keeps every byte's credit. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_body_rate_window" data-name="server_set_body_rate_window">
+      <h3 class="function-name">server_set_body_rate_window <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_body_rate_window(server, window) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, window: Duration</span></p>
     </div>
     <div class="function" id="server_set_tls_handshake_timeout_raw" data-name="server_set_tls_handshake_timeout_raw">
       <h3 class="function-name">server_set_tls_handshake_timeout_raw <span class="kind">extern</span></h3>

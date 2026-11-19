@@ -205,17 +205,23 @@ the way a run of HTTP/1.1 requests is (#3738):
   on the wire stand for a large field, over and over.
 - **A stream's request must arrive whole in time**: within the head and
   body budgets (`server_set_head_timeout`, `server_set_body_timeout`) of
-  its first HEADERS, the body's extended by its minimum rate. Late, it is
+  its first HEADERS, the body's extended by its minimum rate, held to the
+  rate window (`server_set_body_rate_window`). Late, it is
   reset with `CANCEL`.
 - **Idle connections close.** With no stream open for the idle timeout
   (`server_set_keepalive`), the server sends `GOAWAY` and closes; PINGs and
-  SETTINGS do not count as activity. With streams open but none being
-  handled, nothing arriving for the idle timeout closes it too.
+  SETTINGS do not count as activity. With streams open but nothing
+  moving for the idle timeout (no bytes in or out, no handler running or
+  finishing) it closes too; a handler that runs past the idle timeout
+  still has its whole response go out as the client's window allows.
 - **Connections age out.** Past `server_set_h2_max_age` (1 h by default)
   the server sends a graceful `GOAWAY`: the streams already open finish,
   no new ones start, and the connection closes within the idle timeout.
   The same graceful `GOAWAY` is what a server stop sends; it used to end
-  the session at once and drop the streams it meant to let finish.
+  the session at once and drop the streams it meant to let finish. A stop
+  also refuses the streams whose requests have not arrived whole
+  (`REFUSED_STREAM`) and gives the rest the idle timeout, so a client that
+  keeps a stream trickling cannot hold the stop.
 
 nghttp2's own protections (against `SETTINGS` and `PING` ack floods, rapid
 reset and `CONTINUATION` floods) are set explicitly when the session is
@@ -477,7 +483,12 @@ idle timeout, is answered `408` and the connection closes: before the
 handler runs when the server reads the body itself (a chunked body, or one
 that fits the connection buffer), and after it when the handler reads it
 with `request_body` or `request_body_read`, whose read ends short. A rate
-of 0 makes the body's timeout absolute. Every limit is in one table in
+of 0 makes the body's timeout absolute. The rate is held over a sliding
+window, 60 s unless set (`http.server_set_body_rate_window`): what the
+budget has left never grows past it through bytes received, so a client
+that sends a burst and then trickles below the rate is cut off within
+the window of falling behind, not after the burst's whole credit. Every
+limit is in one table in
 [Resource limits](#resource-limits).
 
 ### Idle connections wait in a poller, not on a worker
@@ -1164,6 +1175,7 @@ timeout of `0ns` turns that bound off.
 | TLS handshake, as a whole | 30 s | `server_set_tls_handshake_timeout` | the connection closes |
 | Request head, from its first byte | 30 s | `server_set_head_timeout` | `408`; the connection closes |
 | Request body: the server's waiting, extended by one second per `min_rate` bytes received | 30 s and 500 bytes/s | `server_set_body_timeout` | `408`; the connection closes |
+| The most of that extension a body keeps: the window over which the minimum rate is held, so a burst followed by a trickle below it is cut off within the window | 60 s | `server_set_body_rate_window` | `408`; the connection closes (HTTP/2: the stream is reset) |
 | Body `request_body` buffers | 64 MiB | `server_set_max_body` | `413` (HTTP/2: the stream is reset) |
 | Chunked body, read whole before the handler | 8 MiB, and never past the body limit | none | `413`; the connection closes |
 | WebSocket message | 64 MiB | `server_set_ws_max_message`, `ws_set_max_message` | close `1009` |
