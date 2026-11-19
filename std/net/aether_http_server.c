@@ -252,8 +252,8 @@ void http_server_set_actor_handler(HttpServer* s, void (*sf)(void*), void (*snf)
 const char* http_request_method(HttpRequest* r) { (void)r; return ""; }
 const char* http_request_path(HttpRequest* r) { (void)r; return ""; }
 const char* http_request_body(HttpRequest* r) { (void)r; return ""; }
-int http_request_body_length(HttpRequest* r) { (void)r; return 0; }
-int http_request_body_read_raw(HttpRequest* r, int o, int m) { (void)r; (void)o; (void)m; return 0; }
+int64_t http_request_body_length(HttpRequest* r) { (void)r; return 0; }
+int http_request_body_read_raw(HttpRequest* r, int64_t o, int m) { (void)r; (void)o; (void)m; return 0; }
 int http_request_body_complete(HttpRequest* r) { (void)r; return 0; }
 const char* http_get_request_body_read(void) { return ""; }
 int http_get_request_body_read_length(void) { return 0; }
@@ -4628,6 +4628,13 @@ const char* http_ws_set_max_message_raw(HttpWsConn* ws, int64_t max_bytes) {
 static int ws_fail(HttpWsConn* ws, int code, const char* reason) {
     http_ws_close(ws, code, reason);
     ws->closed = 1;
+    /* The frame that failed is still unread on the socket, and closing over
+     * unread bytes answers them with a reset, which can destroy the close
+     * frame just sent before the peer reads it (Windows and macOS discard
+     * what was received but not read). Linger on close, as a refused HTTP
+     * request does (conn_linger): half-close, then read and discard until
+     * the peer closes or goes quiet, bounded. */
+    if (ws->conn) ws->conn->linger_on_close = 1;
     return -1;
 }
 
@@ -5318,7 +5325,12 @@ void http_ws_client_free(HttpWsConn* ws) {
          * a truncated connection; the CTX is process-wide and stays. */
         if (ws->conn->ssl) conn_tls_close(ws->conn);
 #endif
-        if (ws->conn->fd >= 0) close(ws->conn->fd);
+        if (ws->conn->fd >= 0) {
+            /* After a protocol failure (ws_fail) the failed frame is unread;
+             * drain it so the close frame is not lost to a reset. */
+            if (ws->conn->linger_on_close) conn_linger(ws->conn->fd);
+            close(ws->conn->fd);
+        }
         free(ws->conn);
     }
     /* Grown by ws_msg_grow through aether_caps_realloc, so released through
