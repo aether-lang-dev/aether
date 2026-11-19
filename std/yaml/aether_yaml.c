@@ -84,6 +84,29 @@ static const char *store_emit_string(char *str) {
 // Public API Implementations
 // ---------------------------------------------------------------------------
 
+/* A parsed document, and the text it was parsed from, which it owns. libfyaml
+ * does not copy a string it parses: the document's scalars point into it,
+ * and its emitter, keeping each scalar's original style, writes a block
+ * scalar from the source lines. So the text lives as long as the document,
+ * not as long as the caller's string, which an Aether caller may release
+ * while the document is still in use.
+ *
+ * The copy ends in a line break. The emitter takes a block scalar's last
+ * line for scalar content only when a line break follows it, so a document
+ * whose last line was one (`k: >\n  abc`, at the end of the input) emitted
+ * as `k: >` with the content gone, and read back as an empty scalar (#3749,
+ * found by the YAML fuzz target). A final line break does not change what a
+ * document says. The vendored libfyaml takes no local patches
+ * (libfyaml/VENDOR.md), so the text is made the shape it handles. */
+typedef struct {
+    struct fy_document* fyd;
+    char* src;
+} AetherYamlDoc;
+
+static struct fy_document* yaml_fyd(void* doc) {
+    return doc ? ((AetherYamlDoc*)doc)->fyd : NULL;
+}
+
 void* yaml_parse_raw(const char* yaml_str) {
     g_yaml_err_set = 0;
     g_yaml_err_buf[0] = '\0';
@@ -109,7 +132,20 @@ void* yaml_parse_raw(const char* yaml_str) {
         cfg.diag = diag;
     }
 
-    struct fy_document *doc = fy_document_build_from_string(&cfg, yaml_str, strlen(yaml_str));
+    size_t n = strlen(yaml_str);
+    int add_lb = n > 0 && yaml_str[n - 1] != '\n' && yaml_str[n - 1] != '\r';
+    char* src = (char*)malloc(n + (size_t)add_lb + 1);
+    if (!src) {
+        if (diag) fy_diag_unref(diag);
+        snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf), "out of memory");
+        g_yaml_err_set = 1;
+        return NULL;
+    }
+    memcpy(src, yaml_str, n);
+    if (add_lb) src[n] = '\n';
+    src[n + (size_t)add_lb] = '\0';
+
+    struct fy_document *doc = fy_document_build_from_string(&cfg, src, n + (size_t)add_lb);
 
     if (!doc && diag) {
         void *prev = NULL;
@@ -142,18 +178,35 @@ void* yaml_parse_raw(const char* yaml_str) {
         fy_diag_unref(diag);
     }
 
-    return doc;
+    if (!doc) {
+        free(src);
+        return NULL;
+    }
+    AetherYamlDoc* d = (AetherYamlDoc*)malloc(sizeof(*d));
+    if (!d) {
+        fy_document_destroy(doc);
+        free(src);
+        snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf), "out of memory");
+        g_yaml_err_set = 1;
+        return NULL;
+    }
+    d->fyd = doc;
+    d->src = src;
+    return d;
 }
 
 void yaml_free_raw(void* doc) {
     if (doc) {
-        fy_document_destroy((struct fy_document*)doc);
+        AetherYamlDoc* d = (AetherYamlDoc*)doc;
+        fy_document_destroy(d->fyd);
+        free(d->src);
+        free(d);
     }
 }
 
 void* yaml_root_raw(void* doc) {
     if (!doc) return NULL;
-    return fy_document_root((struct fy_document*)doc);
+    return fy_document_root(yaml_fyd(doc));
 }
 
 int yaml_node_type_raw(void* node) {
@@ -236,13 +289,13 @@ const char* yaml_emit_document_raw(void* doc) {
     if (!doc) return NULL;
     /* A document with no root (what an empty stream parses to) is the empty
      * text, which parses back to it; libfyaml emits nothing for it. */
-    if (!fy_document_root((struct fy_document*)doc)) {
+    if (!fy_document_root(yaml_fyd(doc))) {
         char* empty = malloc(1);
         if (!empty) return NULL;
         empty[0] = '\0';
         return store_emit_string(empty);
     }
-    char* str = fy_emit_document_to_string((struct fy_document*)doc, FYECF_DEFAULT);
+    char* str = fy_emit_document_to_string(yaml_fyd(doc), FYECF_DEFAULT);
     return store_emit_string(str);
 }
 
