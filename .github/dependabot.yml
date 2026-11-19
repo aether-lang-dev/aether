@@ -1,0 +1,17 @@
+# Every action in .github is pinned to a full commit SHA with its version in a
+# comment (#3746), so a moved tag cannot change what CI runs. Dependabot keeps
+# those pins current: each week it proposes the newest release of each action
+# as a PR that moves the SHA and the comment together, and CI runs on it like
+# any other change before anyone merges it.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"

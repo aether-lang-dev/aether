@@ -3745,6 +3745,7 @@ check-tests:
 	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \
 	fi
+	@sh tests/scripts/check_action_pins.sh
 
 # Every non-host contrib module's Aether surface, type-checked (#1442).
 #
