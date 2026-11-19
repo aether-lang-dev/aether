@@ -1174,6 +1174,7 @@ timeout of `0ns` turns that bound off.
 | HTTP/2 connection with no stream open | the idle timeout | as that | `GOAWAY`; closed |
 | HTTP/2 connection's age | 1 h | `server_set_h2_max_age` | graceful `GOAWAY`; closed when its streams are done |
 | Connections the proxy event loop holds | half the process's open-file limit, less 64 | `server_set_loop_max_connections` | the connection that has waited longest with nothing of a request sent is closed; with none, the new one gets `503` |
+| Idle keep-alive connections the worker path parks (waiting without a worker) | as the event loop's | `server_set_park_max_connections` | the connection idle longest is closed |
 
 The proxy event loop (Linux and macOS, for a server whose work is a
 reverse proxy to plain upstreams) holds the same head, body and handshake

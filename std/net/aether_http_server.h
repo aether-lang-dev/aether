@@ -228,6 +228,7 @@ struct HttpConn;
 //   h2_max_header_list        32 KiB   none                              431, the stream reset
 //   h2_max_age_ms             1 h      server_set_h2_max_age             GOAWAY, then closed
 //   loop_max_connections      derived  server_set_loop_max_connections   oldest silent one closed, else 503
+//   park_max_connections      derived  server_set_park_max_connections   longest idle one closed
 //
 // The proxy event loop (Linux and macOS, a server whose work is a reverse
 // proxy) holds the same head, body and handshake budgets, by the clock. Its
@@ -302,6 +303,10 @@ typedef struct HttpServerLimits {
     // The most connections the proxy event loop holds at once; 0 for half
     // the process's open-file limit less 64, read when the loop starts.
     int     loop_max_connections;
+    // The most idle keep-alive connections the parking lot holds (the
+    // worker path waits on them there, not on a worker); 0 for the same
+    // default as loop_max_connections. At it the one idle longest is closed.
+    int     park_max_connections;
     // How long an HTTP/2 connection may live: past it the server sends
     // GOAWAY, lets the streams it has finish, and closes, no later than
     // idle_timeout_ms after. An HTTP/2 connection with no stream open
@@ -311,6 +316,11 @@ typedef struct HttpServerLimits {
 
 // The defaults above, as a struct.
 void http_server_limits_default(HttpServerLimits* limits);
+
+// The default bound for loop_max_connections and park_max_connections:
+// half the process's open-file limit less 64, between 16 and 32768; 4096
+// where there is no such limit to read (Windows).
+int http_server_default_connection_bound(void);
 
 typedef struct HttpServer {
     int socket_fd;
@@ -1264,6 +1274,13 @@ const char* http_server_set_h2_max_age_raw(HttpServer* server, int64_t timeout_n
 // connection that has sent nothing of a request, else answers 503. Returns
 // "" or why the value was refused.
 const char* http_server_set_loop_max_connections_raw(HttpServer* server, int max_connections);
+
+// The most idle keep-alive connections the worker path's parking lot holds
+// (limits.park_max_connections); 0 for the default (as the event loop's).
+// At it the connection idle longest is closed to make room. It was a fixed
+// 4096, and a connection the full lot declined waited on its worker, so
+// idle clients past it held the workers. Returns "" or why it was refused.
+const char* http_server_set_park_max_connections_raw(HttpServer* server, int max_connections);
 
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,

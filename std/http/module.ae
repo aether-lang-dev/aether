@@ -48,6 +48,7 @@ exports(
     http_server_set_tls_handshake_timeout_raw, server_set_tls_handshake_timeout,
     http_server_set_h2_max_age_raw, server_set_h2_max_age,
     http_server_set_loop_max_connections_raw, server_set_loop_max_connections,
+    http_server_set_park_max_connections_raw, server_set_park_max_connections,
     http_server_set_h2_raw, server_set_h2,
     http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
@@ -504,6 +505,17 @@ extern http_server_set_loop_max_connections_raw(server: ptr, max_connections: in
 
 server_set_loop_max_connections(server: ptr, max_connections: int) -> string {
     return http_server_set_loop_max_connections_raw(server, max_connections)
+}
+
+// The most idle keep-alive connections the worker path's parking lot holds
+// (#3750); 0, the default, is the same bound as the event loop's. The lot
+// is where an idle connection waits for its next request without a worker;
+// at the bound the one idle longest is closed to make room. Returns "" or
+// why the value was refused.
+extern http_server_set_park_max_connections_raw(server: ptr, max_connections: int) -> string
+
+server_set_park_max_connections(server: ptr, max_connections: int) -> string {
+    return http_server_set_park_max_connections_raw(server, max_connections)
 }
 
 // Graceful shutdown (#260 Tier 3). Stops accepting new connections,

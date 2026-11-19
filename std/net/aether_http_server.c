@@ -110,6 +110,29 @@ const char* http_status_text(int code) {
     }
 }
 
+#if !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__)
+#include <sys/resource.h>   /* getrlimit: http_server_default_connection_bound */
+#endif
+
+/* The default bound on the connections a server holds in one place, the
+ * proxy event loop (loop_max_connections) or the parking lot of idle
+ * connections (park_max_connections), when the program set none: half the
+ * process's open-file limit less 64, between 16 and 32768. Half, since a
+ * proxied connection takes an upstream descriptor too; less 64 for the
+ * server's own. 4096 where there is no such limit to read (Windows). */
+int http_server_default_connection_bound(void) {
+#if !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__)
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) return 32768;
+    long long m = ((long long)rl.rlim_cur - 64) / 2;
+    if (m < 16) m = 16;
+    if (m > 32768) m = 32768;
+    return (int)m;
+#else
+    return 4096;
+#endif
+}
+
 /* The defaults every server starts with, the one place they are set (#3750):
  * the table is in the header, by HttpServerLimits. */
 void http_server_limits_default(HttpServerLimits* limits) {
@@ -226,6 +249,7 @@ const char* http_server_set_tls_handshake_timeout_raw(HttpServer* s, int64_t t) 
 const char* http_server_set_h2_max_age_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_loop_max_connections_raw(HttpServer* s, int m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
 const char* http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; return "WebSocket unavailable: networking not built in"; }
+const char* http_server_set_park_max_connections_raw(HttpServer* s, int m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_post(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -2005,6 +2029,15 @@ const char* http_server_set_loop_max_connections_raw(HttpServer* server, int max
     if (!server) return "server is null";
     if (max_connections < 0) return "the event loop's connection bound must not be negative";
     server->limits.loop_max_connections = max_connections;
+    return "";
+}
+
+/* The parking lot's bound (#3750); 0 for the default, read when the lot is
+ * made as the server starts. */
+const char* http_server_set_park_max_connections_raw(HttpServer* server, int max_connections) {
+    if (!server) return "server is null";
+    if (max_connections < 0) return "the parking lot's bound must not be negative";
+    server->limits.park_max_connections = max_connections;
     return "";
 }
 
@@ -8416,8 +8449,8 @@ static void handle_client_connection(HttpServer* server, int client_fd) {
  * (close a spare, accept, close the connection, reopen the spare) turns
  * that into refused connections for clients that would have been served a
  * moment later, costs a descriptor per listener, and has no counterpart on
- * Windows; the connection bounds (limits.loop_max_connections) keep
- * exhaustion from being the steady state. */
+ * Windows; the connection bounds (limits.loop_max_connections,
+ * park_max_connections) keep exhaustion from being the steady state. */
 static int accept_out_of_descriptors(void) {
 #if defined(_WIN32)
     int e = WSAGetLastError();
@@ -9040,9 +9073,13 @@ static int http_server_serve(HttpServer* server) {
         server->conn_pool = pool;
         /* The lot resubmits woken connections into the same pool. Capacity is
          * descriptors, not threads, which is the whole point: a few thousand
-         * idle keep-alive clients cost a table slot each. */
+         * idle keep-alive clients cost a table slot each. Bounded by
+         * limits.park_max_connections (#3750); at it the lot closes the
+         * connection idle longest. */
         if (pool) {
-            server->park_lot = http_park_create(server, http_park_resume, 4096);
+            int park_max = server->limits.park_max_connections > 0
+                ? server->limits.park_max_connections : http_server_default_connection_bound();
+            server->park_lot = http_park_create(server, http_park_resume, park_max);
         }
 #endif
 

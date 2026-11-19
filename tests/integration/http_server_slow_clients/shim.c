@@ -715,6 +715,52 @@ static void round_loop_slots(void) {
 }
 #endif
 
+/* The parking lot's bound, 3 here. Each connection asks one request, which
+ * is answered, and then waits: the server parks it, so it waits without a
+ * worker. A fourth parked closes the one idle longest. The lot declined it
+ * before, and a declined connection waited on its worker, so idle clients
+ * past the bound held the workers one each. */
+static void round_park(void) {
+    const char* label = "park bound";
+    HttpServer* server = http_server_create(0);
+    if (!server) { report(label, 0, -1, -1, "server_create"); return; }
+    http_server_get(server, "/ping", ping_handler, NULL);
+    const char* err = http_server_set_keepalive_raw(server, 1, 0, 10000LL * 1000000LL);
+    if (!*err) err = http_server_set_park_max_connections_raw(server, 3);
+    if (*err || http_server_bind_raw(server, "127.0.0.1", 0) < 0 ||
+        http_server_start_background_raw(server) < 0) {
+        report(label, 0, -1, -1, *err ? err : "bind or start");
+        http_server_free(server);
+        return;
+    }
+    int port = http_server_port(server);
+    client_sock held[4];
+    int served = 0;
+    static const char req[] = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    for (int i = 0; i < 4; i++) {
+        held[i] = client_connect(port);
+        if (held[i] == CLIENT_BAD) continue;
+        send_all(held[i], req, (int)sizeof(req) - 1);
+        char body[32] = "";
+        if (read_status(held[i], NULL, body, (int)sizeof(body)) == 200) served++;
+        sleep_ms(300);   /* parked by now */
+    }
+    /* The first is closed for the fourth: readable, at its end. The others
+     * are still open. */
+    char b;
+    int first_closed = held[0] != CLIENT_BAD && readable(held[0], 1500) &&
+                       recv(held[0], &b, 1, 0) <= 0;
+    int others_open = 1;
+    for (int i = 1; i < 4; i++)
+        if (held[i] == CLIENT_BAD || readable(held[i], 100)) others_open = 0;
+    for (int i = 0; i < 4; i++) if (held[i] != CLIENT_BAD) client_close(held[i]);
+    http_server_free(server);
+    char note[96];
+    snprintf(note, sizeof(note), "%d served, first closed=%d, the rest open=%d",
+             served, first_closed, others_open);
+    report(label, served == 4 && first_closed && others_open, 0, 0, note);
+}
+
 #ifndef _WIN32
 /* Out of descriptors. The process's descriptor limit is lowered to just past
  * what is open, clients connect until socket() fails, and then one more
@@ -811,6 +857,7 @@ int http_slow_clients_probe(void) {
     if (WANT("stall")) round_body(PLAIN, "stall");
     if (WANT("rate")) for (int b = PLAIN; b <= AETHER; b++) round_rate(b);
     if (WANT("sleep")) round_sleep();
+    if (WANT("park")) round_park();
 #ifndef _WIN32
     if (WANT("loop")) {
         round_loop_slow("head");

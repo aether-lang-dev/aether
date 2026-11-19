@@ -59,7 +59,6 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/socket.h>
-#include <sys/resource.h>   /* getrlimit: the loop's default connection bound */
 #endif
 
 typedef enum {
@@ -1464,13 +1463,7 @@ static void ev_refuse(EvDriver* d, EvConn* c, const char* msg, size_t len, int l
  * process had no descriptor left, for anything. */
 static int ev_max_connections(HttpServer* server) {
     int n = server->limits.loop_max_connections;
-    if (n > 0) return n;
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) return 32768;
-    long long m = ((long long)rl.rlim_cur - 64) / 2;
-    if (m < 16) m = 16;
-    if (m > 32768) m = 32768;
-    return (int)m;
+    return n > 0 ? n : http_server_default_connection_bound();
 }
 
 /* At the bound, make room for `fresh`: close this driver's connection that
