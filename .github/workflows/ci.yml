@@ -658,10 +658,18 @@ jobs:
     - name: Build and test inside a FreeBSD VM
       uses: vmactions/freebsd-vm@v1
       with:
-        release: '14.2'
+        # 14.2 reached its end of life in 2025, and in November 2026 its pkg
+        # stopped reading the package catalogue: the repository serves
+        # packagesite.pkg and data.pkg only, and 14.2's pkg asked for the
+        # .tzst names its meta.conf still gives, which answer 404 on every
+        # mirror. A supported release, and pkg re-bootstrapped from the
+        # repository when the catalogue will not load, so the next format
+        # change is met by the pkg that matches it.
+        release: '14.4'
         usesh: true
         # bc lives in FreeBSD base, not in pkg: asking for it fails the run.
         prepare: |
+          pkg update || { pkg bootstrap -f -y && pkg update -f; }
           pkg install -y gmake pkgconf
         run: |
           set -e
