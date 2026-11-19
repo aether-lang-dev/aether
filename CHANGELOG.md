@@ -14,6 +14,296 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.924.0]
+
+### Added
+
+- **`ae toolchain zig` installs the pinned Zig and verifies it.** `ae build
+  --target=<triple>` cross-compiles with Zig 0.16.0, and the only pinned,
+  verified way to get it was `scripts/get-zig.sh`, which exists only in a
+  source checkout and fetched only the x86_64 Linux archive. The new command
+  installs it on x86_64 and aarch64 Linux, macOS, Windows and FreeBSD into
+  `~/.aether/toolchains/zig-0.16.0/` (or under `$AETHER_HOME`), checks the
+  archive against a sha256 compiled into `ae` before unpacking it, refuses a
+  mismatch with both hashes printed, renames the finished tree into place,
+  and prints the path of `zig` as its last line. `--check` verifies an
+  install without downloading. The version and the hashes live in
+  `tools/ae_zig_pin.h`, which `scripts/get-zig.sh` now reads too, and the
+  script hands its work to `ae toolchain zig` when an `ae` is available
+  (#3623).
+
+- **A C bridge builds an Aether closure with the runtime's constructor.**
+  `include/aether_closure.h` declares `aether_closure_new(fn, env, release)`,
+  `aether_closure_retain`, `aether_closure_release`, `aether_closure_env` and
+  `aether_closure_self_env`. The closure is one Aether opens with
+  `unbox_closure`, calls with `call` and gives back with `release_closure`,
+  in the same reference count as a closure Aether made: `release(env)` runs
+  once, when the last reference goes. Bridges such as html-sanitizer's
+  copied codegen's private box and env header to do this, and broke at run
+  time, with nothing at compile or link time, whenever that layout changed
+  (#1439, #2494). The layout is now defined once, in
+  `runtime/aether_closure_abi.h`, which generated code and the runtime both
+  include, and callers of the constructor only ever hold opaque pointers
+  (#3622).
+
+### Fixed
+
+- **`mem.steady_growth` no longer reports a round's own thread as a leak.** A
+  run that leaves the heap exactly as it found it now answers 0 even when a
+  thread started or ended during it: a leak grows every run, and a thread's
+  blocks only add to the count. A round that starts and joins a thread of its
+  own (a proxy pool's health-check probe) changed the thread count on Windows
+  every run, so no run was compared, and the answer was whatever the last run
+  happened to grow. `proxy_mount_frees_with_server` failed about one run in
+  three on Windows that way, with no leak: 200 rounds grow the heap by 3000
+  bytes once, then not at all (#3730).
+
+- **`ae cflags --cflags` prints `-DAETHER_HAS_SANDBOX`, the define
+  `libaether.a` is always built with.** Without it `runtime/aether_sandbox.c`
+  compiles to nothing, and `aether_sandbox.h`'s check is a macro that allows
+  everything, with no link error to say so (docs/install-layout.md). A build
+  that compiles the runtime from the MANIFEST beside the archive's std got a
+  runtime with no sandbox. The weekly cross-language benchmarks are such a
+  build, and their Aether entry stopped linking on
+  `aether_sandbox_check_slow`, which the archive's `std.os` calls (#3731).
+
+- **`http.ws_client_free` returns the message buffer to the memory cap
+  (#3758).** A WebSocket client handle grows its message buffer through the
+  runtime's capped allocator, and freeing the handle released it with plain
+  `free()`, so the cap's byte counter kept every freed handle's buffer (4 KiB
+  or more each). A program under a memory cap that opened and closed client
+  connections eventually ran into the cap while holding nothing. The buffer
+  is now released through the cap with the size it holds.
+
+- **Request body lengths are 64 bits on every platform (#3761).** The
+  server read a Content-Length into a `long`, bounded by `LONG_MAX`, and kept
+  a streamed body's length and progress in `long` fields. A `long` is 32
+  bits on Windows, so a body declared past 2 GiB was refused there with 400
+  where Linux streamed it. Past 2 GiB `http.request_body_length` also cut the
+  length to 32 bits on every platform, and `http.request_body_read` could not
+  name an offset beyond it. The parse, `HttpRequest.stream_total` and
+  `stream_consumed`, and the reads are now 64-bit throughout:
+  `request_body_length` returns a `long`, and `request_body_read` takes a
+  `long` offset. Existing callers compile unchanged, since an `int` passes
+  where a `long` is taken; a loop that reads past 2 GiB starts its offset
+  as a long (`off = 0 as long`). C code that calls `http_request_head_check`
+  passes an `int64_t*` now, and on Windows the two stream fields of
+  `HttpRequest` are 8 bytes each.
+
+### Security
+
+- **The HTTP client refuses a content type with a line ending in it.** The
+  content type given with a request body went into the request head as
+  `Content-Type: <value>` with no check, while every other header value was
+  checked for CR and LF. An application passing a caller-supplied content
+  type to `http.post`, `http.put` or `client.set_body` let a user add headers
+  to the request, or smuggle a second request to the upstream. `set_body` now
+  refuses it, and `http.post`, `http.put`, `client.post_with_status` and
+  `client.patch` return an error instead of sending (#3741).
+
+- **The proxy cache keys by the query and the Host, and keeps no
+  credentialed answer.** The cache key was the path alone, so `/x?a=1` and
+  `/x?a=2` shared an entry and one client could be served another's
+  response. The key now carries the query as it is sent upstream, and the
+  client's `Host` under `preserve_host`. A response to a request carrying
+  `Authorization` was stored and replayed to every later client; it is now
+  stored only when the response says `public`, `s-maxage` or
+  `must-revalidate` (RFC 9111 3.5). A response carrying `Set-Cookie` is no
+  longer stored, so its cookie is never replayed (#3736).
+
+- **`http.serve_static` no longer serves a sibling directory that shares
+  the root's name as a prefix.** The check that a resolved path lies inside
+  the document root was a bare prefix match, so a symlink in `/srv/www`
+  that resolved into `/srv/www-private` passed it. The match must now end
+  at a path separator, on POSIX and on Windows (#3747).
+
+- **A WebSocket peer can no longer make the server hold what it only
+  declares.** The receive allocated each frame at the length it declared,
+  up to 1 GiB, before any of it arrived; reassembled fragments with no total
+  bound, in an `int` capacity that overflowed past 1 GiB and then looped;
+  and echoed pings and closes of any size, fragmented or not. A message now
+  has a cap, 64 MiB by default, checked against each frame's declared length
+  before it is read and closing with 1009 past it:
+  `http.server_set_ws_max_message` sets it for the handles a server
+  upgrades and `http.ws_set_max_message` for one handle. A frame's bytes go
+  into a buffer that grows as they arrive, sizes are `size_t`, and a control
+  frame over 125 bytes or fragmented closes with 1002 (RFC 6455 5.5). A
+  client handle from `ws_connect` has the same 64 MiB cap (#3739).
+
+- **`http.request_body` refuses a body past the server's limit.** It
+  buffered whatever Content-Length the client declared, up to `LONG_MAX`,
+  allocated before any of it arrived, so a few connections each declaring a
+  multi-GB body took the server's memory. The server now has a limit on a
+  buffered body, 64 MiB by default and set with `http.server_set_max_body`.
+  Past it `request_body` returns `""` without reading the body,
+  `request_body_length` reports 0, and the server answers 413. Under it the
+  buffer grows as the bytes arrive rather than at the declared length.
+  `request_body_read` streams a body of any size and is not bounded by the
+  limit, so large uploads keep working (#3740).
+
+- **An HTTP/2 connection's streams and their bodies are bounded.**
+  `SETTINGS_MAX_CONCURRENT_STREAMS` went out only when the program set it,
+  and nghttp2's own local default is unlimited, so one connection could open
+  streams without bound; it is now 100 unless `http.server_set_h2` gives
+  another number. A stream's DATA was appended with no cap while nghttp2's
+  automatic WINDOW_UPDATE kept it flowing; a stream whose body passes the
+  server's body limit (`http.server_set_max_body`, 64 MiB by default) is now
+  reset with `RST_STREAM` (`CANCEL`) and never dispatched. Idle and absolute
+  timeouts for HTTP/2 connections and a minimum nghttp2 version remain open
+  (#3738).
+
+- **A request head has a deadline from its first byte.** The only bound on
+  reading a head was the per-read idle timeout, so a client that sent one
+  byte just inside it, over and over, held a worker for as long as it liked,
+  and a few such clients per worker held them all. A head must now arrive
+  whole within 30 s of its first byte, or the server answers 408 and closes;
+  `http.server_set_head_timeout` changes the bound and `0ns` turns it off.
+  Deadlines for request bodies and for the TLS handshake remain open
+  (#3737).
+
+- **A command string needs an exec grant for the shell, in-process too
+  (#3735).** `os.system` and `os.exec` matched the exec grant against the
+  whole command string, then ran it through `/bin/sh -c`. A grant such as
+  `grant_exec("echo *")` matches any string that starts with `echo `, so
+  `"echo hi; rm -rf ~"` passed the check and the shell ran all of it. Both
+  now also need an exec grant for the shell, the rule the LD_PRELOAD library
+  already applied to `system()` and `popen()`: `/bin/sh`, or on Windows the
+  program `COMSPEC` names (`cmd.exe`). The new `grant_shell()` gives it; code
+  that held only `grant_exec("echo *")` is now refused, and its correct forms
+  are `grant_exec("echo")` with `os.run_capture` and an argv (no shell), or
+  `grant_shell()` for code trusted to run any command.
+  docs/containment-sandbox.md no longer presents `grant_exec("echo *")` as
+  the safe pattern for an untrusted plugin.
+
+- **A file opened `"r+"` needs a write grant as well as a read grant
+  (#3742).** std.fs's `fs.open` and the LD_PRELOAD library's `fopen` and
+  `fopen64` checked any mode starting with `r` as a read, so a read-only
+  grant let `"r+"` open the file for writing. A mode is now checked for
+  everything it asks: `fs_read` when it reads (`r`, or any `+`), `fs_write`
+  when it writes, creates, truncates or appends (`w`, `a`, `x`, or any `+`),
+  both for `"r+"`, `"w+"` and `"a+"`. The preload applies the same rule to
+  `open`, `openat`, `open64` and `openat64`, where `O_RDWR` was checked as a
+  write only and a write-only grant let the file be read, and now also
+  wraps `freopen` and `freopen64`, which glibc opens on its internal `open`
+  (with no path, glibc reopens the stream's file through
+  `/proc/self/fd/N`, and that is what is checked). Code that opens a file
+  read-write needs both grants, which `grant_fs` gives.
+
+- **std.fs listing, globbing, mtime and directory calls are checked by the
+  sandbox (#3743).** `dir_list_raw`, `fs_glob_raw`, `fs_glob_multi_raw`,
+  `file_mtime`, `dir_create_raw`, `dir_create_mode_raw` and `dir_delete_raw`
+  did no sandbox check, so a block with no fs grants could list and glob
+  any directory, read mtimes, and create and remove directories. A sweep of
+  std/fs/aether_fs.c found four more with none: `file_mtime_raw` (what
+  `fs.mtime` calls), `dir_exists`, `fs_try_statvfs` (`fs.statvfs`), and the
+  sysfs reads of `fs_try_block_info` (`fs.block_info`). Lookups and listings
+  now need `fs_read` (a listing on the directory itself, so
+  `grant_fs_read("/data")` lets `/data` be listed and `"/data/*"` covers
+  what is under it), and creating or removing a directory needs `fs_write`.
+  A glob is checked on the directory its pattern starts in and reports only
+  the paths the caller may read, so a wildcard in a middle component or a
+  symlink cannot reach past the grants.
+
+- **`ae install`, `ae upgrade` and `ae version` refuse a release tag that is
+  not a version (#3744).** The latest release's tag, read from GitHub's
+  JSON, went unchecked into curl, wget, cp and rm command lines (PowerShell
+  scripts on Windows), and `ae upgrade` is sometimes run as root; a tag
+  holding shell syntax would have run. Every tag and version, whether from
+  GitHub or from the command line (`ae version install`, `use` and
+  `remove`), is now checked against the rule `ae add` already applies
+  (letters, digits, `.`, `-`, `_` and `+`) before it reaches a URL, a path
+  or a command line, and `ae version list` skips a tag that fails it. The
+  downloaded JSON and the Windows download and extract scripts no longer sit
+  at predictable names in the shared temp directory (`/tmp/ae_latest_<pid>.json`
+  and the like), where another local user could make them first: they are
+  made in a private directory of the process's own (mode 0700, a
+  `mkdtemp` name), removed when `ae` exits. The release list is read from
+  `AE_GITHUB_API_BASE` when it is set, as release assets already were.
+
+- **`ae` keeps its temp files in a private directory, and an unset HOME no
+  longer means `/tmp` (#3745).** `ae test`, an uncached `ae run`, `ae
+  build`'s generated C, the REPL, `ae version doctor`, `ae bindgen`, cross
+  builds and the compiler probes wrote C and binaries to predictable names in
+  the shared temp directory (`$TMPDIR/_ae_<pid>.c` and the like), then
+  compiled and ran them; another local user could make such a file first, or
+  a symlink, and change it between the write and the compile. Each `ae`
+  process now makes one directory with `mkdtemp` (mode 0700, a name no one
+  can guess) on first use, puts every such file in it, and removes it when it
+  exits; Windows uses the same layout under the user's own `%TEMP%`. With
+  HOME unset, `ae` used to keep its cache, versions and packages under
+  `/tmp/.aether` (`C:\Users\Public` on Windows), which any local user can
+  write: it now takes the home the password database gives (HOMEDRIVE and
+  HOMEPATH on Windows), and with none stops and asks for HOME to be set.
+
+- **`ae install`, `ae upgrade` and get.sh verify every release archive
+  against its sha256 digest before unpacking it (#3748).** Both checked the
+  digest GitHub's API lists for an asset only when the archive came through
+  the API fallback; fetched from the release URL, the normal way, it was
+  checked for an archive's magic and size and then unpacked. The digest is
+  now looked up and checked on every path, and the archive is refused when it
+  does not match. A digest that cannot be had (the API unreachable or
+  rate-limited, or a listing with none) is a refusal too, with a message
+  saying so, not a silent pass; there is no opt-out, since no offline
+  install path needs one. `GITHUB_TOKEN` (or `GH_TOKEN`) raises the API's
+  rate limit of 60 requests an hour. get.sh no longer falls back to a
+  source build after a refusal, and finds a sha256 tool among `sha256sum`,
+  `shasum`, FreeBSD's `sha256` and `openssl`.
+
+- **A proxy cache hit is no longer freed while it is served (#3756).** The
+  cache lookup found an entry under the cache lock, released the lock and
+  returned the entry, and the proxy then copied its headers and body into
+  the response with no lock held. A store on another worker could evict and
+  free the entry in between: any two concurrent requests to a cached proxy
+  could make one of them read freed memory, serving another response's bytes
+  or crashing the server. An entry now carries a reference count: the cache
+  holds one, the request serving a hit holds another until its copy is done,
+  and the last one dropped frees it. In `method_url_vary` mode an evicted or
+  expired entry was also unlinked from the wrong bucket, since its bucket
+  was recomputed from the hash of the key with its Vary part, so the freed
+  entry stayed in its chain for the next lookup of that URL to walk. An
+  entry now records the bucket it was put in.
+
+- **The proxy cache compares a key over its whole length (#3757).** A
+  `method_url_vary` key holds a NUL before each segment the response's Vary
+  adds (`GET /p`, then `\0accept=text/html`), and entries were matched with
+  `strcmp`, which stops at the first NUL. Two variants of one URL were then
+  told apart by their 64-bit hash alone, and a hash collision served one
+  variant's response, possibly another user's language or encoding, for the
+  other. Keys are now compared by length and `memcmp`.
+
+- **WebSocket frames with a reserved opcode, or the wrong masking, close
+  the connection with 1002 (#3759).** The frame reader appended a frame with
+  a reserved data opcode (3 to 7) to the message as if it continued it, and
+  took one with a reserved control opcode (0xB to 0xF) as data, where RFC
+  6455 5.2 requires failing the connection. A server also accepted unmasked
+  frames from its client, which RFC 6455 5.1 requires it to refuse: masking
+  keeps a client's script from choosing the bytes an intermediary sees, the
+  defence against cache poisoning through a WebSocket. Both now close with
+  1002, and so does a client handle from `http.ws_connect` that receives a
+  masked frame from its server, the other half of 5.1. Every conforming
+  client masks, `ws_connect`'s handles included, so only a peer that broke
+  the protocol is refused.
+
+- **`http.serve_static` on Windows follows junctions and symlinks before its
+  containment check (#3760).** The Windows branch resolved the requested
+  path with `_fullpath`, which removes `.` and `..` from the text but follows
+  no junction or symbolic link. A junction in the document root pointing
+  outside it passed the check, and the file behind it was served. The file
+  and the root are now each opened and resolved to their final paths with
+  `GetFinalPathNameByHandle`, as `realpath` resolves them on POSIX, before
+  the separator-bounded comparison #3747 added. Junctions that stay inside
+  the root, and a root that is itself a junction, are served as before.
+
+- **A file with no `#!` line needs the shell's exec grant, in-process too
+  (#3755).** `os.run` and its siblings run such a file through `/bin/sh`, as
+  `execvp` does, after the exec grant matched the file. The shell then ran
+  whatever the file held with no grant of its own, where the LD_PRELOAD
+  library's `execvp` already asked for one. Both now apply the rule #3735
+  set for command strings: without `grant_shell()` the start fails with
+  "permission denied". A script with a `#!` line is unchanged, since the
+  kernel starts its interpreter, and code trusted to run shell scripts keeps
+  running them by adding `grant_shell()`.
+
 ## [0.923.0]
 
 ### Changed
