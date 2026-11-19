@@ -38,6 +38,10 @@
  * handshake, a body above the minimum rate (200), and its connection bound:
  * four connections partway through a head and a fifth refused 503, four
  * silent ones and a fifth served while a silent one is closed.
+ *
+ * And where the descriptor limit binds sockets: with the process out of
+ * descriptors and a connection queued, the server must not spin on a
+ * listener that stays readable (under 500 ms of CPU in 2 s).
  */
 
 #include <stdio.h>
@@ -59,6 +63,7 @@ typedef SOCKET client_sock;
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/select.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
@@ -710,6 +715,81 @@ static void round_loop_slots(void) {
 }
 #endif
 
+#ifndef _WIN32
+/* Out of descriptors. The process's descriptor limit is lowered to just past
+ * what is open, clients connect until socket() fails, and then one more
+ * connects on a descriptor held back for it, so its connection waits in the
+ * listener's queue with nothing left for the server's accept(). The
+ * listener stays readable and accept() keeps failing with EMFILE: the
+ * accept loop went straight back to poll and accept, a core spinning for as
+ * long as the client held its connections. Over 2 s of that, the process
+ * must use well under a second of CPU. Skipped where the limit does not
+ * bind sockets (Cygwin). */
+static void round_descriptors(void) {
+    const char* label = "descriptors plain";
+    HttpServer* server = http_server_create(0);
+    if (!server) { report(label, 0, -1, -1, "server_create"); return; }
+    http_server_get(server, "/ping", ping_handler, NULL);
+    http_server_set_keepalive_raw(server, 1, 0, 10000LL * 1000000LL);
+    if (http_server_bind_raw(server, "127.0.0.1", 0) < 0 ||
+        http_server_start_background_raw(server) < 0) {
+        report(label, 0, -1, -1, "bind or start");
+        http_server_free(server);
+        return;
+    }
+    int port = http_server_port(server);
+    sleep_ms(200);
+
+    enum { MAX_HELD = 64 };
+    client_sock held[MAX_HELD];
+    int n = 0;
+    struct rlimit old;
+    getrlimit(RLIMIT_NOFILE, &old);
+    int spare = dup(0);   /* held back for the last client */
+    int next_fd = dup(0);
+    if (next_fd >= 0) close(next_fd);
+    struct rlimit low = old;
+    low.rlim_cur = (rlim_t)(next_fd + 8);
+    if (spare < 0 || next_fd < 0 || setrlimit(RLIMIT_NOFILE, &low) != 0) {
+        if (spare >= 0) close(spare);
+        printf("round[%s]: skipped, the descriptor limit cannot be lowered\n", label);
+        http_server_free(server);
+        return;
+    }
+    while (n < MAX_HELD) {
+        client_sock s = client_connect(port);
+        if (s == CLIENT_BAD) break;
+        held[n++] = s;
+        sleep_ms(20);   /* the server takes each before the next */
+    }
+    int enforced = n < MAX_HELD;
+    close(spare);
+    client_sock last = enforced ? client_connect(port) : CLIENT_BAD;
+    sleep_ms(300);   /* the server is at accept(), with no descriptor for it */
+
+    struct rusage r0, r1;
+    getrusage(RUSAGE_SELF, &r0);
+    sleep_ms(2000);
+    getrusage(RUSAGE_SELF, &r1);
+    setrlimit(RLIMIT_NOFILE, &old);
+    if (last != CLIENT_BAD) client_close(last);
+    for (int i = 0; i < n; i++) client_close(held[i]);
+    http_server_free(server);
+    if (!enforced) {
+        printf("round[%s]: skipped, the descriptor limit does not bind sockets here\n", label);
+        return;
+    }
+    int64_t cpu = ((int64_t)r1.ru_utime.tv_sec - r0.ru_utime.tv_sec) * 1000 +
+                  ((int64_t)r1.ru_utime.tv_usec - r0.ru_utime.tv_usec) / 1000 +
+                  ((int64_t)r1.ru_stime.tv_sec - r0.ru_stime.tv_sec) * 1000 +
+                  ((int64_t)r1.ru_stime.tv_usec - r0.ru_stime.tv_usec) / 1000;
+    char note[128];
+    snprintf(note, sizeof(note), "%d connections held, one queued, %lld ms of CPU in 2 s",
+             n, (long long)cpu);
+    report(label, last != CLIENT_BAD && cpu < 500, 2000, 0, note);
+}
+#endif
+
 int http_slow_clients_probe(void) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -739,6 +819,7 @@ int http_slow_clients_probe(void) {
         round_loop_rate();
         round_loop_slots();
     }
+    if (WANT("descriptors")) round_descriptors();
     if (g_upstream) http_server_free(g_upstream);
 #else
     printf("loop rounds: skipped, the proxy event loop runs on Linux and macOS only\n");
