@@ -378,12 +378,36 @@ char* getenv(const char* name) {
     return real_getenv(name);
 }
 
+// What an open() asks of the file (#3742): a read when its access mode is
+// O_RDONLY or O_RDWR, a write when it is O_WRONLY or O_RDWR or when it
+// creates, appends to or truncates the file. O_RDWR needs both grants, as
+// fopen's "r+" does; it used to be checked as a write only, so a write-only
+// grant let the file be read. Landlock asks the same of a child that
+// spawn_sandboxed starts (READ_FILE and WRITE_FILE).
+static int open_flags_allowed(const char* path, int flags) {
+    int acc = flags & O_ACCMODE;
+    int reads = acc == O_RDONLY || acc == O_RDWR;
+    int writes = acc != O_RDONLY || (flags & (O_CREAT | O_APPEND | O_TRUNC));
+    if (reads && !check_grant("fs_read", path)) return 0;
+    if (writes && !check_grant("fs_write", path)) return 0;
+    return 1;
+}
+
+// The same for an fopen() mode (aether_fopen_access in
+// aether_sandbox_match.h, which std.fs uses too): "r+", "w+" and "a+" read
+// and write, so they need both grants; "r+" used to pass as a read.
+static int fopen_mode_allowed(const char* path, const char* mode) {
+    int access = aether_fopen_access(mode);
+    if ((access & AETHER_ACCESS_READ) && !check_grant("fs_read", path)) return 0;
+    if ((access & AETHER_ACCESS_WRITE) && !check_grant("fs_write", path)) return 0;
+    return 1;
+}
+
 // open
 int open(const char* path, int flags, ...) {
     if (!real_open) real_open = dlsym(RTLD_NEXT, "open");
     if (path) {
-        const char* cat = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND)) ? "fs_write" : "fs_read";
-        if (!check_grant(cat, path)) {
+        if (!open_flags_allowed(path, flags)) {
             errno = EACCES;
             return -1;
         }
@@ -402,14 +426,48 @@ int open(const char* path, int flags, ...) {
 // fopen
 FILE* fopen(const char* path, const char* mode) {
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
-    if (path && mode) {
-        const char* cat = (mode[0] == 'r') ? "fs_read" : "fs_write";
-        if (!check_grant(cat, path)) {
-            errno = EACCES;
-            return NULL;
-        }
+    if (path && !fopen_mode_allowed(path, mode)) {
+        errno = EACCES;
+        return NULL;
     }
     return real_fopen(path, mode);
+}
+
+// freopen. glibc opens the new file on its internal open, which the open()
+// above never sees, so it gets fopen's rule here. With no path it reopens
+// the stream's own file in the new mode: glibc does that through
+// /proc/self/fd/N, which can widen a read-only stream to "r+", so on Linux
+// that path is what is checked (it resolves to the file). The BSD libcs and
+// musl only change the flags of the descriptor they have, which cannot
+// widen its access, so there nothing new is opened. On a refusal the stream
+// is closed, as freopen closes it whatever happens.
+//
+// fdopen needs no wrapper: it opens nothing, and every libc refuses a mode
+// the descriptor's own access does not allow.
+static int freopen_allowed(const char* path, const char* mode, FILE* stream) {
+    if (path) return fopen_mode_allowed(path, mode);
+#if defined(__linux__)
+    int fd = stream ? fileno(stream) : -1;
+    if (fd < 0) return 1;   // nothing to reopen: libc fails it
+    char self[64];
+    snprintf(self, sizeof self, "/proc/self/fd/%d", fd);
+    return fopen_mode_allowed(self, mode);
+#else
+    (void)mode;
+    (void)stream;
+    return 1;
+#endif
+}
+
+static FILE* (*real_freopen)(const char*, const char*, FILE*) = NULL;
+FILE* freopen(const char* path, const char* mode, FILE* stream) {
+    if (!real_freopen) real_freopen = dlsym(RTLD_NEXT, "freopen");
+    if (!freopen_allowed(path, mode, stream)) {
+        if (stream) fclose(stream);
+        errno = EACCES;
+        return NULL;
+    }
+    return real_freopen(path, mode, stream);
 }
 
 // connect
@@ -479,8 +537,7 @@ static int (*real_openat)(int, const char*, int, ...) = NULL;
 int openat(int dirfd, const char* path, int flags, ...) {
     if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
     if (path) {
-        const char* cat = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND)) ? "fs_write" : "fs_read";
-        if (!check_grant(cat, path)) {
+        if (!open_flags_allowed(path, flags)) {
             errno = EACCES;
             return -1;
         }
@@ -495,7 +552,7 @@ int openat(int dirfd, const char* path, int flags, ...) {
     return real_openat(dirfd, path, flags);
 }
 
-// open64 / openat64 / fopen64 — glibc large-file variants. These symbols
+// open64 / openat64 / fopen64 / freopen64: glibc large-file variants. These symbols
 // exist only on glibc/Linux; FreeBSD's off_t is 64-bit natively and has
 // no *64 suffixed entry points, so the whole block is Linux-gated.
 #if defined(__linux__)
@@ -505,8 +562,7 @@ int openat(int dirfd, const char* path, int flags, ...) {
 int open64(const char* path, int flags, ...) {
     if (!real_open) real_open = dlsym(RTLD_NEXT, "open64");
     if (path) {
-        const char* cat = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND)) ? "fs_write" : "fs_read";
-        if (!check_grant(cat, path)) { errno = EACCES; return -1; }
+        if (!open_flags_allowed(path, flags)) { errno = EACCES; return -1; }
     }
     if (flags & O_CREAT) {
         va_list ap; __builtin_va_start(ap, flags);
@@ -521,8 +577,7 @@ int open64(const char* path, int flags, ...) {
 int openat64(int dirfd, const char* path, int flags, ...) {
     if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat64");
     if (path) {
-        const char* cat = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_APPEND)) ? "fs_write" : "fs_read";
-        if (!check_grant(cat, path)) {
+        if (!open_flags_allowed(path, flags)) {
             errno = EACCES;
             return -1;
         }
@@ -542,15 +597,26 @@ int openat64(int dirfd, const char* path, int flags, ...) {
 #ifndef fopen64
 FILE* fopen64(const char* path, const char* mode) {
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen64");
-    if (path && mode) {
-        const char* cat = (mode[0] == 'r') ? "fs_read" : "fs_write";
-        if (!check_grant(cat, path)) { errno = EACCES; return NULL; }
-    }
+    if (path && !fopen_mode_allowed(path, mode)) { errno = EACCES; return NULL; }
     return real_fopen(path, mode);
 }
 #endif
 
-#endif // __linux__ (open64 / openat64 / fopen64)
+// freopen64: the glibc large-file variant of freopen above
+#ifndef freopen64
+static FILE* (*real_freopen64)(const char*, const char*, FILE*) = NULL;
+FILE* freopen64(const char* path, const char* mode, FILE* stream) {
+    if (!real_freopen64) real_freopen64 = dlsym(RTLD_NEXT, "freopen64");
+    if (!freopen_allowed(path, mode, stream)) {
+        if (stream) fclose(stream);
+        errno = EACCES;
+        return NULL;
+    }
+    return real_freopen64(path, mode, stream);
+}
+#endif
+
+#endif // __linux__ (open64 / openat64 / fopen64 / freopen64)
 
 #define MAX_EXEC_ENV_ENTRIES 4096
 extern char** environ;

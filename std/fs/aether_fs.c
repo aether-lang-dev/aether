@@ -406,13 +406,19 @@ static inline const char* fs_unwrap_bytes(const char* data, int explicit_len, si
 File* file_open_raw(const char* path, const char* mode) {
     if (!path || !mode) { errno = 0; return NULL; }
 
-    // Sandbox check: determine read vs write from mode. A refusal reads as
-    // EACCES, as libaether_sandbox_preload's refusals do, so a caller that
-    // renders errno says "Permission denied" rather than a stale reason.
-    if (mode[0] == 'r') {
-        if (!aether_sandbox_check("fs_read", path)) { errno = EACCES; return NULL; }
-    } else {
-        if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return NULL; }
+    // Sandbox check: what the mode asks of the file. "r+" reads and writes,
+    // so it needs fs_read and fs_write; it used to pass as a read (#3742).
+    // A refusal reads as EACCES, as libaether_sandbox_preload's refusals
+    // do, so a caller that renders errno says "Permission denied" rather
+    // than a stale reason.
+    int access = aether_fopen_access(mode);
+    if ((access & AETHER_ACCESS_READ) && !aether_sandbox_check("fs_read", path)) {
+        errno = EACCES;
+        return NULL;
+    }
+    if ((access & AETHER_ACCESS_WRITE) && !aether_sandbox_check("fs_write", path)) {
+        errno = EACCES;
+        return NULL;
     }
 
     /* Verbatim bytes on every platform. fs.read / fs.write / read_binary /

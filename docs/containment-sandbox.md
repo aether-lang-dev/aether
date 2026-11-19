@@ -360,6 +360,7 @@ direct calls to the raw extern (`tcp_connect_raw`) are enforced.
 | `tcp.listen(port)` | `tcp_listen_raw` | `"tcp_listen"` | Yes, wrapper returns `(null, "listen failed")` if denied |
 | `file.open(path, "r")` | `file_open_raw` | `"fs_read"` | Yes, wrapper returns `(null, "cannot open file")` if denied |
 | `file.open(path, "w")` | `file_open_raw` | `"fs_write"` | Yes, wrapper returns `(null, "cannot open file")` if denied |
+| `file.open(path, "r+")` (and `"w+"`, `"a+"`) | `file_open_raw` | `"fs_read"` and `"fs_write"` | Yes, wrapper returns `(null, "cannot open file")` if either is denied |
 | `file.exists(path)` | `file_exists` | `"fs_read"` | Yes, returns 0 if denied |
 | `file.delete(path)` | `file_delete_raw` | `"fs_write"` | Yes, wrapper returns `"cannot delete file"` if denied |
 | `file.size(path)` | `file_size_raw` | `"fs_read"` | Yes, wrapper returns `(0, "cannot stat file")` if denied |
@@ -1254,7 +1255,7 @@ spawn_sandboxed(worker,            os.getenv("AWS_SECRET_KEY")          → deni
    | libc call | Checks | On deny |
    |-----------|--------|---------|
    | `connect()` | `grant_tcp` against resolved hostname | Returns `EACCES` |
-   | `open()` | `grant_fs_read` or `grant_fs_write` by path + mode | Returns `EACCES` |
+   | `open()`, `fopen()`, `freopen()` | `grant_fs_read` when the mode reads, `grant_fs_write` when it writes, creates, truncates or appends; both for `O_RDWR` and `"r+"`, `"w+"`, `"a+"` | Returns `EACCES` |
    | `execve()` | `grant_exec` against command path | Returns `EPERM` |
    | `getenv()` | `grant_env` against variable name | Returns `NULL` |
 
@@ -1332,10 +1333,13 @@ int connect(int fd, const struct sockaddr* addr, socklen_t len) {
     return real_connect(fd, addr, len);  // dlsym(RTLD_NEXT, "connect")
 }
 
-// Intercept open()
+// Intercept open(): a read needs fs_read, a write fs_write, O_RDWR both
 int open(const char* path, int flags, ...) {
-    const char* cat = (flags & O_WRONLY || flags & O_RDWR) ? "fs_write" : "fs_read";
-    if (!check_grant(grants, cat, path)) {
+    int acc = flags & O_ACCMODE;
+    int reads = acc == O_RDONLY || acc == O_RDWR;
+    int writes = acc != O_RDONLY || (flags & (O_CREAT | O_APPEND | O_TRUNC));
+    if ((reads && !check_grant(grants, "fs_read", path)) ||
+        (writes && !check_grant(grants, "fs_write", path))) {
         errno = EACCES;
         return -1;
     }

@@ -80,6 +80,31 @@ static inline int aether_grant_match(const char* category, const char* pat, cons
     return aether_grant_glob(pat, resource);
 }
 
+// What an fopen() mode asks of the file, for the fs checks on it (#3742):
+// AETHER_ACCESS_READ when it reads ("r", or any "+"), AETHER_ACCESS_WRITE
+// when it writes, creates, truncates or appends ("w", "a", "x" or any "+").
+// "r+" is both, so it needs fs_read and fs_write; checking it as a read let
+// a read-only grant open a file for writing. The mode is read up to a ','
+// (glibc's and the Windows CRT's ",ccs=..." suffix). 'D' (Windows: delete
+// the file when it is closed) counts as a write. A mode that starts with
+// none of r, w and a is one fopen refuses; it counts as both, so a check
+// never allows more than the open could do.
+#define AETHER_ACCESS_READ  1
+#define AETHER_ACCESS_WRITE 2
+static inline int aether_fopen_access(const char* mode) {
+    const int both = AETHER_ACCESS_READ | AETHER_ACCESS_WRITE;
+    if (!mode) return both;
+    int access;
+    if (mode[0] == 'r') access = AETHER_ACCESS_READ;
+    else if (mode[0] == 'w' || mode[0] == 'a') access = AETHER_ACCESS_WRITE;
+    else return both;
+    for (const char* m = mode + 1; *m && *m != ','; m++) {
+        if (*m == '+') access = both;
+        else if (*m == 'w' || *m == 'a' || *m == 'x' || *m == 'D') access |= AETHER_ACCESS_WRITE;
+    }
+    return access;
+}
+
 // The shell a command string runs through, for the exec check on it. An exec
 // grant is matched against a command string as a whole, and "echo *" matches
 // any string that starts with "echo ", whatever shell syntax follows. The

@@ -188,6 +188,54 @@ main() {
             spec.assert_eq(fs.exists("${dir}/written.txt"), 0, "and nothing was written")
         }
 
+        // #3742: a mode is checked for everything it asks. "r+" reads and
+        // writes, so a read-only grant refuses it, and "w+" and "a+" read,
+        // so a write-only grant refuses those.
+        spec.it("checks an open mode for each thing it asks of the file") callback {
+            ro = sandbox.new("read-only") {
+                grant_fs_read("${dir}/*")
+            }
+            sandbox.enforce(ro) callback {
+                h, err = fs.open("${dir}/allowed.txt", "r")
+                spec.assert_ok(err, "a read open is allowed")
+                if err == "" { _c = fs.close(h) }
+                _h2, err2 = fs.open("${dir}/allowed.txt", "r+")
+                spec.assert_err(err2, "r+ needs fs_write as well")
+                _h3, err3 = fs.open("${dir}/allowed.txt", "rb+")
+                spec.assert_err(err3, "so does rb+")
+            }
+            sandbox.free(ro)
+            a, _aerr = fs.read("${dir}/allowed.txt")
+            spec.assert_str_eq(a, "allowed", "and the file is as it was")
+
+            wo = sandbox.new("write-only") {
+                grant_fs_write("${dir}/*")
+            }
+            sandbox.enforce(wo) callback {
+                h, err = fs.open("${dir}/modes.txt", "w")
+                spec.assert_ok(err, "a write open is allowed")
+                if err == "" { _c = fs.close(h) }
+                _h2, err2 = fs.open("${dir}/modes.txt", "w+")
+                spec.assert_err(err2, "w+ needs fs_read as well")
+                _h3, err3 = fs.open("${dir}/modes.txt", "a+")
+                spec.assert_err(err3, "so does a+")
+                _h4, err4 = fs.open("${dir}/modes.txt", "r+")
+                spec.assert_err(err4, "and r+")
+            }
+            sandbox.free(wo)
+
+            rw = sandbox.new("read-write") {
+                grant_fs_read("${dir}/*")
+                grant_fs_write("${dir}/*")
+            }
+            sandbox.enforce(rw) callback {
+                h, err = fs.open("${dir}/modes.txt", "r+")
+                spec.assert_ok(err, "r+ opens with both grants")
+                if err == "" { _c = fs.close(h) }
+            }
+            sandbox.free(rw)
+        }
+
         spec.it("matches exec grants against the command line") callback {
             g = sandbox.new("echoer") {
                 grant_exec("echo *")
