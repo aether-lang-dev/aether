@@ -202,6 +202,7 @@ int http_ws_message_length(HttpWsConn* w) { (void)w; return 0; }
 const char* http_ws_set_max_message_raw(HttpWsConn* w, int64_t m) { (void)w; (void)m; return "WebSocket unavailable: networking not built in"; }
 const char* http_server_set_ws_max_message_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "WebSocket unavailable: networking not built in"; }
 const char* http_server_set_max_body_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_head_timeout_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
 void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -1522,6 +1523,7 @@ HttpServer* http_server_create(int port) {
     server->keep_alive_idle_ms = 0;
     server->ws_max_message = HTTP_WS_DEFAULT_MAX_MESSAGE;
     server->max_body = HTTP_DEFAULT_MAX_BODY;
+    server->head_timeout_ms = HTTP_DEFAULT_HEAD_TIMEOUT_MS;
     server->response_transformer_chain = NULL;
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
@@ -1613,6 +1615,19 @@ const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes) 
     if (!server) return "server is null";
     if (max_bytes <= 0) return "max body must be positive";
     server->max_body = max_bytes;
+    return "";
+}
+
+/* The longest a request head may take from its first byte (#3737). Stored
+ * in ms, as the receive paths count; a value under 1 ms rounds up to 1 so
+ * it is not mistaken for 0, which turns the bound off. */
+const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout_ns) {
+    if (!server) return "server is null";
+    if (timeout_ns < 0) return "head timeout must not be negative";
+    int64_t ms = timeout_ns / 1000000LL;
+    if (timeout_ns > 0 && ms == 0) ms = 1;
+    if (ms > INT_MAX) ms = INT_MAX;
+    server->head_timeout_ms = (int)ms;
     return "";
 }
 
@@ -6207,6 +6222,19 @@ static void conn_send_payload_too_large(HttpConn* conn, const char* req, size_t 
     conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
+/* A request head that did not arrive whole within the server's head
+ * timeout from its first byte (#3737). */
+static void conn_send_request_timeout(HttpConn* conn, const char* req, size_t req_len) {
+    static const char msg[] =
+        "HTTP/1.1 408 Request Timeout\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 23\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request head timed out\n";
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
+}
+
 /* Refuse a message whose framing this server will not guess at, and say so
  * before closing. A framing error cannot be answered on a kept-alive
  * connection, because where the next request starts is exactly what is in
@@ -6235,6 +6263,7 @@ static void conn_send_bad_request_line(HttpConn* conn, const char* req, size_t r
 }
 
 static void conn_set_recv_timeout(HttpConn* c, int ms);
+static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c);
 
 /* The request hooks (#260 Tier 3: the access log, metrics, a program's own)
  * on the response about to be sent, `t_start` the request's start. Every
@@ -6352,6 +6381,10 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * scan starts from read_pos so already-buffered pipelined bytes
      * count toward the header boundary. */
     char* hdr_end = NULL;
+    /* When the first byte of this head was in hand, and whether the wait
+     * was cut to its deadline (#3737). */
+    int64_t head_started_ms = 0;
+    int head_deadline_applied = 0;
     while (1) {
         if (conn->write_pos > conn->read_pos) {
             /* NUL-terminate the unconsumed slice in place — we have
@@ -6363,6 +6396,22 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             hdr_end = (char*)http_find_header_end(conn->buf + conn->read_pos,
                                                   (size_t)(conn->write_pos - conn->read_pos));
             if (hdr_end) break;
+            if (head_started_ms == 0) head_started_ms = conn_now_ms();
+        }
+        /* The whole head must arrive within head_timeout_ms of its first
+         * byte (#3737). The per-recv timeout alone let a client that sends
+         * a byte just inside it hold this worker for as long as it liked;
+         * each wait is now cut to what is left of the deadline as well. */
+        if (head_started_ms != 0 && server->head_timeout_ms > 0) {
+            int64_t left = head_started_ms + server->head_timeout_ms - conn_now_ms();
+            if (left <= 0) {
+                conn_send_request_timeout(conn, conn->buf + conn->read_pos,
+                                          (size_t)(conn->write_pos - conn->read_pos));
+                return 0;
+            }
+            int per_recv = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+            conn_set_recv_timeout(conn, left < per_recv ? (int)left : per_recv);
+            head_deadline_applied = 1;
         }
         /* A head holds no more than the connection buffer's first size,
          * HTTP_CONN_BUF_CAP, less the NUL, answered 431 past it (#3252).
@@ -6388,10 +6437,17 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
              * different worker without carrying parse state with it. */
             if (n < 0 && conn->write_pos == conn->read_pos && conn_recv_timed_out())
                 return HTTP_REQUEST_IDLE;
+            /* The head's deadline passed during the wait: say so. */
+            if (n < 0 && head_started_ms != 0 && server->head_timeout_ms > 0 &&
+                conn_now_ms() - head_started_ms >= server->head_timeout_ms)
+                conn_send_request_timeout(conn, conn->buf + conn->read_pos,
+                                          (size_t)(conn->write_pos - conn->read_pos));
             return 0;  /* EOF / error */
         }
         conn->write_pos += n;
     }
+    /* The body's reads wait by the idle timeout again. */
+    if (head_deadline_applied) conn_apply_recv_timeout(server, conn);
 
     int header_size = (int)(hdr_end - conn->buf) + 4 - conn->read_pos;
     int request_total = header_size;

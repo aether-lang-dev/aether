@@ -43,6 +43,7 @@ exports(
     http_server_set_tls_backend_raw, server_set_tls_backend,
     http_server_set_keepalive_raw, server_set_keepalive,
     http_server_set_max_body_raw, server_set_max_body,
+    http_server_set_head_timeout_raw, server_set_head_timeout,
     http_server_set_h2_raw, server_set_h2,
     http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
@@ -437,6 +438,18 @@ extern http_server_set_max_body_raw(server: ptr, max_bytes: long) -> string
 
 server_set_max_body(server: ptr, max_bytes: long) -> string {
     return http_server_set_max_body_raw(server, max_bytes)
+}
+
+// The longest a request head may take to arrive whole, from its first byte
+// (#3737); 30 s unless set here. Past it the server answers 408 and closes
+// the connection. The idle timeout (server_set_keepalive) bounds each read
+// on its own, so without this a client that sent one byte of its head just
+// inside that bound, over and over, held a worker for as long as it liked.
+// 0ns turns the bound off. Returns "" or why the value was refused.
+extern http_server_set_head_timeout_raw(server: ptr, timeout_ns: long) -> string
+
+server_set_head_timeout(server: ptr, timeout: Duration) -> string {
+    return http_server_set_head_timeout_raw(server, timeout.ns)
 }
 
 // Graceful shutdown (#260 Tier 3). Stops accepting new connections,

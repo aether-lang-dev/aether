@@ -307,6 +307,7 @@ tests/integration/http_serve_static_range/
 tests/integration/http_serve_static_sibling/
 tests/integration/http_server_body_limit/
 tests/integration/http_server_h2_limits/
+tests/integration/http_server_head_deadline/
 tests/integration/http_server_h2/
 tests/integration/http_sse_upgrade/
 tests/integration/slice_bounds/

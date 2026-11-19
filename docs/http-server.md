@@ -416,6 +416,13 @@ Loop terminates when:
   body gets `Content-Length: 0` rather than a close; anything read
   until EOF closes).
 
+The idle timeout bounds each read. A request head also has a deadline
+for the whole of it, 30 s from its first byte by default: a head not
+complete by then is answered `408` and the connection closes (#3737).
+Without it a client that sent a byte just inside the idle timeout, over
+and over, held a worker for as long as it liked. Set it with
+`http.server_set_head_timeout(server, 10s)`; `0ns` turns it off.
+
 ### Idle connections wait in a poller, not on a worker
 
 A worker owns a connection for its whole life (see the section above),

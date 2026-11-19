@@ -462,6 +462,10 @@ typedef struct HttpServer {
     // and is not bounded by this. HTTP/2 holds every stream's body whole, so
     // there a stream whose DATA passes it is reset (#3738).
     int64_t max_body;
+    // The longest a request head may take to arrive whole, in ms from its
+    // first byte, answered 408 past it (#3737): HTTP_DEFAULT_HEAD_TIMEOUT_MS
+    // unless http_server_set_head_timeout_raw set another; 0 for none.
+    int head_timeout_ms;
 } HttpServer;
 
 // ============================================================================
@@ -1123,6 +1127,15 @@ const char* http_request_body(HttpRequest* req);
 // The largest request body http_request_body buffers on this server, in
 // bytes. Returns "" or why the value was refused (not positive).
 const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes);
+
+// The longest a request head may take to arrive whole, from its first byte,
+// by default (#3737).
+#define HTTP_DEFAULT_HEAD_TIMEOUT_MS 30000
+
+// The longest a request head may take to arrive whole, from its first byte;
+// past it the server answers 408 and closes. 0 turns the bound off, leaving
+// only the per-read idle timeout. Returns "" or why the value was refused.
+const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout_ns);
 
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,

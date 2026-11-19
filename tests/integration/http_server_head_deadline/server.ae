@@ -1,0 +1,45 @@
+// The server for http_server_head_deadline (#3737): an idle timeout of
+// 1 s, which bounds each read, and a head timeout of 2 s from the head's
+// first byte. GET / answers "ok". The driver,
+// test_http_server_head_deadline.sh, plays the slow client.
+
+import std.http
+
+extern exit(code: int)
+
+ok_handler(req: ptr, res: ptr, ud: ptr) {
+    http.http_response_set_status(res, 200)
+    http.http_response_set_body(res, "ok")
+}
+
+message StartSrv { raw: ptr }
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
+}
+
+main() {
+    raw = http.server_create(0)
+    if raw == 0 { println("FAIL: server_create"); exit(1) }
+    http.server_set_host(raw, "127.0.0.1")
+    kerr = http.server_set_keepalive(raw, 1, 0, 1000ms)
+    if kerr != "" { println("FAIL: server_set_keepalive: ${kerr}"); exit(1) }
+    if http.server_set_head_timeout(raw, -1ms) == "" {
+        println("FAIL: server_set_head_timeout accepted a negative timeout")
+        exit(1)
+    }
+    herr = http.server_set_head_timeout(raw, 2000ms)
+    if herr != "" { println("FAIL: server_set_head_timeout: ${herr}"); exit(1) }
+    http.http_server_get(raw, "/", ok_handler, null)
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    println("READY ${http.server_port(raw)}")
+
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+
+    sleep(60000)
+    exit(0)
+}

@@ -64,6 +64,8 @@
     <li><a href="#server_set_keepalive">server_set_keepalive</a></li>
     <li><a href="#server_set_max_body_raw">server_set_max_body_raw</a></li>
     <li><a href="#server_set_max_body">server_set_max_body</a></li>
+    <li><a href="#server_set_head_timeout_raw">server_set_head_timeout_raw</a></li>
+    <li><a href="#server_set_head_timeout">server_set_head_timeout</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
     <li><a href="#server_set_h2">server_set_h2</a></li>
     <li><a href="#server_set_multi_accept_raw">server_set_multi_accept_raw</a></li>
@@ -537,6 +539,17 @@
       <h3 class="function-name">server_set_max_body <span class="kind">fn</span></h3>
       <pre class="usage"><code>server_set_max_body(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
+    </div>
+    <div class="function" id="server_set_head_timeout_raw" data-name="server_set_head_timeout_raw">
+      <h3 class="function-name">server_set_head_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_head_timeout_raw(server, timeout_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long</span></p>
+      <p class="doc">The longest a request head may take to arrive whole, from its first byte (#3737); 30 s unless set here. Past it the server answers 408 and closes the connection. The idle timeout (server_set_keepalive) bounds each read on its own, so without this a client that sent one byte of its head just inside that bound, over and over, held a worker for as long as it liked. 0ns turns the bound off. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_head_timeout" data-name="server_set_head_timeout">
+      <h3 class="function-name">server_set_head_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_head_timeout(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
     </div>
     <div class="function" id="server_set_h2_raw" data-name="server_set_h2_raw">
       <h3 class="function-name">server_set_h2_raw <span class="kind">extern</span></h3>
