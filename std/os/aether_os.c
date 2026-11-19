@@ -1188,13 +1188,45 @@ int os_execv(const char* prog, void* argv_list) {
     fflush(stdout);
     fflush(stderr);
 
-    // execvp honours PATH if `prog` does not contain a slash. On
-    // success this call never returns; on failure we free scratch and
-    // report -1. We intentionally do not touch errno — callers that
-    // want diagnostic detail should read it themselves after the call
-    // via a dedicated wrapper (not exposed yet).
-    execvp(prog, argv);
+    // The program is found as os.run finds it (aether_spawn_resolve: a
+    // name with a '/' as given, a bare name on PATH) and started with
+    // execv. It used to be execvp, which runs a file the kernel refuses
+    // with ENOEXEC (no #! line) through /bin/sh by itself: the exec grant
+    // matched the file, and the shell then ran whatever the file held with
+    // no grant of its own (#3762). The shell fallback is made here instead,
+    // as execvp makes it ("/bin/sh", path, argv[1..]), and only when the
+    // sandbox lets the shell run (grant_shell, the rule os.run follows,
+    // #3755). Refused, the call fails with EACCES. Asked only after the
+    // kernel refused the file, so the audit names the shell only for a
+    // start that needed it. On success this call never returns; on failure
+    // the scratch is freed and -1 returned with errno set.
+    char* path = aether_spawn_resolve(prog);
+    if (!path) {
+        aether_caps_free(argv, argv_bytes);
+        return -1;
+    }
+    execv(path, argv);
+    if (errno == ENOEXEC) {
+        if (!aether_sandbox_check("exec", AETHER_OS_SHELL)) {
+            errno = EACCES;
+        } else {
+            size_t sh_bytes = sizeof(char*) * (size_t)(ai + 2);
+            char** sh_argv = (char**)aether_caps_malloc(sh_bytes);
+            if (sh_argv) {
+                sh_argv[0] = (char*)AETHER_OS_SHELL;
+                sh_argv[1] = path;
+                for (int i = 1; i <= ai; i++) sh_argv[i + 1] = argv[i];   /* argv[ai] is the NULL */
+                execv(AETHER_OS_SHELL, sh_argv);
+                int saved = errno;
+                aether_caps_free(sh_argv, sh_bytes);
+                errno = saved;
+            }
+        }
+    }
+    int saved_errno = errno;
+    free(path);
     aether_caps_free(argv, argv_bytes);
+    errno = saved_errno;
     return -1;
 #endif
 }

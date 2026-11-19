@@ -308,7 +308,10 @@ args_get(index: int) -> {
 // list<ptr> of C strings (element 0 is argv[0] for the new program and
 // does NOT need to match `prog`). On success this call never returns;
 // on failure it returns -1 with the current process still running.
-// `prog` is looked up on PATH if it does not contain a slash.
+// `prog` is looked up on PATH if it does not contain a slash. A file with
+// no #! line runs through /bin/sh, as execvp runs it; inside a sandbox that
+// needs grant_shell() as well as the file's own exec grant (#3762), and
+// without it the call returns -1.
 // Windows cannot replace a running process: there it runs `prog`, waits,
 // and exits with its status. -1 only when it could not be started.
 extern os_execv(prog: string, argv_list: ptr) -> int

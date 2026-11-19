@@ -55,7 +55,30 @@ fn stored(category: string, pattern: string) -> string {
     return s
 }
 
+// #3762: os.execv in a child of this test, so that an exec that should
+// have been refused replaces only the child. `role` is "execv-script" (the
+// file's grant alone) or "execv-shell" (and grant_shell); the child exits 3
+// when os.execv returned, which a refused start does.
+fn execv_child(role: string, script: string) {
+    argv = list.new()
+    list.add(argv, script)
+    g = sandbox.new("execv-child") {
+        grant_exec(script)
+        if role == "execv-shell" { grant_shell() }
+    }
+    sandbox.enforce(g) callback {
+        _rc = os.execv(script, argv)
+    }
+    exit(3)
+}
+
 main() {
+    if os.args_count() > 2 {
+        role = os.args_get(1)
+        if role == "execv-script" || role == "execv-shell" {
+            execv_child(role, os.args_get(2))
+        }
+    }
     fw = spec.init()
 
     dir, terr = fs.make_temp_dir("", "ae_sandbox_test")
@@ -370,6 +393,33 @@ main() {
                 }
                 sandbox.free(g2)
                 list.free(argv)
+            }
+        }
+
+        // #3762: os.execv used execvp, which runs a file with no #! line
+        // through /bin/sh by itself, with no grant for the shell. It now
+        // takes the shell only with grant_shell. The exec runs in a child
+        // of this test (execv_child), which exits 3 when os.execv returned.
+        spec.it("os.execv runs a file with no #! line through the shell only with grant_shell") callback {
+            self_path = os.argv0()
+            if select(windows: 1, other: 0) == 0 && string.index_of(self_path, "/") >= 0 {
+                script = "${dir}/no_shebang_execv"
+                _w = fs.write(script, "exit 7\n")
+                _c = fs.chmod(script, 493) // 0o755
+                argv = list.new()
+                list.add(argv, "execv-script")
+                list.add(argv, script)
+                _o, code, err = os.run_capture(self_path, argv, null)
+                spec.assert_ok(err, "the child starts")
+                spec.assert_eq(code, 3, "without a shell grant os.execv returns, refused")
+                argv2 = list.new()
+                list.add(argv2, "execv-shell")
+                list.add(argv2, script)
+                _o2, code2, err2 = os.run_capture(self_path, argv2, null)
+                spec.assert_ok(err2, "the child starts")
+                spec.assert_eq(code2, 7, "with grant_shell the shell runs the script")
+                list.free(argv)
+                list.free(argv2)
             }
         }
 
