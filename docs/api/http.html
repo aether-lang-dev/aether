@@ -110,6 +110,10 @@
     <li><a href="#ws_message">ws_message</a></li>
     <li><a href="#ws_message_bytes">ws_message_bytes</a></li>
     <li><a href="#ws_close">ws_close</a></li>
+    <li><a href="#ws_set_max_message_raw">ws_set_max_message_raw</a></li>
+    <li><a href="#ws_set_max_message">ws_set_max_message</a></li>
+    <li><a href="#server_set_ws_max_message_raw">server_set_ws_max_message_raw</a></li>
+    <li><a href="#server_set_ws_max_message">server_set_ws_max_message</a></li>
     <li><a href="#server_bind">server_bind</a></li>
     <li><a href="#server_start">server_start</a></li>
     <li><a href="#server_start_background">server_start_background</a></li>
@@ -784,6 +788,28 @@
       <h3 class="function-name">ws_close <span class="kind">fn</span></h3>
       <pre class="usage"><code>ws_close(ws, code, reason)</code></pre>
       <p class="signature"><span class="sig-params">ws: ptr, code: int, reason: string</span></p>
+    </div>
+    <div class="function" id="ws_set_max_message_raw" data-name="ws_set_max_message_raw">
+      <h3 class="function-name">ws_set_max_message_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>ws_set_max_message_raw(ws, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, max_bytes: long</span></p>
+    </div>
+    <div class="function" id="ws_set_max_message" data-name="ws_set_max_message">
+      <h3 class="function-name">ws_set_max_message <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_set_max_message(ws, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, max_bytes: long</span></p>
+      <p class="doc">The cap on one message for this handle alone, server or client, from the next ws_recv on. A client handle from ws_connect starts at 64 MiB.</p>
+    </div>
+    <div class="function" id="server_set_ws_max_message_raw" data-name="server_set_ws_max_message_raw">
+      <h3 class="function-name">server_set_ws_max_message_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_ws_max_message_raw(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
+    </div>
+    <div class="function" id="server_set_ws_max_message" data-name="server_set_ws_max_message">
+      <h3 class="function-name">server_set_ws_max_message <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_ws_max_message(server, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_bytes: long</span></p>
+      <p class="doc">The cap on one WebSocket message, in bytes (#3739). Every handle this server upgrades starts with it; 64 MiB unless set here. A message past it closes the connection with 1009 (message too big), checked against the length each frame declares before any of it is read, so a peer cannot make the server hold more than the cap. Returns &quot;&quot; or why the value was refused (not positive, or past the 2 GiB a message length can report).</p>
     </div>
     <div class="function" id="server_bind" data-name="server_bind">
       <h3 class="function-name">server_bind <span class="kind">fn</span></h3>

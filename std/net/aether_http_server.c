@@ -199,6 +199,8 @@ int http_ws_poll(HttpWsConn* w, int t) { (void)w; (void)t; return -1; }
 int http_ws_fd(HttpWsConn* w) { (void)w; return -1; }
 const char* http_ws_message_data(HttpWsConn* w) { (void)w; return ""; }
 int http_ws_message_length(HttpWsConn* w) { (void)w; return 0; }
+const char* http_ws_set_max_message_raw(HttpWsConn* w, int64_t m) { (void)w; (void)m; return "WebSocket unavailable: networking not built in"; }
+const char* http_server_set_ws_max_message_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "WebSocket unavailable: networking not built in"; }
 void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -1517,6 +1519,7 @@ HttpServer* http_server_create(int port) {
     server->keep_alive_enabled = 1;
     server->keep_alive_max = 0;
     server->keep_alive_idle_ms = 0;
+    server->ws_max_message = HTTP_WS_DEFAULT_MAX_MESSAGE;
     server->response_transformer_chain = NULL;
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
@@ -1588,6 +1591,18 @@ const char* http_server_set_keepalive_raw(HttpServer* server,
     if (idle_ms < 0) idle_ms = 0;
     if (idle_ms > INT_MAX) idle_ms = INT_MAX;
     server->keep_alive_idle_ms = (int)idle_ms;
+    return "";
+}
+
+/* The cap every WebSocket this server upgrades starts with (#3739). A
+ * handle read after the change gets the new cap; one already upgraded
+ * keeps the cap it was given. */
+const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_bytes) {
+    if (!server) return "server is null";
+    if (max_bytes <= 0) return "max message must be positive";
+    if ((uint64_t)max_bytes > (uint64_t)HTTP_WS_MAX_MESSAGE_LIMIT)
+        return "max message is past the 2 GiB a message length can report";
+    server->ws_max_message = (size_t)max_bytes;
     return "";
 }
 
@@ -4165,10 +4180,14 @@ struct HttpWsRoute {
 struct HttpWsConn {
     HttpConn* conn;       /* not owned */
     int       closed;
-    /* Reassembled message buffer — grown as needed. */
+    /* Reassembled message buffer, grown as the bytes arrive. Sizes are
+     * size_t: the int capacity this had overflowed past 1 GiB (#3739). */
     char*  msg_buf;
-    int    msg_cap;
-    int    msg_len;
+    size_t msg_cap;
+    size_t msg_len;
+    /* The largest message this handle reassembles, in bytes; past it the
+     * receive closes with 1009 (#3739). 0 means HTTP_WS_DEFAULT_MAX_MESSAGE. */
+    size_t max_message;
     /* For binary frames we don't NUL-terminate, so callers see
      * (out_data, out_len). For text frames we NUL-terminate for
      * convenience. The opcode of the in-progress message is
@@ -4525,11 +4544,22 @@ void http_ws_close(HttpWsConn* ws, int code, const char* reason) {
     ws->closed = 1;
 }
 
-/* Grow the message-reassembly buffer if needed. */
-static int ws_msg_grow(HttpWsConn* ws, int need) {
+/* The largest message `ws` reassembles. */
+static size_t ws_max_message(const HttpWsConn* ws) {
+    return ws->max_message ? ws->max_message : HTTP_WS_DEFAULT_MAX_MESSAGE;
+}
+
+/* Grow the message-reassembly buffer to hold at least `need` bytes. The
+ * caller has already checked `need` against the message cap, so it is at
+ * most the cap plus one byte for a text message's NUL. Doubling stops at
+ * that bound rather than overshooting it. */
+static int ws_msg_grow(HttpWsConn* ws, size_t need) {
     if (ws->msg_cap >= need) return 0;
-    int new_cap = ws->msg_cap > 0 ? ws->msg_cap : 4096;
-    while (new_cap < need) new_cap *= 2;
+    size_t bound = ws_max_message(ws) + 1;
+    size_t new_cap = ws->msg_cap > 0 ? ws->msg_cap : 4096;
+    while (new_cap < need && new_cap < bound) new_cap *= 2;
+    if (new_cap > bound) new_cap = bound;
+    if (new_cap < need) new_cap = need;
     /* Cap-aware (#343): WebSocket message reassembly is driven by the
      * peer's frame sizes — untrusted. Old size is the prior
      * ws->msg_cap (0 on the first grow from NULL); the matching free
@@ -4548,7 +4578,28 @@ const char* http_ws_message_data(HttpWsConn* ws) {
 }
 
 int http_ws_message_length(HttpWsConn* ws) {
-    return ws ? ws->msg_len : 0;
+    /* Fits: a message is at most HTTP_WS_MAX_MESSAGE_LIMIT bytes. */
+    return ws ? (int)ws->msg_len : 0;
+}
+
+/* The largest message this handle reassembles from now on (#3739). Returns
+ * "" or why the value was refused. */
+const char* http_ws_set_max_message_raw(HttpWsConn* ws, int64_t max_bytes) {
+    if (!ws) return "websocket is null";
+    if (max_bytes <= 0) return "max message must be positive";
+    if ((uint64_t)max_bytes > (uint64_t)HTTP_WS_MAX_MESSAGE_LIMIT)
+        return "max message is past the 2 GiB a message length can report";
+    ws->max_message = (size_t)max_bytes;
+    return "";
+}
+
+/* Fail the connection: send a close frame with `code` (1002 protocol error,
+ * 1009 message too big) and mark the handle closed. Returns -1, what the
+ * receive reports for a closed connection. */
+static int ws_fail(HttpWsConn* ws, int code, const char* reason) {
+    http_ws_close(ws, code, reason);
+    ws->closed = 1;
+    return -1;
 }
 
 /* Monotonic milliseconds; defined further down with the connection-park
@@ -4715,12 +4766,12 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
         int fin    = (hdr2[0] >> 7) & 1;
         int opcode = hdr2[0] & 0x0F;
         int masked = (hdr2[1] >> 7) & 1;
-        long long pl = hdr2[1] & 0x7F;
+        uint64_t pl = hdr2[1] & 0x7F;
 
         if (pl == 126) {
             unsigned char ext[2];
             if (ws_recv_exact(ws->conn, ext, 2) != 0) { ws->closed = 1; return -1; }
-            pl = ((long long)ext[0] << 8) | ext[1];
+            pl = ((uint64_t)ext[0] << 8) | ext[1];
         } else if (pl == 127) {
             unsigned char ext[8];
             if (ws_recv_exact(ws->conn, ext, 8) != 0) { ws->closed = 1; return -1; }
@@ -4733,68 +4784,64 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
             if (ws_recv_exact(ws->conn, mask_key, 4) != 0) { ws->closed = 1; return -1; }
         }
 
-        /* Sanity bound — refuse 1GB+ frames. */
-        if (pl < 0 || pl > (1LL << 30)) { ws->closed = 1; return -1; }
-
-        /* Read payload into a scratch buffer, unmasking on the fly.
-         * Cap-aware (#343): `pl` is the WebSocket payload length
-         * field from the wire — untrusted by definition. The 1 GiB
-         * sanity bound above stops the obvious DoS shape; the caps
-         * allocator threads this through to the host's
-         * aether_set_memory_cap budget. */
-        char* frame_buf = NULL;
-        size_t frame_cap = 0;
-        if (pl > 0) {
-            frame_cap = (size_t)pl;
-            frame_buf = (char*)aether_caps_malloc(frame_cap);
-            if (!frame_buf) { ws->closed = 1; return -1; }
-            if (ws_recv_exact(ws->conn, frame_buf, (int)pl) != 0) {
-                aether_caps_free(frame_buf, frame_cap); ws->closed = 1; return -1;
+        if (opcode == WS_OP_PING || opcode == WS_OP_PONG || opcode == WS_OP_CLOSE) {
+            /* A control frame carries at most 125 bytes and is never
+             * fragmented (RFC 6455 5.5). Both were taken as given, and a
+             * ping or close was echoed back at whatever size it declared
+             * (#3739). */
+            if (!fin || pl > 125)
+                return ws_fail(ws, 1002, "invalid control frame");
+            unsigned char ctl[125];
+            if (pl > 0) {
+                if (ws_recv_exact(ws->conn, ctl, (int)pl) != 0) { ws->closed = 1; return -1; }
+                if (masked)
+                    for (uint64_t i = 0; i < pl; i++) ctl[i] ^= mask_key[i & 3];
             }
-            if (masked) {
-                for (long long i = 0; i < pl; i++) {
-                    frame_buf[i] ^= (char)mask_key[i & 3];
-                }
+            if (opcode == WS_OP_PING) {
+                /* Answer with a pong carrying the same payload (RFC 6455
+                 * 5.5.3). The caller does not see control frames. */
+                ws_send_frame_masked(ws->conn, WS_OP_PONG, ctl, (int)pl, ws->mask_tx);
+                continue;
             }
-        }
-
-        if (opcode == WS_OP_PING) {
-            /* Respond with a pong carrying the same payload (RFC 6455
-             * §5.5.3). Free our buffer afterwards; caller doesn't see
-             * control frames. */
-            ws_send_frame_masked(ws->conn, WS_OP_PONG, frame_buf, (int)pl,
-                                 ws->mask_tx);
-            aether_caps_free(frame_buf, frame_cap);
-            continue;
-        }
-        if (opcode == WS_OP_PONG) {
-            aether_caps_free(frame_buf, frame_cap);
-            continue;  /* unsolicited pong — discard */
-        }
-        if (opcode == WS_OP_CLOSE) {
-            /* Echo close frame back (RFC 6455 §5.5.1) and report
-             * to caller. */
-            ws_send_frame_masked(ws->conn, WS_OP_CLOSE, frame_buf, (int)pl,
-                                 ws->mask_tx);
-            aether_caps_free(frame_buf, frame_cap);
+            if (opcode == WS_OP_PONG) continue;  /* unsolicited pong: discard */
+            /* Echo the close frame back (RFC 6455 5.5.1) and report it. */
+            ws_send_frame_masked(ws->conn, WS_OP_CLOSE, ctl, (int)pl, ws->mask_tx);
             ws->closed = 1;
             return -1;
         }
 
-        /* Data frame (text / binary / continuation). Append to
-         * the message buffer, then break out if FIN. */
+        /* Data frame (text / binary / continuation): append it to the
+         * message, then stop at FIN. */
         if (opcode == WS_OP_TEXT || opcode == WS_OP_BIN) {
             ws->msg_opcode = opcode;
             ws->msg_len = 0;  /* fresh message */
         }
-        if (pl > 0) {
-            if (ws_msg_grow(ws, ws->msg_len + (int)pl + 1) != 0) {
-                aether_caps_free(frame_buf, frame_cap); ws->closed = 1; return -1;
+        /* The message cap is checked before a byte of the frame is read or
+         * a buffer grown for it: a frame may declare up to 2^63 bytes, and
+         * fragments added up with no total bound (#3739). */
+        size_t max_msg = ws_max_message(ws);
+        if (ws->msg_len > max_msg || pl > (uint64_t)(max_msg - ws->msg_len))
+            return ws_fail(ws, 1009, "message too big");
+        /* Read the payload straight into the message buffer, growing it as
+         * the bytes arrive rather than at the length the frame declares, so
+         * a peer that declares a large frame and sends little of it holds
+         * memory in proportion to what it has sent. */
+        size_t want = (size_t)pl;
+        size_t done = 0;
+        while (done < want) {
+            size_t step = want - done;
+            if (step > 65536) step = 65536;
+            if (ws_msg_grow(ws, ws->msg_len + done + step + 1) != 0) {
+                ws->closed = 1;
+                return -1;
             }
-            memcpy(ws->msg_buf + ws->msg_len, frame_buf, (size_t)pl);
-            ws->msg_len += (int)pl;
+            char* dst = ws->msg_buf + ws->msg_len + done;
+            if (ws_recv_exact(ws->conn, dst, (int)step) != 0) { ws->closed = 1; return -1; }
+            if (masked)
+                for (size_t i = 0; i < step; i++) dst[i] ^= (char)mask_key[(done + i) & 3];
+            done += step;
         }
-        aether_caps_free(frame_buf, frame_cap);
+        ws->msg_len += want;
 
         if (fin) break;
     }
@@ -5209,6 +5256,7 @@ HttpWsConn* http_ws_connect(const char* url) {
     ws->conn      = conn;
     ws->mask_tx   = 1;   /* we are the client: every frame we send is masked */
     ws->owns_conn = 1;   /* we dialled it, so we close and free it */
+    ws->max_message = HTTP_WS_DEFAULT_MAX_MESSAGE;   /* #3739 */
     return ws;
 }
 
@@ -6658,6 +6706,7 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
                         .conn = conn, .closed = 0,
                         .msg_buf = NULL, .msg_cap = 0,
                         .msg_len = 0, .msg_opcode = 0,
+                        .max_message = server->ws_max_message,
                     };
                     wr->handler(req, &ws_handle, wr->user_data);
                     /* If the handler returned without closing,

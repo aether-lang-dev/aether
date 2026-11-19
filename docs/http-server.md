@@ -762,8 +762,23 @@ wants one (#3118). Inside the handler:
 | `ws_send_text(ws, text)` | emit one text frame; `0` on success, `-1` on transport error. |
 | `ws_send_binary(ws, data)` | emit one binary frame holding the bytes of `data` (a `byte[]`; binary-safe). |
 | `ws_close(ws, code, reason)` | emit a close frame; `1000` = normal, `1001` = going away, `1011` = internal error. |
+| `ws_set_max_message(ws, max_bytes)` | the cap on one message for this handle from the next `ws_recv` on; `""` or why the value was refused. |
 
 Returning from the handler closes with code `1000` automatically.
+
+### Receive limits
+
+A message has a cap, 64 MiB unless
+`http.server_set_ws_max_message(server, max_bytes)` sets another for the
+handles a server upgrades, or `ws_set_max_message` for one handle. Each
+frame's declared length is checked against what is left of the cap before
+any of it is read, and past it the connection closes with `1009` (message
+too big). A frame's bytes go into a buffer that grows as they arrive, so
+a peer that declares a large frame and sends little of it holds memory in
+proportion to what it sent. A control frame over 125 bytes, or a fragmented one,
+closes the connection with `1002` (RFC 6455 5.5). `ws_recv` returns `-1`
+in both cases (#3739). A client handle from `ws_connect` has the same
+64 MiB cap.
 
 ## Server-Sent Events
 

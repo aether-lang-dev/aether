@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <stddef.h>  // size_t
 #include <stdint.h>  // int64_t (HttpRequestHook)
+#include <limits.h>  // INT_MAX (HTTP_WS_MAX_MESSAGE_LIMIT)
 #include <time.h>    // struct tm (http_format_clf_time)
 
 // HTTP Request
@@ -439,6 +440,10 @@ typedef struct HttpServer {
     // setup), so a driver recomputes its cached plan only then
     // (http_server_loop_plan, #3269).
     _Atomic int loop_plan_gen;
+    // The cap on one WebSocket message reassembled by a handle this server
+    // upgrades (#3739): HTTP_WS_DEFAULT_MAX_MESSAGE unless
+    // http_server_set_ws_max_message_raw set another.
+    size_t ws_max_message;
 } HttpServer;
 
 // ============================================================================
@@ -844,7 +849,28 @@ int http_ws_send_binary(HttpWsConn* ws, const void* data, int len);
 //
 // The message data lives in the connection's internal buffer and
 // is valid until the next ws_recv / ws_send / ws_close call.
+//
+// A message past the handle's cap (HTTP_WS_DEFAULT_MAX_MESSAGE unless set)
+// closes the connection with 1009, checked before the frame is read. A
+// control frame over 125 bytes, or a fragmented one, closes it with 1002
+// (RFC 6455 5.5). Both return -1.
 int http_ws_recv(HttpWsConn* ws);
+
+// The cap on one reassembled WebSocket message, by default (#3739). A
+// server applies its own (http_server_set_ws_max_message_raw) to the
+// handles it upgrades, and a handle can be given another with
+// http_ws_set_max_message_raw. The limit is what a message length (an int)
+// can report.
+#define HTTP_WS_DEFAULT_MAX_MESSAGE ((size_t)64 * 1024 * 1024)
+#define HTTP_WS_MAX_MESSAGE_LIMIT   ((size_t)INT_MAX - 1)
+
+// The largest message `ws` reassembles from now on, in bytes. Returns ""
+// or why the value was refused (not positive, or past the limit).
+const char* http_ws_set_max_message_raw(HttpWsConn* ws, int64_t max_bytes);
+
+// The cap every WebSocket this server upgrades starts with. Returns "" or
+// why the value was refused.
+const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_bytes);
 
 // Bounded receive, for a multiplexed reader that cannot park a thread in a
 // blocking recv (a WebDriver-BiDi style demux is the motivating case).
