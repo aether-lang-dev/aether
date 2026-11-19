@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <locale.h>
 #include <time.h>
+#include <sched.h>   /* sched_yield */
 #ifdef _WIN32
 #include <winsock2.h>   /* getsockname; ahead of anything that pulls in windows.h */
 #include <ws2tcpip.h>
@@ -1069,10 +1070,122 @@ TEST(http_proxy_cache_keeps_a_long_ttl) {
     AetherProxyCacheEntry* e = aether_proxy_cache_lookup(cache, "GET", "/long", req);
     int found = e != NULL;
     long long ttl_ms = e ? (long long)(e->expires_at_ms - e->stored_at_ms) : -1;
+    aether_proxy_cache_release(e);
     http_request_free(req);
     aether_proxy_cache_free(cache);
     ASSERT_TRUE(found);
     ASSERT_TRUE(ttl_ms == 30LL * 24 * 3600 * 1000);
+}
+
+/* #3756: a lookup hit is read with the cache lock released, as the proxy's
+ * serve_from_cache reads it, while another worker's store evicts it. The
+ * lookup handed back the bare entry, and the store freed it under the
+ * reader: the body then held whatever the allocator put in its place (in
+ * practice the evicting store's own body, which is the same size) or the
+ * read crashed. Now the hit carries a reference and the entry outlives the
+ * eviction until it is released.
+ *
+ * The cache holds one entry, so every store of /b evicts /a and every store
+ * of /a evicts /b. The /a body is all 'a' and the /b body all 'b', both
+ * 4 KiB; the reader checks each byte of each /a hit, twice, the second pass
+ * after a pause that gives the writer time to evict. */
+enum { CACHE_RACE_BODY = 4096, CACHE_RACE_READS = 4000 };
+
+typedef struct {
+    AetherProxyCache* cache;
+    HttpRequest* req;
+    _Atomic int stop;
+    int bad;       /* hits whose body or headers were not /a's */
+    int hits;
+} CacheRace;
+
+static int cache_race_entry_ok(const AetherProxyCacheEntry* e) {
+    if (e->status_code != 200 || e->body_length != CACHE_RACE_BODY) return 0;
+    for (int i = 0; i < CACHE_RACE_BODY; i++)
+        if (e->body[i] != 'a') return 0;
+    for (int i = 0; i < e->header_count; i++)
+        if (strcmp(e->header_keys[i], "X-Which") == 0 &&
+            strcmp(e->header_values[i], "a") != 0) return 0;
+    return 1;
+}
+
+static void* cache_race_writer(void* arg) {
+    CacheRace* r = (CacheRace*)arg;
+    char* a = (char*)malloc(CACHE_RACE_BODY);
+    char* b = (char*)malloc(CACHE_RACE_BODY);
+    memset(a, 'a', CACHE_RACE_BODY);
+    memset(b, 'b', CACHE_RACE_BODY);
+    while (!atomic_load(&r->stop)) {
+        aether_proxy_cache_store(r->cache, "GET", "/b", r->req, 200,
+                                 "X-Which: b\r\n", b, CACHE_RACE_BODY);
+        aether_proxy_cache_store(r->cache, "GET", "/a", r->req, 200,
+                                 "X-Which: a\r\n", a, CACHE_RACE_BODY);
+    }
+    free(a);
+    free(b);
+    return NULL;
+}
+
+TEST(http_proxy_cache_hit_outlives_an_eviction) {
+    CacheRace r;
+    memset(&r, 0, sizeof r);
+    r.cache = aether_proxy_cache_new(1, 65536, 60, AETHER_PROXY_CACHE_KEY_METHOD_URL);
+    ASSERT_NOT_NULL(r.cache);
+    r.req = http_parse_request("GET /a HTTP/1.1\r\n\r\n");
+    ASSERT_NOT_NULL(r.req);
+    pthread_t writer;
+    ASSERT_EQ(0, pthread_create(&writer, NULL, cache_race_writer, &r));
+    for (int i = 0; i < CACHE_RACE_READS; i++) {
+        AetherProxyCacheEntry* e = aether_proxy_cache_lookup(r.cache, "GET", "/a", r.req);
+        if (!e) continue;
+        r.hits++;
+        int ok = cache_race_entry_ok(e);
+        /* Room for the writer to evict /a and store /b in between. */
+        for (int k = 0; k < 20; k++) sched_yield();
+        ok = ok && cache_race_entry_ok(e);
+        if (!ok) r.bad++;
+        aether_proxy_cache_release(e);
+    }
+    atomic_store(&r.stop, 1);
+    pthread_join(writer, NULL);
+    http_request_free(r.req);
+    aether_proxy_cache_free(r.cache);
+    ASSERT_TRUE(r.hits > 0);
+    ASSERT_EQ(0, r.bad);
+}
+
+/* Every entry the cache counts sits in the bucket chain its lookup walks,
+ * and nothing else does. In method_url_vary mode an entry is bucketed by its
+ * key without the Vary part, but the unlink of an evicted or expired entry
+ * recomputed the bucket from the full key's hash: it missed, left the entry
+ * in its chain and freed it, and the next lookup of that URL walked freed
+ * memory. Two URLs with a Vary response each, in a cache of one entry, so
+ * the second store evicts the first. */
+static int cache_reachable_entries(const AetherProxyCache* c) {
+    int n = 0;
+    for (int i = 0; i < c->bucket_count; i++)
+        for (const AetherProxyCacheEntry* e = c->buckets[i]; e; e = e->bucket_next) n++;
+    return n;
+}
+
+TEST(http_proxy_cache_evicts_a_vary_entry_from_its_bucket) {
+    AetherProxyCache* cache = aether_proxy_cache_new(1, 65536, 60,
+                                                     AETHER_PROXY_CACHE_KEY_METHOD_URL_VARY);
+    ASSERT_NOT_NULL(cache);
+    HttpRequest* req = http_parse_request("GET /v HTTP/1.1\r\nAccept: text/html\r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    aether_proxy_cache_store(cache, "GET", "/v1", req, 200, "Vary: Accept\r\n", "one", 3);
+    aether_proxy_cache_store(cache, "GET", "/v2", req, 200, "Vary: Accept\r\n", "two", 3);
+    int counted = cache->entry_count;
+    int reachable = cache_reachable_entries(cache);
+    AetherProxyCacheEntry* e = aether_proxy_cache_lookup(cache, "GET", "/v2", req);
+    int hit = e != NULL && e->body_length == 3 && memcmp(e->body, "two", 3) == 0;
+    aether_proxy_cache_release(e);
+    http_request_free(req);
+    aether_proxy_cache_free(cache);
+    ASSERT_EQ(1, counted);
+    ASSERT_EQ(1, reachable);
+    ASSERT_TRUE(hit);
 }
 
 #if !defined(_WIN32)

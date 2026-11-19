@@ -354,7 +354,9 @@ static void proxy_set_body(HttpServerResponse* res, const HttpRequest* req,
     }
 }
 
-/* Apply a cache hit's snapshot to the inbound HttpServerResponse. */
+/* Apply a cache hit's snapshot to the inbound HttpServerResponse. The caller
+ * holds a reference to `e` (aether_proxy_cache_lookup's), which is what lets
+ * this read it without the cache lock. */
 static void serve_from_cache(HttpServerResponse* res, const HttpRequest* req,
                              AetherProxyCacheEntry* e) {
     http_response_set_status(res, e->status_code);
@@ -573,7 +575,10 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
         free(target);
         if (hit) {
             atomic_fetch_add(&opts->pool->metric_cache_hits, 1);
+            /* The lookup's reference keeps the entry alive while it is
+             * copied out, whatever another worker's store evicts (#3756). */
             serve_from_cache(res, req, hit);
+            aether_proxy_cache_release(hit);
             return 0;
         }
         atomic_fetch_add(&opts->pool->metric_cache_misses, 1);

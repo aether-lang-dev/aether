@@ -197,6 +197,13 @@ TTL resolution: response `Cache-Control: max-age` (clamped to 1
 hour for v1 conservatism), else `default_ttl_sec`. `s-maxage` and
 `Expires` are not consulted in v1.
 
+A hit is copied into the response after the cache lock is released,
+so a store on another worker can evict the entry meanwhile. Each entry
+therefore carries a reference count: the cache holds one, the request
+serving a hit holds another until its copy is done, and the entry is
+freed when the last one is dropped. An eviction never frees an entry a
+request is still reading (#3756).
+
 ### Key strategies
 
 | Strategy | Key | Use when |

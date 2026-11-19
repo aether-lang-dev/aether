@@ -26,6 +26,15 @@
  *
  * Single mutex around the whole cache. Sharded locking is the v2
  * follow-up if write contention shows in profiling.
+ *
+ * An entry carries a reference count (#3756). The cache holds one while
+ * the entry is in the table; a lookup hit takes another for the request
+ * that serves it, which reads the entry with the lock released and drops
+ * its reference with aether_proxy_cache_release. Taking an entry out of the
+ * table (eviction, expiry, replacement) drops the cache's reference, and
+ * whichever reference goes last frees the entry. Lookup used to hand back
+ * the bare pointer, and a store on another worker could evict and free the
+ * entry while it was being served.
  */
 
 #include "aether_proxy_internal.h"
@@ -97,6 +106,15 @@ static void entry_free_one(AetherProxyCacheEntry* e) {
     aether_caps_free(e, sizeof(*e));
 }
 
+/* Drop one reference to `e`; the last one frees it. Needs no lock: an entry
+ * whose count is still above zero is not freed by anyone else, and the one
+ * that reaches zero is out of the table, where nothing else can find it. */
+void aether_proxy_cache_release(AetherProxyCacheEntry* e) {
+    if (!e) return;
+    if (atomic_fetch_sub_explicit(&e->refs, 1, memory_order_acq_rel) == 1)
+        entry_free_one(e);
+}
+
 void aether_proxy_cache_free(AetherProxyCache* cache) {
     if (!cache) return;
     pthread_mutex_lock(&cache->lock);
@@ -104,7 +122,7 @@ void aether_proxy_cache_free(AetherProxyCache* cache) {
         AetherProxyCacheEntry* e = cache->buckets[i];
         while (e) {
             AetherProxyCacheEntry* nx = e->bucket_next;
-            entry_free_one(e);
+            aether_proxy_cache_release(e);   /* the cache's reference */
             e = nx;
         }
     }
@@ -211,17 +229,20 @@ static void lru_promote(AetherProxyCache* c, AetherProxyCacheEntry* e) {
     if (!c->lru_tail) c->lru_tail = e;
 }
 
+/* Take `e` out of the table and drop the cache's reference to it (caller
+ * holds cache->lock). A request still serving it keeps it alive. */
 static void unlink_entry(AetherProxyCache* c, AetherProxyCacheEntry* e) {
     /* Remove from LRU list. */
     if (e->lru_prev) e->lru_prev->lru_next = e->lru_next;
     if (e->lru_next) e->lru_next->lru_prev = e->lru_prev;
     if (c->lru_head == e) c->lru_head = e->lru_next;
     if (c->lru_tail == e) c->lru_tail = e->lru_prev;
-    /* Remove from hash bucket. */
-    int b = (int)(e->key_hash & (uint64_t)(c->bucket_count - 1));
-    AetherProxyCacheEntry** pp = &c->buckets[b];
+    /* Remove from the bucket it was put in. */
+    AetherProxyCacheEntry** pp = &c->buckets[e->bucket];
     while (*pp && *pp != e) pp = &(*pp)->bucket_next;
     if (*pp) *pp = e->bucket_next;
+    c->entry_count--;
+    aether_proxy_cache_release(e);
 }
 
 AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
@@ -288,13 +309,14 @@ AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
         if (matches) {
             if (e->expires_at_ms <= now) {
                 unlink_entry(cache, e);
-                cache->entry_count--;
-                entry_free_one(e);
                 free(base_key);
                 pthread_mutex_unlock(&cache->lock);
                 return NULL;
             }
             lru_promote(cache, e);
+            /* The caller's reference, taken under the lock so no unlink can
+             * drop the cache's in between. */
+            atomic_fetch_add_explicit(&e->refs, 1, memory_order_relaxed);
             free(base_key);
             pthread_mutex_unlock(&cache->lock);
             return e;
@@ -498,27 +520,15 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
     while (*pp) {
         if ((*pp)->key_hash == full_hash &&
             strcmp((*pp)->key_repr, full_key) == 0) {
-            AetherProxyCacheEntry* old = *pp;
-            *pp = old->bucket_next;
-            /* Unlink from LRU. */
-            if (old->lru_prev) old->lru_prev->lru_next = old->lru_next;
-            if (old->lru_next) old->lru_next->lru_prev = old->lru_prev;
-            if (cache->lru_head == old) cache->lru_head = old->lru_next;
-            if (cache->lru_tail == old) cache->lru_tail = old->lru_prev;
-            cache->entry_count--;
-            entry_free_one(old);
+            unlink_entry(cache, *pp);
             break;
         }
         pp = &(*pp)->bucket_next;
     }
 
     /* Evict LRU tail if at capacity. */
-    while (cache->entry_count >= cache->max_entries && cache->lru_tail) {
-        AetherProxyCacheEntry* victim = cache->lru_tail;
-        unlink_entry(cache, victim);
-        cache->entry_count--;
-        entry_free_one(victim);
-    }
+    while (cache->entry_count >= cache->max_entries && cache->lru_tail)
+        unlink_entry(cache, cache->lru_tail);
 
     /* Allocate the new entry. */
     AetherProxyCacheEntry* e = (AetherProxyCacheEntry*)aether_caps_calloc(1, sizeof(*e));
@@ -599,7 +609,9 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
         }
     }
 
-    /* Insert into bucket + LRU head. */
+    /* Insert into bucket + LRU head, with the cache's reference. */
+    atomic_init(&e->refs, 1);
+    e->bucket = b;
     e->bucket_next = cache->buckets[b];
     cache->buckets[b] = e;
     e->lru_prev = NULL;

@@ -19,6 +19,10 @@
  *   AetherProxyCache::lock     — single mutex around the hash + LRU
  *                                list. Sharded locking is a v2
  *                                optimisation when contention shows.
+ *   AetherProxyCacheEntry refs: atomic count of the cache's reference
+ *                                and each serving request's, so an
+ *                                entry is read without the lock and
+ *                                freed by whoever drops the last one.
  */
 #ifndef AETHER_PROXY_INTERNAL_H
 #define AETHER_PROXY_INTERNAL_H
@@ -183,6 +187,18 @@ typedef struct AetherProxyCacheEntry {
     struct AetherProxyCacheEntry *lru_prev, *lru_next;
     /* Hash bucket chain. */
     struct AetherProxyCacheEntry *bucket_next;
+    /* The bucket the entry sits in. It is chosen by the key without its
+     * Vary part, so it cannot be recomputed from key_hash, which covers the
+     * whole key: an unlink that did so missed the bucket, left the entry in
+     * its chain and freed it. */
+    int bucket;
+
+    /* References held on the entry: one by the cache while the entry is in
+     * the table, and one by each request serving it, taken by
+     * aether_proxy_cache_lookup and dropped by aether_proxy_cache_release.
+     * The last one dropped frees it, so a store that evicts the entry while
+     * it is served leaves it whole until the serve is done (#3756). */
+    _Atomic int refs;
 
     uint64_t key_hash;
     char*    key_repr;                /* canonical key string for collision check */
@@ -284,14 +300,17 @@ void aether_proxy_breaker_record(AetherProxyPool* pool,
                                  AetherUpstream* u,
                                  int ok);
 
-/* Cache — defined in aether_proxy_cache.c. Lookup returns the
- * stored entry on hit (caller must NOT free; the cache owns it),
- * or NULL on miss. The body+headers are written back into `res`
- * when populating from a cache hit. */
+/* Cache, defined in aether_proxy_cache.c. Lookup returns the stored entry on
+ * a hit with a reference the caller holds, or NULL on a miss. The caller
+ * reads the entry without the cache lock, since another request's store may
+ * evict it meanwhile, and hands the reference back with
+ * aether_proxy_cache_release when it is done (#3756). It never frees the
+ * entry itself. */
 AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
                                                  const char* method,
                                                  const char* url,
                                                  HttpRequest* req);
+void aether_proxy_cache_release(AetherProxyCacheEntry* e);
 void aether_proxy_cache_store(AetherProxyCache* cache,
                               const char* method,
                               const char* url,
