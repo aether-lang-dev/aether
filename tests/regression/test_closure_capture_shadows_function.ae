@@ -12,9 +12,13 @@
 // `reorderable(cb: fn ...)` did beside a program's own `cb`), and where the
 // adapter was never declared the C did not compile.
 //
-// Each shape below was wrong. The top-level `cb` must never run.
+// Each shape below was wrong. The top-level `cb` must never run. Every
+// closure handed in captures a counted string, so its env is on the heap and
+// a sanitizer run sees a capture's reference dropped or given back twice.
 // tests/integration/closure_capture_shadows_consumer_fn covers the parameter
 // of an imported module's function against the program's function.
+
+import std.string
 
 extern exit(code: int)
 
@@ -51,7 +55,8 @@ param_as_argument(cb: fn, x: int) {
 
 // A captured local (not a parameter) passed on as an argument.
 local_as_argument(x: int) {
-    cb = | a: int, b: int | { println("ok local_as_argument ${a} ${b}") }
+    s = string.concat("l", "#")
+    cb = | a: int, b: int | { println("ok local_as_argument ${s} ${a} ${b}") }
     run_it(| n: int | { call2(cb, n, x) })
 }
 
@@ -70,9 +75,14 @@ assigned_in_closure(cb: fn, x: int) {
         })
 }
 
-// Boxed into a `ptr`.
+// Boxed into a `ptr`. The box holds a reference of its own to the closure,
+// which the program gives back.
 boxed_in_closure(cb: fn, x: int) {
-    run_it(| n: int | { call_boxed(box_closure(cb), n, x) })
+    run_it(| n: int | {
+            p = box_closure(cb)
+            call_boxed(p, n, x)
+            release_closure(p)
+        })
 }
 
 // Returned from a closure (the C did not compile).
@@ -106,16 +116,17 @@ callee_in_closure(cb: fn, x: int) {
 }
 
 main() {
-    param_as_argument(| a: int, b: int | { println("ok param_as_argument ${a} ${b}") }, 3)
+    w = string.concat("w", "#")
+    param_as_argument(| a: int, b: int | { println("ok param_as_argument ${w} ${a} ${b}") }, 3)
     local_as_argument(3)
-    nested_closure(| a: int, b: int | { println("ok nested_closure ${a} ${b}") }, 3)
-    assigned_in_closure(| a: int, b: int | { println("ok assigned_in_closure ${a} ${b}") }, 3)
-    boxed_in_closure(| a: int, b: int | { println("ok boxed_in_closure ${a} ${b}") }, 3)
-    g = returned_from_closure(| a: int, b: int | { println("ok returned_from_closure ${a} ${b}") })
+    nested_closure(| a: int, b: int | { println("ok nested_closure ${w} ${a} ${b}") }, 3)
+    assigned_in_closure(| a: int, b: int | { println("ok assigned_in_closure ${w} ${a} ${b}") }, 3)
+    boxed_in_closure(| a: int, b: int | { println("ok boxed_in_closure ${w} ${a} ${b}") }, 3)
+    g = returned_from_closure(| a: int, b: int | { println("ok returned_from_closure ${w} ${a} ${b}") })
     g(1, 3)
-    stored_in_field(| a: int, b: int | { println("ok stored_in_field ${a} ${b}") }, 3)
-    trailing_callback(| a: int, b: int | { println("ok trailing_callback ${a} ${b}") }, 3)
+    stored_in_field(| a: int, b: int | { println("ok stored_in_field ${w} ${a} ${b}") }, 3)
+    trailing_callback(| a: int, b: int | { println("ok trailing_callback ${w} ${a} ${b}") }, 3)
     int_capture(41)
-    callee_in_closure(| a: int, b: int | { println("ok callee_in_closure ${a} ${b}") }, 3)
+    callee_in_closure(| a: int, b: int | { println("ok callee_in_closure ${w} ${a} ${b}") }, 3)
     println("PASS: a closure's capture shadows a top-level function of its name")
 }

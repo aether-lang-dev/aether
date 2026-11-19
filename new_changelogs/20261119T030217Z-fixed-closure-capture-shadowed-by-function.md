@@ -11,6 +11,8 @@
   returned, or stored in a `fn` field. The closure body's prologue declared
   each read-only capture but never registered it as a binding of the body,
   so codegen's "is this a top-level function?" checks, which defer to a
-  local binding first (#1657), found none. They are registered now.
+  local binding first (#1657), found none. They are registered now, and a
+  capture named like a function is retained and released as one of any
+  other name is: the C is the same.
   `tests/regression/test_closure_capture_shadows_function.ae`,
   `tests/integration/closure_capture_shadows_consumer_fn`.
