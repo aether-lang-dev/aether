@@ -7,7 +7,9 @@
   against `SHA256SUMS` and GitHub's digest before unpacking it, verify the
   signature when `cosign` is installed and the provenance when `gh` is
   installed and logged in, refuse on any failure, and say which checks they
-  could not make. `SHA256SUMS` is fetched from the release URL, so a spent
+  could not make. The signature and the provenance must both name the
+  release workflow run from main or from the release's own tag, and no
+  other ref. `SHA256SUMS` is fetched from the release URL, so a spent
   API rate limit no longer blocks an install of a signed release. Releases
   from before 0.926.0, the first signed one, are checked by GitHub's
   digest, as before; one at or above it without `SHA256SUMS`, or without

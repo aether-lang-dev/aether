@@ -173,6 +173,12 @@ gh_http() {
     return $_ghh_rc
 }
 
+# regex_literal TEXT : TEXT with each character an extended regular
+# expression reads as syntax escaped, for an identity pattern.
+regex_literal() {
+    printf '%s' "$1" | sed 's/[]\\.*^$+?(){}|[]/\\&/g'
+}
+
 # release_signed TAG : 0 when TAG (vX.Y.Z, anything after Z ignored) is at or
 # above SIGNED_SINCE, or is not a version at all; 1 when it is older.
 release_signed() {
@@ -352,10 +358,18 @@ gh_release_download() {
         say "  verified $_ghd_a against SHA256SUMS"
     fi
 
-    # The signature of SHA256SUMS: keyless, by this repository's release
-    # workflow (run from main, or from the tag pushed by hand), under GitHub's
-    # token issuer. cosign 2 reads the sigstore bundle cosign 3 writes only
-    # with --new-bundle-format, so a refusal is asked again with it.
+    # The identity both the signature and the provenance must carry: this
+    # repository's release workflow, run from main (a release the tag job
+    # made) or from this tag (a tag pushed by hand), and no other ref. The
+    # repository and the tag are literal text in the pattern.
+    _ghd_rr="$(regex_literal "$_ghd_r")"
+    _ghd_rt="$(regex_literal "$_ghd_t")"
+    _ghd_idre="^https://github\\.com/$_ghd_rr/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$_ghd_rt)\$"
+
+    # The signature of SHA256SUMS: keyless, with that identity, under
+    # GitHub's token issuer. cosign 2 reads the sigstore bundle cosign 3
+    # writes only with --new-bundle-format, so a refusal is asked again with
+    # it.
     if have cosign; then
         _ghd_sig="$_ghd_d.sigstore.json"
         if ! gh_fetch "$_ghd_r" "$_ghd_t" SHA256SUMS.sigstore.json "${_ghd_g%% *}" "$_ghd_sig"; then
@@ -363,14 +377,11 @@ gh_release_download() {
             say "  $_ghd_a cannot be verified: SHA256SUMS.sigstore.json could not be fetched for cosign."
             return 2
         fi
-        # The repository and the tag as literal text in the identity pattern.
-        _ghd_rr="$(printf '%s' "$_ghd_r" | sed 's/[.]/\\./g')"
-        _ghd_rt="$(printf '%s' "$_ghd_t" | sed 's/[.]/\\./g')"
         _ghd_ok=0
         for _ghd_fmt in "" --new-bundle-format; do
             # shellcheck disable=SC2086
             if cosign verify-blob $_ghd_fmt --bundle "$_ghd_sig" \
-                --certificate-identity-regexp "^https://github\\.com/$_ghd_rr/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$_ghd_rt)\$" \
+                --certificate-identity-regexp "$_ghd_idre" \
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com \
                 "$_ghd_sums" >/dev/null 2>&1; then
                 _ghd_ok=1
@@ -389,10 +400,13 @@ gh_release_download() {
     fi
     rm -f "$_ghd_sums"
 
-    # The archive's build provenance, with an authenticated gh.
+    # The archive's build provenance, with an authenticated gh: the same
+    # identity, anchored. --signer-workflow matches a prefix and so takes the
+    # release workflow run from any branch or tag.
     if have gh && gh auth status >/dev/null 2>&1; then
         if ! gh attestation verify "$_ghd_d" --repo "$_ghd_r" \
-            --signer-workflow "$_ghd_r/.github/workflows/release.yml" >/dev/null 2>&1; then
+            --cert-identity-regex "$_ghd_idre" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1; then
             rm -f "$_ghd_d"
             say "  $_ghd_a has no build provenance from $_ghd_r's release workflow that 'gh attestation verify' accepts"
             return 2

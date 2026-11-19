@@ -142,6 +142,23 @@ for d in $PATH; do
 done
 IFS="$old_ifs"
 
+# The identity cosign and gh must both be given for v9.9.9, anchored at both
+# ends: the release workflow run from main or from this tag, and no other
+# ref (gh's --signer-workflow, a prefix match, took any).
+IDENTITY='^https://github\.com/aether-lang-dev/aether/\.github/workflows/release\.yml@refs/(heads/main|tags/v9\.9\.9)$'
+# asked_identity WHO: cosign and gh were each given exactly IDENTITY (in
+# quotes on Windows, where the fake tools are batch files), and gh was not
+# given --signer-workflow.
+asked_identity() {
+    for flag in "cosign verify-blob .*--certificate-identity-regexp" "gh attestation verify .*--cert-identity-regex"; do
+        line="$(grep "^$flag " "$TMP/tools.log" | head -1)"
+        arg="$(printf '%s\n' "$line" | sed "s/^$flag \"\{0,1\}\([^ \"]*\).*/\1/")"
+        [ "$arg" = "$IDENTITY" ] || fail "$1 gave ${flag%% *} the identity '$arg', not '$IDENTITY'" "$TMP/tools.log"
+    done
+    grep -q -- "--signer-workflow" "$TMP/tools.log" && fail "$1 asked gh by --signer-workflow, a prefix match" "$TMP/tools.log"
+    return 0
+}
+
 # tools none | tools COSIGN_RC GH_AUTH_RC GH_RC
 tools() {
     : > "$TMP/tools.log"
@@ -218,11 +235,13 @@ grep -q "signature of SHA256SUMS verified with cosign" "$TMP/signed.log" \
 grep -q "provenance verified with gh attestation verify" "$TMP/signed.log" \
     || fail "ae did not say the provenance verified" "$TMP/signed.log"
 # cosign was asked about this repository's release workflow, under GitHub's
-# token issuer, with the bundle, and gh about the archive.
-grep -q "^cosign verify-blob .*--bundle .*SHA256SUMS.sigstore.json.*--certificate-identity https://github.com/aether-lang-dev/aether/.github/workflows/release.yml@refs/.*--certificate-oidc-issuer https://token.actions.githubusercontent.com" \
+# token issuer, with the bundle, and gh about the archive, both with the
+# anchored identity (asked_identity, below).
+grep -q "^cosign verify-blob .*--bundle .*SHA256SUMS.sigstore.json.*--certificate-identity-regexp .*--certificate-oidc-issuer https://token.actions.githubusercontent.com" \
     "$TMP/tools.log" || fail "cosign was not asked the right question" "$TMP/tools.log"
-grep -q "^gh attestation verify .*$ASSET.* --repo aether-lang-dev/aether --signer-workflow aether-lang-dev/aether/.github/workflows/release.yml" \
+grep -q "^gh attestation verify .*$ASSET.* --repo aether-lang-dev/aether --cert-identity-regex .*--cert-oidc-issuer https://token.actions.githubusercontent.com" \
     "$TMP/tools.log" || fail "gh was not asked the right question" "$TMP/tools.log"
+asked_identity ae
 
 tools 1 0 0
 expect_refused badsig "an archive whose SHA256SUMS signature cosign refuses" "does not verify with cosign"
@@ -310,8 +329,11 @@ if [ "$WIN" = 0 ] && [ -f "$ROOT/get.sh" ]; then
         || fail "get.sh did not say the signature verified" "$TMP/get_signed.log"
     grep -q "provenance verified with gh attestation verify" "$TMP/get_signed.log" \
         || fail "get.sh did not say the provenance verified" "$TMP/get_signed.log"
-    grep -q "^cosign verify-blob .*--bundle .*--certificate-identity-regexp .*aether-lang-dev/.*release.*--certificate-oidc-issuer https://token.actions.githubusercontent.com" \
+    grep -q "^cosign verify-blob .*--bundle .*--certificate-identity-regexp .*--certificate-oidc-issuer https://token.actions.githubusercontent.com" \
         "$TMP/tools.log" || fail "get.sh did not ask cosign the right question" "$TMP/tools.log"
+    grep -q "^gh attestation verify .* --repo aether-lang-dev/aether --cert-identity-regex .*--cert-oidc-issuer https://token.actions.githubusercontent.com" \
+        "$TMP/tools.log" || fail "get.sh did not ask gh the right question" "$TMP/tools.log"
+    asked_identity get.sh
 
     tools 1 0 0
     get_refused badsig "an archive whose SHA256SUMS signature cosign refuses" "does not verify with cosign"

@@ -40,6 +40,13 @@ archive before anything in it is unpacked:
    `gh attestation verify` must accept the archive as built by
    `aether-lang-dev/aether/.github/workflows/release.yml`.
 
+The signature and the provenance are both checked against one identity,
+anchored at both ends: the release workflow run from `refs/heads/main` or from
+the release's own tag, and no other ref
+(`^https://github\.com/aether-lang-dev/aether/\.github/workflows/release\.yml@refs/(heads/main|tags/vX\.Y\.Z)$`).
+`gh attestation verify --signer-workflow` is not used: it matches a prefix, and
+so takes the workflow run from any branch or tag.
+
 A check that fails refuses the archive, and nothing is installed (`get.sh` does
 not fall back to a source build after a refusal). A tool that is missing is
 said, not passed over in silence:
@@ -81,18 +88,22 @@ tag=v0.930.0
 gh release download "$tag" --repo aether-lang-dev/aether \
     --pattern 'aether-*-linux-x86_64.tar.gz' --pattern 'SHA256SUMS*'
 
+# The identity both must carry: the release workflow, from main or this tag
+id="^https://github\\.com/aether-lang-dev/aether/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$(printf '%s' "$tag" | sed 's/[.]/\\./g'))\$"
+
 # The checksums
 sha256sum -c --ignore-missing SHA256SUMS
 
 # Their signature
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-    --certificate-identity-regexp '^https://github\.com/aether-lang-dev/aether/\.github/workflows/release\.yml@refs/(heads/main|tags/v[0-9.]+)$' \
+    --certificate-identity-regexp "$id" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
     SHA256SUMS
 
 # The archive's build provenance
 gh attestation verify aether-*-linux-x86_64.tar.gz --repo aether-lang-dev/aether \
-    --signer-workflow aether-lang-dev/aether/.github/workflows/release.yml
+    --cert-identity-regex "$id" \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 Or, with `gh` alone: `sh scripts/verify-release-asset.sh aether-lang-dev/aether

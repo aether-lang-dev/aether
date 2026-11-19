@@ -7,7 +7,8 @@
 # release listing from files this test puts in a directory, and logs how it
 # was called. Pinned:
 #   1. a signed release whose SHA256SUMS lists the asset verifies, cosign
-#      and gh are asked, and it says so;
+#      and gh are asked, both with the same identity anchored at both ends
+#      (the release workflow, run from main or from the tag), and it says so;
 #   2. a release at or above the floor stripped of SHA256SUMS is refused;
 #   3. one stripped of the bundle alone is refused when cosign is installed;
 #   4. a release below the floor, with no SHA256SUMS, passes on its digest.
@@ -90,6 +91,15 @@ verify signed "$ABOVE" "$TMP/bin" || fail "a signed release was refused" "$TMP/s
 grep -q "matches its line in SHA256SUMS" "$TMP/signed.log" || fail "SHA256SUMS was not checked" "$TMP/signed.log"
 grep -q "^cosign verify-blob " "$TMP/tools.log" || fail "cosign was not asked" "$TMP/tools.log"
 grep -q "^gh attestation verify " "$TMP/tools.log" || fail "gh attestation verify was not asked" "$TMP/tools.log"
+# Both with the identity anchored at both ends: the release workflow run
+# from main or from this tag, and no other ref (--signer-workflow, a prefix
+# match, took any).
+IDENTITY="^https://github\\.com/aether-lang-dev/aether/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$(printf '%s' "$ABOVE" | sed 's/[.]/\\./g'))\$"
+for flag in "cosign verify-blob .*--certificate-identity-regexp" "gh attestation verify .*--cert-identity-regex"; do
+    arg="$(grep "^$flag " "$TMP/tools.log" | head -1 | sed "s/^$flag \([^ ]*\).*/\1/")"
+    [ "$arg" = "$IDENTITY" ] || fail "${flag%% *} was given the identity '$arg', not '$IDENTITY'" "$TMP/tools.log"
+done
+grep -q -- "--signer-workflow" "$TMP/tools.log" && fail "gh was asked by --signer-workflow, a prefix match" "$TMP/tools.log"
 
 rm -f "$TMP/rel/SHA256SUMS" "$TMP/rel/SHA256SUMS.sigstore.json"
 verify stripped "$ABOVE" "$TMP/bin" && fail "a release at or above the floor without SHA256SUMS passed" "$TMP/stripped.log"

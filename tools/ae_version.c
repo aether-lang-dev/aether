@@ -482,32 +482,58 @@ static int sums_lookup(const char* sums_path, const char* file, char hex[65]) {
     return found;
 }
 
+/* `text` with each character an extended regular expression reads as syntax
+ * escaped, into out[outsz]. 0 when it does not fit. */
+static int regex_literal(const char* text, char* out, size_t outsz) {
+    size_t w = 0;
+    for (const char* p = text; *p; p++) {
+        if (strchr("\\.*^$+?(){}|[]", *p)) {
+            if (w + 1 >= outsz) return 0;
+            out[w++] = '\\';
+        }
+        if (w + 1 >= outsz) return 0;
+        out[w++] = *p;
+    }
+    out[w] = '\0';
+    return 1;
+}
+
+/* The identity, as an anchored pattern, that the signature of SHA256SUMS
+ * and each asset's provenance must carry: this repository's release
+ * workflow, run from main (a release the tag job made) or from `tag` (a tag
+ * pushed by hand), and no other ref. The same as get.sh's. 0 when it does
+ * not fit. */
+static int release_identity_regex(const char* tag, char* out, size_t outsz) {
+    char repo[160], rtag[160];
+    if (!regex_literal(AE_GITHUB_REPO, repo, sizeof(repo)) || !regex_literal(tag, rtag, sizeof(rtag)))
+        return 0;
+    int n = snprintf(out, outsz,
+                     "^https://github\\.com/%s/\\.github/workflows/release\\.yml@refs/(heads/main|tags/%s)$",
+                     repo, rtag);
+    return n > 0 && (size_t)n < outsz;
+}
+
 /* Run `cmd` with its output hidden: 1 when it exited 0. */
 static int verify_tool_ok(const char* cmd) {
     return run_cmd_quiet(cmd) == 0;
 }
 
 /* Verify the keyless signature of SHA256SUMS with cosign: the certificate
- * must name this repository's release workflow, run from main (a release the
- * tag job made) or from the tag itself (a tag pushed by hand), and GitHub's
+ * must carry the release identity (release_identity_regex) under GitHub's
  * token issuer. 1 verified, 0 refused. cosign 3 writes the sigstore bundle
  * format, which cosign 2 reads only with --new-bundle-format, so a refusal
  * is asked again with it. */
 static int cosign_verifies(const char* cosign, const char* tag, const char* sums,
                            const char* sig) {
-    char tag_ref[300];
-    snprintf(tag_ref, sizeof(tag_ref), "refs/tags/%s", tag);
-    const char* refs[2] = { "refs/heads/main", tag_ref };
+    char idre[512];
+    if (!release_identity_regex(tag, idre, sizeof(idre))) return 0;
     for (int fmt = 0; fmt < 2; fmt++) {
-        for (int r = 0; r < 2; r++) {
-            char cmd[4096];
-            snprintf(cmd, sizeof(cmd),
-                     "\"%s\" verify-blob%s --bundle \"%s\""
-                     " --certificate-identity https://github.com/%s/.github/workflows/release.yml@%s"
-                     " --certificate-oidc-issuer https://token.actions.githubusercontent.com \"%s\"",
-                     cosign, fmt ? " --new-bundle-format" : "", sig, AE_GITHUB_REPO, refs[r], sums);
-            if (verify_tool_ok(cmd)) return 1;
-        }
+        char cmd[4096];
+        snprintf(cmd, sizeof(cmd),
+                 "\"%s\" verify-blob%s --bundle \"%s\" --certificate-identity-regexp %s"
+                 " --certificate-oidc-issuer https://token.actions.githubusercontent.com \"%s\"",
+                 cosign, fmt ? " --new-bundle-format" : "", sig, idre, sums);
+        if (verify_tool_ok(cmd)) return 1;
     }
     return 0;
 }
@@ -647,12 +673,19 @@ static int gh_verify_release_asset(const char* slug, const char* tag, const char
         gh_ready = verify_tool_ok(cmd);
     }
     if (gh_ready) {
+        /* The identity the signature carries, anchored: --signer-workflow
+         * matches a prefix, and so takes the release workflow run from any
+         * branch or tag. */
+        char idre[512];
         char cmd[4096];
-        snprintf(cmd, sizeof(cmd),
-                 "\"%s\" attestation verify \"%s\" --repo %s --signer-workflow "
-                 "%s/.github/workflows/release.yml",
-                 gh, path, AE_GITHUB_REPO, AE_GITHUB_REPO);
-        int ok = verify_tool_ok(cmd);
+        int ok = release_identity_regex(tag, idre, sizeof(idre));
+        if (ok) {
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" attestation verify \"%s\" --repo %s --cert-identity-regex %s"
+                     " --cert-oidc-issuer https://token.actions.githubusercontent.com",
+                     gh, path, AE_GITHUB_REPO, idre);
+            ok = verify_tool_ok(cmd);
+        }
         free(gh);
         if (!ok) {
             snprintf(why, whysz, "%s has no build provenance from %s's release workflow that "

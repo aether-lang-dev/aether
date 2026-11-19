@@ -99,13 +99,20 @@ want="$(awk -v f="$name" 'length($0) == 66 + length(f) && substr($0, 67) == f { 
 [ "$want" = "$got" ] || die "$name does not match its sha256 in SHA256SUMS (expected $want, got $got)"
 say "$name matches its line in SHA256SUMS"
 
+# The identity the signature and the provenance must both carry: REPO's
+# release workflow, run from main (a release the tag job made) or from TAG
+# (a tag pushed by hand), and no other ref. The repository and the tag are
+# literal text in the pattern. The same as get.sh's and ae's.
+regex_literal() {
+    printf '%s' "$1" | sed 's/[]\\.*^$+?(){}|[]/\\&/g'
+}
+idre="^https://github\\.com/$(regex_literal "$repo")/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$(regex_literal "$tag"))\$"
+
 if have cosign; then
     [ -s "$work/SHA256SUMS.sigstore.json" ] ||
         die "the $tag release has no SHA256SUMS.sigstore.json for cosign to check"
-    rr="$(printf '%s' "$repo" | sed 's/[.]/\\./g')"
-    rt="$(printf '%s' "$tag" | sed 's/[.]/\\./g')"
     cosign verify-blob --bundle "$work/SHA256SUMS.sigstore.json" \
-        --certificate-identity-regexp "^https://github\\.com/$rr/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$rt)\$" \
+        --certificate-identity-regexp "$idre" \
         --certificate-oidc-issuer https://token.actions.githubusercontent.com \
         "$work/SHA256SUMS" || die "the signature of SHA256SUMS of $tag does not verify"
     say "the signature of SHA256SUMS verified with cosign"
@@ -113,7 +120,9 @@ else
     say "the signature of SHA256SUMS was not checked: cosign is not installed"
 fi
 
-gh attestation verify "$file" --repo "$repo" \
-    --signer-workflow "$repo/.github/workflows/release.yml" >/dev/null ||
+# Anchored: --signer-workflow matches a prefix, and so takes the release
+# workflow run from any branch or tag.
+gh attestation verify "$file" --repo "$repo" --cert-identity-regex "$idre" \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com >/dev/null ||
     die "$name has no build provenance from $repo's release workflow that gh accepts"
 say "$name's build provenance verified with gh attestation verify"
