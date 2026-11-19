@@ -543,6 +543,11 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
      * with 504 (#3238). A client that stops short is refused rather than
      * having part of its body forwarded as if it were all of it. */
     if (req->stream_conn && !req->body) {
+        /* The proxy's own cap, checked above, is the limit on what it buffers
+         * (opts_set_body_cap), as on the event-loop path; the server's
+         * max_body (#3740) is the default for handlers, and refused a body a
+         * proxy configured past 64 MiB was meant to forward. */
+        if (opts->max_body_bytes > 0) req->body_max = (int64_t)opts->max_body_bytes;
         http_request_body(req);
         if (!http_request_body_complete(req)) {
             http_response_set_status(res, 400);
