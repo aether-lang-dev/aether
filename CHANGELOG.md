@@ -14,6 +14,89 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.925.0]
+
+### Added
+
+- **`audit.denied_total()`: a denial count that does not roll off.** The
+  audit ring keeps the latest 256 checks, allowed ones included, so
+  `audit.denied_count()` read 0 once 256 allowed checks followed a denial.
+  `denied_total()` (a `long`) counts every denial the in-process sandbox has
+  recorded since the process started, on any thread (the ring is
+  process-wide, and so is the total); `clear()` does not reset it. Take it
+  before and after a piece of work to count that work's denials.
+  `std/audit/test_audit.ae`.
+
+- **`sandbox.enter(g)` / `sandbox.leave()`: enforce's two halves,
+  documented and exported.** A level that is not one block (a host's entry
+  helper that puts a guest's grants in force and takes them off later) was
+  reachable only through the undocumented `sandbox_push` / `sandbox_pop`
+  builtins. `enter` lends the list (no copy, unlike `enforce`: a grant added
+  later applies, and the list must outlive the `leave`), nests by
+  intersection with `enforce` blocks and other `enter`s, counts toward the
+  64 levels a thread holds (the 65th panics), and `leave` with nothing in
+  force is a no-op; `leave` takes the innermost level whoever pushed it, so
+  the caller pairs them (`defer sandbox.leave()`).
+  `std/sandbox/test_sandbox_enter.ae` checks each of those.
+
+### Fixed
+
+- **A closure's capture shadows a top-level function of the same name, as
+  a parameter or local does outside a closure.** A closure that captured
+  its enclosing function's `cb` and passed it on as a value
+  (`run_it(|n| { call2(cb, n, x) })`) passed the program's top-level `cb`
+  instead, with the caller's closure and its env dropped: wrong output, a
+  SIGSEGV through the adapter's mismatched signature (aether-ui's
+  `reorderable(cb: fn ...)` in a program with its own `cb`, across the
+  module boundary), or C that did not compile where the adapter was never
+  declared. Captured params and locals alike, in nested closures and
+  `callback { }` blocks, passed as an argument, bound to a local, boxed,
+  returned, or stored in a `fn` field. The closure body's prologue declared
+  each read-only capture but never registered it as a binding of the body,
+  so codegen's "is this a top-level function?" checks, which defer to a
+  local binding first (#1657), found none. They are registered now, and a
+  capture named like a function is retained and released as one of any
+  other name is: the C is the same.
+  `tests/regression/test_closure_capture_shadows_function.ae`,
+  `tests/integration/closure_capture_shadows_consumer_fn`.
+
+- **The sandbox preload's `syscall()` forwards what a sandbox needs and
+  stays default-deny under a policy.** With `libaether_sandbox.so`
+  preloaded it answered every raw `syscall()` `ENOSYS` when nothing was
+  enforced and `EPERM` under a grant file, futexes included: GLib's futex
+  waits returned at once, so an idle GTK4 program's `pool-spawner`,
+  `pool-0` and pango threads spun (sae-driver: 35 s of CPU in 12 s idle, 0.2 s
+  now, with no grant file, under a grant file, and with an in-process level
+  on the GTK thread), and the Aether scheduler's `sched_getaffinity` and
+  `membarrier` failed. Now, with nothing in force every call is forwarded;
+  under a policy (a grant file, or an in-process level on the calling
+  thread) only an allowlist of calls that reach nothing outside the process
+  is (futex, rseq, membarrier, scheduling and signals of this process,
+  ids, clocks, `getrandom`, I/O on a descriptor already held, epoll and
+  friends; FreeBSD libthr's `getpid` and `sigreturn`), process creation gets
+  `fork()`'s rule and executable memory `mmap()`'s and `mprotect()`'s, and
+  everything else is refused and logged (`AETHER_DENIED: native
+  syscall:unlinkat`) unless a native grant names it (`syscall:unlinkat`;
+  `native:*` and `grant_all` cover all). Every argument is passed on where
+  the caller put it, and call numbers are the architecture's own (the old
+  named list was x86_64 numbers on every Linux).
+  `tests/integration/sandbox_preload_syscall`; `sandbox_clone_fence` runs a
+  raw `clone3` with the fork grant.
+
+- **`fs.write_atomic(path)` works under the sandbox preload with a write
+  grant on `path`.** It writes `<path>.tmp.<pid>.<n>` and renames it over
+  `path`; std checked `path`, but `libaether_sandbox.so` checked the
+  temporary's own name and refused it, so a write std allowed failed with
+  "Permission denied" (sae's documents service inside an `enforce` block,
+  and a spawned child with a grant file alike). std now stages the
+  temporary for that one open (`aether_sandbox_stage`, read by the preload
+  through `aether_sandbox_staged_for`, as it reads the in-process levels),
+  and the preload checks `path` instead, under every policy it applies.
+  Only for an open that creates a new file named exactly
+  `<path>.tmp.<this pid>.<digits>` on the staging thread: a stage cannot
+  open an existing file or any other name.
+  `tests/integration/sandbox_preload_write_atomic`.
+
 ## [0.924.0]
 
 ### Added
