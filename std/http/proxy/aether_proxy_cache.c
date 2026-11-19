@@ -1,7 +1,8 @@
 /* aether_proxy_cache.c — in-memory LRU response cache + TTL eviction.
  *
  * Open-chained hash + doubly-linked LRU list (head = most recently
- * used). Lookup walks the bucket chain matching `key_hash + key_repr`,
+ * used). Lookup walks the bucket chain matching `key_hash + key_repr`
+ * (the whole key, by its length: it holds NULs, #3757),
  * checks `expires_at_ms`, moves the entry to the LRU head on hit,
  * returns NULL on miss.
  *
@@ -148,16 +149,18 @@ static void lower_into(const char* in, char* out, size_t cap) {
     out[i] = '\0';
 }
 
-/* Build the canonical cache key and its hash. Returned key is
+/* Build the canonical cache key, its hash and its length. Returned key is
  * malloc'd; caller frees. Returns NULL on OOM or uncacheable
  * (Vary: *). When `vary_header` is non-NULL the response's Vary
- * header drives request-header inclusion. */
+ * header drives request-header inclusion. The key holds a NUL before each
+ * Vary segment, so it is compared by its length, never as a C string. */
 static char* build_key(AetherProxyCacheKeyStrategy strat,
                        const char* method,
                        const char* url,
                        HttpRequest* req,
                        const char* vary_header,
-                       uint64_t* out_hash) {
+                       uint64_t* out_hash,
+                       size_t* out_len) {
     /* Reasonable upper bound; rare cases above this are handled by
      * malloc-and-copy. */
     char buf[2048];
@@ -211,7 +214,19 @@ static char* build_key(AetherProxyCacheKeyStrategy strat,
     if (!out) return NULL;
     memcpy(out, buf, pos);
     out[pos] = '\0';
+    *out_len = pos;
     return out;
+}
+
+/* Whether entry `e` is stored under the key `key` of `key_len` bytes with
+ * hash `hash`. The whole key is compared, Vary segments included: strcmp
+ * stopped at the NUL before the first one, so two variants of one URL were
+ * told apart by their 64-bit hash alone, and a collision served one
+ * variant's response for the other (#3757). */
+int aether_proxy_cache_key_matches(const AetherProxyCacheEntry* e, uint64_t hash,
+                                   const char* key, size_t key_len) {
+    return e->key_hash == hash && e->key_len == key_len &&
+           memcmp(e->key_repr, key, key_len) == 0;
 }
 
 /* Move entry to LRU head (caller holds cache->lock). */
@@ -274,8 +289,9 @@ AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
      * all variants of one URL share a bucket — then the per-entry
      * Vary recompute narrows down. */
     uint64_t base_hash;
+    size_t base_len;
     char* base_key = build_key(cache->key_strategy, method, url, req, NULL,
-                                &base_hash);
+                                &base_hash, &base_len);
     if (!base_key) {
         pthread_mutex_unlock(&cache->lock);
         return NULL;
@@ -294,16 +310,16 @@ AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
              * stored one, the request's Vary-named header values
              * match what was stored — same representation, hit. */
             uint64_t variant_hash;
+            size_t variant_len;
             char* variant_key = build_key(cache->key_strategy, method, url, req,
-                                          e->vary_header, &variant_hash);
+                                          e->vary_header, &variant_hash, &variant_len);
             if (!variant_key) { e = nx; continue; }
-            matches = (variant_hash == e->key_hash &&
-                       strcmp(variant_key, e->key_repr) == 0);
+            matches = aether_proxy_cache_key_matches(e, variant_hash,
+                                                     variant_key, variant_len);
             free(variant_key);
         } else {
             /* No Vary: direct key match. */
-            matches = (e->key_hash == base_hash &&
-                       strcmp(e->key_repr, base_key) == 0);
+            matches = aether_proxy_cache_key_matches(e, base_hash, base_key, base_len);
         }
 
         if (matches) {
@@ -500,10 +516,11 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
      * METHOD_URL modes the two collapse to the same value because
      * `vary` is unused. */
     uint64_t base_hash, full_hash;
+    size_t base_len, full_len;
     char* base_key = build_key(cache->key_strategy, method, url, req, NULL,
-                               &base_hash);
+                               &base_hash, &base_len);
     char* full_key = build_key(cache->key_strategy, method, url, req, vary,
-                               &full_hash);
+                               &full_hash, &full_len);
     if (!base_key || !full_key) {
         free(base_key);
         free(full_key);
@@ -518,8 +535,7 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
     int b = (int)(base_hash & (uint64_t)(cache->bucket_count - 1));
     AetherProxyCacheEntry** pp = &cache->buckets[b];
     while (*pp) {
-        if ((*pp)->key_hash == full_hash &&
-            strcmp((*pp)->key_repr, full_key) == 0) {
+        if (aether_proxy_cache_key_matches(*pp, full_hash, full_key, full_len)) {
             unlink_entry(cache, *pp);
             break;
         }
@@ -544,6 +560,7 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
     free(base_key);
     e->key_hash     = full_hash;
     e->key_repr     = full_key;
+    e->key_len      = full_len;
     e->vary_header  = vary;     /* ownership transferred; may be NULL */
     e->status_code  = status_code;
     e->stored_at_ms  = aether_proxy_now_ms();

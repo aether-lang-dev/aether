@@ -1154,6 +1154,28 @@ TEST(http_proxy_cache_hit_outlives_an_eviction) {
     ASSERT_EQ(0, r.bad);
 }
 
+/* #3757: a method_url_vary key is "METHOD target", then "\0name=value" for
+ * each header the response's Vary names. Entries were matched with strcmp,
+ * which stops at the first NUL, so two variants of one URL were told apart
+ * only by their 64-bit hash; when the hashes collide, one variant's response
+ * was served for the other. Here the hashes are equal by construction, and
+ * only the bytes after the first segment differ. */
+TEST(http_proxy_cache_key_compares_every_vary_segment) {
+    static const char stored[] = "GET /p\0accept=text/html";
+    static const char other[]  = "GET /p\0accept=application/json";
+    static const char longer[] = "GET /p\0accept=text/html\0accept-language=fr";
+    AetherProxyCacheEntry e;
+    memset(&e, 0, sizeof e);
+    e.key_hash = 42;
+    e.key_repr = (char*)stored;
+    e.key_len  = sizeof stored - 1;
+    ASSERT_EQ(1, aether_proxy_cache_key_matches(&e, 42, stored, sizeof stored - 1));
+    ASSERT_EQ(0, aether_proxy_cache_key_matches(&e, 42, other, sizeof other - 1));
+    ASSERT_EQ(0, aether_proxy_cache_key_matches(&e, 42, longer, sizeof longer - 1));
+    ASSERT_EQ(0, aether_proxy_cache_key_matches(&e, 42, "GET /p", 6));
+    ASSERT_EQ(0, aether_proxy_cache_key_matches(&e, 43, stored, sizeof stored - 1));
+}
+
 /* Every entry the cache counts sits in the bucket chain its lookup walks,
  * and nothing else does. In method_url_vary mode an entry is bucketed by its
  * key without the Vary part, but the unlink of an evicted or expired entry

@@ -201,7 +201,11 @@ typedef struct AetherProxyCacheEntry {
     _Atomic int refs;
 
     uint64_t key_hash;
-    char*    key_repr;                /* canonical key string for collision check */
+    /* The canonical key, compared with key_len and memcmp: it holds a NUL
+     * before each Vary segment, so a C-string compare sees only its first
+     * segment (#3757). */
+    char*    key_repr;
+    size_t   key_len;
 
     int    status_code;
     char** header_keys;
@@ -311,6 +315,10 @@ AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
                                                  const char* url,
                                                  HttpRequest* req);
 void aether_proxy_cache_release(AetherProxyCacheEntry* e);
+/* Whether `e` is stored under the key of `key_len` bytes with hash `hash`:
+ * hash, length and every byte equal. */
+int aether_proxy_cache_key_matches(const AetherProxyCacheEntry* e, uint64_t hash,
+                                   const char* key, size_t key_len);
 void aether_proxy_cache_store(AetherProxyCache* cache,
                               const char* method,
                               const char* url,
