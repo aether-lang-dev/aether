@@ -185,28 +185,24 @@ StringSeq* string_seq_drop(StringSeq* s, int n);
  * Closure ABI
  * -----------
  * Each callback parameter is declared `ptr` (C `void*`) on both sides,
- * and the Aether `extern` declares it `ptr` too. When a caller passes
- * a closure literal into a `ptr`-typed slot, the codegen heap-BOXES it:
- *
- *     extern_fn(..., _aether_box_closure(
- *         (_AeClosure){ .fn = (void(*)(void))_closure_fn_N, .env = _e }))
- *
- * where `_AeClosure` is the codegen prologue's
- *
- *     typedef struct { void (*fn)(void); void* env; } _AeClosure;
- *
- * `_aether_box_closure` malloc's a copy of that two-word struct and
- * hands us the heap pointer. We mirror the layout locally as
- * `AeSeqClosure` (see the .c — this TU need not see the prologue
- * typedef) and read `.fn` / `.env` back out. The closure body is then
- * invoked as
+ * and the Aether `extern` declares it `ptr` too. A closure handed to a
+ * `ptr`-typed slot arrives BOXED: an `_AeClosureBox`, the closure value
+ * `{ fn, env }` followed by a tag. The layout is private and is defined
+ * once, in runtime/aether_closure_abi.h, which the generated prologue
+ * and the .c both include (#3622); the .c reads `.fn` / `.env` from it.
+ * The closure body is invoked as
  *
  *     ((RET(*)(void* env, ARG1, ARG2, ...))clo.fn)(clo.env, a1, a2, ...)
  *
  * i.e. `env` (the captured environment, NULL for a non-capturing
  * closure) is ALWAYS the implicit first argument, ahead of the declared
- * parameters — exactly what codegen emits for `call(cb, ...)` and for
+ * parameters, which is what codegen emits for `call(cb, ...)` and for
  * the `_closure_fn_N(env, ...)` definition.
+ *
+ * Code outside the toolchain does not copy this layout: a C library that
+ * makes a closure for Aether to call uses aether_closure_new() and its
+ * retain and release (include/aether_closure.h), which hand out opaque
+ * pointers only.
  *
  * Ownership: the callback parameters are declared `@noescape` (#2523),
  * so the box lives on the caller's stack (`_aether_box_closure_in`) and

@@ -35,7 +35,8 @@ esac
 HEADERS="libaether.h aether_abi.h aether_panic.h aether_slice.h aether_stringseq.h
     aether_schema.h actor_state_machine.h aether_send_message.h aether_actor_thread.h
     multicore_scheduler.h aether_cpu_detect.h aether_optimization_config.h
-    aether_bounds_check.h aether_runtime_types.h aether_compiler.h"
+    aether_bounds_check.h aether_runtime_types.h aether_compiler.h
+    aether_closure.h aether_closure_abi.h"
 
 fail=0
 for h in $HEADERS; do

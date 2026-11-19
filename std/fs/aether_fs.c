@@ -3,6 +3,7 @@
 #include "../../runtime/utils/aether_compiler.h"
 #include "../../runtime/aether_sandbox.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/aether_closure_abi.h"
 #include "../string/aether_string.h"
 #include "../bytes/aether_bytes.h"   /* fs_pread_into_raw fills a caller's bytes buffer (#1102) */
 
@@ -4059,12 +4060,10 @@ char* path_rel(const char* base, const char* target) {
 // #977: recursive directory walk + filesystem change notification
 // ============================================================
 
-/* Layout-compatible view of the codegen's boxed `_AeClosure`
- * (see std/collections/aether_stringseq.c and codegen.c's prologue):
- *     typedef struct { void (*fn)(void); void* env; } _AeClosure;
- * `env` is the implicit first argument to `fn`. The box (and its env)
- * is malloc'd by _aether_box_closure and OWNED by the callee. */
-typedef struct { void (*fn)(void); void* env; } AeFsClosure;
+/* A closure box, as generated code lays it out (runtime/aether_closure_abi.h,
+ * #3622). `env` is the implicit first argument to `fn`. The box (and its
+ * env) is malloc'd by _aether_box_closure and OWNED by the callee. */
+typedef _AeClosureBox AeFsClosure;
 
 /* The callback is read only during the walk: `fs_walk_raw`'s `cb` is
  * declared `@noescape` (#2523), so the box is the caller's stack and the

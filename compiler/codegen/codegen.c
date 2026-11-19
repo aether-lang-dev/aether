@@ -10310,8 +10310,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#if !AETHER_GCC_COMPAT");
     print_line(gen, "static void* _aether_ref_new(intptr_t val) { intptr_t* r = (intptr_t*)_aether_alloc(sizeof(intptr_t), 0, \"out of memory allocating a ref\"); *r = val; return (void*)r; }");
     print_line(gen, "#endif");
-    // Closure support: generic closure struct (function pointer + captured environment)
-    print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
+    /* #3622: the closure value (_AeClosure), the head every env starts with
+     * (_AeEnvHead, _AE_ENV_HEAD_FIELDS) and the box with its tag
+     * (_AeClosureBox, _AE_CLOSURE_TAG) come from the one header the runtime
+     * builds closures from too (include/aether_closure.h, aether_closure_new),
+     * so a closure made in C and one made here cannot be laid out apart. */
+    print_line(gen, "#include \"aether_closure_abi.h\"");
     /* #3091: the function a call through a closure jumps to. The empty
      * closure (`null` in a closure slot, also when a `fn?` holds it) has
      * none, and the call panics with `where`, its category and source
@@ -10322,13 +10326,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (!fn) aether_panic(where);");
     print_line(gen, "    return fn;");
     print_line(gen, "}");
-    /* The head every closure env starts with: its destructor (#1398) and its
-     * reference count (#2494). An env is held by the closure value's owner
-     * and by every env that captured the closure; each holder releases
-     * through the destructor, which tears the env down on the last release.
-     * The count is atomic because a captured closure can be released on a
-     * worker thread while its declaring scope releases on another. */
-    print_line(gen, "typedef struct { void (*_dtor)(void*); atomic_long _refs; } _AeEnvHead;");
+    /* The head every closure env starts with (_AeEnvHead, from
+     * aether_closure_abi.h): its destructor (#1398) and its reference count
+     * (#2494). An env is held by the closure value's owner and by every env
+     * that captured the closure; each holder releases through the
+     * destructor, which tears the env down on the last release. */
     print_line(gen, "static inline void _aether_closure_env_retain(void* e) { if (e) atomic_fetch_add_explicit(&((_AeEnvHead*)e)->_refs, 1, memory_order_relaxed); }");
     /* #2765: every element of an `fn[N]` field taken from another array, a
      * reference to each env (emit_array_field_take), as a call. */
@@ -10378,18 +10380,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern void aether_observe_notify_field(void* obj, int field);");
     /* heap.free of an @observable box removes its observers first. */
     print_line(gen, "extern int aether_unobserve_all(void* obj);");
-    /* Boxed form. The tag sits AFTER the {fn, env} prefix on purpose: that
-     * prefix is the FFI layout std/collections and std/worker mirror and
-     * embedders are documented to rely on, so putting the tag first would
-     * silently turn every C-side reader's `fn` into the tag and call it.
-     *
-     * Boxing is the only way a valid closure pointer is ever produced, so
-     * the tag is what tells a real box apart from a raw code address,
-     * which is what a bare function coerced into a `ptr` slot leaves
-     * behind. Unboxing that used to read `.env` off the function's own
-     * machine code and jump through it (issue #1439). */
-    print_line(gen, "typedef struct { void (*fn)(void); void* env; unsigned long long tag; } _AeClosureBox;");
-    print_line(gen, "#define _AE_CLOSURE_TAG 0xAEC105EDB0CEDULL");
+    /* Boxed form (_AeClosureBox, from aether_closure_abi.h). Boxing is the
+     * only way a valid closure pointer is ever produced, so the tag is what
+     * tells a real box apart from a raw code address, which is what a bare
+     * function coerced into a `ptr` slot leaves behind. Unboxing that used
+     * to read `.env` off the function's own machine code and jump through it
+     * (issue #1439). A box aether_closure_new() made in C is the same box. */
     print_line(gen, "static inline void* _aether_box_closure(_AeClosure c) {");
     print_line(gen, "    _AeClosureBox* p = (_AeClosureBox*)_aether_alloc(sizeof(_AeClosureBox), 0, \"out of memory boxing a closure\");");
     print_line(gen, "    p->fn = c.fn; p->env = c.env; p->tag = _AE_CLOSURE_TAG;");

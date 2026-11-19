@@ -37,6 +37,7 @@ runtime/aether_exec.c
 runtime/libaether_caps.c
 runtime/aether_resource_caps.c
 runtime/aether_callbacks.c
+runtime/aether_closure.c
 runtime/actors/aether_send_buffer.c
 runtime/actors/aether_send_message.c
 runtime/actors/aether_unwind.c

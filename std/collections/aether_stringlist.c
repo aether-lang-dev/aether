@@ -2,6 +2,7 @@
 #include "aether_collections.h"
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/aether_closure_abi.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -135,11 +136,9 @@ void string_list_free(StringList* list) {
  * set is preserved exactly: no leak, no double-free, no read-after-free.
  */
 
-/* Layout-compatible view of the codegen's boxed `_AeClosure`
- * (see std/collections/aether_stringseq.c and codegen.c's prologue):
- *     typedef struct { void (*fn)(void); void* env; } _AeClosure;
- * `env` is the implicit first argument to `fn`. */
-typedef struct { void (*fn)(void); void* env; } AeStrListClosure;
+/* A closure box, as generated code lays it out (runtime/aether_closure_abi.h,
+ * #3622). `env` is the implicit first argument to `fn`. */
+typedef _AeClosureBox AeStrListClosure;
 
 /* The comparator is declared `@noescape` (#2523): its box is the caller's
  * stack and its env the caller's to release after the sort, as for the seq
