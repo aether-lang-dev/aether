@@ -24,6 +24,7 @@ import std.fs
 import std.worker
 import std.string
 import std.list
+import std.io
 
 extern exit(code: int)
 
@@ -89,6 +90,13 @@ main() {
     _m2 = fs.mkdir_p(outside)
     _w1 = fs.write("${box}/d/secret.txt", "inside")
     _w2 = fs.write("${outside}/secret.txt", "outside")
+    // The names the race test's calls use, outside: changed, removed or
+    // seen only by a call that followed the swapped link.
+    _w4 = fs.write("${outside}/w.txt", "outside-w")
+    _w5 = fs.write("${outside}/n.txt", "keep")
+    _w6 = fs.write("${outside}/only_out.txt", "only outside")
+    _m3 = fs.mkdir_p("${outside}/k")
+    _w7 = fs.write("${box}/d/w.txt", "inside-w")
     _w3 = fs.write("${box}/inside.txt", "inside")
     have_dir_link = make_dir_link("${box}/d_link", outside)
     no_dir_link = "no symlink or junction could be made here"
@@ -102,8 +110,6 @@ main() {
         }
     }
     no_links = "POSIX symlinks only"
-    posix_dir_link = 0
-    if windows == 0 && have_dir_link == 1 { posix_dir_link = 1 }
 
     in_box = sandbox.new("box") {
         grant_fs_read("${box}/*")
@@ -133,21 +139,79 @@ main() {
             spec.assert_true(inside > 0, "and the box's own file was")
             spec.assert_true(swaps_made > 0, "while the directory was being swapped")
         }
-        spec.it_when(posix_dir_link, "a write never creates a file through a link swapped in after the check",
-                     "POSIX only: on Windows a write reaches the file before the second check") callback {
+        // Every kind of call, through box/d while the worker swaps it: a
+        // write over a file (truncating), a new file, a rename, an unlink, a
+        // mkdir and an rmdir, write_atomic, a temporary file and directory,
+        // a lock file, and lookups. outside/ holds files with the names
+        // those calls use, so a call that followed the link would change
+        // them, or make new ones, or (a lookup) see one that only exists
+        // there.
+        spec.it_when(have_dir_link, "no call reaches a link swapped in after its check", no_dir_link) callback {
             stop_swap = 0
             ok = worker.run(| _c: ptr | { swap_until_stopped() }, | _c: ptr | {})
+            seen = 0
             i = 0
             sandbox.enforce(in_box) callback {
-                while i < 20000 && fs.exists("${outside}/made.txt") == 0 {
-                    _e = fs.write("${box}/d/made.txt", "x")
+                while i < 3000 {
+                    _e1 = fs.write("${box}/d/w.txt", "x")
+                    _e2 = fs.write("${box}/d/m.txt", "x")
+                    _e3 = fs.rename("${box}/d/m.txt", "${box}/d/n.txt")
+                    _u, _k, _e4 = fs.unlink("${box}/d/n.txt")
+                    _e5 = fs.create_dir("${box}/d/k")
+                    _e6 = fs.delete_dir("${box}/d/k")
+                    _e7 = fs.write_atomic("${box}/d/atomic.txt", string.bytes("x"))
+                    t, terr = fs.make_temp_file("${box}/d", "t")
+                    if terr == "" { _d1 = fs.delete(t) }
+                    td, tderr = fs.make_temp_dir("${box}/d", "t")
+                    if tderr == "" { _d2 = fs.delete_dir(td) }
+                    lfd, _lk, lerr = fs.lock_open("${box}/d/lock")
+                    if lerr == "" { _c = io.fd_close(lfd) }
+                    if fs.exists("${box}/d/only_out.txt") == 1 { seen = seen + 1 }
                     i = i + 1
                 }
             }
             stop_swap = 1
             if ok { worker.wait() }
             worker.drain(16)
-            spec.assert_eq(fs.exists("${outside}/made.txt"), 0, "nothing was written outside the box")
+            // With the directory its own again, each call works in the box.
+            done = 0
+            sandbox.enforce(in_box) callback {
+                _p = fs.delete_dir("${box}/d/k")   // a leftover of the race, if any
+                e2 = fs.write("${box}/d/m.txt", "x")
+                e3 = fs.rename("${box}/d/m.txt", "${box}/d/n.txt")
+                u, _k, _e4 = fs.unlink("${box}/d/n.txt")
+                e5 = fs.create_dir("${box}/d/k")
+                e6 = fs.delete_dir("${box}/d/k")
+                e7 = fs.write_atomic("${box}/d/atomic.txt", string.bytes("x"))
+                t, terr = fs.make_temp_file("${box}/d", "t")
+                if terr == "" { _d1 = fs.delete(t) }
+                td, tderr = fs.make_temp_dir("${box}/d", "t")
+                if tderr == "" { _d2 = fs.delete_dir(td) }
+                lfd, _lk, lerr = fs.lock_open("${box}/d/lock")
+                if lerr == "" { _c = io.fd_close(lfd) }
+                if e2 == "" && e3 == "" && u == 1 && e5 == "" && e6 == "" && e7 == "" &&
+                   terr == "" && tderr == "" && lerr == "" && fs.exists("${box}/d/atomic.txt") == 1 {
+                    done = 1
+                }
+            }
+            got_w, _rw = fs.read("${outside}/w.txt")
+            spec.assert_str_eq(got_w, "outside-w", "a write never truncated or rewrote the outside file")
+            got_n, _rn = fs.read("${outside}/n.txt")
+            spec.assert_str_eq(got_n, "keep", "an unlink or a rename never reached the outside file")
+            spec.assert_eq(fs.exists("${outside}/k"), 1, "an rmdir never removed the outside directory")
+            spec.assert_eq(fs.exists("${outside}/m.txt"), 0, "no new file was made outside")
+            spec.assert_eq(fs.exists("${outside}/atomic.txt"), 0, "no write_atomic landed outside")
+            spec.assert_eq(fs.exists("${outside}/lock"), 0, "no lock file was made outside")
+            l, lerr2 = fs.list_dir(outside)
+            n_out = 0
+            if lerr2 == "" {
+                n_out = fs.dir_list_count(l)
+                fs.dir_list_free(l)
+            }
+            spec.assert_eq(n_out, 5 + have_links, "nothing else appeared outside (no temporary file or directory)")
+            spec.assert_eq(seen, 0, "a lookup never saw a file that is only outside")
+            spec.assert_eq(done, 1, "and each call works in the box when the directory is its own")
+            spec.assert_true(swaps_made > 0, "while the directory was being swapped")
         }
     }
 
@@ -195,6 +259,29 @@ main() {
             }
             spec.assert_true(err != "", "refused")
             spec.assert_eq(fs.exists("${box}/hard"), 0, "no second name in the box")
+        }
+        // fs.lock_open needs fs_write only, as it always has; inside an enforce
+        // block without fs_read its descriptor is write-only, which the lock
+        // takes (flock, LockFileEx).
+        spec.it("takes a lock on a file it may only write") callback {
+            wonly = sandbox.new("write only") {
+                grant_fs_write("${box}/*")
+            }
+            got = 0
+            err = ""
+            sandbox.enforce(wonly) callback {
+                lfd, _lk, lerr = fs.lock_open("${box}/held.lock")
+                err = lerr
+                if lerr == "" {
+                    g, _k2, _e2 = fs.try_lock(lfd, 1)
+                    got = g
+                    _u, _k3, _e3 = fs.unlock(lfd)
+                    _c = io.fd_close(lfd)
+                }
+            }
+            sandbox.free(wonly)
+            spec.assert_str_eq(err, "", "the lock file opens with fs_write alone")
+            spec.assert_eq(got, 1, "and the lock is taken")
         }
         spec.it("makes a hard link between two names of the box") callback {
             err = ""

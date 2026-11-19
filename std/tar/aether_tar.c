@@ -93,6 +93,11 @@ int aether_tar_set_mtime_raw(const char* path, int64_t mtime, int is_symlink) {
 
 int aether_tar_get_mode_raw(const char* path) {
     if (!path) return 0;
+    if (aether_sandbox_levels_here() > 0) {
+        /* Looked up from the anchor of its directory, as checked (#3751). */
+        AetherSandboxStat ls;
+        return aether_sandbox_stat(path, 0, &ls) == 0 ? (int)ls.mode : 0;
+    }
     if (!aether_sandbox_check("fs_read", path)) return 0;
     struct stat st;
     if (stat(path, &st) != 0) return 0;

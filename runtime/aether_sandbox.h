@@ -22,6 +22,28 @@
 
 #include "aether_sandbox_match.h"   /* aether_net_resource, the shared matcher */
 
+#include <stddef.h>
+
+// What aether_sandbox_stat reports (#3751).
+#define AETHER_SANDBOX_KIND_FILE    1
+#define AETHER_SANDBOX_KIND_DIR     2
+#define AETHER_SANDBOX_KIND_SYMLINK 3
+#define AETHER_SANDBOX_KIND_OTHER   4
+typedef struct {
+    int kind;
+    unsigned mode;      // st_mode on POSIX; S_IFDIR or S_IFREG and the write bits on Windows
+    long long size;
+    long long mtime;    // seconds since the epoch
+} AetherSandboxStat;
+
+// What aether_sandbox_stage_begin holds for commit or abort (#3751).
+typedef struct {
+    long long anchor;   // the directory: a descriptor, or a HANDLE on Windows
+    long long held;     // Windows: the temporary's own handle, for the rename
+    char name[1024];    // `path`'s last name
+    char tmp[1100];     // the temporary's
+} AetherSandboxStaged;
+
 #ifdef AETHER_HAS_SANDBOX
 
 #include <stdatomic.h>
@@ -129,22 +151,23 @@ int aether_sandbox_check_entry(const char* category, const char* resource);
 int aether_sandbox_check_link(const char* target, const char* linkpath);
 
 // Calls made on the path the sandbox checked (#3751). Each resolves its path
-// once, checks the grants on that resolution, and makes the call on the
-// resolution following no symlink (aether_sandbox_walk and
-// aether_sandbox_anchor, aether_sandbox_path.h), so nothing changed between
-// the check and the call is followed. With no level in force on the calling
-// thread each is the plain libc call. A refusal is -1 (NULL) with errno
-// EACCES. Under the LD_PRELOAD library the call is passed to its wrapper,
-// which does the same with the functions behind it. An open is checked for
-// what its flags or mode ask (fs_read, fs_write or both, as the preload's
-// open is); the calls on a name, and an open with O_NOFOLLOW or
-// O_CREAT|O_EXCL, check that name (aether_sandbox_check_entry). On Windows
-// only aether_sandbox_fopen is here: it checks, opens, and checks again the
-// final path of what it opened (GetFinalPathNameByHandleW).
+// once, checks the grants on that resolution, and makes the call on what was
+// checked. On POSIX the call is made on the resolution following no symlink
+// (aether_sandbox_walk and aether_sandbox_anchor, aether_sandbox_path.h), so
+// nothing changed between the check and the call is followed. On Windows
+// what the call acts on (or the directory it acts in) is opened without
+// changing it, the final path of the handle is checked, and the call is
+// made through the handle (a truncation by SetEndOfFile, a removal by its
+// disposition, a rename, link or new name relative to the verified
+// directory). With no level in force on the calling thread each is the
+// plain call. A refusal is -1 (NULL) with errno EACCES. Under the LD_PRELOAD
+// library a call is passed to its wrapper, which does the same with the
+// functions behind it. An open is checked for what its flags or mode ask
+// (fs_read, fs_write or both, as the preload's open is); the calls on a
+// name, and an open with O_NOFOLLOW or O_CREAT|O_EXCL, check that name
+// (aether_sandbox_check_entry).
 void* aether_sandbox_fopen(const char* path, const char* mode);   // FILE*
-#ifndef _WIN32
 int   aether_sandbox_open(const char* path, int flags, int mode);
-void* aether_sandbox_opendir(const char* path);                   // DIR*
 int   aether_sandbox_unlink(const char* path);
 int   aether_sandbox_rmdir(const char* path);
 int   aether_sandbox_remove(const char* path);
@@ -153,12 +176,59 @@ int   aether_sandbox_mkdir(const char* path, int mode);
 // then each missing directory made from the one before it, none followed.
 int   aether_sandbox_mkdir_p(const char* path, int mode);
 int   aether_sandbox_rename(const char* from, const char* to);
-int   aether_sandbox_symlink(const char* target, const char* linkpath);
 // A hard link is a second name for `target`'s file: it needs fs_write on
 // the new name, and the new name may not reach the file more than the old
 // one may (fs_read and fs_write on `target` for what the new name has).
 int   aether_sandbox_link(const char* target, const char* linkpath);
+
+// A lookup (stat, lstat with `nofollow`): fs_read on the resolution, then
+// fstatat of the name from its anchor without following it (POSIX), or a
+// handle opened and verified (Windows).
+int aether_sandbox_stat(const char* path, int nofollow, AetherSandboxStat* out);
+// fs.realpath: the resolution the check matched, once a lookup finds
+// something there. 0 with it in `out`.
+int aether_sandbox_realpath(const char* path, char* out, size_t cap);
+// Whether the grants would allow `category` on `path`, asked without being
+// recorded. 1 with no level in force.
+int aether_sandbox_granted(const char* category, const char* path);
+
+// fs.write_atomic: a temporary beside `path`, made in the directory `path`
+// resolves to (fs_write on `path` itself), and renamed onto it from there.
+// begin gives the descriptor to write; commit renames, abort removes; each
+// releases what begin held. -2 from begin when this is not the way here (no
+// level in force, or the LD_PRELOAD library's staged open and rename do it):
+// the caller then makes its own.
+int  aether_sandbox_stage_begin(const char* path, AetherSandboxStaged* s);
+int  aether_sandbox_stage_commit(AetherSandboxStaged* s);
+void aether_sandbox_stage_abort(AetherSandboxStaged* s);
+
+// fs.make_temp_file and fs.make_temp_dir: fs_write on `dir`, and a fresh name
+// made in the directory that was checked (a file comes back closed). The
+// path, `dir` as given and the name, goes to `out`. 0; -1; -2 when this is
+// not the way here (as for stage_begin).
+int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char* out, size_t cap);
+
+#ifndef _WIN32
+void* aether_sandbox_opendir(const char* path);                   // DIR*
+int   aether_sandbox_symlink(const char* target, const char* linkpath);
 int   aether_sandbox_chmod(const char* path, int mode);
+long  aether_sandbox_readlink(const char* path, char* buf, size_t cap);
+// A descriptor of what `path` names, to ask about it (fstatvfs, a watch
+// through /proc/self/fd): fs_read, opened by the walk as a path only.
+int   aether_sandbox_open_lookup(const char* path);
+#else
+// mkdir with a security descriptor (NULL: the folder's), for a private
+// directory.
+int   aether_sandbox_win_mkdir(const char* path, void* sd);
+// A name std made by name (CreateSymbolicLinkW): verified, and removed again
+// through its handle when a swap sent it elsewhere. 0, or -1 refused.
+int   aether_sandbox_win_verify_entry(const char* path);
+// What `path` names, opened for ReadDirectoryChangesW and verified: a
+// HANDLE, INVALID_HANDLE_VALUE on a failure.
+void* aether_sandbox_win_open_watched(const char* path);
+// Is the handle std opened on `path` itself what the check saw? 1 yes (or
+// no level in force), 0 no.
+int   aether_sandbox_win_handle_ok(void* handle, const char* path, int nofollow, int access);
 #endif
 // 1 when this thread's last call above was refused by the grants, so a
 // caller can tell that EACCES from the system's own.
@@ -176,6 +246,14 @@ int aether_sandbox_refused(void);
 #define aether_sandbox_check_link(target, linkpath) ((void)(target), (void)(linkpath), 1)
 #define aether_sandbox_fopen(path, mode) ((void*)fopen((path), (mode)))
 #define aether_sandbox_refused() 0
+#define aether_sandbox_levels_here() 0
+#define aether_sandbox_granted(category, path) ((void)(category), (void)(path), 1)
+#define aether_sandbox_stage_begin(path, s) ((void)(path), (void)(s), -2)
+#define aether_sandbox_stage_commit(s) ((void)(s), -1)
+#define aether_sandbox_stage_abort(s) ((void)(s))
+#define aether_sandbox_temp_in(dir, prefix, is_dir, out, cap) \n    ((void)(dir), (void)(prefix), (void)(is_dir), (void)(out), (void)(cap), -2)
+#define aether_sandbox_stat(path, nofollow, out) ((void)(path), (void)(nofollow), (void)(out), -1)
+#define aether_sandbox_realpath(path, out, cap) ((void)(path), (void)(out), (void)(cap), -1)
 #ifndef _WIN32
 #define aether_sandbox_open(path, flags, mode) open((path), (flags), (mode))
 #define aether_sandbox_opendir(path) ((void*)opendir(path))

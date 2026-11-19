@@ -446,6 +446,61 @@ static int aether_sandbox_anchor(const char* resolved, char* name, size_t cap,
     return aether_sandbox_walk(parent, AETHER_SANDBOX_ANCHOR & ~O_NOFOLLOW, 0, ops);
 }
 
+
+#if !defined(__wasi__)
+// chmod of `name` in the directory `dirfd`, not following it: fchmodat with
+// AT_SYMLINK_NOFOLLOW. Where the C library cannot do that (glibc before
+// 2.32 says ENOTSUP), the name is opened without following it and changed
+// through that: by /proc/self/fd/N (chmod follows that magic link to the
+// file opened, and an O_PATH descriptor takes no fchmod), else through a
+// descriptor opened for reading or writing (fchmod). Only when the file can
+// be opened neither way is it changed by name after a look, leaving that
+// name alone to a swap between the two. A symlink found at the name fails
+// with EACCES: the name was resolved, so one there now is the race.
+// `fchmodat_fn` and `chmod_fn` are libc's, or the functions behind the
+// preload's wrappers.
+static int aether_sandbox_chmod_at(int dirfd, const char* name, mode_t mode,
+                                   const AetherSandboxFsOps* ops,
+                                   int (*fchmodat_fn)(int, const char*, mode_t, int),
+                                   int (*chmod_fn)(const char*, mode_t)) {
+    if (fchmodat_fn(dirfd, name, mode, AT_SYMLINK_NOFOLLOW) == 0) return 0;
+    if (errno != ENOTSUP && errno != EOPNOTSUPP && errno != EINVAL) return -1;
+    struct stat st;
+#if defined(O_PATH) && defined(__linux__)
+    int pfd = ops->openat(dirfd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (pfd >= 0) {
+        int r = -1;
+        if (fstat(pfd, &st) == 0 && S_ISLNK(st.st_mode)) {
+            errno = EACCES;
+        } else {
+            char self[64];
+            snprintf(self, sizeof self, "/proc/self/fd/%d", pfd);
+            r = chmod_fn(self, mode);
+        }
+        int err = errno;
+        ops->close(pfd);
+        errno = err;
+        if (r == 0 || errno != ENOENT) return r;   // ENOENT: no /proc
+    }
+#else
+    (void)chmod_fn;
+#endif
+    int fd = ops->openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 && (errno == EACCES || errno == EISDIR))
+        fd = ops->openat(dirfd, name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd >= 0) {
+        int r = fchmod(fd, mode);
+        int err = errno;
+        ops->close(fd);
+        errno = err;
+        return r;
+    }
+    if (errno == ELOOP || errno == EMLINK) { errno = EACCES; return -1; }
+    if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return -1;
+    if (S_ISLNK(st.st_mode)) { errno = EACCES; return -1; }
+    return fchmodat_fn(dirfd, name, mode, 0);
+}
+#endif // !__wasi__
 #endif // _WIN32
 
 // A path whose last name is the thing a call acts on, not where it leads:
