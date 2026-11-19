@@ -4676,7 +4676,7 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
         if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
             continue;
         size_t nlen = strlen(fd.cFileName);
-        if (len + 1 + nlen >= FS_WALK_PATH_CAP) continue;  /* too long — prune */
+        if (len + 1 + nlen >= FS_WALK_PATH_CAP) continue;  /* too long: prune */
         buf[len] = '/';
         memcpy(buf + len + 1, fd.cFileName, nlen + 1);
         int kind = fs_winattr_to_kind(fd.dwFileAttributes);
@@ -4711,7 +4711,7 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
         size_t nlen = strlen(entry->d_name);
-        if (len + 1 + nlen >= FS_WALK_PATH_CAP) continue;  /* too long — prune */
+        if (len + 1 + nlen >= FS_WALK_PATH_CAP) continue;  /* too long: prune */
         buf[len] = '/';
         memcpy(buf + len + 1, entry->d_name, nlen + 1);
         int kind = fs_dtype_to_kind(entry->d_type);
@@ -4750,7 +4750,7 @@ static int fs_walk_recurse_verified(char* buf, size_t len, int depth,
     int r;
     while ((r = aether_sandbox_win_readdir(dir, name, sizeof name, &attrs)) > 0) {
         size_t nlen = strlen(name);
-        if (len + 1 + nlen >= FS_WALK_PATH_CAP) continue;  /* too long — prune */
+        if (len + 1 + nlen >= FS_WALK_PATH_CAP) continue;  /* too long: prune */
         buf[len] = '/';
         memcpy(buf + len + 1, name, nlen + 1);
         int kind = fs_winattr_to_kind((DWORD)attrs);
