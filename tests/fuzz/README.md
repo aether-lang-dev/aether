@@ -266,7 +266,9 @@ each harness lists the properties.
   method, path, query, fields and body it sent, never one with a missing
   pseudo-header or a connection-specific field, never twice; every whole,
   valid request is dispatched while the connection stands; the server
-  writes well-formed frames, a `:status 200` and the echoed body for each.
+  writes well-formed frames, a `:status 200`, every field the middleware
+  set (300 on the last stream, past what the glue once kept) and the
+  echoed body for each, except to a stream the client cancelled.
 - **`proxy_response`** (C): what an upstream sends back, framed as the
   proxy event loop frames it, through the copying path (the client's reader
   and the exchange) and the pass-through (`aether_proxy_direct_take`,
@@ -300,8 +302,9 @@ each harness lists the properties.
   client run (ClientHello, ServerHello and HelloRetryRequest, the
   extension blocks, Certificate, CertificateRequest, NewSessionTicket):
   a refusal names an alert TLS 1.3 defines, what is accepted is described
-  from inside the message, and what the module's builders write its
-  parsers read back.
+  from inside the message (a ServerHello's suite is the one it names;
+  whether the client offered it is the client's check), and what the
+  module's builders write its parsers read back.
 - **`x509`** (Aether): `parse_certificate`, the DER reader under it, PEM and
   OCSP status. An accepted certificate is described from inside its bytes
   and matches each of its own plain DNS names; the DER reader stays inside
@@ -330,7 +333,12 @@ Set-Cookie of several) and a response held at most 50 fields; ASN.1
 indefinite lengths nested without bound and overflowed the stack (a 60 KB
 certificate); `asn1.last_tag_class`, `last_tag_pc` and `last_tag_number`
 were exported and never defined; std.tar's `entry_read` failed instead of
-reporting the end of an entry read whole.
+reporting the end of an entry read whole; the XML reader took a control
+byte as part of a name; the proxy's pass-through read a head with a bare
+CR or LF differently from the copying path; std.yaml's emitter dropped a
+block scalar's last line at the end of the input; and a certificate whose
+validity held no time parsed. Each reproducer stays in its target's
+corpus as a `crash_*` seed its `gen_corpus.ae` writes.
 
 ## In CI (`make fuzz-ci`)
 

@@ -7,11 +7,13 @@
 // and three key shares, with and without a server name, a HelloRetryRequest),
 // EncryptedExtensions, Certificate, CertificateRequest and NewSessionTicket
 // bodies laid out as RFC 8446 4.3 to 4.6 has them, the same with a field cut
-// short or repeated, and material for the builder round trip.
+// short or repeated, and material for the builder round trip; and the
+// reproducers fuzzing found, kept as regression seeds (crash_*).
 import std.os
 import std.io
 import std.fs
 import std.bytes
+import std.string
 import std.strbuilder
 import std.cryptography.tls13_hs
 
@@ -73,6 +75,37 @@ fn put24(b: ptr, v: int) {
     put(b, v >> 16)
     put(b, v >> 8)
     put(b, v)
+}
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits, the selector byte first: a
+// reproducer a fuzzing run found, kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        put(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    body = strbuilder.finish_with_length(b)
+    int bn = body.len
+    out = bytes.new(bn + 1)
+    bytes.set_length(out, bn)
+    bytes.copy_from_slice(out, 0, body)
+    write_out(dir, name, out, bn)
+    bytes.free(out)
 }
 
 main() {
@@ -258,4 +291,10 @@ main() {
     bytes.free(sid)
     bytes.free(x25519)
     bytes.free(p256)
+
+    // Reproducers fuzzing found, kept as regression seeds: a ServerHello
+    // naming a suite TLS 1.3 does not define (0x1313), which the parser
+    // reports and the client refuses (selector 1).
+    hex_seed(dir, "crash_sh_unknown_suite",
+             "01020000770303010e1b2835424f5c697683909daab7c4d1deebf805121f2c394653606d7a879400131300004f002b00020304003300450017004104111e2b3845525f6c798693a0ad2835424f5c697683909daab7c463707d8a97a4b1becbd8e5f2ff0c192633404d5a6774818e9ba8b5c2cfdce9f603101d2a3744")
 }
