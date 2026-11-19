@@ -64,9 +64,9 @@ fn same_range(a: ptr, aoff: int, b: ptr, boff: int, n: int) -> bool {
 
 fn client_hello(m: ptr, n: int) {
     ch = tls13_hs.ChParsed { random: null, session_id: null, session_id_len: 0, cipher_suite: 0, group: 0,
-                             key_share: null, key_share_len: 0, has_sni: 0, saw_supported_versions: 0,
-                             sig_algs: 0, saw_sig_algs: 0, groups: 0, retry_group: 0, has_early_data: 0,
-                             has_cookie: 0, alert: 0 }
+        key_share: null, key_share_len: 0, has_sni: 0, saw_supported_versions: 0,
+        sig_algs: 0, saw_sig_algs: 0, groups: 0, retry_group: 0, has_early_data: 0,
+        has_cookie: 0, alert: 0 }
     err = tls13_hs.parse_client_hello(bytes.view(m)[0..n], &ch)
     if err == "" {
         if ch.alert != 0 { abort() }
@@ -89,8 +89,8 @@ fn client_hello(m: ptr, n: int) {
 
 fn server_hello(m: ptr, n: int) {
     sh = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
-                             is_hello_retry: 0, psk_accepted: 0, alert: 0, session_id_off: 0,
-                             session_id_len: 0, selected_identity: -1, cookie_off: 0, cookie_len: 0 }
+        is_hello_retry: 0, psk_accepted: 0, alert: 0, session_id_off: 0,
+        session_id_len: 0, selected_identity: -1, cookie_off: 0, cookie_len: 0 }
     err = tls13_hs.parse_server_hello(bytes.view(m)[0..n], &sh)
     if err == "" {
         if sh.alert != 0 { abort() }
@@ -118,7 +118,7 @@ fn server_hello(m: ptr, n: int) {
 
 fn session_ticket(m: ptr, n: int) {
     t = tls13_hs.NstParsed { lifetime: 0, age_add: 0, nonce_off: 0, nonce_len: 0, ticket_off: 0, ticket_len: 0,
-                             max_early_data: 0, alert: 0 }
+        max_early_data: 0, alert: 0 }
     err = tls13_hs.parse_new_session_ticket(bytes.view(m)[0..n], &t)
     if err == "" {
         if t.alert != 0 { abort() }
@@ -161,12 +161,12 @@ fn round_trip(m: ptr, n: int) {
     bytes.free(hb)
 
     msg = tls13_hs.client_hello_full(random, bytes.view(sid)[0..sid_len], tls13_hs.GROUP_X25519,
-                                     bytes.view(pub)[0..32], 0, bytes.view(pub)[0..0], 0, bytes.view(pub)[0..0], host)
+        bytes.view(pub)[0..32], 0, bytes.view(pub)[0..0], 0, bytes.view(pub)[0..0], host)
     ml = 4 + (((bytes.get(msg, 1) & 255) << 16) | ((bytes.get(msg, 2) & 255) << 8) | (bytes.get(msg, 3) & 255))
     ch = tls13_hs.ChParsed { random: null, session_id: null, session_id_len: 0, cipher_suite: 0, group: 0,
-                             key_share: null, key_share_len: 0, has_sni: 0, saw_supported_versions: 0,
-                             sig_algs: 0, saw_sig_algs: 0, groups: 0, retry_group: 0, has_early_data: 0,
-                             has_cookie: 0, alert: 0 }
+        key_share: null, key_share_len: 0, has_sni: 0, saw_supported_versions: 0,
+        sig_algs: 0, saw_sig_algs: 0, groups: 0, retry_group: 0, has_early_data: 0,
+        has_cookie: 0, alert: 0 }
     err = tls13_hs.parse_client_hello(bytes.view(msg)[0..ml], &ch)
     if err != "" { abort() }
     if !same_range(ch.random, 0, random, 0, 32) { abort() }
@@ -187,8 +187,8 @@ fn round_trip(m: ptr, n: int) {
     shm = tls13_hs.server_hello(random, bytes.view(sid)[0..sid_len], suite, tls13_hs.GROUP_X25519, bytes.view(pub)[0..32])
     sl = 4 + (((bytes.get(shm, 1) & 255) << 16) | ((bytes.get(shm, 2) & 255) << 8) | (bytes.get(shm, 3) & 255))
     sh = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
-                             is_hello_retry: 0, psk_accepted: 0, alert: 0, session_id_off: 0,
-                             session_id_len: 0, selected_identity: -1, cookie_off: 0, cookie_len: 0 }
+        is_hello_retry: 0, psk_accepted: 0, alert: 0, session_id_off: 0,
+        session_id_len: 0, selected_identity: -1, cookie_off: 0, cookie_len: 0 }
     serr = tls13_hs.parse_server_hello(bytes.view(shm)[0..sl], &sh)
     if serr != "" { abort() }
     if sh.version != 0x0304 || sh.cipher_suite != suite || sh.group != tls13_hs.GROUP_X25519 { abort() }

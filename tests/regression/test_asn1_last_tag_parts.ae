@@ -33,7 +33,7 @@ main() {
 
     r = asn1.reader_new(der)
     fails = fails + check(asn1.last_tag_class(r) == -1 && asn1.last_tag_pc(r) == -1 && asn1.last_tag_number(r) == -1,
-                          "a reader that has read nothing reports a tag")
+        "a reader that has read nothing reports a tag")
     seq, err = asn1.read_tlv(r)
     fails = fails + check(err == "", "the SEQUENCE did not read: ${err}")
     fails = fails + check(asn1.last_tag_class(r) == asn1.TAG_CLASS_UNIVERSAL(), "the SEQUENCE's class")

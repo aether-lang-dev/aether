@@ -51,10 +51,10 @@ main() {
 
     fails = fails + check(err == "" && content != null, "the indefinite TLV did not read: ${err}")
     fails = fails + check(elapsed < BOUND_MS,
-                          "reading ${N} TLVs inside an indefinite length took ${elapsed} ms, past ${BOUND_MS}")
+        "reading ${N} TLVs inside an indefinite length took ${elapsed} ms, past ${BOUND_MS}")
     if content != null {
         fails = fails + check(bytes.length(content) == N * 2,
-                              "the content is ${bytes.length(content)} bytes, not ${N * 2}")
+            "the content is ${bytes.length(content)} bytes, not ${N * 2}")
         same = 1
         j = 0
         while j < N * 2 && same == 1 {
@@ -65,7 +65,7 @@ main() {
         bytes.free(content)
     }
     fails = fails + check(asn1.last_tag(r) == 0x30,
-                          "last_tag is ${asn1.last_tag(r)}, not the indefinite SEQUENCE's 48")
+        "last_tag is ${asn1.last_tag(r)}, not the indefinite SEQUENCE's 48")
     fails = fails + check(asn1.reader_eof(r) == 1, "the reader did not end past the EOC")
     asn1.reader_free(r)
     bytes.free(b)

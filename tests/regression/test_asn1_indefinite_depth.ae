@@ -56,7 +56,7 @@ main() {
     r = asn1.reader_new(deep)
     content, err = asn1.read_tlv(r)
     fails = fails + check(content == null && string.contains(err, "nested too deep") == 1,
-                          "30000 nested indefinite lengths read as '${err}'")
+        "30000 nested indefinite lengths read as '${err}'")
     asn1.reader_free(r)
 
     leaf = tls13_cert.LeafCert { tbs: null }

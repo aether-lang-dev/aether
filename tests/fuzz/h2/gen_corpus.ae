@@ -58,7 +58,6 @@ fn write_seed(dir: string, name: string, b: ptr) {
     }
 }
 
-
 fn hex_digit(c: int) -> int {
     if c >= 48 && c <= 57 { return c - 48 }
     if c >= 97 && c <= 102 { return c - 87 }
@@ -234,5 +233,5 @@ main() {
     // CI run 44568798645: stream 3 ended, dispatched, then cancelled by the
     // client in the same read; the harness owed it a response (fuzz_h2.c, G3).
     hex_seed(dir, "crash_rst_after_end",
-             "0000000001010000010102100f0102000003010000000101000000256c61746520ffffff626f647904000241000007")
+        "0000000001010000010102100f0102000003010000000101000000256c61746520ffffff626f647904000241000007")
 }

@@ -290,8 +290,9 @@ fn read_indefinite(r: ptr) -> (ptr, string) {
     start = rr.pos
     end = -1
     while end < 0 {
-        if rr.pos + 2 <= rr.len && (bytes.get(rr.buf, rr.pos) & 0xFF) == 0 &&
-           (bytes.get(rr.buf, rr.pos + 1) & 0xFF) == 0 {
+        at_eoc = rr.pos + 2 <= rr.len && (bytes.get(rr.buf, rr.pos) & 0xFF) == 0
+        if at_eoc { at_eoc = (bytes.get(rr.buf, rr.pos + 1) & 0xFF) == 0 }
+        if at_eoc {
             end = rr.pos
             rr.pos = rr.pos + 2
         } else {

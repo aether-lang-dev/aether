@@ -26,7 +26,6 @@ fn seed(dir: string, name: string, text: string) {
     }
 }
 
-
 fn hex_digit(c: int) -> int {
     if c >= 48 && c <= 57 { return c - 48 }
     if c >= 97 && c <= 102 { return c - 87 }
@@ -111,5 +110,5 @@ main() {
 
     // Reproducers fuzzing found, kept as regression seeds.
     hex_seed(dir, "crash_block_at_eof",
-             "735c22203a7834315c75303034325e746578743a203e0a2020665530303030303034335c305c615c6f6c625c655c6655725c765c2f5c4e5c5f5c4c645c")
+        "735c22203a7834315c75303034325e746578743a203e0a2020665530303030303034335c305c615c6f6c625c655c6655725c765c2f5c4e5c5f5c4c645c")
 }
