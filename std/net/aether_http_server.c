@@ -7563,8 +7563,13 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
          * the peer knows not to start new streams; in-flight
          * streams keep running until they finish naturally. After
          * the GOAWAY drains and all streams close, want_close
-         * flips and we exit. */
-        if (!goaway_sent && !server->is_running) {
+         * flips and we exit. The stop is `stopping`, not
+         * `is_running`: a host that serves connections itself
+         * (http_server_drain_connection) never starts the server, so
+         * is_running was 0 from the first turn and every HTTP/2
+         * connection it served got a GOAWAY before its first
+         * request. */
+        if (!goaway_sent && atomic_load(&server->stopping)) {
             aether_h2_session_initiate_goaway(sess);
             goaway_sent = 1;
         }
