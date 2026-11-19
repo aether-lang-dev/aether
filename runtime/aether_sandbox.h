@@ -89,9 +89,12 @@ static inline int aether_sandbox_check(const char* category, const char* resourc
 // A command string run through the shell (os.system, os.exec): the exec
 // grants must cover the shell (aether_sandbox_shell) as well as the command
 // string, because the shell runs whatever follows the part a grant matched.
+// The command is checked first, so a refused command is what the audit
+// records (the thing the code asked to run, the same on every platform);
+// the shell is checked, and recorded, only for a command that was granted.
 static inline int aether_sandbox_check_shell(const char* cmd) {
-    return aether_sandbox_check("exec", aether_sandbox_shell()) &&
-           aether_sandbox_check("exec", cmd);
+    return aether_sandbox_check("exec", cmd) &&
+           aether_sandbox_check("exec", aether_sandbox_shell());
 }
 
 // The shell's name as a string the grant builders can store
