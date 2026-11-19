@@ -10,7 +10,8 @@
 // DER for the TLV reader. Beside them, DER the reader must survive:
 // indefinite lengths nested deep and many TLVs inside one, a high tag
 // number that does not end, the longest length forms, contents past the
-// end; and OCSP responses.
+// end; and OCSP responses; and the reproducers fuzzing found, kept as
+// regression seeds (crash_*).
 import std.os
 import std.io
 import std.fs
@@ -96,6 +97,37 @@ fn certs_from(dir: string, path: string, tag: string) {
 
 fn put(b: ptr, v: int) {
     _a = strbuilder.append_byte(b, v & 255)
+}
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits, the selector byte first: a
+// reproducer a fuzzing run found, kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        put(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    body = strbuilder.finish_with_length(b)
+    int bn = body.len
+    out = bytes.new(bn + 1)
+    bytes.set_length(out, bn)
+    bytes.copy_from_slice(out, 0, body)
+    write_out(dir, name, out, bn)
+    bytes.free(out)
 }
 
 main() {
@@ -214,4 +246,9 @@ main() {
     b = strbuilder.new(0)
     _q = strbuilder.append(b, "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n")
     laid(dir, "pem_unterminated", 2, b)
+
+    // Reproducers fuzzing found, kept as regression seeds: a certificate
+    // whose validity holds no time, which parsed (selector 0).
+    hex_seed(dir, "crash_validity_no_time",
+             "00308201ce3082012fa003020102020900cddb27b384d01add300a06082a8648ce3d04030130800201050000035504030c13436861696e205465737420502d3532312043413020170d3236303130313030303030305a180f32313236303130313030303030305a30173115301306035504030c0c703532312e6578616d706c653059301306072a8648ce3d020106082a8648ce3d0301070342000432e31ec4df3f72bd7f282a552fa2cc2ce96b908f6e3e223090641a63737433aeac3813510dcde6257c0442e24e3fd0df143437c095aeb1a8cfb3bf212d4a409ca35b305930170603551d110410300e820c703532312e6578616d706c65301d0603551d0e04160414165456e7e8a8cf68cb023c166124db21d3612db5301f0603551d2304183016801413a524952763da8337cc9c27018e678791ee5685300a06082a8648ce3d04030403818c0030818802420092328d445bf71d9b4dc04b08d490c188f594d5240ce04fd1fd0e65854d67f50f364dc2e23db0b06d32f71f59c5583acf6cd3a48681e41e279e5b227e75c13b0ddb930242019250a058c88b7d419ec4a65c17f4a867c4b5b384f1147fb0ec6a112fc4044bea1229c5d44bd104bbf67653ec565f1ca84f91271bed593b9819e48d400660578ab6")
 }

@@ -808,6 +808,23 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
     return perr
 }
 
+// A validity time as RFC 5280 4.1.2.5 writes it: a UTCTime YYMMDDHHMMSSZ
+// (tag 0x17, 13 bytes) or a GeneralizedTime YYYYMMDDHHMMSSZ (0x18, 15), each
+// byte a digit but the final Z. What time_to_key reads.
+fn validity_time_ok(tag: int, t: ptr) -> bool {
+    if t == null { return false }
+    n = bytes.length(t)
+    if !((tag == 0x17 && n == 13) || (tag == 0x18 && n == 15)) { return false }
+    if (bytes.get(t, n - 1) & 0xFF) != 90 { return false }
+    i = 0
+    while i < n - 1 {
+        c = bytes.get(t, i) & 0xFF
+        if c < 48 || c > 57 { return false }
+        i = i + 1
+    }
+    return true
+}
+
 // TBSCertificate ::= SEQUENCE {
 //   [0] version DEFAULT v1, serialNumber, signature AlgId, issuer Name,
 //   validity SEQUENCE { notBefore Time, notAfter Time }, subject Name,
@@ -863,16 +880,38 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     out.issuer = iss
     out.issuer_len = bytes.length(iss)
 
-    // validity SEQUENCE { notBefore, notAfter }.
+    // validity SEQUENCE { notBefore Time, notAfter Time }. Both reads used to
+    // drop their errors and take any tag, as the six above once did (#1942):
+    // a validity that was not a SEQUENCE, or held no time, or something
+    // other than a time, parsed into a certificate with no notBefore or a
+    // notAfter of arbitrary bytes (#3749, found by the X.509 fuzz target).
     val_content, valerr = asn1.read_tlv(tbsr)
     if string.equals(valerr, "") != 1 { bytes.wipe_free(val_content); return valerr }
+    if asn1.last_tag(tbsr) != 0x30 {
+        bytes.wipe_free(val_content)
+        return "certificate validity is not a SEQUENCE"
+    }
     vr = asn1.reader_new(val_content)
     nb, nberr = asn1.read_tlv(vr)
-    if string.equals(nberr, "") == 1 { out.not_before = nb; out.not_before_len = bytes.length(nb) }
-    na, naerr = asn1.read_tlv(vr)
-    if string.equals(naerr, "") == 1 { out.not_after = na; out.not_after_len = bytes.length(na) }
+    nb_ok = string.equals(nberr, "") == 1 && validity_time_ok(asn1.last_tag(vr), nb)
+    na = null
+    na_ok = false
+    if nb_ok {
+        na2, naerr = asn1.read_tlv(vr)
+        na = na2
+        na_ok = string.equals(naerr, "") == 1 && validity_time_ok(asn1.last_tag(vr), na)
+    }
     asn1.reader_free(vr)
     bytes.wipe_free(val_content)
+    if !nb_ok || !na_ok {
+        if nb != null { bytes.wipe_free(nb) }
+        if na != null { bytes.wipe_free(na) }
+        return "certificate validity does not hold two times (UTCTime YYMMDDHHMMSSZ or GeneralizedTime YYYYMMDDHHMMSSZ)"
+    }
+    out.not_before = nb
+    out.not_before_len = bytes.length(nb)
+    out.not_after = na
+    out.not_after_len = bytes.length(na)
 
     // subject Name (SEQUENCE) — capture raw DER.
     subj, suberr = read_tlv_full(tbsr)
