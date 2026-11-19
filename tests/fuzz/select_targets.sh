@@ -16,11 +16,13 @@
 # The table below is the one place a target's inputs are named; the
 # workflow's paths filter (.github/workflows/fuzz.yml) covers the same
 # paths, and test_fuzz_targets_listed checks that every target directory is
-# in it.
+# in it, and that each row names what its target is built from: the C
+# sources run_fuzz_c.sh compiles in, the modules its --with links, and every
+# std module its harness imports, followed through their imports.
 
 TABLE='
-cbor            std/cbor/ tests/fuzz/cbor/
-ipc_frames      std/ipc/ std/cbor/ tests/fuzz/ipc_frames/
+cbor            std/cbor/ std/encoding/ std/list/ std/strbuilder/ tests/fuzz/cbor/
+ipc_frames      std/ipc/ std/cbor/ std/os/ std/io/ std/encoding/ std/list/ std/strbuilder/ tests/fuzz/ipc_frames/
 http_head       std/net/ tests/fuzz/http_head/
 http_chunked    std/net/ tests/fuzz/http_chunked/
 url             std/net/ tests/fuzz/url/
@@ -31,11 +33,11 @@ proxy_response  std/http/proxy/ std/net/ tests/fuzz/proxy_response/
 xml             std/xml/ tests/fuzz/xml/
 yaml            std/yaml/ tests/fuzz/yaml/
 msgpack         std/msgpack/ std/list/ tests/fuzz/msgpack/
-tar             std/tar/ std/fs/ std/io/ std/list/ tests/fuzz/tar/
-zip             std/zip/ std/zlib/ std/hash/ std/fs/ std/io/ std/list/ tests/fuzz/zip/
-tls13_record    std/cryptography/ tests/fuzz/tls13_record/
-tls13_handshake std/cryptography/ std/list/ tests/fuzz/tls13_handshake/
-x509            std/cryptography/ std/list/ tests/fuzz/x509/
+tar             std/tar/ std/fs/ std/os/ std/io/ std/list/ std/strbuilder/ tests/fuzz/tar/
+zip             std/zip/ std/zlib/ std/hash/ std/bits/ std/fs/ std/os/ std/io/ std/list/ std/strbuilder/ tests/fuzz/zip/
+tls13_record    std/cryptography/ std/bits/ std/intarr/ tests/fuzz/tls13_record/
+tls13_handshake std/cryptography/ std/bits/ std/list/ tests/fuzz/tls13_handshake/
+x509            std/cryptography/ std/bignum/ std/bits/ std/encoding/ std/strbuilder/ std/list/ std/fs/ std/os/ tests/fuzz/x509/
 '
 
 # Paths every target is built with.

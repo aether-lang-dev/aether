@@ -14,7 +14,10 @@
 #      of its own (run_fuzz_<target>.sh);
 #   3. every path in the table is covered by the workflow's paths filter;
 #   4. the selector's shards split the list: three shards hold every target
-#      once.
+#      once;
+#   5. each target's row names what it is built from: its C sources, the
+#      modules its --with links and the std modules its harness imports,
+#      followed through theirs.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -48,6 +51,60 @@ for p in $prefixes; do
         case "$p" in "$f"*) covered=1 ;; esac
     done
     [ "$covered" = 1 ] || fail "fuzz.yml's paths filter does not cover $p, which select_targets.sh feeds a target from"
+done
+
+# 5. What a target is built from is in its row: the C sources run_fuzz_c.sh
+# compiles into it, each module its --with links (std/<name>/, extern being
+# no module), and every std module its Aether harness imports, followed
+# through their own imports. A path is in the row when one of the row's
+# prefixes, or one every target shares, starts it. tar, zip and x509 linked
+# std.os, the crypto targets std.bignum and std.strbuilder, x509 std.fs,
+# and a change to any of them fuzzed nothing.
+shared=$(sed -n "/^SHARED='/,/'\$/p" "$SEL" | sed "s/^SHARED='//; s/'\$//")
+row_of() { sed -n "/^TABLE='/,/^'/p" "$SEL" | awk -v t="$1" '$1 == t { $1 = ""; print }'; }
+with_of() {
+    if [ -f "$ROOT/tests/fuzz/$1/run_fuzz_$1.sh" ]; then
+        sed -n 's/.*--with=\([A-Za-z0-9_,]*\).*/\1/p' "$ROOT/tests/fuzz/$1/run_fuzz_$1.sh" | head -1
+    else
+        grep "^    $1) " "$ROOT/tests/fuzz/run_fuzz_c.sh" | sed -n 's/.*AE_WITH="\([^"]*\)".*/\1/p'
+    fi
+}
+sources_of() {
+    awk -v t="$1" '
+        $0 ~ "^    " t "\\) " { on = 1 }
+        on { print; if ($0 ~ /;;/) exit }' "$ROOT/tests/fuzz/run_fuzz_c.sh" |
+        grep -oE 'std/[A-Za-z0-9_./-]+\.c' | sed 's#/[^/]*$#/#'
+}
+# The directory of each std module the files given import, and of theirs.
+imports_of() {
+    todo="$*"; done_=" "
+    while [ -n "$todo" ]; do
+        set -- $todo; f="$1"; shift; todo="$*"
+        case "$done_" in *" $f "*) continue ;; esac
+        done_="$done_$f "
+        for m in $(sed -n 's/^[[:space:]]*import[[:space:]][[:space:]]*std\.\([A-Za-z0-9_.]*\).*/\1/p' "$ROOT/$f" | sort -u); do
+            d="std/$(printf '%s' "$m" | tr . /)"
+            while [ ! -f "$ROOT/$d/module.ae" ] && [ "$d" != std ]; do d="${d%/*}"; done
+            [ "$d" = std ] && continue
+            echo "$d/"
+            todo="$todo $d/module.ae"
+        done
+    done
+}
+for t in $all; do
+    row="$(row_of "$t") $shared"
+    need="$(sources_of "$t")"
+    for w in $(with_of "$t" | tr ',' ' '); do
+        [ "$w" = extern ] || need="$need std/$w/"
+    done
+    [ -f "$ROOT/tests/fuzz/$t/fuzz_$t.ae" ] && need="$need $(imports_of "tests/fuzz/$t/fuzz_$t.ae")"
+    for p in $need; do
+        in_row=0
+        for r in $row; do
+            case "$p" in "$r"*) in_row=1 ;; esac
+        done
+        [ "$in_row" = 1 ] || fail "$t is built from $p, and its row in select_targets.sh does not name it"
+    done
 done
 
 shards="$(sh "$SEL" --all --shard 1/3) $(sh "$SEL" --all --shard 2/3) $(sh "$SEL" --all --shard 3/3)"

@@ -48,8 +48,14 @@ on:
       - 'std/hash/**'
       - 'std/cryptography/**'
       - 'std/fs/**'
+      - 'std/os/**'
       - 'std/io/**'
       - 'std/list/**'
+      - 'std/bignum/**'
+      - 'std/bits/**'
+      - 'std/encoding/**'
+      - 'std/intarr/**'
+      - 'std/strbuilder/**'
       # What every target is built with: the runtime, the compiler and ae
       # (the Aether targets are compiled by `ae build --emit=obj`), the std
       # modules each one links, and the flags the Makefile hands the
