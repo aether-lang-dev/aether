@@ -264,7 +264,7 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
  * system() and popen() do is kept: `/bin/sh -c` (with `--`, so a command
  * that starts with `-` is no option, as glibc passes it), the wait-status
  * word, the signal handling and the waits retried on EINTR. */
-#define AETHER_OS_SHELL "/bin/sh"
+#define AETHER_OS_SHELL AETHER_SANDBOX_SHELL   /* "/bin/sh", aether_sandbox_match.h */
 
 /* This process's environment: what a child execs with when no env is given
  * (#3201). */
@@ -531,9 +531,13 @@ static int aether_os_system_posix(const char* cmd) {
 #endif
 #endif
 
+/* A command string runs through the shell, which runs all of it, not only
+ * the part an exec grant matched ("echo *" matches "echo hi; rm -rf ~"):
+ * the shell needs an exec grant of its own (#3735), as it does under the
+ * LD_PRELOAD library. aether_sandbox_check_shell checks both. */
 int os_system(const char* cmd) {
     if (!cmd) return -1;
-    if (!aether_sandbox_check("exec", cmd)) return -1;
+    if (!aether_sandbox_check_shell(cmd)) return -1;
 #if !AETHER_HAS_SHELL
     /* iOS/tvOS/watchOS: no shell to exec into, and system() is marked
      * __API_UNAVAILABLE there, so even naming it fails the compile. Report
@@ -569,7 +573,7 @@ int os_system(const char* cmd) {
 
 char* os_exec_raw(const char* cmd) {
     if (!cmd) return NULL;
-    if (!aether_sandbox_check("exec", cmd)) return NULL;
+    if (!aether_sandbox_check_shell(cmd)) return NULL;   /* the shell too, #3735 */
 
 #ifdef _WIN32
     FILE* pipe = _popen(cmd, "r");

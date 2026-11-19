@@ -692,7 +692,7 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
 // execvp, execvpe and execlp search PATH here, the way glibc does, so the
 // grant is checked against each file actually run.
 #define MAX_EXEC_ARGS 4096
-#define SANDBOX_SHELL "/bin/sh"
+#define SANDBOX_SHELL AETHER_SANDBOX_SHELL   // "/bin/sh": the one name std.os checks too
 
 // A file that is not an executable format (no #! line) is run as a shell
 // script by execvp and execlp, as glibc and FreeBSD do; through execve above,
@@ -1126,7 +1126,9 @@ int pidfd_spawnp(int* pidfd, const char* file, const posix_spawn_file_actions_t*
 
 // The shell: system(), popen() and wordexp()'s command substitution run
 // /bin/sh. It needs fork()'s rule and an exec grant for /bin/sh, as the
-// fork and execve it amounts to would. The shell inherits the live
+// fork and execve it amounts to would. In-process, std.os's os.system and
+// os.exec apply the same exec rule (aether_sandbox_check_shell, #3735).
+// The shell inherits the live
 // environment, which (unlike execve's) cannot be rebuilt here, so under a
 // grant file it must still carry exactly the controls the process started
 // with: one that has dropped or changed them is refused, as execve would

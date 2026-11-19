@@ -86,12 +86,25 @@ static inline int aether_sandbox_check(const char* category, const char* resourc
     return aether_sandbox_check_slow(category, resource);
 }
 
+// A command string run through the shell (os.system, os.exec): the exec
+// grants must cover the shell (aether_sandbox_shell) as well as the command
+// string, because the shell runs whatever follows the part a grant matched.
+static inline int aether_sandbox_check_shell(const char* cmd) {
+    return aether_sandbox_check("exec", aether_sandbox_shell()) &&
+           aether_sandbox_check("exec", cmd);
+}
+
+// The shell's name as a string the grant builders can store
+// (std.sandbox's grant_shell).
+const char* aether_sandbox_shell_path(void);
+
 #else
 
 // No sandbox compiled in: always allow. The arguments are evaluated for
 // their side effects only, so a resource built in a local buffer
 // (aether_net_resource) does not leave that buffer unused.
 #define aether_sandbox_check(category, resource) ((void)(category), (void)(resource), 1)
+#define aether_sandbox_check_shell(cmd) ((void)(cmd), 1)
 
 #endif // AETHER_HAS_SANDBOX
 

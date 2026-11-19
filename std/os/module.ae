@@ -40,7 +40,8 @@ exports(
 
 // Run a shell command, returns exit code (0 = success). A command the
 // shell cannot find is the shell's own 127; a shell that could not start
-// is -1 on every platform (#3170).
+// is -1 on every platform (#3170). Inside a sandbox it needs an exec grant
+// for the shell (sandbox's grant_shell) as well as for `cmd` (#3735).
 extern os_system(cmd: string) -> int
 
 // Run a command and capture stdout as a string. Raw extern returns
@@ -317,7 +318,8 @@ extern os_execv(prog: string, argv_list: ptr) -> int
 extern string_concat(a: string, b: string) -> string @heap
 
 // Execute a shell command and capture stdout. Returns (output, "")
-// on success, ("", error) on failure.
+// on success, ("", error) on failure. Inside a sandbox it needs an exec
+// grant for the shell (sandbox's grant_shell) as well as for `cmd` (#3735).
 exec(cmd: string) -> {
     output = os_exec_raw(cmd)
     if output == null {

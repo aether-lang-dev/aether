@@ -52,6 +52,9 @@ extern strdup(s: string) -> ptr
 // on macOS and a grant named through a symlink covers where it leads.
 extern aether_sandbox_grant_pattern(category: string, pattern: string) -> ptr
 @extern("free") libc_free(p: ptr)
+// The shell a command string runs through (runtime/aether_sandbox_match.h):
+// /bin/sh, or on Windows what COMSPEC names (cmd.exe when unset).
+extern aether_sandbox_shell_path() -> string
 // grant_runtime asks an interpreter for its paths (os.run_capture's C half).
 extern os_run_capture_status_raw(prog: string, argv: ptr, env: ptr) -> (string @heap, int, string)
 // For freezing a grant list: an element's characters (a plain C string or an
@@ -66,7 +69,7 @@ extern os_run_socket_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string
 
 exports(
     Grants, new, enforce, free, spawn_socket, spawn_socket_uncontained,
-    grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec,
+    grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec, grant_shell,
     grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native, grant_fork,
     grant_without_landlock, grant_runtime
 )
@@ -246,8 +249,20 @@ grant_fs(_ctx: Grants, path: string) {
     add_grant(_ctx, "fs", path)
 }
 
-// Running commands whose command line matches `cmd` ("echo *").
+// Running commands whose command line matches `cmd`: a program os.run and
+// its family start ("echo", "/usr/bin/git"), or a command string os.system
+// and os.exec hand to the shell ("echo *"). A command string also needs
+// grant_shell, below.
 grant_exec(_ctx: Grants, cmd: string) { add_grant(_ctx, "exec", cmd) }
+
+// Running the shell: /bin/sh, or on Windows the program COMSPEC names
+// (cmd.exe). os.system and os.exec run their command string through it, and
+// the shell runs all of the string, not only the part an exec grant matched:
+// with grant_exec("echo *"), "echo hi; rm -rf ~" matches too. So a command
+// string needs this grant as well as its own, and the pair allows whatever
+// the shell can be told to run. Grant it only to code you would let run any
+// command; give the rest os.run with an argv, which runs no shell.
+grant_shell(_ctx: Grants) { add_grant(_ctx, "exec", aether_sandbox_shell_path()) }
 
 // Reading the environment variables whose names match `name`.
 grant_env(_ctx: Grants, name: string) { add_grant(_ctx, "env", name) }

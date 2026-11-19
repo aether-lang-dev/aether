@@ -69,7 +69,8 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_fs_read(path)` | `fs_read` | path being opened for reading |
 | `grant_fs_write(path)` | `fs_write` | path being opened, created or written |
 | `grant_fs(path)` | `fs_read`, `fs_write` and `fs` | reads, writes and directory operations such as `os.chdir` |
-| `grant_exec(cmd)` | `exec` | command line |
+| `grant_exec(cmd)` | `exec` | program (`os.run` and its family) or command string (`os.system`, `os.exec`) |
+| `grant_shell()` | `exec` | the shell a command string runs through: `/bin/sh`, or on Windows what `COMSPEC` names (`cmd.exe`) |
 | `grant_env(name)` | `env` | environment variable name |
 | `grant_tcp(host)` | `tcp` | host name (std.net) or resolved IP (LD_PRELOAD); ports are not checked |
 | `grant_tcp_listen()` | `tcp_listen` | any listening socket |
@@ -113,14 +114,15 @@ This maps directly to the container/contained boundary:
 
 ## Working example
 
-The contained code below calls ordinary `os.getenv`, `fs.read` and
-`os.exec`. It does not know it is sandboxed; a refused call looks like a
-missing variable, an unreadable file or a failed command.
+The contained code below calls ordinary `os.getenv`, `fs.read`,
+`os.run_capture` and `os.exec`. It does not know it is sandboxed; a refused
+call looks like a missing variable, an unreadable file or a failed command.
 
 ```aether
 import std.sandbox
 import std.os
 import std.fs
+import std.list
 
 try_env(name: string) {
     if os.getenv(name) != null {
@@ -136,6 +138,17 @@ try_read(path: string) {
         println("  [ALLOW] read ${path}")
     } else {
         println("  [DENY]  read ${path}")
+    }
+}
+
+try_run(prog: string, arg: string) {
+    argv = list.new()
+    _a = list.add(argv, arg)
+    _out, _status, err = os.run_capture(prog, argv, null)
+    if err == "" {
+        println("  [ALLOW] run ${prog} ${arg}")
+    } else {
+        println("  [DENY]  run ${prog} ${arg}")
     }
 }
 
@@ -155,9 +168,10 @@ main() {
         grant_env("HOME")
     }
 
-    // An untrusted plugin that may only run echo
+    // An untrusted plugin that may only run echo, with an argv: no shell
+    // reads its arguments, so they cannot become a second command.
     plugin = sandbox.new("plugin") {
-        grant_exec("echo *")
+        grant_exec("echo")
     }
 
     println("=== db-worker ===")
@@ -171,8 +185,9 @@ main() {
 
     println("=== plugin ===")
     sandbox.enforce(plugin) callback {
+        try_run("echo", "hi; uname")
+        try_run("uname", "-a")
         try_exec("echo hi")
-        try_exec("uname")
         try_env("HOME")
         try_read("/etc/passwd")
     }
@@ -192,10 +207,36 @@ main() {
   [DENY]  env PATH
   [DENY]  exec echo hi
 === plugin ===
-  [ALLOW] exec echo hi
-  [DENY]  exec uname
+  [ALLOW] run echo hi; uname
+  [DENY]  run uname -a
+  [DENY]  exec echo hi
   [DENY]  env HOME
   [DENY]  read /etc/passwd
+```
+
+The plugin's `echo` gets `hi; uname` as one argument and prints it; no
+shell reads it. `os.exec("echo hi")` is refused because a command string
+runs through the shell, which the plugin is not granted.
+
+### What a command-string grant allows
+
+`os.system` and `os.exec` hand their command string to the shell (`/bin/sh
+-c`, or on Windows the program `COMSPEC` names, `cmd.exe`), and the shell runs
+all of it. An exec grant is matched against the string as a whole, so
+`grant_exec("echo *")` matches `"echo hi; rm -rf ~"` and `"echo $(id)"` as
+well as `"echo hi"`. For that reason a command string needs two exec grants:
+its own and the shell's, `grant_shell()`. The pair allows anything the shell
+can be told to run, so give it only to code you would let run any command.
+The LD_PRELOAD library applies the same rule to `system()` and `popen()`.
+
+```aether,fragment
+// Untrusted code: name the program and pass an argv. No shell runs.
+grant_exec("echo")              // os.run_capture("echo", argv, null)
+
+// Trusted code that needs the shell: both grants, and the shell can run
+// anything after "echo ".
+grant_exec("echo *")            // os.exec("echo hi")
+grant_shell()
 ```
 
 ## How containment works
@@ -322,8 +363,8 @@ direct calls to the raw extern (`tcp_connect_raw`) are enforced.
 | `file.exists(path)` | `file_exists` | `"fs_read"` | Yes, returns 0 if denied |
 | `file.delete(path)` | `file_delete_raw` | `"fs_write"` | Yes, wrapper returns `"cannot delete file"` if denied |
 | `file.size(path)` | `file_size_raw` | `"fs_read"` | Yes, wrapper returns `(0, "cannot stat file")` if denied |
-| `os.system(cmd)` | `os_system` | `"exec"` | Yes, returns -1 if denied |
-| `os.exec(cmd)` | `os_exec_raw` | `"exec"` | Yes, wrapper returns `("", "command failed")` if denied |
+| `os.system(cmd)` | `os_system` | `"exec"`, for the shell and for `cmd` | Yes, returns -1 if denied |
+| `os.exec(cmd)` | `os_exec_raw` | `"exec"`, for the shell and for `cmd` | Yes, wrapper returns `("", "command failed")` if denied |
 | `os.getenv(name)` | `os_getenv` | `"env"` | Yes, returns null if denied |
 
 Nested sandboxes are intersected, an inner sandbox cannot escalate
@@ -735,8 +776,12 @@ grant_exec("*")
 
 // Good:
 grant_exec("python3")
-grant_exec("echo *")
 ```
+
+A command-string grant such as `grant_exec("echo *")` allows nothing
+without `grant_shell()`, and with it the shell runs whatever follows the
+matched prefix (see "What a command-string grant allows" above). Name the
+program instead and spawn it with an argv.
 
 ### 3. No statically linked binaries in granted paths
 

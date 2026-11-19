@@ -45,6 +45,8 @@ fn has_grant(perms: ptr, i: int, category: string, pattern: string) -> int {
 // Windows (`D:\r\*`).
 extern aether_sandbox_grant_pattern(category: string, pattern: string) -> ptr
 @extern("free") libc_free(p: ptr)
+// The shell grant_shell names: /bin/sh, or what COMSPEC names on Windows.
+extern aether_sandbox_shell_path() -> string
 
 fn stored(category: string, pattern: string) -> string {
     p = aether_sandbox_grant_pattern(category, pattern)
@@ -189,6 +191,7 @@ main() {
         spec.it("matches exec grants against the command line") callback {
             g = sandbox.new("echoer") {
                 grant_exec("echo *")
+                grant_shell()
             }
             sandbox.enforce(g) callback {
                 out, err = os.exec("echo sandboxed")
@@ -196,6 +199,36 @@ main() {
                 spec.assert_contains(out, "sandboxed", "and produces its output")
                 _o2, err2 = os.exec("uname")
                 spec.assert_err(err2, "a command outside the pattern is refused")
+            }
+            sandbox.free(g)
+        }
+
+        // #3735: "echo *" matches any command string that starts with
+        // "echo ", and the shell runs all of the string, so a command string
+        // needs the shell granted as well. Without grant_shell it is refused,
+        // shell syntax after the matched part or not.
+        spec.it("refuses a command string when the shell is not granted") callback {
+            g = sandbox.new("echo-only") {
+                grant_exec("echo *")
+            }
+            sandbox.enforce(g) callback {
+                _o, err = os.exec("echo hi; uname")
+                spec.assert_err(err, "shell syntax after a granted prefix is refused")
+                _o2, err2 = os.exec("echo hi")
+                spec.assert_err(err2, "and so is the plain command, with no shell grant")
+                spec.assert_eq(os.system("echo hi"), -1, "os.system checks the shell too")
+            }
+            sandbox.free(g)
+        }
+
+        spec.it("grant_shell grants the shell the command string runs through") callback {
+            g = sandbox.new("shell") {
+                grant_shell()
+            }
+            spec.assert_true(has_grant(g as ptr, 0, "exec", aether_sandbox_shell_path()), "an exec grant for the shell")
+            sandbox.enforce(g) callback {
+                _o, err = os.exec("echo hi")
+                spec.assert_err(err, "the shell alone does not grant the command")
             }
             sandbox.free(g)
         }

@@ -80,6 +80,26 @@ static inline int aether_grant_match(const char* category, const char* pat, cons
     return aether_grant_glob(pat, resource);
 }
 
+// The shell a command string runs through, for the exec check on it. An exec
+// grant is matched against a command string as a whole, and "echo *" matches
+// any string that starts with "echo ", whatever shell syntax follows. The
+// shell then runs all of it. So a command run through a shell needs an exec
+// grant for the shell as well as for the command: std.os's os.system and
+// os.exec check both (aether_sandbox_check_shell), and the LD_PRELOAD
+// library's system(), popen() and wordexp() check the shell. On POSIX that
+// is /bin/sh. On Windows the CRT's system() and _popen() run the program
+// COMSPEC names, or cmd.exe when it is unset or empty, so that is the
+// resource checked there.
+#ifdef _WIN32
+static inline const char* aether_sandbox_shell(void) {
+    const char* comspec = getenv("COMSPEC");
+    return (comspec && *comspec) ? comspec : "cmd.exe";
+}
+#else
+#define AETHER_SANDBOX_SHELL "/bin/sh"
+static inline const char* aether_sandbox_shell(void) { return AETHER_SANDBOX_SHELL; }
+#endif
+
 // The resource a tcp/udp check names: "host:port", with an IPv6 address in
 // brackets so its own colons cannot be read as the port's.
 static inline const char* aether_net_resource(char* buf, size_t cap, const char* host, int port) {
