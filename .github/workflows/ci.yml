@@ -145,7 +145,7 @@ jobs:
             target: ci-sweep
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # The Linux legs' packages, from a cache of their .deb files (#3602):
     # the mirror served one leg in three at 39 kB/s, five minutes or more.
@@ -177,7 +177,7 @@ jobs:
     # correctness never depends on a cache hit.
     - name: Restore miniaudio object cache
       id: audio_cache
-      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .ci-cache
         key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
@@ -194,7 +194,7 @@ jobs:
       # (the runner could not reach the artifact service, ENOTFOUND on a
       # macOS runner of PR #3671) does not fail a job whose tests passed.
       continue-on-error: true
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: sweep-timings-${{ strategy.job-index }}
         path: ${{ runner.temp }}/sweep-timings.txt
@@ -279,7 +279,7 @@ jobs:
         github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.audio_cache.outputs.cache-hit != 'true'
         && (matrix.target != 'ci-sweep' || matrix.unit == '1')
-      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .ci-cache
         key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
@@ -311,12 +311,12 @@ jobs:
         shard: ["1/2", "2/2"]
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # The ARM64 leg's miniaudio object (same OS, compiler and build
     # variant, so the same key); restore only, the leg saves it.
     - name: Restore miniaudio object cache
-      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .ci-cache
         key: audio-obj-macos-latest-clang-h0-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
@@ -361,7 +361,7 @@ jobs:
     if: github.event_name == 'pull_request'
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         fetch-depth: 0
 
@@ -454,7 +454,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install toolchain
       run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
@@ -462,7 +462,7 @@ jobs:
     # zig cc bundles no FreeBSD libc, so the base sysroot is what makes the
     # FreeBSD headers visible. Same source as the release leg.
     - name: Checkout aether-crossbuild
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         repository: aether-lang-dev/aether-crossbuild
         path: crossbuild
@@ -472,7 +472,7 @@ jobs:
     # dir every run. deps.lock pins both URLs and checksums.
     - name: Restore cross-toolchain download cache
       id: cross_cache
-      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           .zig
@@ -497,7 +497,7 @@ jobs:
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.cross_cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           .zig
@@ -539,7 +539,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - name: Cross-build for Android (ANDROID=1)
       run: |
         NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
@@ -590,7 +590,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install toolchain
       uses: ./.github/actions/apt-install
@@ -600,7 +600,7 @@ jobs:
 
     - name: Restore zig + SQLite cross object cache
       id: sqlite_xcache
-      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           .zig
@@ -632,7 +632,7 @@ jobs:
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.sqlite_xcache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           .zig
@@ -645,7 +645,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # vmactions/freebsd-vm installs qemu with apt, under apt's default
     # connect timeout. When the runner's Azure mirror stopped answering, its
@@ -695,7 +695,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install build tools
       uses: ./.github/actions/apt-install
@@ -728,7 +728,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # valgrind for the contrib memcheck tests. contrib/vulkan needs the
     # headers to build and a driver to run: lavapipe is Mesa's CPU
@@ -779,7 +779,7 @@ jobs:
     # only ever supply the right one. Split restore/save as above.
     - name: Restore SQLite amalgamation object cache
       id: sqlite_obj_cache
-      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .ci-cache/sqlite
         key: sqlite-obj-ubuntu-22.04-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
@@ -801,7 +801,7 @@ jobs:
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.sqlite_obj_cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .ci-cache/sqlite
         key: sqlite-obj-ubuntu-22.04-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
@@ -925,7 +925,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install build deps, lavapipe and gdb
       uses: ./.github/actions/apt-install
@@ -1044,7 +1044,7 @@ jobs:
         shell: bash
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # Metal ships with macOS. Vulkan does not: the headers build
     # contrib.vulkan, the loader is what it opens at runtime, and MoltenVK is
@@ -1121,7 +1121,7 @@ jobs:
         shell: msys2 {0}
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
       with:
@@ -1214,7 +1214,7 @@ jobs:
       # (the runner could not reach the artifact service, ENOTFOUND on a
       # macOS runner of PR #3671) does not fail a job whose tests passed.
       continue-on-error: true
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: sweep-timings-windows-gcc-${{ strategy.job-index }}
         path: ${{ runner.temp }}/sweep-timings.txt
@@ -1237,7 +1237,7 @@ jobs:
         shell: msys2 {0}
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
       with:
@@ -1304,7 +1304,7 @@ jobs:
     # (#1372); keep its object between runs, as on the Linux contrib leg.
     - name: Restore SQLite amalgamation object cache
       id: sqlite_obj_cache
-      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .ci-cache/sqlite
         key: sqlite-obj-windows-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
@@ -1353,7 +1353,7 @@ jobs:
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.sqlite_obj_cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .ci-cache/sqlite
         key: sqlite-obj-windows-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
@@ -1412,7 +1412,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install toolchain
       run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc
@@ -1432,7 +1432,7 @@ jobs:
     # could rot to a stub and stay green everywhere. OPENSSL=0 forces the
     # detection off regardless of what is installed on the runner.
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install toolchain
       run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc
@@ -1480,7 +1480,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install toolchain
       uses: ./.github/actions/apt-install
@@ -1500,7 +1500,7 @@ jobs:
     - name: Restore the conformance corpora
       id: conformance_cache
       if: success() || failure()
-      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/aether-conformance
         key: conformance-${{ hashFiles('tests/conformance/*/run.sh') }}
@@ -1518,7 +1518,7 @@ jobs:
         (success() || failure())
         && github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.conformance_cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/aether-conformance
         key: conformance-${{ hashFiles('tests/conformance/*/run.sh') }}
@@ -1528,10 +1528,10 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install Emscripten
-      uses: mymindstorm/setup-emsdk@667eb33f24e84e7f362c16d8d7fff0629a73e15e # v15
+      uses: mymindstorm/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
       with:
         version: 3.1.51
 
@@ -1612,7 +1612,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # --no-install-recommends: Recommends pulls libstdc++-arm-none-eabi-newlib,
     # 347 MB of C++ library this C-only build never links, and a slow Azure
@@ -1642,7 +1642,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Free disk space for the ESP-IDF image
       run: |
@@ -1675,7 +1675,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install RISC-V cross-toolchain + qemu
       uses: ./.github/actions/apt-install
