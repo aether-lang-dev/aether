@@ -343,7 +343,7 @@ This is consistent with normal lexical shadowing and means
 | `seal except printf, malloc` then trying to call `free` | Compile error, `free` is not in the whitelist. |
 | `hide http` then `http.get("x")` | Compile error, qualified access blocked because the prefix is hidden (reported as `E0301` undefined, since the hidden prefix resolves to no symbol). |
 | `hide http` then `http.get("x")` in a nested block, `if` body or closure | Compile error, the same as at the hiding block's own level. |
-| `seal except http` then `http.get("x")`, at any depth | OK, a whitelisted prefix admits all of its exported members. |
+| `seal except http` then `http.get("x")` or `http.STATUS_OK`, at any depth | OK, a whitelisted prefix admits all of its exported members, functions and constants. |
 | `hide` or `seal except` inside an actor receive arm | Works, receive arm bodies are block scopes like any other. |
 
 ## Implementation note

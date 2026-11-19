@@ -243,6 +243,8 @@ static int qualified_member_blocked(SymbolTable* table, const char* ns, const ch
 // `fs_exists`, a name the user never wrote and could never whitelist.
 // Checking it against hide/seal again made `seal except fs` refuse every
 // `fs.<member>` call, so walk the chain without those checks.
+static const char* enum_member_source_prefix(const ASTNode* nd);
+
 static Symbol* lookup_member_symbol(SymbolTable* table, const char* name) {
     for (SymbolTable* t = table; t; t = t->parent) {
         Symbol* s = lookup_symbol_local(t, name);
@@ -4222,8 +4224,10 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
     if (expr->child_count > 0 && expr->children[0] &&
         expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
         is_visible_namespace(expr->children[0]->value, table) && expr->value) {
+        /* Past hide / seal, as typecheck_expression's member access looks
+         * it up: a seal admitting `mm` left `mm.K as uint32` "unknown". */
         const char* qualified = aether_internf("%s_%s", expr->children[0]->value, expr->value);
-        Symbol* sym = lookup_symbol(table, qualified);
+        Symbol* sym = lookup_member_symbol(table, qualified);
         /* #2631: the checked module file's own constant, which a
          * build merges as `<ns>_<name>`: the bare one it carries. */
         if ((!sym || !sym->type) && !(table && table->merged_from) &&
@@ -4813,7 +4817,11 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->annotation && strcmp(expr->annotation, "fn_value") == 0 && expr->node_type) {
                 return clone_type(expr->node_type);
             }
-            Symbol* symbol = lookup_symbol(table, expr->value);
+            /* A lowered `Color.Red` or `mm.K`: its prefix passed hide / seal
+             * where it was checked, and its C name is none a seal lists. */
+            Symbol* symbol = enum_member_source_prefix(expr)
+                                 ? lookup_member_symbol(table, expr->value)
+                                 : lookup_symbol(table, expr->value);
             return (symbol && symbol->type) ? clone_type(symbol->type) : create_type(TYPE_UNKNOWN);
         }
         
@@ -12811,10 +12819,11 @@ static void enum_rewrite_ast(ASTNode* nd, const char** names, int n) {
 }
 
 /* A qualified enum member is lowered to one identifier before lexical scopes
- * are checked. Preserve the prefix the source wrote so hide/seal decisions use
- * `Color`, not the generated `Color_Red` constant name. */
+ * are checked, and a module's constant (`mm.K`) once it is checked. Preserve
+ * the prefix the source wrote so hide/seal decisions use `Color` or `mm`, not
+ * the generated `Color_Red` or `mm_K`, which no seal can list. */
 static const char* enum_member_source_prefix(const ASTNode* nd) {
-    static const char marker[] = "enum_prefix:";
+    static const char marker[] = "member_of:";
     if (!nd || !nd->annotation) return NULL;
     size_t marker_len = sizeof(marker) - 1;
     for (const char* p = nd->annotation; (p = strstr(p, marker)) != NULL; p += marker_len) {
@@ -12848,7 +12857,7 @@ static void enum_rewrite_member_access(ASTNode* nd) {
         } else {
             const char* qualified = aether_internf("%s_%s", ename, nd->value);
             nd->annotation = annotation_add_marker(nd->annotation,
-                                                   aether_internf("enum_prefix:%s", ename));
+                                                   aether_internf("member_of:%s", ename));
             Type* et = create_type(TYPE_ENUM);
             et->struct_name = strdup(ename);
             free(nd->value);
@@ -14524,7 +14533,7 @@ static int report_uncalled_function(ASTNode* e, SymbolTable* table) {
                e->children[0]->value && !value_hides_namespace(table, e->children[0]->value) &&
                is_visible_namespace(e->children[0]->value, table)) {
         /* `ns.name` reaches the C name the merge gave it, as a call does. */
-        sym = lookup_symbol(table, qualified_c_name(e->children[0]->value, e->value));
+        sym = lookup_member_symbol(table, qualified_c_name(e->children[0]->value, e->value));
         snprintf(shown, sizeof(shown), "%s.%s", e->children[0]->value, e->value);
     }
     if (!sym || !sym->is_function) return 0;
@@ -18451,9 +18460,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     type_error(msg, expr->line, expr->column);
                     return 0;
                 }
+                /* The prefix passed hide / seal above, so its member is
+                 * looked up past them, as a call through it is
+                 * (lookup_member_symbol): `mm_K` is a name the source never
+                 * wrote and no seal could list, and `seal except mm` refused
+                 * every `mm.K` as "no export 'K'". */
                 const char* qualified =
                     aether_internf("%s_%s", expr->children[0]->value, expr->value);
-                Symbol* sym = lookup_symbol(table, qualified);
+                Symbol* sym = lookup_member_symbol(table, qualified);
                 /* #924 re-export: `hub.X` where hub lists X in `exports` but
                  * imports it from another module. The local `hub_X` symbol
                  * doesn't exist; redirect to the defining module's symbol
@@ -18464,7 +18478,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (origin && origin->name) {
                         qualified = aether_internf("%s_%s", module_namespace_of(origin->name),
                                                    expr->value);
-                        sym = lookup_symbol(table, qualified);
+                        sym = lookup_member_symbol(table, qualified);
                     }
                 }
                 /* #2631: the checked module file's own constant, which a
@@ -18477,6 +18491,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (sym && sym->type) {
                     // Rewrite node in-place
                     expr->type = AST_IDENTIFIER;
+                    expr->annotation = annotation_add_marker(expr->annotation,
+                        aether_internf("member_of:%s", expr->children[0]->value));
                     free(expr->value);
                     expr->value = strdup(qualified);
                     set_node_type(expr, clone_type(sym->type));

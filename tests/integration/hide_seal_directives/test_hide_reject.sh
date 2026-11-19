@@ -549,8 +549,9 @@ cd "$ROOT"
 # could. A name from outside the seal stays refused.
 mkdir -p $AE_TMP/sealmod/mm
 cat > $AE_TMP/sealmod/mm/module.ae << 'EOF'
-exports (run_it, K, bump)
+exports (run_it, K, S, bump)
 const K = 7
+const S = "hi"
 run_it(f: @keep fn) { f() }
 bump(x: int) -> int { return x + K }
 EOF
@@ -583,6 +584,46 @@ main() {
 }
 EOF
 run_reject_hidden "closure passed to a module function still cannot reach a sealed-out name" $AE_TMP/sealmod/closure_module_outer.ae
+
+# A module's exported constant through a listed prefix: `seal except mm`
+# admits `mm.K` as it admits `mm.bump(p)`. It was refused as "module 'mm'
+# has no export 'K'": the constant's merged name `mm_K`, which no seal can
+# list, was looked up through the seal. Without `mm` on the list, or under
+# `hide mm.K`, it is refused as hidden. Read again after the check (`mm.K as
+# uint32`, the type of `s = mm.S`), it was "unknown" under the seal too.
+cat > $AE_TMP/sealmod/module_const.ae << 'EOF'
+import mm
+f1(p: int) -> int {
+    seal except p, mm
+    a = mm.K
+    b = mm.K as uint32
+    s = mm.S
+    if s == "h${p}" { return 0 }
+    return a + (b as int) + mm.bump(p)
+}
+main() { println(f1(1)) }
+EOF
+run_accept "seal except admits a listed module's constant" $AE_TMP/sealmod/module_const.ae
+
+cat > $AE_TMP/sealmod/module_const_unlisted.ae << 'EOF'
+import mm
+f1(p: int) -> int {
+    seal except p
+    return mm.K
+}
+main() { println(f1(1)) }
+EOF
+run_reject_hidden "seal except without the module refuses its constant" $AE_TMP/sealmod/module_const_unlisted.ae
+
+cat > $AE_TMP/sealmod/module_const_hidden.ae << 'EOF'
+import mm
+f1(p: int) -> int {
+    hide mm.K
+    return mm.K + mm.bump(p)
+}
+main() { println(f1(1)) }
+EOF
+run_reject_hidden "hide ns.member refuses that constant" $AE_TMP/sealmod/module_const_hidden.ae
 
 # Cleanup
 rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out $AE_TMP/ae_hide_log
