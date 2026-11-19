@@ -8989,6 +8989,34 @@ static int static_path_within(const char* path, const char* root) {
     return ok;
 }
 
+#ifdef _WIN32
+/* The final path of `path` into `out`, as the file system resolves it: every
+ * junction and symbolic link on the way followed, `.` and `..` gone, in the
+ * case the volume stores. 0 on success; -1 when the path cannot be opened or
+ * its final path does not fit. Opening the path asks the file system itself,
+ * where _fullpath, used before, only rewrote the text and left a junction in
+ * the document root pointing outside it to pass the containment check
+ * (#3760). FILE_FLAG_BACKUP_SEMANTICS opens a directory too, for the root.
+ * The answer is in the \\?\ namespace; the prefix comes off so it compares
+ * with the root's: \\?\D:\p is D:\p and \\?\UNC\server\share\p is
+ * \\server\share\p. The narrow calls read UTF-8, the code page Aether's
+ * manifest sets (runtime/windows/aether.manifest). */
+static int static_final_path(const char* path, char* out, size_t cap) {
+    HANDLE h = CreateFileA(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    DWORD n = GetFinalPathNameByHandleA(h, out, (DWORD)cap,
+                                        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(h);
+    if (n == 0 || n >= cap) return -1;
+    if (strncmp(out, "\\\\?\\UNC\\", 8) == 0)
+        memmove(out + 2, out + 8, strlen(out + 8) + 1);   /* keep the leading two backslashes */
+    else if (strncmp(out, "\\\\?\\", 4) == 0)
+        memmove(out, out + 4, strlen(out + 4) + 1);
+    return 0;
+}
+#endif
+
 // Static file serving handler (for use with wildcard routes)
 void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir) {
     const char* dir = (const char*)base_dir;
@@ -9069,11 +9097,12 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
     http_serve_file(res, resolved);
     http_response_set_header(res, "Accept-Ranges", "bytes");
 #else
-    // On Windows, use _fullpath for canonicalization
+    // The final paths of the file and of the root, each with every junction
+    // and symlink followed, as realpath gives them on POSIX (#3760).
     char resolved[1024];
     char resolved_dir[1024];
-    if (!_fullpath(resolved, filepath, sizeof(resolved)) ||
-        !_fullpath(resolved_dir, dir, sizeof(resolved_dir))) {
+    if (static_final_path(filepath, resolved, sizeof(resolved)) != 0 ||
+        static_final_path(dir, resolved_dir, sizeof(resolved_dir)) != 0) {
         http_response_set_status(res, 404);
         http_response_set_body(res, "404 - Not Found");
         return;

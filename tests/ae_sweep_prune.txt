@@ -304,6 +304,7 @@ tests/integration/many_namespaces_qualified_call/
 tests/integration/http_handler_user_data/
 tests/integration/http_query_param_multi/
 tests/integration/http_serve_static_range/
+tests/integration/http_serve_static_junction/
 tests/integration/http_serve_static_sibling/
 tests/integration/http_server_body_limit/
 tests/integration/http_server_h2_limits/

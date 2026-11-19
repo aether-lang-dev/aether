@@ -80,7 +80,10 @@ back to a buffered read.
 `http.serve_static(req, res, base_dir)` dispatches the request path
 against a directory. Path traversal (`..`, `%2e` encodings) is
 rejected with 403, missing files return 404, and `Range` headers are
-honoured for partial content.
+honoured for partial content. The file is served only when its resolved
+path lies inside the resolved directory, every symlink followed (and on
+Windows every junction, #3760), so a link in the directory that leads
+outside it answers 403. Links that stay inside it are served.
 
 ---
 
