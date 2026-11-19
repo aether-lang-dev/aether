@@ -184,7 +184,8 @@ int ae_download(const char* url, const char* dest) {
  * /releases/assets/<id> with Accept: application/octet-stream, which redirects
  * to the CDN. Unauthenticated use is allowed (60 requests an hour); GITHUB_TOKEN
  * or GH_TOKEN, when set, is sent as a Bearer token to raise that. The API lists
- * a sha256 `digest` for each asset, which the fallback checks the file against.
+ * a sha256 `digest` for each asset, which every release archive is checked
+ * against before it is unpacked, however it was fetched (#3748).
  *
  * AE_GITHUB_WEB_BASE and AE_GITHUB_API_BASE move the two endpoints, which is
  * how the tests force the first to fail and the second to be a local server.
@@ -301,12 +302,12 @@ static int gh_find_asset(const char* json, const char* file,
     return 1;
 }
 
-/* Fetch the release asset through the REST API. 0 on success; on failure a
- * one-line reason is left in why. */
-static int gh_download_via_api(const char* owner, const char* repo, const char* tag,
-                               const char* file, const char* dest,
-                               char* why, size_t whysz) {
-    const char* token = gh_token();
+/* Look the asset `file` up in the `tag` release's API listing of `slug`
+ * ("owner/repo"): its id and its sha256 digest ("" when none is listed).
+ * 0 on success; otherwise a one-line reason is left in why. */
+static int gh_release_asset_info(const char* slug, const char* tag, const char* file,
+                                 char* id, size_t idsz, char* digest, size_t dsz,
+                                 char* why, size_t whysz) {
     char json_path[1024], url[768];
     /* Read back below: in ae's private temp directory, not at a name in the
      * shared one that another user could make first (#3744). */
@@ -314,9 +315,8 @@ static int gh_download_via_api(const char* owner, const char* repo, const char* 
         snprintf(why, whysz, "no private temp directory for the API's reply");
         return 1;
     }
-    snprintf(url, sizeof(url), "%s/repos/%s/%s/releases/tags/%s",
-             gh_api_base(), owner, repo, tag);
-    if (ae_download_raw(url, json_path, 30, 0, token) != 0) {
+    snprintf(url, sizeof(url), "%s/repos/%s/releases/tags/%s", gh_api_base(), slug, tag);
+    if (ae_download_raw(url, json_path, 30, 0, gh_token()) != 0) {
         remove(json_path);
         snprintf(why, whysz, "the API could not be read for %s (no network, no such release, or its rate limit)", tag);
         return 1;
@@ -332,16 +332,26 @@ static int gh_download_via_api(const char* owner, const char* repo, const char* 
         fclose(f);
     }
     remove(json_path);
-    char id[32], digest[72];
-    int found = json && gh_find_asset(json, file, id, sizeof(id), digest, sizeof(digest));
+    int found = json && gh_find_asset(json, file, id, idsz, digest, dsz);
     free(json);
     if (!found) {
         snprintf(why, whysz, "the %s release lists no asset called %s", tag, file);
         return 1;
     }
-    snprintf(url, sizeof(url), "%s/repos/%s/%s/releases/assets/%s",
-             gh_api_base(), owner, repo, id);
-    if (ae_download_raw(url, dest, 0, 1, token) != 0) {
+    return 0;
+}
+
+/* Fetch the release asset through the REST API. 0 on success; on failure a
+ * one-line reason is left in why. */
+static int gh_download_via_api(const char* owner, const char* repo, const char* tag,
+                               const char* file, const char* dest,
+                               char* why, size_t whysz) {
+    char slug[520], id[32], digest[72], url[768];
+    snprintf(slug, sizeof(slug), "%s/%s", owner, repo);
+    if (gh_release_asset_info(slug, tag, file, id, sizeof(id), digest, sizeof(digest), why, whysz) != 0)
+        return 1;
+    snprintf(url, sizeof(url), "%s/repos/%s/releases/assets/%s", gh_api_base(), slug, id);
+    if (ae_download_raw(url, dest, 0, 1, gh_token()) != 0) {
         remove(dest);
         snprintf(why, whysz, "the API asset download failed");
         return 1;
@@ -353,6 +363,41 @@ static int gh_download_via_api(const char* owner, const char* repo, const char* 
             snprintf(why, whysz, "the API download does not match the sha256 digest GitHub lists for %s", file);
             return 1;
         }
+    }
+    return 0;
+}
+
+/* Is the file at `path` the release asset `file` of `tag`? Checked against
+ * the sha256 digest GitHub's API lists for the asset, whichever way the file
+ * was fetched, before anything in it is unpacked (#3748): the release URL's
+ * bytes used to be checked only for an archive's magic and size. 0 when the
+ * digest matches. A digest that cannot be had (no network, the API's rate
+ * limit, a listing with none) is a failure, not a pass; why says which. */
+static int gh_verify_release_asset(const char* slug, const char* tag, const char* file,
+                                   const char* path, char* why, size_t whysz) {
+    char id[32], digest[72], reason[256];
+    if (gh_release_asset_info(slug, tag, file, id, sizeof(id), digest, sizeof(digest),
+                              reason, sizeof(reason)) != 0) {
+        snprintf(why, whysz,
+                 "%s cannot be verified: %s, so its sha256 digest is unknown. Nothing was "
+                 "installed. Try again later, or set GITHUB_TOKEN to raise the API's rate limit.",
+                 file, reason);
+        return 1;
+    }
+    if (!digest[0]) {
+        snprintf(why, whysz, "%s cannot be verified: the %s release lists no sha256 digest for it. "
+                             "Nothing was installed.", file, tag);
+        return 1;
+    }
+    char got[65];
+    if (ae_sha256_file_hex(path, got) != 0) {
+        snprintf(why, whysz, "%s cannot be verified: the download could not be read back.", file);
+        return 1;
+    }
+    if (strcmp(got, digest) != 0) {
+        snprintf(why, whysz, "%s does not match the sha256 digest GitHub lists for it (expected %s, "
+                             "got %s). Nothing was installed.", file, digest, got);
+        return 1;
     }
     return 0;
 }
@@ -781,6 +826,18 @@ static int cmd_version_install(const char* version) {
         }
     }
 
+    // #3748: the archive must be the one GitHub lists, by its sha256 digest,
+    // before anything in it is unpacked, on every download path.
+    {
+        char why[512];
+        if (gh_verify_release_asset(AE_GITHUB_REPO, vtag, filename, archive, why, sizeof(why)) != 0) {
+            remove(archive);
+            fprintf(stderr, "Error: %s\n", why);
+            return 1;
+        }
+        printf("Verified %s against its sha256 digest.\n", filename);
+    }
+
     mkdirs(ver_dir);
     printf("Extracting...\n");
 
@@ -868,9 +925,9 @@ static int cmd_version_install(const char* version) {
     // some packages ship) is a well-formed `ar` archive of plausible size; on
     // failure remove the install and tell the user to retry, rather than
     // leaving a landmine. Skipped when the package ships sources only (no
-    // prebuilt archive present). This does not replace a full checksum verify
-    // (which needs the release pipeline to publish per-asset sums) but catches
-    // the truncation that actually corrupted a macOS download.
+    // prebuilt archive present). The download itself was checked against its
+    // sha256 digest before extraction (#3748); this catches an extraction cut
+    // short, the truncation that actually corrupted a macOS install.
     {
         char arch_path[1024];
         snprintf(arch_path, sizeof(arch_path), "%s/lib/aether/libaether.a", ver_dir);

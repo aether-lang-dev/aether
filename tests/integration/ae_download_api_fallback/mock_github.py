@@ -4,7 +4,8 @@
   mock_github.py PORT DIR MODE
 
 DIR holds the release asset(s). The "web" side (/<o>/<r>/releases/download/...)
-answers 504 whatever the file, as the real one did on 2026-11-09. The "API"
+answers 504 whatever the file, as the real one did on 2026-11-09, except in the
+web* modes, where it serves the file. The "API"
 side serves /repos/<o>/<r>/releases (the release list, newest first),
 /repos/<o>/<r>/releases/tags/<tag> and /repos/<o>/<r>/releases/assets/<id>
 (the latter only with Accept: application/octet-stream, redirecting to /cdn/<file>
@@ -16,13 +17,18 @@ MODE: ok          digest in the listing is right
       apidown     the API answers 504 too
       badtag      the newest release's tag is shell and PowerShell syntax, not a
                   version (test_ae_release_tag_refused.sh, #3744)
+      web         the release URL serves the asset; the digest is right
+      webbaddigest  the release URL serves it; the listed digest is wrong
+      webnodigest   the release URL serves it; the listing has no digest
+      webapidown    the release URL serves it; the API answers 504
+                  (the web* modes: test_release_digest_verified.sh, #3748)
 Every request is appended to DIR/requests.log with its Authorization header.
 """
 import hashlib, json, os, re, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 port, d, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-files = sorted(f for f in os.listdir(d) if f.endswith(".tar.gz"))
+files = sorted(f for f in os.listdir(d) if f.endswith(".tar.gz") or f.endswith(".zip"))
 # Makes a file called "pwned" in the working directory if it reaches a POSIX
 # shell inside double quotes, or a PowerShell single-quoted string.
 BAD_TAG = "v9$(touch pwned)'+$(ni pwned)+'"
@@ -44,8 +50,13 @@ class H(BaseHTTPRequestHandler):
         self._log()
         p = self.path
         if "/releases/download/" in p:
+            name = p.rsplit("/", 1)[-1]
+            if mode.startswith("web") and name in files:
+                return self._send(200, open(os.path.join(d, name), "rb").read(), "application/octet-stream")
+            if mode.startswith("web"):
+                return self._send(404, b"not found", "text/plain")
             return self._send(504, b"Gateway Timeout", "text/plain")
-        if mode == "apidown" and p.startswith("/repos/"):
+        if mode in ("apidown", "webapidown") and p.startswith("/repos/"):
             return self._send(504, b"Gateway Timeout", "text/plain")
         if re.match(r"^/repos/([^/]+)/([^/]+)/releases(\?.*)?$", p):
             tag = BAD_TAG if mode == "badtag" else "v9.9.9"
@@ -57,13 +68,15 @@ class H(BaseHTTPRequestHandler):
                 if mode == "noasset": break
                 data = open(os.path.join(d, f), "rb").read()
                 dig = hashlib.sha256(data).hexdigest()
-                if mode == "baddigest": dig = "0" * 64
+                if mode in ("baddigest", "webbaddigest"): dig = "0" * 64
                 # key order as the real API: url, id, node_id, name, label, uploader, ..., digest
-                assets.append({"url": "http://x/repos/o/r/releases/assets/%d" % (1000 + i),
-                               "id": 1000 + i, "node_id": "RA_x", "name": f, "label": None,
-                               "uploader": {"login": "bot", "id": 7},
-                               "content_type": "application/gzip", "state": "uploaded",
-                               "size": len(data), "digest": "sha256:" + dig})
+                asset = {"url": "http://x/repos/o/r/releases/assets/%d" % (1000 + i),
+                         "id": 1000 + i, "node_id": "RA_x", "name": f, "label": None,
+                         "uploader": {"login": "bot", "id": 7},
+                         "content_type": "application/gzip", "state": "uploaded",
+                         "size": len(data), "digest": "sha256:" + dig}
+                if mode == "webnodigest": del asset["digest"]
+                assets.append(asset)
             return self._send(200, json.dumps({"tag_name": m.group(3), "assets": assets}, indent=2).encode())
         m = re.match(r"^/repos/([^/]+)/([^/]+)/releases/assets/(\d+)$", p)
         if m:

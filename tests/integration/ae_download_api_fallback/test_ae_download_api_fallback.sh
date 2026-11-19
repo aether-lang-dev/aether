@@ -112,8 +112,8 @@ run_install none "" && fail "install succeeded though the release lists no asset
 grep -q "lists no asset called $ASSET" "$TMP/none.log" || fail "missing asset not reported" "$TMP/none.log"
 
 # 6: the same for get.sh ------------------------------------------------------
-# (the digest-mismatch case is left out: get.sh then builds from source, which
-# would reach the real github.com)
+# A wrong digest refuses the archive and stops: get.sh no longer falls back to
+# a source build (which would reach the real github.com) after it (#3748).
 if [ -f "$ROOT/get.sh" ]; then
     start_mock ok
     PFX="$TMP/prefix_get"
@@ -124,6 +124,15 @@ if [ -f "$ROOT/get.sh" ]; then
     grep -q "through the GitHub API" "$TMP/get.log" || fail "get.sh did not report the API path" "$TMP/get.log"
     grep -q "releases/assets/1000 auth=Bearer ghp_gettoken456" "$TMP/rel/requests.log" \
         || fail "get.sh did not send GH_TOKEN as a Bearer token" "$TMP/rel/requests.log"
+
+    start_mock baddigest
+    PFX="$TMP/prefix_get_bad"
+    ( env -u GITHUB_TOKEN -u GH_TOKEN PREFIX="$PFX" AE_GITHUB_WEB_BASE="$BASE" \
+        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" v9.9.9 ) >"$TMP/get_bad.log" 2>&1 \
+        && fail "get.sh accepted a wrong digest" "$TMP/get_bad.log"
+    grep -q "digest" "$TMP/get_bad.log" || fail "get.sh did not report the wrong digest" "$TMP/get_bad.log"
+    grep -q "from source" "$TMP/get_bad.log" && fail "get.sh fell back to a source build after a wrong digest" "$TMP/get_bad.log"
+    [ -e "$PFX/bin/ae" ] && fail "get.sh installed after a wrong digest" "$TMP/get_bad.log"
 fi
 
 echo "  [PASS] ae_download_api_fallback"
