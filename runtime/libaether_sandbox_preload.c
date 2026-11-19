@@ -489,7 +489,7 @@ int connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
     return real_connect(sockfd, addr, addrlen);
 }
 
-// bind — block by default, grant with "tcp_listen" category
+// bind: block by default, grant with "tcp_listen" category
 static int (*real_bind)(int, const struct sockaddr*, socklen_t) = NULL;
 int bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
     if (!real_bind) real_bind = dlsym(RTLD_NEXT, "bind");
@@ -503,7 +503,7 @@ int bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
     return real_bind(sockfd, addr, addrlen);
 }
 
-// listen — same restriction as bind
+// listen: same restriction as bind
 static int (*real_listen)(int, int) = NULL;
 int listen(int sockfd, int backlog) {
     if (!real_listen) real_listen = dlsym(RTLD_NEXT, "listen");
@@ -514,7 +514,7 @@ int listen(int sockfd, int backlog) {
     return real_listen(sockfd, backlog);
 }
 
-// accept / accept4 — block inbound connections unless tcp_listen granted
+// accept / accept4: block inbound connections unless tcp_listen granted
 static int (*real_accept)(int, struct sockaddr*, socklen_t*) = NULL;
 int accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen) {
     if (!real_accept) real_accept = dlsym(RTLD_NEXT, "accept");
