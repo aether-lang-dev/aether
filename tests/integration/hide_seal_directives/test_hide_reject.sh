@@ -541,6 +541,49 @@ EOF
 run_reject_hidden "import hiding in a module blocks the member there" $AE_TMP/member/hiding_per_file.ae
 cd "$ROOT"
 
+# A closure handed to a function of another module. The call is a member
+# call, so the closure's body also resolves names through the module as a
+# DSL receiver (`mm_<name>`); a seal used to end that whole lookup at the
+# sealed scope, so the closure could not see the sealed function's own
+# locals (E0300 'ctx'), while the same closure to a function of the file
+# could. A name from outside the seal stays refused.
+mkdir -p $AE_TMP/sealmod/mm
+cat > $AE_TMP/sealmod/mm/module.ae << 'EOF'
+exports (run_it, K, bump)
+const K = 7
+run_it(f: @keep fn) { f() }
+bump(x: int) -> int { return x + K }
+EOF
+cat > $AE_TMP/sealmod/closure_module_call.ae << 'EOF'
+import mm
+helper(x: int) -> int { return x + 1 }
+f1(p: int, argv: int) -> int {
+    seal except p, argv, mm, helper
+    ctx = p + 1
+    seq = argv
+    mm.run_it(|| {
+        _x = helper(ctx + seq)
+    })
+    return 0
+}
+main() { println(f1(1, 2)) }
+EOF
+run_accept "closure passed to a module function sees the sealed function's locals" $AE_TMP/sealmod/closure_module_call.ae
+
+cat > $AE_TMP/sealmod/closure_module_outer.ae << 'EOF'
+import mm
+main() {
+    secret = 4
+    {
+        seal except mm
+        mm.run_it(|| {
+            _x = secret + 1
+        })
+    }
+}
+EOF
+run_reject_hidden "closure passed to a module function still cannot reach a sealed-out name" $AE_TMP/sealmod/closure_module_outer.ae
+
 # Cleanup
 rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out $AE_TMP/ae_hide_log
 

@@ -214,6 +214,13 @@ actor Server {
 This is particularly useful for actors with multiple state variables
 where individual receive arms should only touch a subset of state.
 
+### Closures see the block's own locals
+
+A closure written in a sealed block sees that block's locals, as any nested
+block does, wherever the closure goes: to a function of the same file or
+to a module's (`mm.run_it(|| { ... ctx ... })`). Names from outside the
+seal stay refused inside it.
+
 ### Local bindings are always visible
 
 `hide` only affects lookups that walk OUT of the current block into a

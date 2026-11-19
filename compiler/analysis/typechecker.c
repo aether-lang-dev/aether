@@ -668,10 +668,17 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
          * bytes, and a longer one reached another name (#3569). */
         const char* rewritten = aether_internf("%s_%s", table->dsl_receiver, name);
         for (SymbolTable* t = table; t; t = t->parent) {
-            if (t != table &&
+            /* A scope that hides or seals out `name` ends the search for
+             * the receiver's member, not the lookup: the plain walk below
+             * still finds a binding of `name` at or below that scope (the
+             * sealed function's own local), and refuses one beyond it. It
+             * returned NULL here, so a closure passed to a module function
+             * (`mm.run_it(|| { ctx })`, receiver `mm`) could not see the
+             * locals of the sealed function it was written in. */
+            if (t != table && obey_directives &&
                 (scope_name_is_hidden(t, name) ||
                  (t->is_sealed && !scope_name_in_whitelist(t, name)))) {
-                return NULL;
+                break;
             }
             Symbol* s = lookup_symbol_local(t, rewritten);
             if (s) return s;
