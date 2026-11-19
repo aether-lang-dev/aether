@@ -24,6 +24,7 @@
 #  include <unistd.h>
 #  include <dirent.h>
 #  include <utime.h>
+#  include <pwd.h>       /* get_home_dir: getpwuid when HOME is unset (#3745) */
 #  define PATH_SEP "/"
 #endif
 
@@ -40,16 +41,55 @@
 char s_cache_dir[512] = "";
 
 // Portable home-directory lookup.
-// On Windows: USERPROFILE (native shell) → HOME (MSYS2) → fallback.
-// On POSIX:   HOME → /tmp fallback.
+// On Windows: USERPROFILE (native shell), then HOME (MSYS2), then
+// HOMEDRIVE + HOMEPATH. On POSIX: HOME, then the password database's home
+// for this user.
+//
+// The home holds ~/.aether: the cache of built programs, installed versions
+// and packages, all of which ae later runs. It used to fall back to /tmp
+// (C:\Users\Public on Windows) when HOME was unset, a directory every local
+// user can write, where another user could plant what ae would then run
+// (#3745). With no home to be found, ae now stops and says so.
+static void ae_no_home(void) {
+    fprintf(stderr,
+            "ae: cannot find your home directory: HOME is not set%s.\n"
+            "    ae keeps its cache, versions and packages in <home>/.aether;\n"
+            "    set HOME to your home directory and run the command again.\n",
+#ifdef _WIN32
+            ", and neither are USERPROFILE nor HOMEDRIVE and HOMEPATH"
+#else
+            ", and the password database has none for this user"
+#endif
+            );
+    exit(1);
+}
+
 const char* get_home_dir(void) {
 #ifdef _WIN32
     const char* h = getenv("USERPROFILE");
     if (!h || !h[0]) h = getenv("HOME");
-    return h ? h : "C:\\Users\\Public";
+    if (h && h[0]) return h;
+    static char drive_path[1024];
+    const char* drive = getenv("HOMEDRIVE");
+    const char* path = getenv("HOMEPATH");
+    if (drive && drive[0] && path && path[0]) {
+        int n = snprintf(drive_path, sizeof(drive_path), "%s%s", drive, path);
+        if (n > 0 && (size_t)n < sizeof(drive_path)) return drive_path;
+    }
+    ae_no_home();
+    return NULL;
 #else
     const char* h = getenv("HOME");
-    return h ? h : "/tmp";
+    if (h && h[0]) return h;
+    static char pw_home[1024];
+    if (!pw_home[0]) {
+        struct passwd* pw = getpwuid(getuid());
+        if (pw && pw->pw_dir && pw->pw_dir[0] && strlen(pw->pw_dir) < sizeof(pw_home))
+            snprintf(pw_home, sizeof(pw_home), "%s", pw->pw_dir);
+    }
+    if (pw_home[0]) return pw_home;
+    ae_no_home();
+    return NULL;
 #endif
 }
 
@@ -1376,8 +1416,7 @@ static unsigned long long c_compiler_fingerprint(void) {
          * the line to cmd.exe on Windows, a second process start that was
          * about half of this probe's 23 ms there. */
         char out_path[1200];
-        snprintf(out_path, sizeof(out_path), "%s/ae_ccver_%d.out", get_temp_dir(),
-                 (int)getpid());
+        ae_private_temp_path(out_path, sizeof(out_path), "ccver.out");   /* #3745 */
         int version_rc = run_cmd_capture_stdout(cmd, out_path);
         free(cmd);
         char line[512];

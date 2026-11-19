@@ -1,7 +1,8 @@
 /* aether_proxy_cache.c — in-memory LRU response cache + TTL eviction.
  *
  * Open-chained hash + doubly-linked LRU list (head = most recently
- * used). Lookup walks the bucket chain matching `key_hash + key_repr`,
+ * used). Lookup walks the bucket chain matching `key_hash + key_repr`
+ * (the whole key, by its length: it holds NULs, #3757),
  * checks `expires_at_ms`, moves the entry to the LRU head on hit,
  * returns NULL on miss.
  *
@@ -10,6 +11,9 @@
  *   - status in {200, 203, 204, 300, 301, 404, 410}.
  *   - Cache-Control on request: no `no-store`.
  *   - Cache-Control on response: no `no-store` / `private`.
+ *   - a request with Authorization only when the response says `public`,
+ *     `s-maxage` or `must-revalidate` (RFC 9111 3.5).
+ *   - no `Set-Cookie` on the response.
  *   - body_length ≤ max_body_bytes.
  *   - Vary: * → uncacheable.
  *
@@ -23,6 +27,15 @@
  *
  * Single mutex around the whole cache. Sharded locking is the v2
  * follow-up if write contention shows in profiling.
+ *
+ * An entry carries a reference count (#3756). The cache holds one while
+ * the entry is in the table; a lookup hit takes another for the request
+ * that serves it, which reads the entry with the lock released and drops
+ * its reference with aether_proxy_cache_release. Taking an entry out of the
+ * table (eviction, expiry, replacement) drops the cache's reference, and
+ * whichever reference goes last frees the entry. Lookup used to hand back
+ * the bare pointer, and a store on another worker could evict and free the
+ * entry while it was being served.
  */
 
 #include "aether_proxy_internal.h"
@@ -94,6 +107,15 @@ static void entry_free_one(AetherProxyCacheEntry* e) {
     aether_caps_free(e, sizeof(*e));
 }
 
+/* Drop one reference to `e`; the last one frees it. Needs no lock: an entry
+ * whose count is still above zero is not freed by anyone else, and the one
+ * that reaches zero is out of the table, where nothing else can find it. */
+void aether_proxy_cache_release(AetherProxyCacheEntry* e) {
+    if (!e) return;
+    if (atomic_fetch_sub_explicit(&e->refs, 1, memory_order_acq_rel) == 1)
+        entry_free_one(e);
+}
+
 void aether_proxy_cache_free(AetherProxyCache* cache) {
     if (!cache) return;
     pthread_mutex_lock(&cache->lock);
@@ -101,7 +123,7 @@ void aether_proxy_cache_free(AetherProxyCache* cache) {
         AetherProxyCacheEntry* e = cache->buckets[i];
         while (e) {
             AetherProxyCacheEntry* nx = e->bucket_next;
-            entry_free_one(e);
+            aether_proxy_cache_release(e);   /* the cache's reference */
             e = nx;
         }
     }
@@ -127,16 +149,18 @@ static void lower_into(const char* in, char* out, size_t cap) {
     out[i] = '\0';
 }
 
-/* Build the canonical cache key and its hash. Returned key is
+/* Build the canonical cache key, its hash and its length. Returned key is
  * malloc'd; caller frees. Returns NULL on OOM or uncacheable
  * (Vary: *). When `vary_header` is non-NULL the response's Vary
- * header drives request-header inclusion. */
+ * header drives request-header inclusion. The key holds a NUL before each
+ * Vary segment, so it is compared by its length, never as a C string. */
 static char* build_key(AetherProxyCacheKeyStrategy strat,
                        const char* method,
                        const char* url,
                        HttpRequest* req,
                        const char* vary_header,
-                       uint64_t* out_hash) {
+                       uint64_t* out_hash,
+                       size_t* out_len) {
     /* Reasonable upper bound; rare cases above this are handled by
      * malloc-and-copy. */
     char buf[2048];
@@ -190,7 +214,19 @@ static char* build_key(AetherProxyCacheKeyStrategy strat,
     if (!out) return NULL;
     memcpy(out, buf, pos);
     out[pos] = '\0';
+    *out_len = pos;
     return out;
+}
+
+/* Whether entry `e` is stored under the key `key` of `key_len` bytes with
+ * hash `hash`. The whole key is compared, Vary segments included: strcmp
+ * stopped at the NUL before the first one, so two variants of one URL were
+ * told apart by their 64-bit hash alone, and a collision served one
+ * variant's response for the other (#3757). */
+int aether_proxy_cache_key_matches(const AetherProxyCacheEntry* e, uint64_t hash,
+                                   const char* key, size_t key_len) {
+    return e->key_hash == hash && e->key_len == key_len &&
+           memcmp(e->key_repr, key, key_len) == 0;
 }
 
 /* Move entry to LRU head (caller holds cache->lock). */
@@ -208,17 +244,20 @@ static void lru_promote(AetherProxyCache* c, AetherProxyCacheEntry* e) {
     if (!c->lru_tail) c->lru_tail = e;
 }
 
+/* Take `e` out of the table and drop the cache's reference to it (caller
+ * holds cache->lock). A request still serving it keeps it alive. */
 static void unlink_entry(AetherProxyCache* c, AetherProxyCacheEntry* e) {
     /* Remove from LRU list. */
     if (e->lru_prev) e->lru_prev->lru_next = e->lru_next;
     if (e->lru_next) e->lru_next->lru_prev = e->lru_prev;
     if (c->lru_head == e) c->lru_head = e->lru_next;
     if (c->lru_tail == e) c->lru_tail = e->lru_prev;
-    /* Remove from hash bucket. */
-    int b = (int)(e->key_hash & (uint64_t)(c->bucket_count - 1));
-    AetherProxyCacheEntry** pp = &c->buckets[b];
+    /* Remove from the bucket it was put in. */
+    AetherProxyCacheEntry** pp = &c->buckets[e->bucket];
     while (*pp && *pp != e) pp = &(*pp)->bucket_next;
     if (*pp) *pp = e->bucket_next;
+    c->entry_count--;
+    aether_proxy_cache_release(e);
 }
 
 AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
@@ -250,8 +289,9 @@ AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
      * all variants of one URL share a bucket — then the per-entry
      * Vary recompute narrows down. */
     uint64_t base_hash;
+    size_t base_len;
     char* base_key = build_key(cache->key_strategy, method, url, req, NULL,
-                                &base_hash);
+                                &base_hash, &base_len);
     if (!base_key) {
         pthread_mutex_unlock(&cache->lock);
         return NULL;
@@ -270,28 +310,29 @@ AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
              * stored one, the request's Vary-named header values
              * match what was stored — same representation, hit. */
             uint64_t variant_hash;
+            size_t variant_len;
             char* variant_key = build_key(cache->key_strategy, method, url, req,
-                                          e->vary_header, &variant_hash);
+                                          e->vary_header, &variant_hash, &variant_len);
             if (!variant_key) { e = nx; continue; }
-            matches = (variant_hash == e->key_hash &&
-                       strcmp(variant_key, e->key_repr) == 0);
+            matches = aether_proxy_cache_key_matches(e, variant_hash,
+                                                     variant_key, variant_len);
             free(variant_key);
         } else {
             /* No Vary: direct key match. */
-            matches = (e->key_hash == base_hash &&
-                       strcmp(e->key_repr, base_key) == 0);
+            matches = aether_proxy_cache_key_matches(e, base_hash, base_key, base_len);
         }
 
         if (matches) {
             if (e->expires_at_ms <= now) {
                 unlink_entry(cache, e);
-                cache->entry_count--;
-                entry_free_one(e);
                 free(base_key);
                 pthread_mutex_unlock(&cache->lock);
                 return NULL;
             }
             lru_promote(cache, e);
+            /* The caller's reference, taken under the lock so no unlink can
+             * drop the cache's in between. */
+            atomic_fetch_add_explicit(&e->refs, 1, memory_order_relaxed);
             free(base_key);
             pthread_mutex_unlock(&cache->lock);
             return e;
@@ -321,30 +362,74 @@ static int cc_has_directive(const char* cc, const char* dir) {
     return strstr(cc, dir) != NULL;
 }
 
-/* Helper — locate one header value in a `Name: value\r\n` block.
- * Case-insensitive name match. Returns NULL on miss. Caller frees
- * the returned malloc'd string. */
-static char* extract_header(const char* block, const char* name) {
+/* Whether Cache-Control `cc` carries directive `dir` as a directive of its
+ * own: an element of the comma-separated list whose name is `dir`, matched
+ * case-insensitively, with or without an `=value`. A quoted value is skipped
+ * whole, so `no-cache="public"` names no `public` directive.
+ *
+ * cc_has_directive's substring match is kept for the refusals (no-store,
+ * private), where a false match only refuses a store. This one is for the
+ * directives that permit a store, where a false match would keep a response
+ * the origin never said was shareable. */
+static int cc_has_token(const char* cc, const char* dir) {
+    if (!cc || !dir) return 0;
+    size_t dl = strlen(dir);
+    const char* p = cc;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        const char* name = p;
+        while (*p && *p != '=' && *p != ',' && *p != ' ' && *p != '\t') p++;
+        size_t nl = (size_t)(p - name);
+        if (nl == dl && strncasecmp(name, dir, dl) == 0) return 1;
+        /* Skip the rest of this element: an optional value, quoted or not. */
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '=') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '"') {
+                p++;
+                while (*p && *p != '"') {
+                    if (*p == '\\' && p[1]) p++;
+                    p++;
+                }
+                if (*p == '"') p++;
+            }
+        }
+        while (*p && *p != ',') p++;
+    }
+    return 0;
+}
+
+/* Where field `name` starts in a `Name: value\r\n` block, at the start of its
+ * name, or NULL when the block has no such field. Case-insensitive. */
+static const char* find_header(const char* block, const char* name) {
     if (!block || !name) return NULL;
     size_t name_len = strlen(name);
     const char* p = block;
     while (*p) {
-        if (strncasecmp(p, name, name_len) == 0 && p[name_len] == ':') {
-            const char* v = p + name_len + 1;
-            while (*v == ' ' || *v == '\t') v++;
-            const char* eol = strstr(v, "\r\n");
-            size_t vl = eol ? (size_t)(eol - v) : strlen(v);
-            char* out = (char*)malloc(vl + 1);
-            if (!out) return NULL;
-            memcpy(out, v, vl);
-            out[vl] = '\0';
-            return out;
-        }
+        if (strncasecmp(p, name, name_len) == 0 && p[name_len] == ':') return p;
         const char* eol = strstr(p, "\r\n");
         if (!eol) break;
         p = eol + 2;
     }
     return NULL;
+}
+
+/* One field's value from a `Name: value\r\n` block, as a malloc'd string the
+ * caller frees, or NULL on a miss. */
+static char* extract_header(const char* block, const char* name) {
+    const char* p = find_header(block, name);
+    if (!p) return NULL;
+    const char* v = p + strlen(name) + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    const char* eol = strstr(v, "\r\n");
+    size_t vl = eol ? (size_t)(eol - v) : strlen(v);
+    char* out = (char*)malloc(vl + 1);
+    if (!out) return NULL;
+    memcpy(out, v, vl);
+    out[vl] = '\0';
+    return out;
 }
 
 void aether_proxy_cache_store(AetherProxyCache* cache,
@@ -382,6 +467,27 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
         return;
     }
 
+    /* A response to a request that carried credentials is one user's view
+     * of the resource. A shared cache stores it only when the origin says it
+     * may be shared: public, s-maxage or must-revalidate (RFC 9111 3.5,
+     * #3736). Stored without that, it was replayed to every later client of
+     * the URL, credentials or not. */
+    if (http_get_header(req, "Authorization") &&
+        !(cc_has_token(resp_cc, "public") ||
+          cc_has_token(resp_cc, "s-maxage") ||
+          cc_has_token(resp_cc, "must-revalidate"))) {
+        free(resp_cc);
+        return;
+    }
+
+    /* A response that sets a cookie is addressed to the client that asked:
+     * replayed from the cache, it handed that client's session to everyone
+     * else (#3736). It is not stored at all. */
+    if (find_header(response_headers, "Set-Cookie")) {
+        free(resp_cc);
+        return;
+    }
+
     char* vary = extract_header(response_headers, "Vary");
     if (vary && strchr(vary, '*')) {
         /* Vary: * means the response varies on every header — refuse. */
@@ -410,10 +516,11 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
      * METHOD_URL modes the two collapse to the same value because
      * `vary` is unused. */
     uint64_t base_hash, full_hash;
+    size_t base_len, full_len;
     char* base_key = build_key(cache->key_strategy, method, url, req, NULL,
-                               &base_hash);
+                               &base_hash, &base_len);
     char* full_key = build_key(cache->key_strategy, method, url, req, vary,
-                               &full_hash);
+                               &full_hash, &full_len);
     if (!base_key || !full_key) {
         free(base_key);
         free(full_key);
@@ -428,29 +535,16 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
     int b = (int)(base_hash & (uint64_t)(cache->bucket_count - 1));
     AetherProxyCacheEntry** pp = &cache->buckets[b];
     while (*pp) {
-        if ((*pp)->key_hash == full_hash &&
-            strcmp((*pp)->key_repr, full_key) == 0) {
-            AetherProxyCacheEntry* old = *pp;
-            *pp = old->bucket_next;
-            /* Unlink from LRU. */
-            if (old->lru_prev) old->lru_prev->lru_next = old->lru_next;
-            if (old->lru_next) old->lru_next->lru_prev = old->lru_prev;
-            if (cache->lru_head == old) cache->lru_head = old->lru_next;
-            if (cache->lru_tail == old) cache->lru_tail = old->lru_prev;
-            cache->entry_count--;
-            entry_free_one(old);
+        if (aether_proxy_cache_key_matches(*pp, full_hash, full_key, full_len)) {
+            unlink_entry(cache, *pp);
             break;
         }
         pp = &(*pp)->bucket_next;
     }
 
     /* Evict LRU tail if at capacity. */
-    while (cache->entry_count >= cache->max_entries && cache->lru_tail) {
-        AetherProxyCacheEntry* victim = cache->lru_tail;
-        unlink_entry(cache, victim);
-        cache->entry_count--;
-        entry_free_one(victim);
-    }
+    while (cache->entry_count >= cache->max_entries && cache->lru_tail)
+        unlink_entry(cache, cache->lru_tail);
 
     /* Allocate the new entry. */
     AetherProxyCacheEntry* e = (AetherProxyCacheEntry*)aether_caps_calloc(1, sizeof(*e));
@@ -466,6 +560,7 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
     free(base_key);
     e->key_hash     = full_hash;
     e->key_repr     = full_key;
+    e->key_len      = full_len;
     e->vary_header  = vary;     /* ownership transferred; may be NULL */
     e->status_code  = status_code;
     e->stored_at_ms  = aether_proxy_now_ms();
@@ -531,7 +626,9 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
         }
     }
 
-    /* Insert into bucket + LRU head. */
+    /* Insert into bucket + LRU head, with the cache's reference. */
+    atomic_init(&e->refs, 1);
+    e->bucket = b;
     e->bucket_next = cache->buckets[b];
     cache->buckets[b] = e;
     e->lru_prev = NULL;

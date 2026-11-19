@@ -5182,13 +5182,13 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
      * / parameter (no link symbol involved), so raw is both correct
      * and consistent. See new_string_len_something.md §3. */
     fprintf(gen->output, "typedef struct {\n");
-    /* #1398: first field by contract, so a runtime owner (list_free, the
-       worker pool) can release a captured env it has no type for. Must stay
-       first and must match _AeEnvHeader in the runtime. */
-    fprintf(gen->output, "    void (*_dtor)(void*);\n");
-    /* #2494: second by contract (_AeEnvHead in the prologue). One reference
-       per holder: the value's owner, and every env that captured it. */
-    fprintf(gen->output, "    atomic_long _refs;\n");
+    /* The head (_AeEnvHead): the destructor (#1398), so a runtime owner
+       (list_free, the worker pool) can release a captured env it has no type
+       for, then the reference count (#2494), one per holder: the value's
+       owner, and every env that captured it. Spelled by the macro from
+       aether_closure_abi.h, the one definition aether_closure_new() builds
+       an env from too (#3622). */
+    fprintf(gen->output, "    _AE_ENV_HEAD_FIELDS\n");
     if (cap_count == 0) {
         fprintf(gen->output, "    int _dummy;\n");
     } else {

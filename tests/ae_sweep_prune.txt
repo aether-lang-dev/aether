@@ -289,6 +289,7 @@ tests/integration/where_clause/
 tests/integration/ws_client_loopback/
 tests/integration/ws_client_nonblocking/
 tests/integration/ws_idle_server/
+tests/integration/ws_receive_limits/
 tests/integration/ws_client_conformance/
 tests/integration/wss_client_tls/
 tests/integration/wycheproof/
@@ -303,6 +304,11 @@ tests/integration/many_namespaces_qualified_call/
 tests/integration/http_handler_user_data/
 tests/integration/http_query_param_multi/
 tests/integration/http_serve_static_range/
+tests/integration/http_serve_static_junction/
+tests/integration/http_serve_static_sibling/
+tests/integration/http_server_body_limit/
+tests/integration/http_server_h2_limits/
+tests/integration/http_server_head_deadline/
 tests/integration/http_server_h2/
 tests/integration/http_sse_upgrade/
 tests/integration/slice_bounds/
@@ -370,3 +376,5 @@ tests/integration/posix_regex_system/
 tests/integration/sed_parity/
 # atomic.ae takes its mode and paths from its driver, which runs it under the sandbox preload.
 tests/integration/sandbox_preload_write_atomic/
+# probe.ae calls the C in bridge.c (aether.toml's extra_sources); test_closure_from_c.sh builds and runs them together.
+tests/integration/closure_from_c/

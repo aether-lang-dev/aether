@@ -221,7 +221,7 @@
       <h3 class="function-name">system <span class="kind">extern</span></h3>
       <pre class="usage"><code>system(cmd) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">cmd: string</span></p>
-      <p class="doc">Run a shell command, returns exit code (0 = success). A command the shell cannot find is the shell's own 127; a shell that could not start is -1 on every platform (#3170).</p>
+      <p class="doc">Run a shell command, returns exit code (0 = success). A command the shell cannot find is the shell's own 127; a shell that could not start is -1 on every platform (#3170). Inside a sandbox it needs an exec grant for the shell (sandbox's grant_shell) as well as for `cmd` (#3735).</p>
     </div>
     <div class="function" id="exec_raw" data-name="exec_raw">
       <h3 class="function-name">exec_raw <span class="kind">extern</span></h3>
@@ -415,7 +415,7 @@
       <h3 class="function-name">exec <span class="kind">fn</span></h3>
       <pre class="usage"><code>exec(cmd) <span class="arrow">-&gt;</span> (string, string)</code></pre>
       <p class="signature"><span class="sig-params">cmd: string</span></p>
-      <p class="doc">Execute a shell command and capture stdout. Returns (output, &quot;&quot;) on success, (&quot;&quot;, error) on failure.</p>
+      <p class="doc">Execute a shell command and capture stdout. Returns (output, &quot;&quot;) on success, (&quot;&quot;, error) on failure. Inside a sandbox it needs an exec grant for the shell (sandbox's grant_shell) as well as for `cmd` (#3735).</p>
     </div>
     <div class="function" id="run_capture" data-name="run_capture">
       <h3 class="function-name">run_capture <span class="kind">fn</span></h3>

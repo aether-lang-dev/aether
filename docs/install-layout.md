@@ -167,7 +167,10 @@ disagree. The flag that matters:
   even when linked against a sandbox-enabled library. The shipped
   `libaether.a` is always built with this flag (see `CFLAGS` in
   the Makefile, which carries `-DAETHER_HAS_SANDBOX`), so
-  downstream consumers should compile with it too.
+  downstream consumers should compile with it too. `ae cflags
+  --cflags` prints it, so a build that takes its flags from there
+  (`gcc your.c $(ae cflags)`, or one compiling the runtime from the
+  MANIFEST) has it.
 
 - Any future `AETHER_HAS_*` flags introduced for optional
   runtime subsystems will follow the same pattern.

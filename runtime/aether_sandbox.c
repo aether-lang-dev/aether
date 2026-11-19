@@ -504,6 +504,12 @@ int aether_sandbox_check_resolved(const char* category, const char* resource) {
     return decide(category ? category : "", resource);
 }
 
+// The shell a command string runs through (aether_sandbox_match.h), for
+// std.sandbox's grant_shell. Windows reads COMSPEC each call, as the CRT does.
+const char* aether_sandbox_shell_path(void) {
+    return aether_sandbox_shell();
+}
+
 // A grant's pattern in the form the checks compare against: an fs pattern's
 // fixed directory resolved (std.sandbox's grant_fs_* call this), anything
 // else copied. Returns a malloc'd string the grant list owns.

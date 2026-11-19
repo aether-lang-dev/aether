@@ -496,7 +496,11 @@ post_with_status(url: string, body: string, content_type: string) -> {
     req = request("POST", url)
     if req == null { return "", 0, "request build failed" }
     set_timeout(req, 30s)
-    set_body(req, string.bytes(body), content_type)
+    berr = set_body(req, string.bytes(body), content_type)
+    if berr != "" {
+        request_free(req)
+        return "", 0, berr
+    }
     resp, err = send_request(req)
     request_free(req)
     if err != "" { return "", 0, err }
@@ -612,6 +616,7 @@ patch(url: string, body: string, content_type: string) -> {
     if req == null { return null, "request build failed" }
     defer request_free(req)
     set_timeout(req, 30s)
-    set_body(req, string.bytes(body), content_type)
+    berr = set_body(req, string.bytes(body), content_type)
+    if berr != "" { return null, berr }
     return send_request(req)
 }

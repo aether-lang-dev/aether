@@ -818,8 +818,50 @@ Supported triples: `aarch64-macos`, `x86_64-macos`, `aarch64-linux`,
 `x86_64-linux`, `aarch64-linux-musl`, `x86_64-linux-musl`,
 `riscv64-linux-musl`, `loongarch64-linux-musl` (the `arm64-`/`amd64-`/
 `loong64-` spellings are accepted too). Zig 0.16.0
-or newer must be on `PATH` (`brew install zig`, or use the checksum-pinned
-`scripts/get-zig.sh`); the build fails fast with an install hint otherwise.
+or newer must be on `PATH` (`ae toolchain zig` below, `brew install zig`, or
+the checksum-pinned `scripts/get-zig.sh`); the build fails fast with an
+install hint otherwise.
+
+### `ae toolchain zig`: the pinned Zig, verified
+
+```bash
+ae toolchain zig            # install if missing, verify, print the zig path
+ae toolchain zig --check    # verify only; exit 1 if absent, wrong version or not the pinned archive
+export PATH="$(dirname "$(ae toolchain zig)"):$PATH"
+```
+
+`ae toolchain zig` installs the Zig release Aether pins (0.16.0) for the host
+it runs on: x86_64 or aarch64 Linux, macOS, Windows and FreeBSD. The version
+and the sha256 of each host's archive are compiled into `ae` from
+`tools/ae_zig_pin.h`, copied from ziglang.org's `index.json`; nothing about
+what to trust is fetched at run time.
+
+- **Where:** `$AETHER_HOME/toolchains/zig-<version>/` when `AETHER_HOME` is
+  set, else `~/.aether/toolchains/zig-<version>/`. Every Aether version that
+  pins the same Zig shares it.
+- **Already installed:** when `zig version` there reports the pinned version
+  and the install's stamp names this host's pinned archive, its path is
+  printed and nothing is downloaded.
+- **Otherwise:** the archive is downloaded from
+  `https://ziglang.org/download/<version>/` into a staging directory created
+  fresh inside the toolchains directory, and its sha256 is checked before
+  anything reads it. On a mismatch the file is deleted, both hashes are
+  printed, and the command exits 1. Every entry of the archive must lie under
+  its one top directory (no absolute path, no `..`). It is unpacked in the
+  staging directory and the finished tree is renamed into place, so an
+  interrupted run never leaves a half-unpacked tree where an install is
+  looked for. Then `zig version` is checked.
+- **Output:** the last line on stdout is the absolute path of `zig`
+  (`zig.exe` on Windows), so `ZIG="$(ae toolchain zig)"` works in scripts.
+  Progress goes to stderr.
+- **Mirror:** `AE_ZIG_BASE_URL` replaces `https://ziglang.org/download`; the
+  archive is fetched from `<url>/<version>/<archive>` and checked against the
+  same compiled-in hash.
+
+`scripts/get-zig.sh` hands its work to `ae toolchain zig` when the checkout
+has a built `build/ae` or an `ae` is on `PATH`, installing under
+`<dest>/toolchains/`, and keeps its own x86_64 Linux fetch as the fallback.
+Both read the pin from `tools/ae_zig_pin.h`.
 
 ### iOS: `--target=aarch64-ios` (Xcode backend)
 

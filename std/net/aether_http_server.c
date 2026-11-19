@@ -199,6 +199,10 @@ int http_ws_poll(HttpWsConn* w, int t) { (void)w; (void)t; return -1; }
 int http_ws_fd(HttpWsConn* w) { (void)w; return -1; }
 const char* http_ws_message_data(HttpWsConn* w) { (void)w; return ""; }
 int http_ws_message_length(HttpWsConn* w) { (void)w; return 0; }
+const char* http_ws_set_max_message_raw(HttpWsConn* w, int64_t m) { (void)w; (void)m; return "WebSocket unavailable: networking not built in"; }
+const char* http_server_set_ws_max_message_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "WebSocket unavailable: networking not built in"; }
+const char* http_server_set_max_body_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_head_timeout_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
 void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -248,8 +252,8 @@ void http_server_set_actor_handler(HttpServer* s, void (*sf)(void*), void (*snf)
 const char* http_request_method(HttpRequest* r) { (void)r; return ""; }
 const char* http_request_path(HttpRequest* r) { (void)r; return ""; }
 const char* http_request_body(HttpRequest* r) { (void)r; return ""; }
-int http_request_body_length(HttpRequest* r) { (void)r; return 0; }
-int http_request_body_read_raw(HttpRequest* r, int o, int m) { (void)r; (void)o; (void)m; return 0; }
+int64_t http_request_body_length(HttpRequest* r) { (void)r; return 0; }
+int http_request_body_read_raw(HttpRequest* r, int64_t o, int m) { (void)r; (void)o; (void)m; return 0; }
 int http_request_body_complete(HttpRequest* r) { (void)r; return 0; }
 const char* http_get_request_body_read(void) { return ""; }
 int http_get_request_body_read_length(void) { return 0; }
@@ -1506,7 +1510,7 @@ HttpServer* http_server_create(int port) {
     server->tls_key_pem = NULL;
     server->pure_creds = NULL;
     server->h2_enabled = 0;
-    server->h2_max_concurrent_streams = 0;  /* nghttp2 default 100 when 0 */
+    server->h2_max_concurrent_streams = 0;  /* 0: advertise 100 (#3738) */
     /* HTTP/1.1 is persistent by default (RFC 9112 section 9.3), and a proxy
      * or client that dials this server pays a handshake per request when it
      * is not: the load balancer measured 3.7x behind nginx with 8% of
@@ -1517,6 +1521,9 @@ HttpServer* http_server_create(int port) {
     server->keep_alive_enabled = 1;
     server->keep_alive_max = 0;
     server->keep_alive_idle_ms = 0;
+    server->ws_max_message = HTTP_WS_DEFAULT_MAX_MESSAGE;
+    server->max_body = HTTP_DEFAULT_MAX_BODY;
+    server->head_timeout_ms = HTTP_DEFAULT_HEAD_TIMEOUT_MS;
     server->response_transformer_chain = NULL;
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
@@ -1588,6 +1595,39 @@ const char* http_server_set_keepalive_raw(HttpServer* server,
     if (idle_ms < 0) idle_ms = 0;
     if (idle_ms > INT_MAX) idle_ms = INT_MAX;
     server->keep_alive_idle_ms = (int)idle_ms;
+    return "";
+}
+
+/* The cap every WebSocket this server upgrades starts with (#3739). A
+ * handle read after the change gets the new cap; one already upgraded
+ * keeps the cap it was given. */
+const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_bytes) {
+    if (!server) return "server is null";
+    if (max_bytes <= 0) return "max message must be positive";
+    if ((uint64_t)max_bytes > (uint64_t)HTTP_WS_MAX_MESSAGE_LIMIT)
+        return "max message is past the 2 GiB a message length can report";
+    server->ws_max_message = (size_t)max_bytes;
+    return "";
+}
+
+/* The largest request body http_request_body buffers (#3740). */
+const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes) {
+    if (!server) return "server is null";
+    if (max_bytes <= 0) return "max body must be positive";
+    server->max_body = max_bytes;
+    return "";
+}
+
+/* The longest a request head may take from its first byte (#3737). Stored
+ * in ms, as the receive paths count; a value under 1 ms rounds up to 1 so
+ * it is not mistaken for 0, which turns the bound off. */
+const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout_ns) {
+    if (!server) return "server is null";
+    if (timeout_ns < 0) return "head timeout must not be negative";
+    int64_t ms = timeout_ns / 1000000LL;
+    if (timeout_ns > 0 && ms == 0) ms = 1;
+    if (ms > INT_MAX) ms = INT_MAX;
+    server->head_timeout_ms = (int)ms;
     return "";
 }
 
@@ -2563,7 +2603,9 @@ const char* http_server_set_tls_backend_raw(HttpServer* server, const char* name
  *     metrics, access logs, and health probes all apply uniformly.
  *
  * Returns "" on success, an error string when nghttp2 isn't linked.
- * max_concurrent_streams = 0 → use libnghttp2's default (100). */
+ * max_concurrent_streams = 0 → the server advertises 100
+ * (HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS, #3738). nghttp2's own local
+ * default is unlimited, and the setting was sent only when given. */
 const char* http_server_set_h2_raw(HttpServer* server,
                                    int max_concurrent_streams) {
     if (!server) return "server is null";
@@ -3317,6 +3359,8 @@ void http_request_reset(HttpRequest* req) {
     req->stream_conn = NULL;
     req->stream_total = 0;
     req->stream_consumed = 0;
+    req->body_max = 0;
+    req->body_refused = 0;
 }
 
 /* Parse into an object the caller owns, reusing what it already holds. */
@@ -4165,10 +4209,14 @@ struct HttpWsRoute {
 struct HttpWsConn {
     HttpConn* conn;       /* not owned */
     int       closed;
-    /* Reassembled message buffer — grown as needed. */
+    /* Reassembled message buffer, grown as the bytes arrive. Sizes are
+     * size_t: the int capacity this had overflowed past 1 GiB (#3739). */
     char*  msg_buf;
-    int    msg_cap;
-    int    msg_len;
+    size_t msg_cap;
+    size_t msg_len;
+    /* The largest message this handle reassembles, in bytes; past it the
+     * receive closes with 1009 (#3739). 0 means HTTP_WS_DEFAULT_MAX_MESSAGE. */
+    size_t max_message;
     /* For binary frames we don't NUL-terminate, so callers see
      * (out_data, out_len). For text frames we NUL-terminate for
      * convenience. The opcode of the in-progress message is
@@ -4525,11 +4573,22 @@ void http_ws_close(HttpWsConn* ws, int code, const char* reason) {
     ws->closed = 1;
 }
 
-/* Grow the message-reassembly buffer if needed. */
-static int ws_msg_grow(HttpWsConn* ws, int need) {
+/* The largest message `ws` reassembles. */
+static size_t ws_max_message(const HttpWsConn* ws) {
+    return ws->max_message ? ws->max_message : HTTP_WS_DEFAULT_MAX_MESSAGE;
+}
+
+/* Grow the message-reassembly buffer to hold at least `need` bytes. The
+ * caller has already checked `need` against the message cap, so it is at
+ * most the cap plus one byte for a text message's NUL. Doubling stops at
+ * that bound rather than overshooting it. */
+static int ws_msg_grow(HttpWsConn* ws, size_t need) {
     if (ws->msg_cap >= need) return 0;
-    int new_cap = ws->msg_cap > 0 ? ws->msg_cap : 4096;
-    while (new_cap < need) new_cap *= 2;
+    size_t bound = ws_max_message(ws) + 1;
+    size_t new_cap = ws->msg_cap > 0 ? ws->msg_cap : 4096;
+    while (new_cap < need && new_cap < bound) new_cap *= 2;
+    if (new_cap > bound) new_cap = bound;
+    if (new_cap < need) new_cap = need;
     /* Cap-aware (#343): WebSocket message reassembly is driven by the
      * peer's frame sizes — untrusted. Old size is the prior
      * ws->msg_cap (0 on the first grow from NULL); the matching free
@@ -4548,7 +4607,35 @@ const char* http_ws_message_data(HttpWsConn* ws) {
 }
 
 int http_ws_message_length(HttpWsConn* ws) {
-    return ws ? ws->msg_len : 0;
+    /* Fits: a message is at most HTTP_WS_MAX_MESSAGE_LIMIT bytes. */
+    return ws ? (int)ws->msg_len : 0;
+}
+
+/* The largest message this handle reassembles from now on (#3739). Returns
+ * "" or why the value was refused. */
+const char* http_ws_set_max_message_raw(HttpWsConn* ws, int64_t max_bytes) {
+    if (!ws) return "websocket is null";
+    if (max_bytes <= 0) return "max message must be positive";
+    if ((uint64_t)max_bytes > (uint64_t)HTTP_WS_MAX_MESSAGE_LIMIT)
+        return "max message is past the 2 GiB a message length can report";
+    ws->max_message = (size_t)max_bytes;
+    return "";
+}
+
+/* Fail the connection: send a close frame with `code` (1002 protocol error,
+ * 1009 message too big) and mark the handle closed. Returns -1, what the
+ * receive reports for a closed connection. */
+static int ws_fail(HttpWsConn* ws, int code, const char* reason) {
+    http_ws_close(ws, code, reason);
+    ws->closed = 1;
+    /* The frame that failed is still unread on the socket, and closing over
+     * unread bytes answers them with a reset, which can destroy the close
+     * frame just sent before the peer reads it (Windows and macOS discard
+     * what was received but not read). Linger on close, as a refused HTTP
+     * request does (conn_linger): half-close, then read and discard until
+     * the peer closes or goes quiet, bounded. */
+    if (ws->conn) ws->conn->linger_on_close = 1;
+    return -1;
 }
 
 /* Monotonic milliseconds; defined further down with the connection-park
@@ -4715,12 +4802,12 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
         int fin    = (hdr2[0] >> 7) & 1;
         int opcode = hdr2[0] & 0x0F;
         int masked = (hdr2[1] >> 7) & 1;
-        long long pl = hdr2[1] & 0x7F;
+        uint64_t pl = hdr2[1] & 0x7F;
 
         if (pl == 126) {
             unsigned char ext[2];
             if (ws_recv_exact(ws->conn, ext, 2) != 0) { ws->closed = 1; return -1; }
-            pl = ((long long)ext[0] << 8) | ext[1];
+            pl = ((uint64_t)ext[0] << 8) | ext[1];
         } else if (pl == 127) {
             unsigned char ext[8];
             if (ws_recv_exact(ws->conn, ext, 8) != 0) { ws->closed = 1; return -1; }
@@ -4733,68 +4820,82 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
             if (ws_recv_exact(ws->conn, mask_key, 4) != 0) { ws->closed = 1; return -1; }
         }
 
-        /* Sanity bound — refuse 1GB+ frames. */
-        if (pl < 0 || pl > (1LL << 30)) { ws->closed = 1; return -1; }
+        /* A client masks every frame it sends and a server masks none, and
+         * each end fails the connection on a frame that breaks the rule
+         * (RFC 6455 5.1). A server handle sends unmasked (mask_tx 0) and so
+         * must receive masked frames; a client handle the reverse. Unmasked
+         * client frames were taken as they came, which loses what masking
+         * is for: a client's script cannot choose the bytes an intermediary
+         * sees, so it cannot pass a request off as plain HTTP to poison its
+         * cache (#3759). */
+        if (masked == ws->mask_tx)
+            return ws_fail(ws, 1002, masked ? "masked frame from the server"
+                                            : "unmasked frame from the client");
+        /* Opcodes 3-7 and 0xB-0xF are reserved, and a frame carrying one
+         * fails the connection (RFC 6455 5.2). The reserved data opcodes
+         * were appended to the message as if they continued it, and the
+         * reserved control ones taken as data (#3759). */
+        if ((opcode >= 0x3 && opcode <= 0x7) || opcode >= 0xB)
+            return ws_fail(ws, 1002, "reserved opcode");
 
-        /* Read payload into a scratch buffer, unmasking on the fly.
-         * Cap-aware (#343): `pl` is the WebSocket payload length
-         * field from the wire — untrusted by definition. The 1 GiB
-         * sanity bound above stops the obvious DoS shape; the caps
-         * allocator threads this through to the host's
-         * aether_set_memory_cap budget. */
-        char* frame_buf = NULL;
-        size_t frame_cap = 0;
-        if (pl > 0) {
-            frame_cap = (size_t)pl;
-            frame_buf = (char*)aether_caps_malloc(frame_cap);
-            if (!frame_buf) { ws->closed = 1; return -1; }
-            if (ws_recv_exact(ws->conn, frame_buf, (int)pl) != 0) {
-                aether_caps_free(frame_buf, frame_cap); ws->closed = 1; return -1;
+        if (opcode == WS_OP_PING || opcode == WS_OP_PONG || opcode == WS_OP_CLOSE) {
+            /* A control frame carries at most 125 bytes and is never
+             * fragmented (RFC 6455 5.5). Both were taken as given, and a
+             * ping or close was echoed back at whatever size it declared
+             * (#3739). */
+            if (!fin || pl > 125)
+                return ws_fail(ws, 1002, "invalid control frame");
+            unsigned char ctl[125];
+            if (pl > 0) {
+                if (ws_recv_exact(ws->conn, ctl, (int)pl) != 0) { ws->closed = 1; return -1; }
+                if (masked)
+                    for (uint64_t i = 0; i < pl; i++) ctl[i] ^= mask_key[i & 3];
             }
-            if (masked) {
-                for (long long i = 0; i < pl; i++) {
-                    frame_buf[i] ^= (char)mask_key[i & 3];
-                }
+            if (opcode == WS_OP_PING) {
+                /* Answer with a pong carrying the same payload (RFC 6455
+                 * 5.5.3). The caller does not see control frames. */
+                ws_send_frame_masked(ws->conn, WS_OP_PONG, ctl, (int)pl, ws->mask_tx);
+                continue;
             }
-        }
-
-        if (opcode == WS_OP_PING) {
-            /* Respond with a pong carrying the same payload (RFC 6455
-             * §5.5.3). Free our buffer afterwards; caller doesn't see
-             * control frames. */
-            ws_send_frame_masked(ws->conn, WS_OP_PONG, frame_buf, (int)pl,
-                                 ws->mask_tx);
-            aether_caps_free(frame_buf, frame_cap);
-            continue;
-        }
-        if (opcode == WS_OP_PONG) {
-            aether_caps_free(frame_buf, frame_cap);
-            continue;  /* unsolicited pong — discard */
-        }
-        if (opcode == WS_OP_CLOSE) {
-            /* Echo close frame back (RFC 6455 §5.5.1) and report
-             * to caller. */
-            ws_send_frame_masked(ws->conn, WS_OP_CLOSE, frame_buf, (int)pl,
-                                 ws->mask_tx);
-            aether_caps_free(frame_buf, frame_cap);
+            if (opcode == WS_OP_PONG) continue;  /* unsolicited pong: discard */
+            /* Echo the close frame back (RFC 6455 5.5.1) and report it. */
+            ws_send_frame_masked(ws->conn, WS_OP_CLOSE, ctl, (int)pl, ws->mask_tx);
             ws->closed = 1;
             return -1;
         }
 
-        /* Data frame (text / binary / continuation). Append to
-         * the message buffer, then break out if FIN. */
+        /* Data frame (text / binary / continuation): append it to the
+         * message, then stop at FIN. */
         if (opcode == WS_OP_TEXT || opcode == WS_OP_BIN) {
             ws->msg_opcode = opcode;
             ws->msg_len = 0;  /* fresh message */
         }
-        if (pl > 0) {
-            if (ws_msg_grow(ws, ws->msg_len + (int)pl + 1) != 0) {
-                aether_caps_free(frame_buf, frame_cap); ws->closed = 1; return -1;
+        /* The message cap is checked before a byte of the frame is read or
+         * a buffer grown for it: a frame may declare up to 2^63 bytes, and
+         * fragments added up with no total bound (#3739). */
+        size_t max_msg = ws_max_message(ws);
+        if (ws->msg_len > max_msg || pl > (uint64_t)(max_msg - ws->msg_len))
+            return ws_fail(ws, 1009, "message too big");
+        /* Read the payload straight into the message buffer, growing it as
+         * the bytes arrive rather than at the length the frame declares, so
+         * a peer that declares a large frame and sends little of it holds
+         * memory in proportion to what it has sent. */
+        size_t want = (size_t)pl;
+        size_t done = 0;
+        while (done < want) {
+            size_t step = want - done;
+            if (step > 65536) step = 65536;
+            if (ws_msg_grow(ws, ws->msg_len + done + step + 1) != 0) {
+                ws->closed = 1;
+                return -1;
             }
-            memcpy(ws->msg_buf + ws->msg_len, frame_buf, (size_t)pl);
-            ws->msg_len += (int)pl;
+            char* dst = ws->msg_buf + ws->msg_len + done;
+            if (ws_recv_exact(ws->conn, dst, (int)step) != 0) { ws->closed = 1; return -1; }
+            if (masked)
+                for (size_t i = 0; i < step; i++) dst[i] ^= (char)mask_key[(done + i) & 3];
+            done += step;
         }
-        aether_caps_free(frame_buf, frame_cap);
+        ws->msg_len += want;
 
         if (fin) break;
     }
@@ -5209,6 +5310,7 @@ HttpWsConn* http_ws_connect(const char* url) {
     ws->conn      = conn;
     ws->mask_tx   = 1;   /* we are the client: every frame we send is masked */
     ws->owns_conn = 1;   /* we dialled it, so we close and free it */
+    ws->max_message = HTTP_WS_DEFAULT_MAX_MESSAGE;   /* #3739 */
     return ws;
 }
 
@@ -5223,10 +5325,19 @@ void http_ws_client_free(HttpWsConn* ws) {
          * a truncated connection; the CTX is process-wide and stays. */
         if (ws->conn->ssl) conn_tls_close(ws->conn);
 #endif
-        if (ws->conn->fd >= 0) close(ws->conn->fd);
+        if (ws->conn->fd >= 0) {
+            /* After a protocol failure (ws_fail) the failed frame is unread;
+             * drain it so the close frame is not lost to a reset. */
+            if (ws->conn->linger_on_close) conn_linger(ws->conn->fd);
+            close(ws->conn->fd);
+        }
         free(ws->conn);
     }
-    if (ws->msg_buf) free(ws->msg_buf);
+    /* Grown by ws_msg_grow through aether_caps_realloc, so released through
+     * the cap with the size it holds: plain free() left msg_cap counted for
+     * every handle freed, and a program under a memory cap reached it
+     * holding nothing (#3758). */
+    aether_caps_free(ws->msg_buf, ws->msg_cap);
     free(ws);
 }
 
@@ -5498,6 +5609,19 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
  * same size (HTTP_RX_KEEP_MAX). */
 #define HTTP_BODY_DRAIN_MAX (64 * 1024)
 
+/* The answer once http_request_body refused `req`'s body as past the
+ * server's limit (#3740): 413, in place of whatever the handler or a
+ * middleware set, since what it set was decided on a body it never had. A
+ * response already on the wire (a takeover, a chunked stream) is the
+ * caller's to skip. */
+static void response_refuse_body(HttpRequest* req, HttpServerResponse* res) {
+    if (!req->body_refused) return;
+    http_response_reset(res);
+    http_response_set_status(res, 413);
+    http_response_set_header(res, "Content-Type", "text/plain");
+    http_response_set_body(res, "request body exceeds server limit\n");
+}
+
 /* Whether some of `req`'s streamed body is still on its connection, which
  * then cannot carry another request: the next one would be read from the
  * middle of this one's body. */
@@ -5522,7 +5646,7 @@ static int request_body_unread(const HttpRequest* req) {
 static void request_body_settle(HttpConn* conn, HttpRequest* req) {
     if (!req->stream_conn) return;
     HttpConn* sconn = (HttpConn*)req->stream_conn;
-    long left = req->stream_total - req->stream_consumed;
+    int64_t left = req->stream_total - req->stream_consumed;
     if (left > 0 && left <= HTTP_BODY_DRAIN_MAX) {
         /* What is already buffered first, then off the socket in small reads
          * (no buffer the body's size); a client that stops sending ends it at
@@ -5536,7 +5660,7 @@ static void request_body_settle(HttpConn* conn, HttpRequest* req) {
         }
         while (left > 0) {
             char scratch[4096];
-            int chunk = left < (long)sizeof(scratch) ? (int)left : (int)sizeof(scratch);
+            int chunk = left < (int64_t)sizeof(scratch) ? (int)left : (int)sizeof(scratch);
             int n = conn_recv(sconn, scratch, chunk);
             if (n <= 0) break;
             req->stream_consumed += n;
@@ -5931,7 +6055,7 @@ static int head_line_value(const char* line, size_t line_len,
  *                         value ends.
  */
 int http_request_head_check(const char* head, const char* hdr_end,
-                            long* content_length, int* chunked) {
+                            int64_t* content_length, int* chunked) {
     *content_length = 0;
     *chunked = 0;
     /* A NUL makes the head something other than a request (RFC 9110 5.5),
@@ -6017,12 +6141,14 @@ int http_request_head_check(const char* head, const char* hdr_end,
          * disagree about where one request stops and the next begins. A
          * Content-Length is a plain count of digits, read whole by the one
          * reader std.net has for it: a sign, a spelled number, or a value
-         * that does not fit has no length in it. */
+         * that does not fit has no length in it. The bound is INT64_MAX on
+         * every platform: LONG_MAX is 2^31 - 1 on Windows, where a body past
+         * 2 GiB was refused as bad framing (#3761). */
         uint64_t declared = 0;
         if (cl_differing ||
-            http_parse_count(cl_value, cl_len, 10, (uint64_t)LONG_MAX, &declared) != 0)
+            http_parse_count(cl_value, cl_len, 10, (uint64_t)INT64_MAX, &declared) != 0)
             return HTTP_HEAD_BAD_FRAMING;
-        *content_length = (long)declared;
+        *content_length = (int64_t)declared;
     }
 
     /* Transfer-Encoding decides where the body ends, and when it is present
@@ -6132,6 +6258,19 @@ static void conn_send_payload_too_large(HttpConn* conn, const char* req, size_t 
     conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
+/* A request head that did not arrive whole within the server's head
+ * timeout from its first byte (#3737). */
+static void conn_send_request_timeout(HttpConn* conn, const char* req, size_t req_len) {
+    static const char msg[] =
+        "HTTP/1.1 408 Request Timeout\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 23\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request head timed out\n";
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
+}
+
 /* Refuse a message whose framing this server will not guess at, and say so
  * before closing. A framing error cannot be answered on a kept-alive
  * connection, because where the next request starts is exactly what is in
@@ -6160,6 +6299,7 @@ static void conn_send_bad_request_line(HttpConn* conn, const char* req, size_t r
 }
 
 static void conn_set_recv_timeout(HttpConn* c, int ms);
+static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c);
 
 /* The request hooks (#260 Tier 3: the access log, metrics, a program's own)
  * on the response about to be sent, `t_start` the request's start. Every
@@ -6231,6 +6371,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         conn->pending_req = NULL;
         conn->pending_res = NULL;
         res->takeover_conn = conn;
+        req->body_max = server->max_body;   /* #3740 */
         return dispatch_request(server, conn, req, res, conn->pending_from,
                                 conn->pending_t_start, requests_served, max_requests);
     }
@@ -6276,6 +6417,10 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * scan starts from read_pos so already-buffered pipelined bytes
      * count toward the header boundary. */
     char* hdr_end = NULL;
+    /* When the first byte of this head was in hand, and whether the wait
+     * was cut to its deadline (#3737). */
+    int64_t head_started_ms = 0;
+    int head_deadline_applied = 0;
     while (1) {
         if (conn->write_pos > conn->read_pos) {
             /* NUL-terminate the unconsumed slice in place — we have
@@ -6287,6 +6432,22 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             hdr_end = (char*)http_find_header_end(conn->buf + conn->read_pos,
                                                   (size_t)(conn->write_pos - conn->read_pos));
             if (hdr_end) break;
+            if (head_started_ms == 0) head_started_ms = conn_now_ms();
+        }
+        /* The whole head must arrive within head_timeout_ms of its first
+         * byte (#3737). The per-recv timeout alone let a client that sends
+         * a byte just inside it hold this worker for as long as it liked;
+         * each wait is now cut to what is left of the deadline as well. */
+        if (head_started_ms != 0 && server->head_timeout_ms > 0) {
+            int64_t left = head_started_ms + server->head_timeout_ms - conn_now_ms();
+            if (left <= 0) {
+                conn_send_request_timeout(conn, conn->buf + conn->read_pos,
+                                          (size_t)(conn->write_pos - conn->read_pos));
+                return 0;
+            }
+            int per_recv = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+            conn_set_recv_timeout(conn, left < per_recv ? (int)left : per_recv);
+            head_deadline_applied = 1;
         }
         /* A head holds no more than the connection buffer's first size,
          * HTTP_CONN_BUF_CAP, less the NUL, answered 431 past it (#3252).
@@ -6312,10 +6473,17 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
              * different worker without carrying parse state with it. */
             if (n < 0 && conn->write_pos == conn->read_pos && conn_recv_timed_out())
                 return HTTP_REQUEST_IDLE;
+            /* The head's deadline passed during the wait: say so. */
+            if (n < 0 && head_started_ms != 0 && server->head_timeout_ms > 0 &&
+                conn_now_ms() - head_started_ms >= server->head_timeout_ms)
+                conn_send_request_timeout(conn, conn->buf + conn->read_pos,
+                                          (size_t)(conn->write_pos - conn->read_pos));
             return 0;  /* EOF / error */
         }
         conn->write_pos += n;
     }
+    /* The body's reads wait by the idle timeout again. */
+    if (head_deadline_applied) conn_apply_recv_timeout(server, conn);
 
     int header_size = (int)(hdr_end - conn->buf) + 4 - conn->read_pos;
     int request_total = header_size;
@@ -6330,7 +6498,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * head has passed the checks the proxy event loop makes too (#3236). */
     const char* head_start = conn->buf + conn->read_pos;
     size_t head_have = (size_t)(conn->write_pos - conn->read_pos);
-    long content_length = 0;
+    int64_t content_length = 0;
     int te_chunked = 0;
     switch (http_request_head_check(head_start, hdr_end, &content_length, &te_chunked)) {
     case HTTP_HEAD_MALFORMED:    conn_send_bad_request_line(conn, head_start, head_have); return 0;
@@ -6410,7 +6578,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         conn->write_pos = conn->read_pos + header_size
                         + (int)decoded_len + (int)tail_len;
         conn->buf[conn->write_pos] = '\0';
-        content_length = (long)decoded_len;
+        content_length = (int64_t)decoded_len;
         request_total  = header_size + (int)decoded_len;
         stream_body    = 0;
     }
@@ -6489,6 +6657,9 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     }
 
 
+    /* The most of the body http_request_body may buffer (#3740). */
+    req->body_max = server->max_body;
+
     /* The peer, the local address and the TLS state, from the connection. */
     http_request_copy_conn_meta(req, conn);
 
@@ -6534,6 +6705,7 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
          * connection's fate is decided the same way. Transformers are the
          * route handler's (a proxied response is not gzipped here, as
          * nginx's gzip_proxied is off); the hooks observe it. */
+        response_refuse_body(req, res);
         run_request_hooks(server, req, res, t_start);
         return finish_response(server, conn, req, res, requests_served, max_requests);
     }
@@ -6658,6 +6830,7 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
                         .conn = conn, .closed = 0,
                         .msg_buf = NULL, .msg_cap = 0,
                         .msg_len = 0, .msg_opcode = 0,
+                        .max_message = server->ws_max_message,
                     };
                     wr->handler(req, &ws_handle, wr->user_data);
                     /* If the handler returned without closing,
@@ -6729,6 +6902,9 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
         return 0;
     }
 
+    /* A body http_request_body refused is answered 413 (#3740). */
+    response_refuse_body(req, res);
+
     /* Run response-transformer chain (#260 Tier 1). Each transformer
      * may mutate the response — typical uses include gzip
      * compression and error-page substitution. They run in
@@ -6778,6 +6954,8 @@ void http_server_dispatch_for_h2(HttpServer* server,
                                  HttpRequest* req,
                                  HttpServerResponse* res) {
     if (!server || !req || !res) return;
+    /* The most of the body http_request_body may hand back (#3740). */
+    req->body_max = server->max_body;
     int64_t t_start = http_now_us();
 
     /* Middleware chain — same shape as the HTTP/1.1 path. */
@@ -6790,6 +6968,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
     if (!should_continue) {
         /* middleware answered; res already populated, and observed as
          * every response is (#3213) */
+        response_refuse_body(req, res);
         run_request_hooks(server, req, res, t_start);
         return;
     }
@@ -6801,6 +6980,8 @@ void http_server_dispatch_for_h2(HttpServer* server,
         http_response_set_status(res, 404);
         http_response_set_body(res, "404 Not Found");
     }
+
+    response_refuse_body(req, res);
 
     /* Response transformer chain (gzip / error_pages / etc.). */
     {
@@ -8801,6 +8982,55 @@ static void http_serve_file_range(HttpServerResponse* res, const char* filepath,
     aether_caps_free(buf, alloc);
 }
 
+/* Whether canonical path `path` is `root` or lies inside it (#3747). A bare
+ * prefix match let `/srv/www-private/secret` pass for the root `/srv/www`,
+ * which is what a symlink in the document root pointing at a sibling
+ * directory resolves to. The prefix must end at a path separator, or at the
+ * end of `path`, or `root` must itself end in one (a root of `/` or `C:\`).
+ * On Windows the comparison ignores case and takes either separator. */
+static int static_path_within(const char* path, const char* root) {
+    size_t rl = strlen(root);
+#ifdef _WIN32
+    if (_strnicmp(path, root, rl) != 0) return 0;
+#define STATIC_IS_SEP(c) ((c) == '/' || (c) == '\\')
+#else
+    if (strncmp(path, root, rl) != 0) return 0;
+#define STATIC_IS_SEP(c) ((c) == '/')
+#endif
+    int ok = path[rl] == '\0' || STATIC_IS_SEP(path[rl]) ||
+             (rl > 0 && STATIC_IS_SEP(root[rl - 1]));
+#undef STATIC_IS_SEP
+    return ok;
+}
+
+#ifdef _WIN32
+/* The final path of `path` into `out`, as the file system resolves it: every
+ * junction and symbolic link on the way followed, `.` and `..` gone, in the
+ * case the volume stores. 0 on success; -1 when the path cannot be opened or
+ * its final path does not fit. Opening the path asks the file system itself,
+ * where _fullpath, used before, only rewrote the text and left a junction in
+ * the document root pointing outside it to pass the containment check
+ * (#3760). FILE_FLAG_BACKUP_SEMANTICS opens a directory too, for the root.
+ * The answer is in the \\?\ namespace; the prefix comes off so it compares
+ * with the root's: \\?\D:\p is D:\p and \\?\UNC\server\share\p is
+ * \\server\share\p. The narrow calls read UTF-8, the code page Aether's
+ * manifest sets (runtime/windows/aether.manifest). */
+static int static_final_path(const char* path, char* out, size_t cap) {
+    HANDLE h = CreateFileA(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    DWORD n = GetFinalPathNameByHandleA(h, out, (DWORD)cap,
+                                        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(h);
+    if (n == 0 || n >= cap) return -1;
+    if (strncmp(out, "\\\\?\\UNC\\", 8) == 0)
+        memmove(out + 2, out + 8, strlen(out + 8) + 1);   /* keep the leading two backslashes */
+    else if (strncmp(out, "\\\\?\\", 4) == 0)
+        memmove(out, out + 4, strlen(out + 4) + 1);
+    return 0;
+}
+#endif
+
 // Static file serving handler (for use with wildcard routes)
 void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir) {
     const char* dir = (const char*)base_dir;
@@ -8842,7 +9072,7 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
         http_response_set_body(res, "404 - Not Found");
         return;
     }
-    if (strncmp(resolved, resolved_dir, strlen(resolved_dir)) != 0) {
+    if (!static_path_within(resolved, resolved_dir)) {
         http_response_set_status(res, 403);
         http_response_set_body(res, "403 - Forbidden");
         return;
@@ -8881,16 +9111,17 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
     http_serve_file(res, resolved);
     http_response_set_header(res, "Accept-Ranges", "bytes");
 #else
-    // On Windows, use _fullpath for canonicalization
+    // The final paths of the file and of the root, each with every junction
+    // and symlink followed, as realpath gives them on POSIX (#3760).
     char resolved[1024];
     char resolved_dir[1024];
-    if (!_fullpath(resolved, filepath, sizeof(resolved)) ||
-        !_fullpath(resolved_dir, dir, sizeof(resolved_dir))) {
+    if (static_final_path(filepath, resolved, sizeof(resolved)) != 0 ||
+        static_final_path(dir, resolved_dir, sizeof(resolved_dir)) != 0) {
         http_response_set_status(res, 404);
         http_response_set_body(res, "404 - Not Found");
         return;
     }
-    if (_strnicmp(resolved, resolved_dir, strlen(resolved_dir)) != 0) {
+    if (!static_path_within(resolved, resolved_dir)) {
         http_response_set_status(res, 403);
         http_response_set_body(res, "403 - Forbidden");
         return;
@@ -8952,31 +9183,60 @@ const char* http_request_path(HttpRequest* req) {
     return (req && req->path) ? req->path : "";
 }
 
+/* The most of a body http_request_body buffers for `req`. */
+static int64_t request_body_max(const HttpRequest* req) {
+    return req->body_max > 0 ? req->body_max : HTTP_DEFAULT_MAX_BODY;
+}
+
 const char* http_request_body(HttpRequest* req) {
     if (!req) return "";
-    /* #644 — v1 contract on a STREAMING request: `http.request_body` must
+    /* A body past the server's limit is refused, whatever the client
+     * declared it to be (#3740): the server answers 413 once the handler
+     * returns. It was allocated at its declared Content-Length, up to
+     * LONG_MAX, so a few connections each declaring gigabytes took the
+     * server's memory. A handler that wants a larger body streams it with
+     * http_request_body_read, which this does not bound. */
+    if (req->body_refused) return "";
+    int64_t declared = req->stream_conn ? (int64_t)req->stream_total
+                                        : (int64_t)req->body_length;
+    if (declared > request_body_max(req)) {
+        req->body_refused = 1;
+        return "";
+    }
+    /* #644: v1 contract on a STREAMING request: `http.request_body` must
      * keep returning the whole payload even though the dispatcher no longer
      * pre-buffers it. Materialize on demand: drain the remaining wire bytes
      * into a heap buffer once, then serve it like a buffered body. The
-     * caller explicitly asked for full buffering, so the O(Content-Length)
-     * allocation is the requested behaviour — handlers that want bounded
+     * caller explicitly asked for full buffering, so an allocation the size
+     * of the body is the requested behaviour; handlers that want bounded
      * RAM use http_request_body_read instead.
      *
      * Mixed usage (some bytes already pulled via http_request_body_read)
-     * cannot be honoured — the consumed prefix is gone, and returning a
+     * cannot be honoured: the consumed prefix is gone, and returning a
      * tail as if it were the whole body would silently corrupt. That case
      * keeps returning "" (same as before this fix). */
     if (req->stream_conn && !req->body && req->stream_consumed == 0 &&
         req->stream_total > 0) {
         HttpConn* conn = (HttpConn*)req->stream_conn;
-        long total = req->stream_total;
-        char* buf = (char*)malloc((size_t)total + 1);
+        int64_t total = req->stream_total;
+        /* The buffer grows as the bytes arrive, from the connection
+         * buffer's size, rather than starting at the declared length: a
+         * client that declares the limit and sends little of it holds
+         * memory in proportion to what it sent (#3740). */
+        int64_t cap = total < HTTP_CONN_BUF_CAP ? total : HTTP_CONN_BUF_CAP;
+        char* buf = (char*)malloc((size_t)cap + 1);
         if (!buf) return "";
-        long got = 0;
+        int64_t got = 0;
         /* (a) body bytes that arrived in the same recv as the headers. */
         int buffered = conn->write_pos - conn->read_pos;
         if (buffered > 0) {
-            long take = ((long)buffered < total) ? (long)buffered : total;
+            int64_t take = ((int64_t)buffered < total) ? (int64_t)buffered : total;
+            if (take > cap) {
+                char* nb = (char*)realloc(buf, (size_t)take + 1);
+                if (!nb) { free(buf); return ""; }
+                buf = nb;
+                cap = take;
+            }
             memcpy(buf, conn->buf + conn->read_pos, (size_t)take);
             conn->read_pos += (int)take;
             got += take;
@@ -8986,7 +9246,15 @@ const char* http_request_body(HttpRequest* req) {
          * sees the updated stream_consumed and gives up on the same
          * peer-close. */
         while (got < total) {
-            int n = conn_recv(conn, buf + got, (int)(total - got));
+            if (got == cap) {
+                int64_t next = cap > total / 2 ? total : cap * 2;
+                char* nb = (char*)realloc(buf, (size_t)next + 1);
+                if (!nb) break;
+                buf = nb;
+                cap = next;
+            }
+            int64_t room = cap - got;
+            int n = conn_recv(conn, buf + got, room < INT_MAX ? (int)room : INT_MAX);
             if (n <= 0) break;
             got += n;
         }
@@ -8998,16 +9266,20 @@ const char* http_request_body(HttpRequest* req) {
     return (req->body) ? req->body : "";
 }
 
-int http_request_body_length(HttpRequest* req) {
+int64_t http_request_body_length(HttpRequest* req) {
     if (!req) return 0;
+    /* A refused body has no length to report: http_request_body gave "",
+     * and a caller slicing that by the declared length would read past it
+     * (#3740). */
+    if (req->body_refused) return 0;
     /* A materialized (or originally buffered) body reports its actual
-     * byte count — after a short read this is what request_body holds. */
-    if (req->body) return (int)req->body_length;
+     * byte count; after a short read this is what request_body holds. */
+    if (req->body) return (int64_t)req->body_length;
     /* Streaming request not yet materialized: `body` is NULL but the
      * declared length is the Content-Length we stashed. The canonical
      * upload loop reads this to know how many bytes to pull via
      * http_request_body_read. */
-    if (req->stream_conn) return (int)req->stream_total;
+    if (req->stream_conn) return req->stream_total;
     return 0;
 }
 
@@ -9090,7 +9362,7 @@ static int rbr_yield_eof(void) {
     return 1;
 }
 
-int http_request_body_read_raw(HttpRequest* req, int offset, int max) {
+int http_request_body_read_raw(HttpRequest* req, int64_t offset, int max) {
     release_rbr_locked();
     if (!req || offset < 0 || max < 0) return 0;
 
@@ -9106,20 +9378,20 @@ int http_request_body_read_raw(HttpRequest* req, int offset, int max) {
      * always bounded by `max`. */
     if (req->stream_conn) {
         HttpConn* conn = (HttpConn*)req->stream_conn;
-        long remaining = req->stream_total - req->stream_consumed;
+        int64_t remaining = req->stream_total - req->stream_consumed;
         if (remaining <= 0) return rbr_yield_eof();
-        if ((long)offset != req->stream_consumed) {
+        if (offset != req->stream_consumed) {
             /* Out-of-order read against an unbuffered stream — refuse. */
             return rbr_yield_eof();
         }
 
-        long want = (max < remaining) ? (long)max : remaining;
+        int64_t want = ((int64_t)max < remaining) ? (int64_t)max : remaining;
         if (want <= 0) return rbr_yield_eof();
         g_rbr_buf = (unsigned char*)aether_caps_malloc((size_t)want);
         if (!g_rbr_buf) return 0;
         g_rbr_cap = (size_t)want;
 
-        long got = 0;
+        int64_t got = 0;
         /* (a) drain any body bytes already in the connection buffer. */
         int buffered = conn->write_pos - conn->read_pos;
         if (buffered > 0) {

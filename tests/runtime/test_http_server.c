@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <locale.h>
 #include <time.h>
+#include <sched.h>   /* sched_yield */
 #ifdef _WIN32
 #include <winsock2.h>   /* getsockname; ahead of anything that pulls in windows.h */
 #include <ws2tcpip.h>
@@ -420,7 +421,7 @@ TEST(http_server_request_line_without_version_is_refused_once) {
 }
 
 /* The head check's answer for `head` followed by the blank line. */
-static int head_check_of(const char* head, long* cl, int* chunked) {
+static int head_check_of(const char* head, int64_t* cl, int* chunked) {
     char buf[512];
     int n = snprintf(buf, sizeof buf, "%s\r\n\r\n", head);
     const char* end = http_find_header_end(buf, (size_t)n);
@@ -436,7 +437,7 @@ TEST(http_request_head_check_refuses_a_bare_cr_or_lf) {
      * A bare CR stayed in a value the proxy forwards, to an upstream that
      * may end the line there (RFC 9112 2.2; found by tests/fuzz/http_head).
      * Both are a head that is not a request, answered 400 like a NUL. */
-    long cl = -1;
+    int64_t cl = -1;
     int chunked = -1;
     ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("POST / HTTP/1.1\r\nHost: a\nContent-Length: 2", &cl, &chunked));
     ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("GET / HTTP/1.1\nHost: a", &cl, &chunked));
@@ -452,13 +453,30 @@ TEST(http_request_head_check_refuses_a_bare_cr_or_lf) {
     ASSERT_EQ(0, (int)cl);
 }
 
+/* #3761: a Content-Length is read into 64 bits on every platform. It was a
+ * `long`, bounded by LONG_MAX, which is 2^31 - 1 on Windows: a body
+ * declared past 2 GiB was refused there as bad framing, where Linux took it
+ * and streamed it. The largest value a 64-bit count holds is taken; one past
+ * it is still refused. */
+TEST(http_request_head_check_reads_a_64_bit_content_length) {
+    int64_t cl = -1;
+    int chunked = -1;
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("POST / HTTP/1.1\r\nContent-Length: 3000000000", &cl, &chunked));
+    ASSERT_TRUE(cl == INT64_C(3000000000));
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("POST / HTTP/1.1\r\nContent-Length: 6442450944", &cl, &chunked));
+    ASSERT_TRUE(cl == INT64_C(6442450944));
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("POST / HTTP/1.1\r\nContent-Length: 9223372036854775807", &cl, &chunked));
+    ASSERT_TRUE(cl == INT64_MAX);
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nContent-Length: 9223372036854775808", &cl, &chunked));
+}
+
 TEST(http_request_head_check_reads_transfer_encoding_as_one_list) {
     /* The check searched the first Transfer-Encoding field for the word
      * "chunked", so a coding that only contains it, chunked ahead of another
      * coding, and chunked undone by a second field were all decoded as
      * chunked, where a front end that reads the codings as RFC 9112 6.3 does
      * finds no length (found by tests/fuzz/http_head). */
-    long cl = -1;
+    int64_t cl = -1;
     int chunked = -1;
     ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: xchunked", &cl, &chunked));
     ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip", &cl, &chunked));
@@ -1069,10 +1087,150 @@ TEST(http_proxy_cache_keeps_a_long_ttl) {
     AetherProxyCacheEntry* e = aether_proxy_cache_lookup(cache, "GET", "/long", req);
     int found = e != NULL;
     long long ttl_ms = e ? (long long)(e->expires_at_ms - e->stored_at_ms) : -1;
+    aether_proxy_cache_release(e);
     http_request_free(req);
     aether_proxy_cache_free(cache);
     ASSERT_TRUE(found);
     ASSERT_TRUE(ttl_ms == 30LL * 24 * 3600 * 1000);
+}
+
+/* #3756: a lookup hit is read with the cache lock released, as the proxy's
+ * serve_from_cache reads it, while another worker's store evicts it. The
+ * lookup handed back the bare entry, and the store freed it under the
+ * reader: the body then held whatever the allocator put in its place (in
+ * practice the evicting store's own body, which is the same size) or the
+ * read crashed. Now the hit carries a reference and the entry outlives the
+ * eviction until it is released.
+ *
+ * The cache holds one entry, so every store of /b evicts /a and every store
+ * of /a evicts /b. The /a body is all 'a' and the /b body all 'b', both
+ * 4 KiB; the reader checks each byte of each /a hit, twice, the second pass
+ * after a pause that gives the writer time to evict. */
+enum { CACHE_RACE_BODY = 4096, CACHE_RACE_HITS = 200, CACHE_RACE_TRIES = 400000 };
+
+typedef struct {
+    AetherProxyCache* cache;
+    HttpRequest* req;
+    _Atomic int stop;
+    _Atomic int stored;   /* the writer has stored /a once */
+    int bad;       /* hits whose body or headers were not /a's */
+    int hits;
+} CacheRace;
+
+static int cache_race_entry_ok(const AetherProxyCacheEntry* e) {
+    if (e->status_code != 200 || e->body_length != CACHE_RACE_BODY) return 0;
+    for (int i = 0; i < CACHE_RACE_BODY; i++)
+        if (e->body[i] != 'a') return 0;
+    for (int i = 0; i < e->header_count; i++)
+        if (strcmp(e->header_keys[i], "X-Which") == 0 &&
+            strcmp(e->header_values[i], "a") != 0) return 0;
+    return 1;
+}
+
+static void* cache_race_writer(void* arg) {
+    CacheRace* r = (CacheRace*)arg;
+    char* a = (char*)malloc(CACHE_RACE_BODY);
+    char* b = (char*)malloc(CACHE_RACE_BODY);
+    memset(a, 'a', CACHE_RACE_BODY);
+    memset(b, 'b', CACHE_RACE_BODY);
+    while (!atomic_load(&r->stop)) {
+        aether_proxy_cache_store(r->cache, "GET", "/b", r->req, 200,
+                                 "X-Which: b\r\n", b, CACHE_RACE_BODY);
+        aether_proxy_cache_store(r->cache, "GET", "/a", r->req, 200,
+                                 "X-Which: a\r\n", a, CACHE_RACE_BODY);
+        atomic_store(&r->stored, 1);
+    }
+    free(a);
+    free(b);
+    return NULL;
+}
+
+TEST(http_proxy_cache_hit_outlives_an_eviction) {
+    CacheRace r;
+    memset(&r, 0, sizeof r);
+    r.cache = aether_proxy_cache_new(1, 65536, 60, AETHER_PROXY_CACHE_KEY_METHOD_URL);
+    ASSERT_NOT_NULL(r.cache);
+    r.req = http_parse_request("GET /a HTTP/1.1\r\n\r\n");
+    ASSERT_NOT_NULL(r.req);
+    pthread_t writer;
+    ASSERT_EQ(0, pthread_create(&writer, NULL, cache_race_writer, &r));
+    /* Lookups start once /a has been stored, and run until enough hits have
+     * been checked (bounded): on a fast machine a fixed number of lookups
+     * could all finish before the writer stored anything. */
+    while (!atomic_load(&r.stored)) sched_yield();
+    for (int i = 0; i < CACHE_RACE_TRIES && r.hits < CACHE_RACE_HITS; i++) {
+        AetherProxyCacheEntry* e = aether_proxy_cache_lookup(r.cache, "GET", "/a", r.req);
+        if (!e) { sched_yield(); continue; }
+        r.hits++;
+        int ok = cache_race_entry_ok(e);
+        /* Room for the writer to evict /a and store /b in between. */
+        for (int k = 0; k < 20; k++) sched_yield();
+        ok = ok && cache_race_entry_ok(e);
+        if (!ok) r.bad++;
+        aether_proxy_cache_release(e);
+    }
+    atomic_store(&r.stop, 1);
+    pthread_join(writer, NULL);
+    http_request_free(r.req);
+    aether_proxy_cache_free(r.cache);
+    ASSERT_TRUE(r.hits > 0);
+    ASSERT_EQ(0, r.bad);
+}
+
+/* #3757: a method_url_vary key is "METHOD target", then "\0name=value" for
+ * each header the response's Vary names. Entries were matched with strcmp,
+ * which stops at the first NUL, so two variants of one URL were told apart
+ * only by their 64-bit hash; when the hashes collide, one variant's response
+ * was served for the other. Here the hashes are equal by construction, and
+ * only the bytes after the first segment differ. */
+TEST(http_proxy_cache_key_compares_every_vary_segment) {
+    static const char stored[] = "GET /p\0accept=text/html";
+    static const char other[]  = "GET /p\0accept=application/json";
+    static const char longer[] = "GET /p\0accept=text/html\0accept-language=fr";
+    AetherProxyCacheEntry e;
+    memset(&e, 0, sizeof e);
+    e.key_hash = 42;
+    e.key_repr = (char*)stored;
+    e.key_len  = sizeof stored - 1;
+    ASSERT_EQ(1, aether_proxy_cache_key_matches(&e, 42, stored, sizeof stored - 1));
+    ASSERT_EQ(0, aether_proxy_cache_key_matches(&e, 42, other, sizeof other - 1));
+    ASSERT_EQ(0, aether_proxy_cache_key_matches(&e, 42, longer, sizeof longer - 1));
+    ASSERT_EQ(0, aether_proxy_cache_key_matches(&e, 42, "GET /p", 6));
+    ASSERT_EQ(0, aether_proxy_cache_key_matches(&e, 43, stored, sizeof stored - 1));
+}
+
+/* Every entry the cache counts sits in the bucket chain its lookup walks,
+ * and nothing else does. In method_url_vary mode an entry is bucketed by its
+ * key without the Vary part, but the unlink of an evicted or expired entry
+ * recomputed the bucket from the full key's hash: it missed, left the entry
+ * in its chain and freed it, and the next lookup of that URL walked freed
+ * memory. Two URLs with a Vary response each, in a cache of one entry, so
+ * the second store evicts the first. */
+static int cache_reachable_entries(const AetherProxyCache* c) {
+    int n = 0;
+    for (int i = 0; i < c->bucket_count; i++)
+        for (const AetherProxyCacheEntry* e = c->buckets[i]; e; e = e->bucket_next) n++;
+    return n;
+}
+
+TEST(http_proxy_cache_evicts_a_vary_entry_from_its_bucket) {
+    AetherProxyCache* cache = aether_proxy_cache_new(1, 65536, 60,
+                                                     AETHER_PROXY_CACHE_KEY_METHOD_URL_VARY);
+    ASSERT_NOT_NULL(cache);
+    HttpRequest* req = http_parse_request("GET /v HTTP/1.1\r\nAccept: text/html\r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    aether_proxy_cache_store(cache, "GET", "/v1", req, 200, "Vary: Accept\r\n", "one", 3);
+    aether_proxy_cache_store(cache, "GET", "/v2", req, 200, "Vary: Accept\r\n", "two", 3);
+    int counted = cache->entry_count;
+    int reachable = cache_reachable_entries(cache);
+    AetherProxyCacheEntry* e = aether_proxy_cache_lookup(cache, "GET", "/v2", req);
+    int hit = e != NULL && e->body_length == 3 && memcmp(e->body, "two", 3) == 0;
+    aether_proxy_cache_release(e);
+    http_request_free(req);
+    aether_proxy_cache_free(cache);
+    ASSERT_EQ(1, counted);
+    ASSERT_EQ(1, reachable);
+    ASSERT_TRUE(hit);
 }
 
 #if !defined(_WIN32)

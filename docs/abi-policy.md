@@ -11,6 +11,7 @@ on, and where an unsupported pair is refused before anything runs (#2957).
 | Boundary | What crosses it | Stability |
 |---|---|---|
 | The host ABI | `include/libaether.h`; a library's `aether_<name>` exports, `aether_<lib>_string_release`, `aether_<lib>_outcome` and `aether_<lib>_check` | Versioned by `AETHER_HOST_ABI` (1). Within a level it only grows |
+| Closures from C | `include/aether_closure.h`: `aether_closure_new`, `_retain`, `_release`, `_env`, `_self_env` (#3622) | Opaque pointers only; the layout behind them is the runtime ABI's. Only grows |
 | The catalog | `aether_lib_meta()`, the record an importer and a plugin host read | Schema `"1.minor"`: fields are only appended within 1 |
 | The runtime ABI | generated C and the runtime it runs on: actor, message and frame layouts, the entry points generated code calls | Not stable across versions: a rebuild boundary |
 | Shared facilities | what runtime copies in one process share through a rendezvous: sandbox levels, execution accounts | Versioned per facility, with the sizes of what the copies pass |

@@ -188,11 +188,21 @@ LRU list. Cacheability gates per RFC 7234 conservative subset:
 - Request `Cache-Control: no-store` → bypass.
 - Response `Cache-Control: no-store` / `private` → bypass.
 - Response `Vary: *` → uncacheable.
+- Request with `Authorization` → stored only when the response says
+  `public`, `s-maxage` or `must-revalidate` (RFC 9111 3.5).
+- Response with `Set-Cookie` → not stored.
 - Body length ≤ `max_body_bytes`.
 
 TTL resolution: response `Cache-Control: max-age` (clamped to 1
 hour for v1 conservatism), else `default_ttl_sec`. `s-maxage` and
 `Expires` are not consulted in v1.
+
+A hit is copied into the response after the cache lock is released,
+so a store on another worker can evict the entry meanwhile. Each entry
+therefore carries a reference count: the cache holds one, the request
+serving a hit holds another until its copy is done, and the entry is
+freed when the last one is dropped. An eviction never frees an entry a
+request is still reading (#3756).
 
 ### Key strategies
 
@@ -201,6 +211,10 @@ hour for v1 conservatism), else `default_ttl_sec`. `s-maxage` and
 | `url` | `path?query` | method-agnostic, POST/GET share entries (rare; usually wrong) |
 | `method_url` | `METHOD path?query` | safe default, GET and HEAD don't share entries with each other or with POST |
 | `method_url_vary` | as above + `\0name=value` for each header in upstream's `Vary:` | the response varies on `Accept-Encoding` / `Accept-Language` / etc. |
+
+The query is part of every key, as it is sent upstream. With
+`proxy.opts_set_preserve_host(opts, 1)` the client's `Host` is part of
+the key too, since the upstream then answers by it.
 
 ## Idempotent retry, `proxy_next_upstream` semantics
 

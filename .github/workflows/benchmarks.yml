@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 120 || 30 }}
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     # gcc and g++ for C, C++ and Aether; GNU time for CPU time and memory.
     - name: Install C, C++ and GNU time
@@ -66,24 +66,24 @@ jobs:
         sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc g++ make time
 
-    - uses: actions/setup-go@v6
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: stable
         cache: false
 
-    - uses: actions/setup-java@v5
+    - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
       with:
         distribution: temurin
         java-version: '21'
 
-    - uses: sbt/setup-sbt@v1
+    - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
 
-    - uses: erlef/setup-beam@v1
+    - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
       with:
         otp-version: '27'
         elixir-version: '1.18'
 
-    - uses: mlugg/setup-zig@v2
+    - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       with:
         version: 0.16.0
 
@@ -129,7 +129,7 @@ jobs:
 
     - name: Upload results
       if: always()
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: benchmark-results
         path: |

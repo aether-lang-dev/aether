@@ -538,6 +538,36 @@ gen(ids: ptr) { gl_gen_buffers(1, ids) }
 
 Either spelling is `fn(T1, T2) -> R` under a name and lowers the same way: `void*` storage, a typed cast at each call, no C `typedef` emitted. Argument and return types are the ones `extern` accepts, `*StructName` pointers included. See [§ Named C function-pointer types](language-reference.md#named-c-function-pointer-types-type-name--fnt1-t2---r) in the language reference.
 
+## Building an Aether Closure in C, `aether_closure.h`
+
+A C library or host that hands Aether code a callback with state of its own (a host hook and its `user_data`) builds a closure with the runtime's constructor, declared in `include/aether_closure.h` (#3622). The result is a closure in a `ptr`, as `box_closure()` makes one: Aether opens it with `unbox_closure(p)`, calls it with `call(f, ...)` and gives it back with `release_closure(p)`.
+
+```c
+#include "aether_closure.h"
+
+static int add(AetherClosureSelf* self, int x) {
+    Ctx* c = aether_closure_self_env(self);   /* the env given below */
+    return c->base + x;
+}
+
+void* make_adder(Ctx* c) {
+    return aether_closure_new((void (*)(void))add, c, ctx_free);
+}
+```
+
+```aether,fragment
+extern make_adder(c: ptr) -> ptr
+
+p = make_adder(ctx)
+f = unbox_closure(p)
+int r = call(f, 2)
+release_closure(p)
+```
+
+- **The function** is called with a handle on the closure's environment first, then the Aether-side arguments, as every Aether closure's function is. `aether_closure_self_env(self)` reads back the `env` the closure was made with. The handle is not `env` itself because the first argument of a closure's function is the environment its reference count lives in, which the runtime owns.
+- **References.** A C-made closure takes part in the same reference count as one Aether made. Each `void*` the header returns is one reference, given back once, with `aether_closure_release` in C or `release_closure` in Aether. `aether_closure_retain(p)` returns a second reference (a second box sharing the environment). An Aether closure that captures the closure, or a list that holds it, keeps a reference of its own. `release(env)` runs exactly once, when the last one goes.
+- **The layout stays private.** The box, its tag and the environment's header are defined once, in `runtime/aether_closure_abi.h`, which generated code and the runtime both include. Only the toolchain includes it: a bridge that copies it breaks when it changes, which is what the constructor is for. `aether_closure_retain` and `aether_closure_release` work on a closure Aether boxed and handed to C as well.
+
 ## Linking External Libraries
 
 Use `link_flags` in your `aether.toml` to link external C libraries:

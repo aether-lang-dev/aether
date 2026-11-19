@@ -70,6 +70,11 @@ for sh_test in $scripts; do
     name=$(echo "$sh_test" | sed "$SWEEP_NAME_SED")
     sh "$root/tests/scripts/sweep_resource_probe.sh" "$name" 2>/dev/null
     sweep_clock; t_start=$sweep_ms
+    # When the limit above ends this test, in seconds since the epoch: a test
+    # that bounds steps of its own fits them under it, so its own report of a
+    # stalled step is printed before the sweep kills it (cross_ios).
+    AE_SH_TEST_DEADLINE=$(($(date +%s) + ${AE_SH_TEST_TIMEOUT:-420}))
+    export AE_SH_TEST_DEADLINE
     $TO bash "$sh_test" >"$tmpdir/run_$name.out" 2>"$tmpdir/run_$name.err"
     sh_rc=$?
     sweep_clock

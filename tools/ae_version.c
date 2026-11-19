@@ -108,10 +108,10 @@ static int ae_download_raw(const char* url, const char* dest, int max_seconds,
         if (slash) { *slash = '\0'; mkdirs(parent); }
     }
 #ifdef _WIN32
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "ae_dl_%u.ps1", (unsigned)GetCurrentProcessId());
+    /* The script is written, then run: it lives in ae's private temp
+     * directory, where no one else can have made or changed it (#3744). */
     char ps_path[1024];
-    snprintf(ps_path, sizeof(ps_path), "%s\\%s", get_temp_dir(), tmp);
+    if (!ae_private_temp_path(ps_path, sizeof(ps_path), "download.ps1")) return 1;
     FILE* ps = fopen(ps_path, "w");
     if (!ps) return 1;
     char ps_timeout[48] = "";
@@ -184,10 +184,13 @@ int ae_download(const char* url, const char* dest) {
  * /releases/assets/<id> with Accept: application/octet-stream, which redirects
  * to the CDN. Unauthenticated use is allowed (60 requests an hour); GITHUB_TOKEN
  * or GH_TOKEN, when set, is sent as a Bearer token to raise that. The API lists
- * a sha256 `digest` for each asset, which the fallback checks the file against.
+ * a sha256 `digest` for each asset, which every release archive is checked
+ * against before it is unpacked, however it was fetched (#3748).
  *
  * AE_GITHUB_WEB_BASE and AE_GITHUB_API_BASE move the two endpoints, which is
- * how the tests force the first to fail and the second to be a local server. */
+ * how the tests force the first to fail and the second to be a local server.
+ * The release list (latest release, `ae version list`) is read from the API
+ * endpoint too, so a test can serve it as well. */
 
 static const char* gh_web_base(void) {
     const char* e = getenv("AE_GITHUB_WEB_BASE");
@@ -299,17 +302,21 @@ static int gh_find_asset(const char* json, const char* file,
     return 1;
 }
 
-/* Fetch the release asset through the REST API. 0 on success; on failure a
- * one-line reason is left in why. */
-static int gh_download_via_api(const char* owner, const char* repo, const char* tag,
-                               const char* file, const char* dest,
-                               char* why, size_t whysz) {
-    const char* token = gh_token();
-    char json_path[512], url[768];
-    snprintf(json_path, sizeof(json_path), "%s/ae_ghrel_%d.json", get_temp_dir(), (int)getpid());
-    snprintf(url, sizeof(url), "%s/repos/%s/%s/releases/tags/%s",
-             gh_api_base(), owner, repo, tag);
-    if (ae_download_raw(url, json_path, 30, 0, token) != 0) {
+/* Look the asset `file` up in the `tag` release's API listing of `slug`
+ * ("owner/repo"): its id and its sha256 digest ("" when none is listed).
+ * 0 on success; otherwise a one-line reason is left in why. */
+static int gh_release_asset_info(const char* slug, const char* tag, const char* file,
+                                 char* id, size_t idsz, char* digest, size_t dsz,
+                                 char* why, size_t whysz) {
+    char json_path[1024], url[768];
+    /* Read back below: in ae's private temp directory, not at a name in the
+     * shared one that another user could make first (#3744). */
+    if (!ae_private_temp_path(json_path, sizeof(json_path), "release-asset.json")) {
+        snprintf(why, whysz, "no private temp directory for the API's reply");
+        return 1;
+    }
+    snprintf(url, sizeof(url), "%s/repos/%s/releases/tags/%s", gh_api_base(), slug, tag);
+    if (ae_download_raw(url, json_path, 30, 0, gh_token()) != 0) {
         remove(json_path);
         snprintf(why, whysz, "the API could not be read for %s (no network, no such release, or its rate limit)", tag);
         return 1;
@@ -325,16 +332,26 @@ static int gh_download_via_api(const char* owner, const char* repo, const char* 
         fclose(f);
     }
     remove(json_path);
-    char id[32], digest[72];
-    int found = json && gh_find_asset(json, file, id, sizeof(id), digest, sizeof(digest));
+    int found = json && gh_find_asset(json, file, id, idsz, digest, dsz);
     free(json);
     if (!found) {
         snprintf(why, whysz, "the %s release lists no asset called %s", tag, file);
         return 1;
     }
-    snprintf(url, sizeof(url), "%s/repos/%s/%s/releases/assets/%s",
-             gh_api_base(), owner, repo, id);
-    if (ae_download_raw(url, dest, 0, 1, token) != 0) {
+    return 0;
+}
+
+/* Fetch the release asset through the REST API. 0 on success; on failure a
+ * one-line reason is left in why. */
+static int gh_download_via_api(const char* owner, const char* repo, const char* tag,
+                               const char* file, const char* dest,
+                               char* why, size_t whysz) {
+    char slug[520], id[32], digest[72], url[768];
+    snprintf(slug, sizeof(slug), "%s/%s", owner, repo);
+    if (gh_release_asset_info(slug, tag, file, id, sizeof(id), digest, sizeof(digest), why, whysz) != 0)
+        return 1;
+    snprintf(url, sizeof(url), "%s/repos/%s/releases/assets/%s", gh_api_base(), slug, id);
+    if (ae_download_raw(url, dest, 0, 1, gh_token()) != 0) {
         remove(dest);
         snprintf(why, whysz, "the API asset download failed");
         return 1;
@@ -346,6 +363,41 @@ static int gh_download_via_api(const char* owner, const char* repo, const char* 
             snprintf(why, whysz, "the API download does not match the sha256 digest GitHub lists for %s", file);
             return 1;
         }
+    }
+    return 0;
+}
+
+/* Is the file at `path` the release asset `file` of `tag`? Checked against
+ * the sha256 digest GitHub's API lists for the asset, whichever way the file
+ * was fetched, before anything in it is unpacked (#3748): the release URL's
+ * bytes used to be checked only for an archive's magic and size. 0 when the
+ * digest matches. A digest that cannot be had (no network, the API's rate
+ * limit, a listing with none) is a failure, not a pass; why says which. */
+static int gh_verify_release_asset(const char* slug, const char* tag, const char* file,
+                                   const char* path, char* why, size_t whysz) {
+    char id[32], digest[72], reason[256];
+    if (gh_release_asset_info(slug, tag, file, id, sizeof(id), digest, sizeof(digest),
+                              reason, sizeof(reason)) != 0) {
+        snprintf(why, whysz,
+                 "%s cannot be verified: %s, so its sha256 digest is unknown. Nothing was "
+                 "installed. Try again later, or set GITHUB_TOKEN to raise the API's rate limit.",
+                 file, reason);
+        return 1;
+    }
+    if (!digest[0]) {
+        snprintf(why, whysz, "%s cannot be verified: the %s release lists no sha256 digest for it. "
+                             "Nothing was installed.", file, tag);
+        return 1;
+    }
+    char got[65];
+    if (ae_sha256_file_hex(path, got) != 0) {
+        snprintf(why, whysz, "%s cannot be verified: the download could not be read back.", file);
+        return 1;
+    }
+    if (strcmp(got, digest) != 0) {
+        snprintf(why, whysz, "%s does not match the sha256 digest GitHub lists for it (expected %s, "
+                             "got %s). Nothing was installed.", file, digest, got);
+        return 1;
     }
     return 0;
 }
@@ -367,17 +419,19 @@ int ae_download_ex(const char* url, const char* dest, int max_seconds) {
     return 1;
 }
 
-// Extract archive → dest_dir.
+/* Extract archive -> dest_dir: a .zip on Windows; a .tar.gz, or a .tar.xz
+ * (Zig's archives, for `ae toolchain zig`), elsewhere. */
 int ae_extract(const char* archive, const char* dest_dir) {
 #ifdef _WIN32
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "ae_ex_%u.ps1", (unsigned)GetCurrentProcessId());
     char ps_path[1024];
-    snprintf(ps_path, sizeof(ps_path), "%s\\%s", get_temp_dir(), tmp);
+    if (!ae_private_temp_path(ps_path, sizeof(ps_path), "extract.ps1")) return 1;   /* #3744 */
     FILE* ps = fopen(ps_path, "w");
     if (!ps) return 1;
+    /* Stop, as in ae_download_raw (#2530): an archive Expand-Archive could
+     * not read must end the script with exit code 1, not 0. */
     fprintf(ps,
         "$ProgressPreference='SilentlyContinue'\n"
+        "$ErrorActionPreference='Stop'\n"
         "Expand-Archive -Path '%s' -DestinationPath '%s' -Force\n",
         archive, dest_dir);
     fclose(ps);
@@ -388,8 +442,10 @@ int ae_extract(const char* archive, const char* dest_dir) {
     remove(ps_path);
     return r;
 #else
+    size_t n = strlen(archive);
+    const char* mode = (n > 7 && strcmp(archive + n - 7, ".tar.xz") == 0) ? "-xJf" : "-xzf";
     char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "tar -xzf \"%s\" -C \"%s\"", archive, dest_dir);
+    snprintf(cmd, sizeof(cmd), "tar %s \"%s\" -C \"%s\"", mode, archive, dest_dir);
     return system(cmd);
 #endif
 }
@@ -500,15 +556,10 @@ static int cmd_version_list(void) {
     }
 
     // Fetch the GitHub releases JSON into a temp file
-    char json_path[512];
-#ifdef _WIN32
-    snprintf(json_path, sizeof(json_path), "%s\\.aether\\releases.json", home);
-#else
-    snprintf(json_path, sizeof(json_path), "%s/ae_releases_%d.json", get_temp_dir(), (int)getpid());
-#endif
-    char url[256];
-    snprintf(url, sizeof(url),
-        "https://api.github.com/repos/" AE_GITHUB_REPO "/releases?per_page=20");
+    char json_path[1024];
+    if (!ae_private_temp_path(json_path, sizeof(json_path), "releases.json")) return 1;   /* #3744 */
+    char url[768];
+    snprintf(url, sizeof(url), "%s/repos/" AE_GITHUB_REPO "/releases?per_page=20", gh_api_base());
 
     printf("Fetching release list...\n");
     if (ae_download(url, json_path) != 0) {
@@ -546,6 +597,8 @@ static int cmd_version_list(void) {
         memcpy(tag, q, len);
         tag[len] = '\0';
         p = end + 1;
+        /* A tag that is not a version is not offered for install (#3744). */
+        if (!ae_version_ok(tag)) continue;
 
         // v-prefix normalisation: strip 'v' to compare with active version
         const char* ver = (tag[0] == 'v') ? tag + 1 : tag;
@@ -600,12 +653,10 @@ static int fetch_latest_release_tag(char* out, size_t outlen);
  * archive for this platform. Asked only after a download failed, so an
  * install that works makes no API call. */
 static void explain_missing_release(const char* vtag, const char* filename) {
-    char json_path[512];
-    snprintf(json_path, sizeof(json_path), "%s/ae_release_%d.json",
-             get_temp_dir(), (int)getpid());
-    char url[256];
-    snprintf(url, sizeof(url),
-        "https://api.github.com/repos/" AE_GITHUB_REPO "/releases/tags/%s", vtag);
+    char json_path[1024];
+    if (!ae_private_temp_path(json_path, sizeof(json_path), "release.json")) return;   /* #3744 */
+    char url[768];
+    snprintf(url, sizeof(url), "%s/repos/" AE_GITHUB_REPO "/releases/tags/%s", gh_api_base(), vtag);
     int has_release = ae_download_ex(url, json_path, 15) == 0;
     int has_asset = 0;
     if (has_release) {
@@ -644,7 +695,18 @@ static void explain_missing_release(const char* vtag, const char* filename) {
     fprintf(stderr, "The latest release is %s. Available versions: ae version list\n", latest);
 }
 
+/* A version named on the command line or by GitHub: it becomes part of a
+ * URL, a path and shell or PowerShell command lines, so anything but a
+ * version is refused before it reaches one (#3744). */
+static int version_arg_ok(const char* version) {
+    if (version && ae_version_ok(version) && strlen(version) < 60) return 1;
+    fprintf(stderr, "Error: '%s' is not a version: a tag name, of letters, digits, '.', '-', '_' and '+'.\n",
+            version ? version : "");
+    return 0;
+}
+
 static int cmd_version_install(const char* version) {
+    if (!version_arg_ok(version)) return 1;
     char vtag[64];
     if (version[0] != 'v') snprintf(vtag, sizeof(vtag), "v%s", version);
     else { strncpy(vtag, version, sizeof(vtag) - 1); vtag[sizeof(vtag)-1] = '\0'; }
@@ -764,6 +826,18 @@ static int cmd_version_install(const char* version) {
         }
     }
 
+    // #3748: the archive must be the one GitHub lists, by its sha256 digest,
+    // before anything in it is unpacked, on every download path.
+    {
+        char why[512];
+        if (gh_verify_release_asset(AE_GITHUB_REPO, vtag, filename, archive, why, sizeof(why)) != 0) {
+            remove(archive);
+            fprintf(stderr, "Error: %s\n", why);
+            return 1;
+        }
+        printf("Verified %s against its sha256 digest.\n", filename);
+    }
+
     mkdirs(ver_dir);
     printf("Extracting...\n");
 
@@ -851,9 +925,9 @@ static int cmd_version_install(const char* version) {
     // some packages ship) is a well-formed `ar` archive of plausible size; on
     // failure remove the install and tell the user to retry, rather than
     // leaving a landmine. Skipped when the package ships sources only (no
-    // prebuilt archive present). This does not replace a full checksum verify
-    // (which needs the release pipeline to publish per-asset sums) but catches
-    // the truncation that actually corrupted a macOS download.
+    // prebuilt archive present). The download itself was checked against its
+    // sha256 digest before extraction (#3748); this catches an extraction cut
+    // short, the truncation that actually corrupted a macOS install.
     {
         char arch_path[1024];
         snprintf(arch_path, sizeof(arch_path), "%s/lib/aether/libaether.a", ver_dir);
@@ -993,6 +1067,7 @@ static void win_delete_bin_leftovers(const char* dest_root) {
 #endif
 
 int cmd_version_use(const char* version) {
+    if (!version_arg_ok(version)) return 1;   /* #3744 */
     char vtag[64];
     if (version[0] != 'v') snprintf(vtag, sizeof(vtag), "v%s", version);
     else { strncpy(vtag, version, sizeof(vtag) - 1); vtag[sizeof(vtag)-1] = '\0'; }
@@ -1025,7 +1100,8 @@ int cmd_version_use(const char* version) {
                 if (nl) *nl = '\0';
             }
             fclose(avf_bak);
-            if (cur_ver[0]) {
+            /* The pin goes into a robocopy command line: only a version (#3744). */
+            if (cur_ver[0] && ae_version_ok(cur_ver)) {
                 char cur_vtag[66];
                 if (cur_ver[0] != 'v') snprintf(cur_vtag, sizeof(cur_vtag), "v%s", cur_ver);
                 else { strncpy(cur_vtag, cur_ver, sizeof(cur_vtag) - 1); cur_vtag[sizeof(cur_vtag)-1] = '\0'; }
@@ -1093,7 +1169,8 @@ int cmd_version_use(const char* version) {
                 char* nl = strchr(cur_ver, '\n'); if (nl) *nl = '\0';
             }
             fclose(avf_bak);
-            if (cur_ver[0]) {
+            /* The pin goes into a cp command line: only a version (#3744). */
+            if (cur_ver[0] && ae_version_ok(cur_ver)) {
                 char cur_vtag[64];
                 if (cur_ver[0] != 'v') snprintf(cur_vtag, sizeof(cur_vtag), "v%s", cur_ver);
                 else { strncpy(cur_vtag, cur_ver, sizeof(cur_vtag) - 1); cur_vtag[sizeof(cur_vtag)-1] = '\0'; }
@@ -1260,13 +1337,14 @@ static const char* get_active_version(void) {
 // Returns 0 on success, non-zero on network/parse failure. GitHub returns
 // releases newest-first, so the first "tag_name" is the latest — same
 // scan cmd_version_list uses.
+/* The tag goes into URLs, paths and the shell and PowerShell command lines
+ * install and use build, sometimes run as root: one that is not a version
+ * (ae_version_ok) is refused with -2, never passed on (#3744). */
 static int fetch_latest_release_tag(char* out, size_t outlen) {
-    char json_path[512];
-    snprintf(json_path, sizeof(json_path), "%s/ae_latest_%d.json",
-             get_temp_dir(), (int)getpid());
-    char url[256];
-    snprintf(url, sizeof(url),
-        "https://api.github.com/repos/" AE_GITHUB_REPO "/releases?per_page=5");
+    char json_path[1024];
+    if (!ae_private_temp_path(json_path, sizeof(json_path), "latest.json")) return -1;
+    char url[768];
+    snprintf(url, sizeof(url), "%s/repos/" AE_GITHUB_REPO "/releases?per_page=5", gh_api_base());
     if (ae_download_ex(url, json_path, 15) != 0) return -1;
     FILE* f = fopen(json_path, "r");
     if (!f) { remove(json_path); return -1; }
@@ -1284,7 +1362,20 @@ static int fetch_latest_release_tag(char* out, size_t outlen) {
     if (len == 0 || len >= outlen) return -1;
     memcpy(out, q, len);
     out[len] = '\0';
+    if (!ae_version_ok(out)) {
+        out[0] = '\0';
+        return -2;
+    }
     return 0;
+}
+
+/* What install and upgrade say when the latest release could not be had. */
+static void report_latest_unknown(int rc) {
+    if (rc == -2)
+        fprintf(stderr, "GitHub named a latest release whose tag is not a version (letters, digits,\n"
+                        "'.', '-', '_' and '+'); it was refused, not installed.\n");
+    else
+        fprintf(stderr, "Could not determine the latest release. Check your connection.\n");
 }
 
 /* Is `a` an older release than `b`? Both are dotted numbers, no leading v.
@@ -1369,9 +1460,10 @@ int cmd_install(int argc, char** argv) {
     }
     char latest[64];
     printf("Resolving latest release...\n");
-    if (fetch_latest_release_tag(latest, sizeof(latest)) != 0) {
-        fprintf(stderr, "Could not determine the latest release.\n");
-        fprintf(stderr, "Check your connection, or name a version: ae install <v>\n");
+    int lrc = fetch_latest_release_tag(latest, sizeof(latest));
+    if (lrc != 0) {
+        report_latest_unknown(lrc);
+        fprintf(stderr, "Name a version instead: ae install <v>\n");
         fprintf(stderr, "('ae version list' shows what's available.)\n");
         return 1;
     }
@@ -1384,8 +1476,9 @@ int cmd_install(int argc, char** argv) {
 int cmd_upgrade(void) {
     char latest[64];
     printf("Checking for the latest release...\n");
-    if (fetch_latest_release_tag(latest, sizeof(latest)) != 0) {
-        fprintf(stderr, "Could not determine the latest release. Check your connection.\n");
+    int lrc = fetch_latest_release_tag(latest, sizeof(latest));
+    if (lrc != 0) {
+        report_latest_unknown(lrc);
         return 1;
     }
     const char* latest_ver = (latest[0] == 'v') ? latest + 1 : latest;
@@ -1676,6 +1769,7 @@ static void ae_print_reclaimed(long long bytes) {
 /* Remove one installed version, refusing the one in use. `quiet` suppresses
  * the per-version line so gc can print its own summary. */
 static int ae_remove_one(const char* ver, int quiet, long long* freed_out) {
+    if (!version_arg_ok(ver)) return 1;   /* it names a directory to delete (#3744) */
     const char* home = get_home_dir();
     const char* cur = ae_current_version();
     const char* pin = get_active_version();
@@ -2421,13 +2515,14 @@ int cmd_version_doctor(int do_fix) {
         doc_fail(&d, "skipped: no compiler to probe with");
     } else {
         char src[1024], exe[1024], cmd[4096];
-        const char* tmp = getenv("TMPDIR");
-        if (!tmp || !*tmp) tmp = "/tmp";
-        snprintf(src, sizeof(src), "%s/ae_doctor_probe_%d.ae", tmp, (int)getpid());
-        snprintf(exe, sizeof(exe), "%s/ae_doctor_probe_%d.out", tmp, (int)getpid());
-        FILE* f = fopen(src, "w");
+        /* Written, compiled and run: in ae's private temp directory (#3745). */
+        const char* tmp = ae_private_temp_dir();
+        FILE* f = NULL;
+        if (tmp && ae_private_temp_path(src, sizeof(src), "doctor_probe.ae") &&
+            ae_private_temp_path(exe, sizeof(exe), "doctor_probe.out"))
+            f = fopen(src, "w");
         if (!f) {
-            doc_warn(&d, "could not write a probe program to %s", tmp);
+            doc_warn(&d, "could not write a probe program to %s", tmp ? tmp : "a private temp directory");
         } else {
             fprintf(f, "main() {\n    println(\"ok\")\n    return 0\n}\n");
             fclose(f);

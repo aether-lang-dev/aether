@@ -1,0 +1,96 @@
+// Probe for test_closure_from_c.sh (#3622): closures a C bridge builds with
+// aether_closure_new (bridge.c), opened, called, shared and given back from
+// Aether as closures Aether made are. Prints "ok" when every check holds.
+import std.mem
+
+extern make_adder(base: int) -> ptr
+extern make_seven() -> ptr
+extern share(f: ptr) -> ptr
+extern drop(f: ptr)
+extern env_base(f: ptr) -> int
+extern foreign_env_is_null(f: ptr) -> int
+extern released() -> int
+extern released_wrongly() -> int
+extern new_refuses_null_fn() -> int
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what} (released ${released()}, wrongly ${released_wrongly()})")
+        exit(1)
+    }
+}
+
+apply(p: ptr, x: int) -> int {
+    f = unbox_closure(p)
+    int r = call(f, x)
+    return r
+}
+
+// An Aether closure that captures the C one holds a reference of its own.
+doubler(p: ptr) -> fn {
+    f = unbox_closure(p)
+    return | x: int | {
+        int r = call(f, x)
+        return r * 2
+    }
+}
+
+// C gives its last box back while `g`, which captured the closure, still
+// holds the env; `release` waits for `g`, released when this returns.
+after_drop(q: ptr) -> int {
+    g = doubler(q)
+    drop(q)
+    check(released() == 0, "a capturing Aether closure keeps the env alive")
+    int r = call(g, 1)
+    return r
+}
+
+round(base: int) -> int {
+    p = make_adder(base)
+    q = share(p)
+    release_closure(p)
+    n = apply(q, 1)
+    drop(q)
+    return n
+}
+
+main() {
+    check(new_refuses_null_fn() == 1, "aether_closure_new refuses a NULL fn")
+
+    p = make_adder(40)
+    check(env_base(p) == 40, "aether_closure_env reads the env back")
+    check(apply(p, 2) == 42, "the call delivers the env and the argument")
+    check(apply(p, 3) == 43, "a second call through the same box")
+    check(released() == 0, "nothing released while the box is held")
+
+    q = share(p)
+    release_closure(p)
+    check(released() == 0, "a retained closure outlives its first box")
+    check(apply(q, 5) == 45, "the second box calls the same env")
+
+    check(after_drop(q) == 82, "called through the capturing closure")
+    check(released() == 1, "release ran once, when the last reference went")
+    check(released_wrongly() == 0, "release was handed the env it was made with")
+
+    s = make_seven()
+    int seven = call(unbox_closure(s))
+    check(seven == 7, "a closure with no env")
+    check(env_base(s) == -1, "no env to read back")
+    release_closure(s)
+
+    b = box_closure(| x: int | { return x + 1 })
+    check(foreign_env_is_null(b) == 1, "aether_closure_env answers NULL for an Aether closure")
+    release_closure(b)
+
+    check(round(9) == 10, "a round")
+    check(released() == 2, "the round's release ran once")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round(9)
+            }, 4)
+        check(grown == 0, "every box and env is given back")
+    }
+    check(released_wrongly() == 0, "every release was handed its own env")
+    println("ok")
+}

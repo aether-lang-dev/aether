@@ -1149,7 +1149,9 @@ static int win_prog_is_batch(const char* prog) {
  * could not be written. */
 static int win_write_response_file(char* const* argv, char* out, size_t out_size) {
     static int seq = 0;
-    snprintf(out, out_size, "%s\\ae_args_%d_%d.rsp", get_temp_dir(), (int)_getpid(), seq++);
+    char name[64];
+    snprintf(name, sizeof(name), "args_%d.rsp", seq++);
+    if (!ae_private_temp_path(out, out_size, name)) return 0;   /* #3745 */
     FILE* f = fopen(out, "wb");
     if (!f) return 0;
     for (int i = 1; argv[i]; i++) {
@@ -1438,9 +1440,11 @@ static const char* exit_status_note(char* buf, size_t size, int rc) {
     return buf;
 }
 
-/* Where a compile step's stdout is parked so a failure can print it. */
+/* Where a compile step's stdout is parked so a failure can print it: this
+ * process's private temp directory (#3745). "" when it cannot be made, and
+ * run_cmd_capture_stdout then hides stdout instead of capturing it. */
 static const char* compile_log_path(char* buf, size_t size) {
-    snprintf(buf, size, "%s/ae_build_%d.out", get_temp_dir(), (int)getpid());
+    ae_private_temp_path(buf, size, "build.out");
     return buf;
 }
 
@@ -1454,6 +1458,7 @@ static const char* compile_log_path(char* buf, size_t size) {
  * C compiler that reports through it (emcc does) would fail with no
  * explanation at all. */
 int run_cmd_capture_stdout(const char* cmd, const char* path) {
+    if (!path || !path[0]) return run_command(cmd, 2, NULL);   /* nowhere to capture to */
     return run_command(cmd, 3, path);
 }
 
@@ -3709,7 +3714,7 @@ static const char* bracket_depth_flags(const char* cc) {
         return answer;
     }
     char probe_c[1100];
-    snprintf(probe_c, sizeof(probe_c), "%s/ae_bracket_probe_%d.c", get_temp_dir(), (int)getpid());
+    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "ae_bracket_probe.c")) return answer;   /* #3745 */
     FILE* f = fopen(probe_c, "w");
     if (!f) return answer;
     fputs("int ae_bracket_probe;\n", f);
@@ -3939,10 +3944,10 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
     }
 
     char probe_c[1100], probe_out[1100], probe_o[1100], cmd[4096];
-    int pid = (int)getpid();
-    snprintf(probe_c, sizeof(probe_c), "%s/ae_avx_probe_%d.c", get_temp_dir(), pid);
-    snprintf(probe_out, sizeof(probe_out), "%s/ae_avx_probe_%d.txt", get_temp_dir(), pid);
-    snprintf(probe_o, sizeof(probe_o), "%s/ae_avx_probe_%d.o", get_temp_dir(), pid);
+    /* Compiled and read back: in the private temp directory (#3745). */
+    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "ae_avx_probe.c") ||
+        !ae_private_temp_path(probe_out, sizeof(probe_out), "ae_avx_probe.txt") ||
+        !ae_private_temp_path(probe_o, sizeof(probe_o), "ae_avx_probe.o")) return flags;
     FILE* f = fopen(probe_c, "w");
     if (!f) return flags;
     fclose(f);
@@ -4854,8 +4859,6 @@ static const char* vendored_sqlite_link(const char* cc, const char* ae_link,
  * one processor or one source leave the sources on the link command, which
  * then compiles them as before and reports an error as before. */
 
-static void ae_remove_tree(const char* path);
-
 static int ae_cpu_count(void) {
 #ifdef _WIN32
     SYSTEM_INFO si;
@@ -4975,6 +4978,74 @@ static int ae_run_parallel(char* const* cmds, char* const* logs, int n, int jobs
     free(pids);
 #endif
     return failed;
+}
+
+/* One private directory per ae process, for every file ae writes to a temp
+ * place and then reads back, compiles or runs (#3745, #3744): generated C,
+ * binaries, compiler probes, captured output, downloaded JSON. A name in the
+ * shared temp directory such as $TMPDIR/_ae_<pid>.c can be made first by
+ * another local user, as a file or a symlink, and changed between the write
+ * and the compile; the pid in it guards against none of that. mkdtemp makes
+ * the directory under a name no one can guess, mode 0700, so no one else
+ * can make, replace or change anything inside it. It is made on first use
+ * and removed when the process that made it exits. %TEMP% on Windows is
+ * already the user's own, but the directory is made there too, so every
+ * platform keeps its temp files in one place. NULL, with a message, when it
+ * cannot be made. */
+static char g_private_tmp[1024];
+static int g_private_tmp_pid;
+
+static void ae_remove_private_tmp(void) {
+    /* Only in the process that made it: a forked child that leaves through
+     * exit() runs the atexit handlers it inherited. */
+    if (g_private_tmp[0] && g_private_tmp_pid == (int)getpid()) ae_remove_tree(g_private_tmp);
+    g_private_tmp[0] = '\0';
+}
+
+const char* ae_private_temp_dir(void) {
+    if (g_private_tmp[0] && g_private_tmp_pid == (int)getpid()) return g_private_tmp;
+    g_private_tmp[0] = '\0';
+#ifdef _WIN32
+    /* No mkdtemp: a fresh name, made with _mkdir, which fails when anything
+     * is there already, so a name is only ever used once it is ours. */
+    static unsigned seq = 0;
+    for (int tries = 0; tries < 100; tries++) {
+        snprintf(g_private_tmp, sizeof(g_private_tmp), "%s/ae-%d-%lu-%u", get_temp_dir(),
+                 (int)getpid(), (unsigned long)GetTickCount(), seq++);
+        for (char* q = g_private_tmp; *q; q++) if (*q == '\\') *q = '/';
+        if (_mkdir(g_private_tmp) == 0) break;
+        g_private_tmp[0] = '\0';
+    }
+#else
+    snprintf(g_private_tmp, sizeof(g_private_tmp), "%s/ae-XXXXXX", get_temp_dir());
+    if (!mkdtemp(g_private_tmp)) g_private_tmp[0] = '\0';
+#endif
+    if (!g_private_tmp[0]) {
+        fprintf(stderr, "ae: cannot make a private directory under %s: %s\n",
+                get_temp_dir(), strerror(errno));
+        return NULL;
+    }
+    static int registered = 0;
+    if (!registered) {
+        registered = 1;
+        atexit(ae_remove_private_tmp);
+    }
+    g_private_tmp_pid = (int)getpid();
+    return g_private_tmp;
+}
+
+/* `name` inside ae_private_temp_dir, into out. 0 when the directory cannot
+ * be made or the path does not fit (out is then ""). */
+int ae_private_temp_path(char* out, size_t out_size, const char* name) {
+    const char* dir = ae_private_temp_dir();
+    if (out_size) out[0] = '\0';
+    if (!dir) return 0;
+    int n = snprintf(out, out_size, "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= out_size) {
+        if (out_size) out[0] = '\0';
+        return 0;
+    }
+    return 1;
 }
 
 /* The object directory of this process's source build, removed at exit. */
@@ -6511,8 +6582,21 @@ static char* ae_abspath(const char* path) {
 static char g_binimport_stubdirs[AE_BINIMPORT_STUBDIRS_MAX][256];
 static int g_binimport_stubdir_count = 0;
 
-static void ae_remove_tree(const char* path) {
+void ae_remove_tree(const char* path) {
 #ifdef _WIN32
+    /* A junction or a directory symlink carries FILE_ATTRIBUTE_DIRECTORY as
+     * well as FILE_ATTRIBUTE_REPARSE_POINT. Descending into one deleted what
+     * it points at: a toolchain directory that was a junction to a Zig the
+     * user installed elsewhere had that Zig emptied when `ae toolchain zig`
+     * replaced it. A reparse point is removed as the link it is
+     * (RemoveDirectory on a directory link, DeleteFile on a file link),
+     * which leaves its target alone, as lstat does on POSIX. */
+    DWORD top = GetFileAttributesA(path);
+    if (top != INVALID_FILE_ATTRIBUTES && (top & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        if (top & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryA(path);
+        else DeleteFileA(path);
+        return;
+    }
     char* pattern = ae_path_printf("%s/*", path);
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
@@ -6521,8 +6605,14 @@ static void ae_remove_tree(const char* path) {
         do {
             if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
             char* child = ae_path_printf("%s/%s", path, fd.cFileName);
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ae_remove_tree(child);
-            else DeleteFileA(child);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryA(child);
+                else DeleteFileA(child);
+            } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                ae_remove_tree(child);
+            } else {
+                DeleteFileA(child);
+            }
             free(child);
         } while (FindNextFileA(h, &fd));
         FindClose(h);
@@ -7097,7 +7187,14 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     char stem[256];
     snprintf(stem, sizeof(stem), "%s", pkg);
     for (char* p = stem; *p; p++) if (*p == '.') *p = '_';
-    char* dir = ae_path_printf("%s/ae-package-%d", get_temp_dir(), (int)getpid());
+    /* A directory compiled from: inside the private temp directory, where
+     * no one else can have made it first (#3745). */
+    const char* ptmp = ae_private_temp_dir();
+    if (!ptmp) {
+        ae_pkg_free(&mods);
+        return -1;
+    }
+    char* dir = ae_path_printf("%s/package", ptmp);
     mkdir_p(dir);
     ae_note_package_dir(dir);
     int fits = ae_sprintf(out, outcap, "%s/%s.ae", dir, stem) == 0;
@@ -7425,6 +7522,8 @@ static int print_command_help(const char* cmd) {
         ae_checksec_usage();
     } else if (strcmp(cmd, "bindgen") == 0) {
         ae_bindgen_usage(stdout);
+    } else if (strcmp(cmd, "toolchain") == 0) {
+        ae_toolchain_usage(stdout);
     } else if (strcmp(cmd, "version") == 0) {
         printf("Usage: ae version [<subcommand>]\n");
         printf("  With no subcommand, print this binary's version, the aetherc it runs\n");
@@ -7694,12 +7793,15 @@ static int cmd_run(int argc, char** argv) {
 
     // Determine temp .c file path and exe path
     // If caching: write exe directly to cache slot (no extra copy needed)
-    // Use PID in temp filenames to avoid symlink attacks and collisions
+    // Outside the tree, the C and an uncached exe go into this process's
+    // private temp directory (#3745): a pid in a name in the shared temp
+    // directory stopped neither a symlink planted there nor a file another
+    // user rewrote between the write and the compile.
     int pid = (int)getpid();
     if (tc.dev_mode) {
         snprintf(c_file, sizeof(c_file), "%s/build/_ae_%d.c", tc.root, pid);
-    } else {
-        snprintf(c_file, sizeof(c_file), "%s/_ae_%d.c", get_temp_dir(), pid);
+    } else if (!ae_private_temp_path(c_file, sizeof(c_file), "run.c")) {
+        return 1;
     }
     if (using_cache) {
         // Link into a private temp beside the slot, publish by rename
@@ -7708,8 +7810,8 @@ static int cmd_run(int argc, char** argv) {
         snprintf(exe_file, sizeof(exe_file), "%s.tmp.%d", cached_exe, pid);
     } else if (tc.dev_mode) {
         snprintf(exe_file, sizeof(exe_file), "%s/build/_ae_%d" EXE_EXT, tc.root, pid);
-    } else {
-        snprintf(exe_file, sizeof(exe_file), "%s/_ae_%d" EXE_EXT, get_temp_dir(), pid);
+    } else if (!ae_private_temp_path(exe_file, sizeof(exe_file), "run" EXE_EXT)) {
+        return 1;
     }
 
     // (The binary-import prepass ran before the cache check: see there.)
@@ -9887,7 +9989,11 @@ done:
  * whole: cut short in a fixed buffer, the tree removed was a prefix of it,
  * the temp directory itself when that was 1023 bytes long (#2899 review). */
 int cmd_build_namespace(int argc, char** argv) {
-    char* tmpdir = ae_path_printf("%s/aether_ns_%d", get_temp_dir(), (int)getpid());
+    /* In the private temp directory (#3745): a fixed name in the shared one
+     * could be made first, or swapped for a symlink, by another user. */
+    const char* ptmp = ae_private_temp_dir();
+    if (!ptmp) return 1;
+    char* tmpdir = ae_path_printf("%s/namespace", ptmp);
     if (!tmpdir) {
         fprintf(stderr, "Error: out of memory for the namespace build's temp directory\n");
         return 1;
@@ -10472,8 +10578,9 @@ static int cmd_build(int argc, char** argv) {
     char nominal_c[2048];
     snprintf(nominal_c, sizeof(nominal_c), "%s", c_file);
     if (!g_emit_csrc && !keep_generated_c()) {
-        snprintf(c_file, sizeof(c_file), "%s/ae_build_%d_%s.c",
-                 get_temp_dir(), (int)getpid(), base);
+        char cname[600];
+        snprintf(cname, sizeof(cname), "build_%s.c", base);
+        if (!ae_private_temp_path(c_file, sizeof(c_file), cname)) return 1;   /* #3745 */
     }
 
     // Override output extension for wasm target
@@ -11534,8 +11641,11 @@ static int cmd_test(int argc, char** argv) {
     }
     char** reports = (char**)calloc((size_t)test_count, sizeof(char*));
     int* child_rc = (int*)calloc((size_t)test_count, sizeof(int));   // <0 => compile/build error (no run); else exit code
-    if (!reports || !child_rc) {
-        fprintf(stderr, "Error: out of memory preparing %d test(s)\n", test_count);
+    /* Outside the tree the tests are built in the private temp directory
+     * (#3745); one that cannot be made has said why. */
+    if (!reports || !child_rc || (!tc.dev_mode && !ae_private_temp_dir())) {
+        if (!reports || !child_rc)
+            fprintf(stderr, "Error: out of memory preparing %d test(s)\n", test_count);
         free(reports);
         free(child_rc);
         test_files_free(test_files, test_count);
@@ -11560,16 +11670,25 @@ static int cmd_test(int argc, char** argv) {
          * share `build/_test_0.c` and `_ae_spec_0.txt`, so one run's
          * `remove` or rewrite landed on the other's — "FAIL (build)" for a
          * test that builds clean alone. `ae run` has keyed its temp files on
-         * the pid for the same reason (#1032). */
+         * the pid for the same reason (#1032). Outside the tree each process
+         * has a private temp directory of its own, which keeps two runs
+         * apart as well. */
         int pid = (int)getpid();
         if (tc.dev_mode) {
             snprintf(c_file, sizeof(c_file), "%s/build/_test_%d_%d.c", tc.root, pid, i);
             snprintf(exe_file, sizeof(exe_file), "%s/build/_test_%d_%d" EXE_EXT, tc.root, pid, i);
             snprintf(report_file, sizeof(report_file), "%s/build/_ae_spec_%d_%d.txt", tc.root, pid, i);
         } else {
-            snprintf(c_file, sizeof(c_file), "%s/_ae_test_%d_%d.c", get_temp_dir(), pid, i);
-            snprintf(exe_file, sizeof(exe_file), "%s/_ae_test_%d_%d" EXE_EXT, get_temp_dir(), pid, i);
-            snprintf(report_file, sizeof(report_file), "%s/_ae_spec_%d_%d.txt", get_temp_dir(), pid, i);
+            /* In the private temp directory (#3745): written, compiled and
+             * run, so no one else may be able to make or change them. The
+             * directory was made above, and these short names fit. */
+            char nc[64], ne[64], nr[64];
+            snprintf(nc, sizeof(nc), "test_%d.c", i);
+            snprintf(ne, sizeof(ne), "test_%d" EXE_EXT, i);
+            snprintf(nr, sizeof(nr), "spec_%d.txt", i);
+            ae_private_temp_path(c_file, sizeof(c_file), nc);
+            ae_private_temp_path(exe_file, sizeof(exe_file), ne);
+            ae_private_temp_path(report_file, sizeof(report_file), nr);
         }
 
         // Compile .ae to .c
@@ -12096,8 +12215,10 @@ static int ae_package_name_ok(const char* package) {
 }
 
 /* A version is a tag name: letters, digits, `.`, `-`, `_` and `+`, and not
- * `.` or `..`. It goes into a URL and into aether.toml. */
-static int ae_version_ok(const char* v) {
+ * `.` or `..`. It goes into a URL and into aether.toml, and the version
+ * manager (ae_version.c) checks every release tag against it before one
+ * reaches a path or a shell or PowerShell command line (#3744). */
+int ae_version_ok(const char* v) {
     if (!v || !*v || strlen(v) > 100) return 0;
     for (const char* p = v; *p; p++) {
         if (isalnum((unsigned char)*p) || *p == '.' || *p == '-' || *p == '_' || *p == '+') continue;
@@ -13145,6 +13266,9 @@ static int cmd_cflags(int argc, char** argv) {
          * mistake and warns about (-Wstring-plus-int); the intent is the same
          * and this spelling states it. */
         fputs(&AETHER_WRAP_CFLAGS[1], stdout);
+        /* The defines the archive was built with, for a build that compiles
+         * runtime or std sources beside it (AETHER_REQUIRED_DEFINES). */
+        fputs(" " AETHER_REQUIRED_DEFINES, stdout);
         wrote_anything = 1;
         if (tc.include_flags[0]) {
             fputc(' ', stdout);
@@ -13286,6 +13410,7 @@ static void print_usage(void) {
     printf("  lib-path             Print the resolved module-search chain\n");
     printf("  lib-info <library>   Print the symbol catalog of an --emit=lib library\n");
     printf("  examples [dir]       Build the example programs into build/examples/\n");
+    printf("  toolchain zig        Install the pinned Zig for --target builds (--check verifies)\n");
     printf("  repl                 Start interactive REPL\n");
     printf("  install [<v>]        Install a release (latest if omitted)\n");
     printf("  upgrade              Install the latest release and switch to it\n");
@@ -14069,6 +14194,12 @@ int main(int argc, char** argv) {
     }
     if (strcmp(cmd, "fmt") == 0) {
         return cmd_fmt(sub_argc, sub_argv);
+    }
+    /* Before discover_toolchain, which sets AETHER_HOME to the toolchain it
+     * found: `ae toolchain` reads the user's AETHER_HOME to place its
+     * installs (#3623). */
+    if (strcmp(cmd, "toolchain") == 0) {
+        return cmd_toolchain(sub_argc, sub_argv);
     }
     // All other commands need the toolchain
     discover_toolchain();

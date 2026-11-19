@@ -1,6 +1,7 @@
 #include "aether_collections.h"
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/aether_value_kind.h"
+#include "../../runtime/aether_closure_abi.h"
 #include "../string/aether_string.h"
 #include "../alloc/aether_alloc.h"
 #include <stdlib.h>
@@ -215,34 +216,26 @@ int list_add_string_owned(ArrayList* list, const void* item) {
     return 1;
 }
 
-/* Layout-compatible view of the codegen's `_AeClosure` box (a
- * heap-allocated { fn, env } pair from _aether_box_closure). Used so
- * list_free can reclaim a boxed closure's captured environment as well
- * as the box itself. The field order/types mirror the prologue typedef
- * exactly; a function pointer and a data pointer are the same width on
- * every target we build for. */
-typedef struct { void (*fn)(void); void* env; } AeClosureBox;
-
-/* #1398: a closure env's first field is a pointer to its generated destructor,
- * which releases the references its string captures own. Lets an owner with no
- * type for the env reclaim it correctly. Must match the `_dtor` field codegen
- * emits first in every env struct. Since #2494 the destructor is a release:
- * an env another closure captured is only torn down by its last holder, and
- * the reference count is the second field (`_AeEnvHead` in the generated
- * prologue). */
-typedef struct { void (*dtor)(void*); atomic_long refs; } _AeEnvHeader;
-
+/* A closure box (_AeClosureBox, from _aether_box_closure or
+ * aether_closure_new) and the head its env starts with (_AeEnvHead), from
+ * the header generated code takes them from (#3622). Used so list_free can
+ * reclaim a boxed closure's captured environment as well as the box.
+ *
+ * #1398: an env's first field is its destructor, which releases the
+ * references its captures own, so an owner with no type for the env
+ * reclaims it correctly. Since #2494 the destructor is a release: an env
+ * another closure captured is only torn down by its last holder. */
 void aether_closure_env_free(void* env) {
     if (!env) return;
-    _AeEnvHeader* h = (_AeEnvHeader*)env;
-    if (h->dtor) { h->dtor(env); return; }
+    _AeEnvHead* h = (_AeEnvHead*)env;
+    if (h->_dtor) { h->_dtor(env); return; }
     free(env);
 }
 
 /* The container's own reference to a closure box's env (#2518). */
 static void closure_box_retain_env(const void* box) {
-    void* env = box ? ((const AeClosureBox*)box)->env : NULL;
-    if (env) atomic_fetch_add_explicit(&((_AeEnvHeader*)env)->refs, 1, memory_order_relaxed);
+    void* env = box ? ((const _AeClosureBox*)box)->env : NULL;
+    if (env) atomic_fetch_add_explicit(&((_AeEnvHead*)env)->_refs, 1, memory_order_relaxed);
 }
 
 /* Release an element the container owns: a string (owned 1) or a closure
@@ -252,7 +245,7 @@ static void closure_box_retain_env(const void* box) {
 static void release_owned_value(void* it, int owned) {
     if (!it || !owned) return;
     if (owned == 2) {
-        aether_closure_env_free(((AeClosureBox*)it)->env);
+        aether_closure_env_free(((_AeClosureBox*)it)->env);
         free(it);
     } else if (is_aether_string(it)) {
         string_release(it);
@@ -735,7 +728,7 @@ int map_put_closure_owned(HashMap* map, const char* key, void* box) {
     if (!map || !key) return 0;
     closure_box_retain_env(box);
     if (!map_put_string_adopted(map, key, box)) {
-        aether_closure_env_free(box ? ((AeClosureBox*)box)->env : NULL);
+        aether_closure_env_free(box ? ((_AeClosureBox*)box)->env : NULL);
         return 0;
     }
     unsigned int key_len = 0;

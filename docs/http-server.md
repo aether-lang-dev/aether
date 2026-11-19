@@ -80,7 +80,10 @@ back to a buffered read.
 `http.serve_static(req, res, base_dir)` dispatches the request path
 against a directory. Path traversal (`..`, `%2e` encodings) is
 rejected with 403, missing files return 404, and `Range` headers are
-honoured for partial content.
+honoured for partial content. The file is served only when its resolved
+path lies inside the resolved directory, every symlink followed (and on
+Windows every junction, #3760), so a link in the directory that leads
+outside it answers 403. Links that stay inside it are served.
 
 ---
 
@@ -156,7 +159,7 @@ import std.http
 main() {
     server = http.server_create(443)
     http.server_set_tls(server, "/etc/ssl/cert.pem", "/etc/ssl/key.pem")
-    http.server_set_h2(server, 0)        // 0 = nghttp2 default 100
+    http.server_set_h2(server, 0)        // 0 = advertise 100 streams
     http.server_set_keepalive(server, 1, 0, 30000ms)
 
     http.server_get(server, "/", home, 0)
@@ -182,8 +185,12 @@ What the toggle changes:
   logs, and all health probes apply uniformly.
 
 `max_concurrent_streams` is the SETTINGS_MAX_CONCURRENT_STREAMS
-value advertised to peers. Pass `0` for libnghttp2's default
-(100).
+value advertised to peers. Pass `0` for the default, 100, which is
+advertised too: nghttp2's own local default is unlimited, and the setting
+used to go out only when given (#3738). A stream's request body is held
+whole until the stream ends, under the limit `server_set_max_body` sets
+(64 MiB by default, #3740); past it the stream is reset with
+`RST_STREAM` (`CANCEL`) and its handler never runs.
 
 ### Per-stream concurrent dispatch
 
@@ -411,6 +418,13 @@ Loop terminates when:
 - the response has no definite body length (a handler that sets no
   body gets `Content-Length: 0` rather than a close; anything read
   until EOF closes).
+
+The idle timeout bounds each read. A request head also has a deadline
+for the whole of it, 30 s from its first byte by default: a head not
+complete by then is answered `408` and the connection closes (#3737).
+Without it a client that sent a byte just inside the idle timeout, over
+and over, held a worker for as long as it liked. Set it with
+`http.server_set_head_timeout(server, 10s)`; `0ns` turns it off.
 
 ### Idle connections wait in a poller, not on a worker
 
@@ -762,8 +776,32 @@ wants one (#3118). Inside the handler:
 | `ws_send_text(ws, text)` | emit one text frame; `0` on success, `-1` on transport error. |
 | `ws_send_binary(ws, data)` | emit one binary frame holding the bytes of `data` (a `byte[]`; binary-safe). |
 | `ws_close(ws, code, reason)` | emit a close frame; `1000` = normal, `1001` = going away, `1011` = internal error. |
+| `ws_set_max_message(ws, max_bytes)` | the cap on one message for this handle from the next `ws_recv` on; `""` or why the value was refused. |
 
 Returning from the handler closes with code `1000` automatically.
+
+### Receive limits
+
+A message has a cap, 64 MiB unless
+`http.server_set_ws_max_message(server, max_bytes)` sets another for the
+handles a server upgrades, or `ws_set_max_message` for one handle. Each
+frame's declared length is checked against what is left of the cap before
+any of it is read, and past it the connection closes with `1009` (message
+too big). A frame's bytes go into a buffer that grows as they arrive, so
+a peer that declares a large frame and sends little of it holds memory in
+proportion to what it sent. A control frame over 125 bytes, or a fragmented one,
+closes the connection with `1002` (RFC 6455 5.5). `ws_recv` returns `-1`
+in both cases (#3739). A client handle from `ws_connect` has the same
+64 MiB cap.
+
+Framing is checked as RFC 6455 requires (#3759). A frame with a reserved
+opcode (3 to 7, 0xB to 0xF) closes the connection with `1002` (5.2). A
+client masks every frame it sends and a server masks none (5.1): a server
+handle closes with `1002` on an unmasked frame from its client, and a
+client handle from `ws_connect` closes with `1002` on a masked frame from
+its server. `ws_recv` returns `-1` after each. Browsers and every
+conforming client mask their frames, and `ws_connect`'s handles always
+have.
 
 ## Server-Sent Events
 

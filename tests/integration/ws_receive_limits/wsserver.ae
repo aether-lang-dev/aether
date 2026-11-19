@@ -1,0 +1,72 @@
+// The server for ws_receive_limits (#3739). Its WebSocket cap is 4096
+// bytes. /ws echoes the length of each message it receives; /wsbig raises
+// its own handle's cap to 64 MiB first. GET /used answers with the bytes the
+// runtime's allocator holds, so the probe can see what a frame that
+// declares a large length and sends little of it costs the server.
+
+import std.http
+
+extern exit(code: int)
+extern aether_caps_used_bytes() -> long
+
+// Echo "len=<n>" for each message until the connection closes.
+echo_lengths(ws: ptr) {
+    done = 0
+    while done == 0 {
+        if http.ws_recv(ws) == -1 {
+            done = 1
+        } else {
+            http.ws_send_text(ws, "len=${http.http_ws_message_length(ws)}")
+        }
+    }
+}
+
+@c_callback small_handler(req: ptr, ws: ptr, ud: ptr) {
+    echo_lengths(ws)
+}
+
+@c_callback big_handler(req: ptr, ws: ptr, ud: ptr) {
+    err = http.ws_set_max_message(ws, 64 * 1024 * 1024)
+    if err != "" {
+        println("server: ws_set_max_message: ${err}")
+        return
+    }
+    echo_lengths(ws)
+}
+
+used_handler(req: ptr, res: ptr, ud: ptr) {
+    http.http_response_set_status(res, 200)
+    http.http_response_set_body(res, "${aether_caps_used_bytes()}")
+}
+
+message StartSrv { raw: ptr }
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
+}
+
+main() {
+    raw = http.server_create(0)
+    if raw == 0 { println("FAIL: server_create"); exit(1) }
+    http.server_set_host(raw, "127.0.0.1")
+    cerr = http.server_set_ws_max_message(raw, 4096)
+    if cerr != "" { println("FAIL: server_set_ws_max_message: ${cerr}"); exit(1) }
+    if http.server_set_ws_max_message(raw, 0) == "" {
+        println("FAIL: server_set_ws_max_message accepted 0")
+        exit(1)
+    }
+    http.server_websocket(raw, "/ws", small_handler, null)
+    http.server_websocket(raw, "/wsbig", big_handler, null)
+    http.http_server_get(raw, "/used", used_handler, null)
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    println("READY ${http.server_port(raw)}")
+
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+
+    sleep(60000)
+    exit(0)
+}

@@ -70,6 +70,35 @@ if ! printf %s "$cflags_only" | grep -q -- "-fwrapv"; then
     echo "$cflags_only"
     exit 1
 fi
+# The defines libaether.a is built with travel too: a build that compiles the
+# runtime from the MANIFEST beside the archive's std (the cross-language
+# benchmarks, aeb) must get the archive's configuration. Without
+# AETHER_HAS_SANDBOX, runtime/aether_sandbox.c compiled to nothing, and the
+# benchmarks' link failed on aether_sandbox_check_slow, which the archive's
+# std.os calls.
+if ! printf %s "$cflags_only" | grep -q -- "-DAETHER_HAS_SANDBOX"; then
+    echo "  [FAIL] ae_cflags --cflags: -DAETHER_HAS_SANDBOX missing; the runtime compiled with these flags has no sandbox"
+    echo "  ---- output ----"
+    echo "$cflags_only"
+    exit 1
+fi
+if command -v nm >/dev/null 2>&1; then
+    tmpo="${TMPDIR:-/tmp}/ae_cflags_sbx_$$.o"
+    # shellcheck disable=SC2086
+    if ${CC:-cc} -c "$ROOT/runtime/aether_sandbox.c" $cflags_only -o "$tmpo" 2>"$tmpo.log"; then
+        if ! nm "$tmpo" 2>/dev/null | grep -q "aether_sandbox_check_slow"; then
+            rm -f "$tmpo" "$tmpo.log"
+            echo "  [FAIL] ae_cflags --cflags: runtime/aether_sandbox.c compiled with these flags defines no aether_sandbox_check_slow"
+            exit 1
+        fi
+    else
+        echo "  [FAIL] ae_cflags --cflags: runtime/aether_sandbox.c does not compile with these flags:"
+        sed 's/^/    /' "$tmpo.log" | head -20
+        rm -f "$tmpo" "$tmpo.log"
+        exit 1
+    fi
+    rm -f "$tmpo" "$tmpo.log"
+fi
 if printf %s "$cflags_only" | grep -qE -- "(^|[[:space:]])-(L|l)"; then
     echo "  [FAIL] ae_cflags --cflags: leaked link flags into the compile-only subset"
     echo "  ---- output ----"

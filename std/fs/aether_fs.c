@@ -3,6 +3,7 @@
 #include "../../runtime/utils/aether_compiler.h"
 #include "../../runtime/aether_sandbox.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/aether_closure_abi.h"
 #include "../string/aether_string.h"
 #include "../bytes/aether_bytes.h"   /* fs_pread_into_raw fills a caller's bytes buffer (#1102) */
 
@@ -405,13 +406,19 @@ static inline const char* fs_unwrap_bytes(const char* data, int explicit_len, si
 File* file_open_raw(const char* path, const char* mode) {
     if (!path || !mode) { errno = 0; return NULL; }
 
-    // Sandbox check: determine read vs write from mode. A refusal reads as
-    // EACCES, as libaether_sandbox_preload's refusals do, so a caller that
-    // renders errno says "Permission denied" rather than a stale reason.
-    if (mode[0] == 'r') {
-        if (!aether_sandbox_check("fs_read", path)) { errno = EACCES; return NULL; }
-    } else {
-        if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return NULL; }
+    // Sandbox check: what the mode asks of the file. "r+" reads and writes,
+    // so it needs fs_read and fs_write; it used to pass as a read (#3742).
+    // A refusal reads as EACCES, as libaether_sandbox_preload's refusals
+    // do, so a caller that renders errno says "Permission denied" rather
+    // than a stale reason.
+    int access = aether_fopen_access(mode);
+    if ((access & AETHER_ACCESS_READ) && !aether_sandbox_check("fs_read", path)) {
+        errno = EACCES;
+        return NULL;
+    }
+    if ((access & AETHER_ACCESS_WRITE) && !aether_sandbox_check("fs_write", path)) {
+        errno = EACCES;
+        return NULL;
     }
 
     /* Verbatim bytes on every platform. fs.read / fs.write / read_binary /
@@ -863,6 +870,7 @@ int64_t file_size_raw(const char* path) {
 
 int64_t file_mtime(const char* path) {
     if (!path) return 0;
+    if (!aether_sandbox_check("fs_read", path)) return 0;   /* #3743 */
 
     aether_stat64_t st;
     if (aether_stat64(path, &st) != 0) return 0;
@@ -875,6 +883,7 @@ int64_t file_mtime(const char* path) {
 // Aether-side callers should prefer `fs.mtime` (Go-style result tuple).
 int64_t file_mtime_raw(const char* path) {
     if (!path) return -1;
+    if (!aether_sandbox_check("fs_read", path)) return -1;   /* #3743 */
 
     aether_stat64_t st;
     if (aether_stat64(path, &st) != 0) return -1;
@@ -884,6 +893,7 @@ int64_t file_mtime_raw(const char* path) {
 // Directory operations
 int dir_exists(const char* path) {
     if (!path) return 0;
+    if (!aether_sandbox_check("fs_read", path)) return 0;   /* as file_exists, #3743 */
 
     struct stat st;
     return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
@@ -891,6 +901,7 @@ int dir_exists(const char* path) {
 
 int dir_create_raw(const char* path) {
     if (!path) return 0;
+    if (!aether_sandbox_check("fs_write", path)) return 0;   /* as fs_mkdir_p_raw, #3743 */
     return mkdir(path, 0755) == 0 ? 1 : 0;
 }
 
@@ -938,6 +949,7 @@ static int dir_create_mode_os(const char* path, int mode) {
 
 int dir_delete_raw(const char* path) {
     if (!path) return 0;
+    if (!aether_sandbox_check("fs_write", path)) return 0;   /* #3743 */
     return rmdir(path) == 0 ? 1 : 0;
 }
 
@@ -1710,6 +1722,7 @@ static AETHER_FS_TLS int64_t s_vfs_avail = 0;
 int fs_try_statvfs(const char* path) {
     s_vfs_total = 0; s_vfs_free = 0; s_vfs_avail = 0;
     if (!path) return 0;
+    if (!aether_sandbox_check("fs_read", path)) return 0;   /* #3743 */
 #ifdef _WIN32
     (void)path;
     return 0;   /* no statvfs on Windows; caller gets the error branch */
@@ -1939,7 +1952,10 @@ static AETHER_FS_TLS int     s_blk_removable = -1;
 static AETHER_FS_TLS char    s_blk_transport[16] = "";
 
 #if defined(__linux__)
+/* Reads under /sys are file reads like any other, checked as fs_try_mounts
+ * checks /proc/self/mountinfo (#3743). */
 static int fs_read_sysfs_line(const char* path, char* out, size_t cap) {
+    if (!aether_sandbox_check("fs_read", path)) return 0;
     FILE* fp = fopen(path, "r");
     if (!fp) return 0;
     int ok = fgets(out, (int)cap, fp) != NULL;
@@ -1978,8 +1994,11 @@ int fs_try_block_info(const char* dev) {
     snprintf(parent, sizeof(parent), "%s", name);
     snprintf(path, sizeof(path), "/sys/class/block/%s", name);
     /* realpath writes up to PATH_MAX bytes into a caller's buffer, more
-     * than any fixed one here held (#3558): it allocates the answer. */
-    char* real = realpath(path, NULL);
+     * than any fixed one here held (#3558): it allocates the answer. The
+     * device's sysfs entry is read like the files under it, so it needs
+     * fs_read too (#3743); refused, the transport stays unknown, as when
+     * realpath fails. */
+    char* real = aether_sandbox_check("fs_read", path) ? realpath(path, NULL) : NULL;
     if (real) {
         char* blk = strstr(real, "/block/");
         if (blk) {
@@ -3172,6 +3191,10 @@ _tuple_int_int_string fs_unlink_raw(const char* path) {
 _tuple_int_int_string dir_create_mode_raw(const char* path, int mode) {
     s_last_os_error = 0;
     if (!path) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
+    if (!aether_sandbox_check("fs_write", path)) {   /* #3743 */
+        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
+                                 "sandbox: cannot create directory");
+    }
     int kind = dir_create_mode_os(path, mode);
     if (kind != AETHER_FS_KIND_OK) return aether_fs_iks_err(kind, aether_fs_kind_text(kind));
     _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
@@ -3391,6 +3414,10 @@ static int fs_winattr_to_kind(DWORD attr) {
 // Directory listing
 DirList* dir_list_raw(const char* path) {
     if (!path) return NULL;
+    /* Listing reads the directory: fs_read on it, as fs.walk checks its
+     * root (#3743). A refusal is NULL, which the wrappers report as
+     * "cannot list directory". */
+    if (!aether_sandbox_check("fs_read", path)) return NULL;
 
     /* #462: a directory with many entries is an unbounded surface — a
      * sandboxed plugin can list a huge tree. Gate the DirList struct,
@@ -3527,6 +3554,11 @@ void dir_list_free(DirList* list) {
 
 // Helper: add a path to a DirList
 static void dirlist_add(DirList* list, const char* path) {
+    /* A glob reports only paths the caller may read (#3743). fs_glob_raw
+     * checks the directory it starts from, but a wildcard in a middle
+     * component, "**", or a symlink under that directory can reach files
+     * that check did not cover. */
+    if (!aether_sandbox_check("fs_read", path)) return;
     /* #462: grow-by-one through the cap. capacity tracks the slot count
      * so dir_list_free releases the array with its exact size. */
     char** new_entries = (char**)aether_caps_realloc(
@@ -3655,8 +3687,38 @@ static void walk_recursive(const char* dir, const char* suffix_pattern, DirList*
 }
 #endif
 
+// The fs_read check for a glob (#3743): on the directory the glob starts
+// reading, which is the pattern up to the separator before its first
+// wildcard. "src/**/*.c" and "src/*.c" read "src", "/x*" reads "/", "*.c"
+// reads ".". A pattern with no wildcard is only looked up, so it is
+// checked itself, as file_exists checks a path. Windows has no '[' class,
+// so there '[' is an ordinary character.
+static int fs_glob_allowed(const char* pattern) {
+#ifdef _WIN32
+    const char* wild = "*?";
+#else
+    const char* wild = "*?[";
+#endif
+    size_t first = strcspn(pattern, wild);
+    if (pattern[first] == '\0') return aether_sandbox_check("fs_read", pattern);
+    size_t cut = first;
+    while (cut > 0 && pattern[cut - 1] != '/' && pattern[cut - 1] != '\\') cut--;
+    if (cut == 0) return aether_sandbox_check("fs_read", ".");
+    size_t n = cut - 1;   /* without the separator */
+    if (n == 0) n = 1;    /* a pattern in the root starts at the root */
+#ifdef _WIN32
+    if (n == 2 && pattern[1] == ':') n = 3;   /* the drive's root, not its current directory */
+#endif
+    char dir[4096];
+    if (n >= sizeof(dir)) return 0;
+    memcpy(dir, pattern, n);
+    dir[n] = '\0';
+    return aether_sandbox_check("fs_read", dir);
+}
+
 DirList* fs_glob_raw(const char* pattern) {
     if (!pattern) return NULL;
+    if (!fs_glob_allowed(pattern)) return NULL;   /* #3743 */
 
     DirList* result = (DirList*)aether_caps_malloc(sizeof(DirList)); /* #462 */
     if (!result) return NULL;
@@ -3784,6 +3846,12 @@ DirList* fs_glob_multi_raw(void* pattern_list) {
     for (int i = 0; i < n; i++) {
         const char* pattern = aether_string_data(list_get_raw(pattern_list, i));
         if (!pattern) continue;
+        /* One refused pattern refuses the call, as fs_glob_raw refuses it,
+         * rather than reading as a pattern that matched nothing (#3743). */
+        if (!fs_glob_allowed(pattern)) {
+            dir_list_free(result);
+            return NULL;
+        }
 
         DirList* partial = fs_glob_raw(pattern);
         if (!partial) continue;
@@ -4064,12 +4132,10 @@ char* path_rel(const char* base, const char* target) {
 // #977: recursive directory walk + filesystem change notification
 // ============================================================
 
-/* Layout-compatible view of the codegen's boxed `_AeClosure`
- * (see std/collections/aether_stringseq.c and codegen.c's prologue):
- *     typedef struct { void (*fn)(void); void* env; } _AeClosure;
- * `env` is the implicit first argument to `fn`. The box (and its env)
- * is malloc'd by _aether_box_closure and OWNED by the callee. */
-typedef struct { void (*fn)(void); void* env; } AeFsClosure;
+/* A closure box, as generated code lays it out (runtime/aether_closure_abi.h,
+ * #3622). `env` is the implicit first argument to `fn`. The box (and its
+ * env) is malloc'd by _aether_box_closure and OWNED by the callee. */
+typedef _AeClosureBox AeFsClosure;
 
 /* The callback is read only during the walk: `fs_walk_raw`'s `cb` is
  * declared `@noescape` (#2523), so the box is the caller's stack and the

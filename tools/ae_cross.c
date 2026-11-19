@@ -19,7 +19,7 @@
 #include <strings.h>    /* strcasecmp: POSIX puts it here, not in <string.h> */
 #endif
 #include <sys/stat.h>   /* sysroot completeness probe, below */
-#include <unistd.h>     /* getpid: the per-process zig libc file (Android) */
+#include <unistd.h>     /* getpid: the per-process temp name beside a cache slot */
 #ifdef _WIN32
 #  include <process.h>
 #  ifndef getpid
@@ -356,12 +356,12 @@ static bool cross_android_setup(const char* ztriple, const char* sr,
             sr, cpu, api, cpu, api, cpu, api, cpu, api);
         return false;
     }
-    const char* tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = getenv("TEMP");   /* Windows */
-    if (!tmp || !*tmp) tmp = "/tmp";
+    /* zig reads it back: in ae's private temp directory (#3745). */
+    const char* tmp = ae_private_temp_dir();
+    if (!tmp) return false;
     static char libc_file[1200];
-    snprintf(libc_file, sizeof(libc_file), "%s/aether-zig-libc-%s-android%s-%ld.txt",
-             tmp, cpu, api, (long)getpid());
+    snprintf(libc_file, sizeof(libc_file), "%s/aether-zig-libc-%s-android%s.txt",
+             tmp, cpu, api);
     FILE* f = fopen(libc_file, "w");
     if (!f) {
         fprintf(stderr, "Error: cannot write the zig libc file %s\n", libc_file);
@@ -759,7 +759,7 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
      * do not ship the Apple-licensed CoreAudio framework headers, so
      * miniaudio (always compiled into the runtime) must fall back to its null
      * backend or ANY macos cross-compile fails. */
-    char feature_defs[512] = "-DAETHER_HAS_SANDBOX";
+    char feature_defs[512] = AETHER_REQUIRED_DEFINES;
     if (strstr(ztriple, "macos") || strstr(ztriple, "-apple-ios")) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
@@ -1159,9 +1159,11 @@ int run_cross_build(const char* c_file, const char* out_file,
     char ar_cmd[1024];
     if (!cross_toolchain(ztriple, cc_cmd, sizeof(cc_cmd), ar_cmd, sizeof(ar_cmd))) return 1;
 
-    /* Fresh per-build object directory under the system temp. */
+    /* Fresh per-build object directory, in ae's private temp directory
+     * (#3745): the objects are linked into the artifact, so no one else may
+     * be able to make the directory first or change what is in it. */
     char objdir[1024];
-    snprintf(objdir, sizeof(objdir), "%s/ae-cross-%d", get_temp_dir(), (int)getpid());
+    if (!ae_private_temp_path(objdir, sizeof(objdir), "cross")) return 1;
     mkdirs(objdir);
 
     const char* user_cflags = get_cflags();
@@ -1222,7 +1224,7 @@ int run_cross_build(const char* c_file, const char* out_file,
      * Tier-2 lib staged: each such lib both LINKS (crossbuild_libs) and
      * COMPILES REAL (its -DAETHER_HAS_* here). Sized for the base defs plus
      * every Tier-2 macro. */
-    char feature_defs[2048] = "-DAETHER_HAS_SANDBOX";
+    char feature_defs[2048] = AETHER_REQUIRED_DEFINES;
     /* iOS needs the same treatment for a different reason: miniaudio's Apple
      * backend is CoreAudio on macOS but AVAudioSession (Objective-C) on iOS,
      * so aether_audio.c stops being valid C there and fails the compile for

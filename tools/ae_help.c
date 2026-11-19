@@ -965,34 +965,16 @@ static int find_aetherc(char* out, size_t out_size) {
     return 0;
 }
 
-/* Build an err-file path inside the platform-native temp directory.
+/* ae's private temp directory and a name in it (tools/ae.c, #3745). */
+int ae_private_temp_path(char* out, size_t out_size, const char* name);
+
+/* The err-file path: aetherc's stderr is written there and read back, so it
+ * lives in ae's private temp directory, where no one else can make or
+ * change it, not at a name in the shared one (#3745). aetherc is spawned
+ * with no shell in between, so the path needs no native form for cmd.exe.
  * Caller-side note: `out` must hold at least AE_HELP_PATH_LEN bytes. */
 static int build_err_file(char* out, size_t out_size) {
-    const char* tmp_dir;
-#ifdef _WIN32
-    /* GetTempPathA queries the OS layer directly, returning a native
-     * Windows path (`D:\...\Temp\`) regardless of how TEMP was set
-     * by the parent shell. Necessary on MSYS2 where bash exports
-     * `TEMP` in POSIX form (`/d/...`) that cmd.exe can't parse. */
-    static char tmp_buf[AE_HELP_PATH_LEN];
-    DWORD tlen = GetTempPathA((DWORD)sizeof(tmp_buf), tmp_buf);
-    if (tlen == 0 || tlen >= sizeof(tmp_buf)) {
-        safe_strncpy(tmp_buf, ".", sizeof(tmp_buf));
-    } else {
-        size_t bl = strlen(tmp_buf);
-        while (bl > 1 && (tmp_buf[bl - 1] == '\\' || tmp_buf[bl - 1] == '/')) {
-            tmp_buf[--bl] = '\0';
-        }
-    }
-    tmp_dir = tmp_buf;
-#else
-    tmp_dir = getenv("TMPDIR");
-    if (!tmp_dir || !*tmp_dir) tmp_dir = "/tmp";
-#endif
-    long pid = (long)getpid();
-    return path_format(out, out_size,
-                       "%s%cae_help_aetherc_err_%ld.log",
-                       tmp_dir, PATH_SEP, pid);
+    return ae_private_temp_path(out, out_size, "help_aetherc_err.log") ? 0 : -1;
 }
 
 static int run_aetherc_capture(const char* script_path, char* stderr_buf, size_t buf_size) {
