@@ -28,7 +28,10 @@ import hashlib, json, os, re, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 port, d, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-files = sorted(f for f in os.listdir(d) if f.endswith(".tar.gz") or f.endswith(".zip"))
+# The archives, and the signed checksums a release has had since #3752 when
+# the test put them there (test_release_sums_verified.sh).
+files = sorted(f for f in os.listdir(d) if f.endswith(".tar.gz") or f.endswith(".zip")
+               or f in ("SHA256SUMS", "SHA256SUMS.sigstore.json"))
 # Makes a file called "pwned" in the working directory if it reaches a POSIX
 # shell inside double quotes, or a PowerShell single-quoted string.
 BAD_TAG = "v9$(touch pwned)'+$(ni pwned)+'"

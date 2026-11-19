@@ -36,8 +36,11 @@
 # unauthenticated and un-throttled (they 302 to a signed CDN URL curl follows).
 # When that URL fails (it did, alone, on 2026-11-09), the asset is fetched
 # through the REST API instead; see "release assets" below. Either way the
-# archive is checked against the sha256 digest the API lists for it before it
-# is unpacked, which costs one API request per install (#3748).
+# archive is verified before it is unpacked: against the release's SHA256SUMS
+# and its keyless cosign signature and build provenance (#3752), when cosign
+# and an authenticated gh are installed, and against the sha256 digest the API
+# lists for it, which costs one API request per install (#3748). A release
+# from before #3752 has no SHA256SUMS and is checked by the digest alone.
 #
 # Prebuilt binaries need only a libc at runtime — no C compiler, no make. A
 # source build (fallback / forced / non-release ref) needs a C compiler and
@@ -122,9 +125,10 @@ detect_slug() {
 # the asset's id in /releases/tags/<tag>, then GET /releases/assets/<id> with
 # Accept: application/octet-stream (a redirect to the CDN). Unauthenticated use
 # is allowed; GITHUB_TOKEN or GH_TOKEN, when set, is sent as a Bearer token.
-# The API lists a sha256 `digest` per asset, and the archive is verified
-# against it on every path, before anything in it is unpacked (#3748). A
-# digest that cannot be had, or that does not match, refuses the prebuilt.
+# The API lists a sha256 `digest` per asset, and the release a SHA256SUMS
+# (#3752); the archive is verified against them on every path, before
+# anything in it is unpacked (gh_release_download, below). A check that cannot
+# be made, or that fails, refuses the prebuilt.
 # AE_GITHUB_WEB_BASE / AE_GITHUB_API_BASE move the two endpoints (for tests).
 GH_WEB="${AE_GITHUB_WEB_BASE:-https://github.com}"
 GH_API="${AE_GITHUB_API_BASE:-https://api.github.com}"
@@ -167,27 +171,57 @@ gh_sha256() {
     fi
 }
 
+# gh_asset_line JSON NAME : "<id> <sha256 hex>" of the asset called exactly
+# NAME in a release listing (the hex empty when none is listed), or nothing.
+# No jq: split the JSON at commas, one field per line.
+gh_asset_line() {
+    tr ',' '\n' < "$1" | awk -v f="$2" '
+        /"id"[[:space:]]*:/ && !hit { s=$0; sub(/.*"id"[[:space:]]*:[[:space:]]*/,"",s); sub(/[^0-9].*/,"",s); lastid=s }
+        /"name"[[:space:]]*:/ { if (hit) exit
+            n=$0; sub(/.*"name"[[:space:]]*:[[:space:]]*"/,"",n); sub(/".*/,"",n)
+            if (n==f) { hit=1; id=lastid } }
+        hit && /"digest"[[:space:]]*:/ { d=$0; sub(/.*sha256:/,"",d); sub(/[^0-9a-f].*/,"",d); dig=d }
+        END { if (hit) print id, dig }'
+}
+
+# gh_fetch REPO TAG NAME ID DEST : a release file, from the release URL, then
+# through the API when ID is known. 0 when fetched.
+gh_fetch() {
+    gh_http "$GH_WEB/$1/releases/download/$2/$3" "$5" && return 0
+    rm -f "$5"
+    [ -n "$4" ] || return 1
+    gh_http "$GH_API/repos/$1/releases/assets/$4" "$5" octet auth && return 0
+    rm -f "$5"
+    return 1
+}
+
 # gh_release_download REPO TAG ASSET DEST : fetch a release asset, trying the
-# normal URL and then the API, and verify it against the sha256 digest the API
-# lists for it (#3748). 0 when fetched and verified; 1 when it could not be
-# fetched (said: both ways failed); 2 when it was fetched but cannot be
-# verified or does not match (said; DEST is removed).
+# normal URL and then the API, and verify it before anything in it is
+# unpacked (#3748, #3752):
+#   - a release made since #3752 lists SHA256SUMS (signed keyless with cosign
+#     by the release workflow, SHA256SUMS.sigstore.json) and a build
+#     provenance attestation per asset: the archive must match its line in
+#     SHA256SUMS, and the digest the API lists when the API could be read;
+#     with cosign installed the signature must verify as the release
+#     workflow's, and with gh installed and logged in `gh attestation verify`
+#     must accept the archive. A missing tool is said, not a refusal;
+#   - an older release has no SHA256SUMS: the archive must match the sha256
+#     digest the API lists for it, as before.
+# 0 when fetched and verified; 1 when it could not be fetched (said: both ways
+# failed); 2 when it was fetched but cannot be verified or does not match
+# (said; DEST is removed).
 gh_release_download() {
     _ghd_r="$1"; _ghd_t="$2"; _ghd_a="$3"; _ghd_d="$4"
-    # The listing first: its digest is what the archive is checked against,
-    # whichever way the archive comes, and its id is the API's way to it.
+    # The listing first: the digest and the SHA256SUMS it lists are what the
+    # archive is checked against, whichever way it comes, and its ids are the
+    # API's way to each file.
     _ghd_j="$_ghd_d.release.json"
-    _ghd_l=""; _ghd_why=""
+    _ghd_l=""; _ghd_s=""; _ghd_g=""; _ghd_why=""; _ghd_listing=0
     if gh_http "$GH_API/repos/$_ghd_r/releases/tags/$_ghd_t" "$_ghd_j" "" auth; then
-        # No jq: split the JSON at commas, one field per line, and take the id
-        # of the asset whose "name" is exactly $_ghd_a, plus its sha256 digest.
-        _ghd_l="$(tr ',' '\n' < "$_ghd_j" | awk -v f="$_ghd_a" '
-            /"id"[[:space:]]*:/ && !hit { s=$0; sub(/.*"id"[[:space:]]*:[[:space:]]*/,"",s); sub(/[^0-9].*/,"",s); lastid=s }
-            /"name"[[:space:]]*:/ { if (hit) exit
-                n=$0; sub(/.*"name"[[:space:]]*:[[:space:]]*"/,"",n); sub(/".*/,"",n)
-                if (n==f) { hit=1; id=lastid } }
-            hit && /"digest"[[:space:]]*:/ { d=$0; sub(/.*sha256:/,"",d); sub(/[^0-9a-f].*/,"",d); dig=d }
-            END { if (hit) print id, dig }')"
+        _ghd_listing=1
+        _ghd_l="$(gh_asset_line "$_ghd_j" "$_ghd_a")"
+        _ghd_s="$(gh_asset_line "$_ghd_j" SHA256SUMS)"
+        _ghd_g="$(gh_asset_line "$_ghd_j" SHA256SUMS.sigstore.json)"
         [ -n "$_ghd_l" ] || _ghd_why="the $_ghd_t release lists no asset by that name"
     else
         _ghd_why="the API could not be read (no network, no such release, or its rate limit)"
@@ -211,31 +245,130 @@ gh_release_download() {
         say "  fetched $_ghd_a through the GitHub API"
     fi
 
-    # Verify before anything is unpacked. A digest that cannot be had is a
+    # Verify before anything is unpacked. A check that cannot be made is a
     # refusal, not a pass.
-    if [ -n "$_ghd_why" ]; then
-        rm -f "$_ghd_d"
-        say "  $_ghd_a cannot be verified: $_ghd_why, so its sha256 digest is unknown."
-        say "  Try again later, or set GITHUB_TOKEN to raise the API's rate limit."
-        return 2
-    fi
-    if [ "${#_ghd_dig}" != 64 ]; then
-        rm -f "$_ghd_d"
-        say "  $_ghd_a cannot be verified: the $_ghd_t release lists no sha256 digest for it."
-        return 2
-    fi
     _ghd_got="$(gh_sha256 "$_ghd_d")"
     if [ -z "$_ghd_got" ]; then
         rm -f "$_ghd_d"
         say "  $_ghd_a cannot be verified: no sha256 tool here (sha256sum, shasum, sha256 or openssl)."
         return 2
     fi
-    if [ "$_ghd_got" != "$_ghd_dig" ]; then
+    if [ -n "$_ghd_l" ] && [ -n "$_ghd_dig" ] && [ "$_ghd_got" != "$_ghd_dig" ]; then
         rm -f "$_ghd_d"
         say "  $_ghd_a does not match the sha256 digest GitHub lists for it (expected $_ghd_dig, got $_ghd_got)"
         return 2
     fi
-    say "  verified $_ghd_a against its sha256 digest"
+
+    # SHA256SUMS: when the listing names it, or when there is no listing
+    # (a release that has it is checked by it).
+    _ghd_sums="$_ghd_d.SHA256SUMS"
+    _ghd_have_sums=0
+    if [ -n "$_ghd_s" ] || [ "$_ghd_listing" = 0 ]; then
+        if gh_fetch "$_ghd_r" "$_ghd_t" SHA256SUMS "${_ghd_s%% *}" "$_ghd_sums"; then
+            _ghd_have_sums=1
+        elif [ -n "$_ghd_s" ]; then
+            rm -f "$_ghd_d"
+            say "  $_ghd_a cannot be verified: the $_ghd_t release lists SHA256SUMS, and it could not be fetched. Try again later."
+            return 2
+        fi
+    fi
+
+    if [ "$_ghd_have_sums" = 0 ]; then
+        # A release from before #3752: GitHub's digest is all there is.
+        if [ -n "$_ghd_why" ]; then
+            rm -f "$_ghd_d"
+            say "  $_ghd_a cannot be verified: $_ghd_why, so its sha256 digest is unknown."
+            say "  Try again later, or set GITHUB_TOKEN to raise the API's rate limit."
+            return 2
+        fi
+        if [ "${#_ghd_dig}" != 64 ]; then
+            rm -f "$_ghd_d"
+            say "  $_ghd_a cannot be verified: the $_ghd_t release lists no sha256 digest for it."
+            return 2
+        fi
+        say "  verified $_ghd_a against its sha256 digest"
+        say "  $_ghd_t predates signed checksums (SHA256SUMS): it has no signature or build provenance to check"
+        return 0
+    fi
+
+    # The archive's line: "<64 hex>  <name>" (or " *<name>"), exactly once.
+    _ghd_want="$(awk -v f="$_ghd_a" '
+        { line=$0; sub(/\r$/,"",line) }
+        length(line) == 66 + length(f) && substr(line, 67) == f {
+            h=substr(line, 1, 64); sep=substr(line, 65, 2)
+            if (h !~ /^[0-9a-f]+$/ || (sep != "  " && sep != " *") || n++) { bad=1; exit }
+            want=h }
+        END { if (bad) print "bad"; else if (n == 1) print want }' "$_ghd_sums")"
+    case "$_ghd_want" in
+        "")  rm -f "$_ghd_d" "$_ghd_sums"
+             say "  $_ghd_a cannot be verified: SHA256SUMS does not list it."
+             return 2 ;;
+        bad) rm -f "$_ghd_d" "$_ghd_sums"
+             say "  $_ghd_a cannot be verified: SHA256SUMS lists it twice, or in a line sha256sum would not write."
+             return 2 ;;
+    esac
+    if [ "$_ghd_got" != "$_ghd_want" ]; then
+        rm -f "$_ghd_d" "$_ghd_sums"
+        say "  $_ghd_a does not match its sha256 in SHA256SUMS (expected $_ghd_want, got $_ghd_got)"
+        return 2
+    fi
+    if [ -n "$_ghd_dig" ]; then
+        say "  verified $_ghd_a against SHA256SUMS and the sha256 digest GitHub lists"
+    else
+        say "  verified $_ghd_a against SHA256SUMS"
+    fi
+
+    # The signature of SHA256SUMS: keyless, by this repository's release
+    # workflow (run from main, or from the tag pushed by hand), under GitHub's
+    # token issuer. cosign 2 reads the sigstore bundle cosign 3 writes only
+    # with --new-bundle-format, so a refusal is asked again with it.
+    if have cosign; then
+        _ghd_sig="$_ghd_d.sigstore.json"
+        if ! gh_fetch "$_ghd_r" "$_ghd_t" SHA256SUMS.sigstore.json "${_ghd_g%% *}" "$_ghd_sig"; then
+            rm -f "$_ghd_d" "$_ghd_sums"
+            say "  $_ghd_a cannot be verified: SHA256SUMS.sigstore.json could not be fetched for cosign."
+            return 2
+        fi
+        # The repository and the tag as literal text in the identity pattern.
+        _ghd_rr="$(printf '%s' "$_ghd_r" | sed 's/[.]/\\./g')"
+        _ghd_rt="$(printf '%s' "$_ghd_t" | sed 's/[.]/\\./g')"
+        _ghd_ok=0
+        for _ghd_fmt in "" --new-bundle-format; do
+            # shellcheck disable=SC2086
+            if cosign verify-blob $_ghd_fmt --bundle "$_ghd_sig" \
+                --certificate-identity-regexp "^https://github\\.com/$_ghd_rr/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$_ghd_rt)\$" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                "$_ghd_sums" >/dev/null 2>&1; then
+                _ghd_ok=1
+                break
+            fi
+        done
+        rm -f "$_ghd_sig"
+        if [ "$_ghd_ok" != 1 ]; then
+            rm -f "$_ghd_d" "$_ghd_sums"
+            say "  the signature of SHA256SUMS for $_ghd_t does not verify with cosign as made by $_ghd_r's release workflow"
+            return 2
+        fi
+        say "  the signature of SHA256SUMS verified with cosign ($_ghd_r's release workflow)"
+    else
+        say "  the signature of SHA256SUMS was not checked: cosign is not installed"
+    fi
+    rm -f "$_ghd_sums"
+
+    # The archive's build provenance, with an authenticated gh.
+    if have gh && gh auth status >/dev/null 2>&1; then
+        if ! gh attestation verify "$_ghd_d" --repo "$_ghd_r" \
+            --signer-workflow "$_ghd_r/.github/workflows/release.yml" >/dev/null 2>&1; then
+            rm -f "$_ghd_d"
+            say "  $_ghd_a has no build provenance from $_ghd_r's release workflow that 'gh attestation verify' accepts"
+            return 2
+        fi
+        say "  its build provenance verified with gh attestation verify"
+    elif have gh; then
+        say "  its build provenance was not checked: gh is not logged in"
+    else
+        say "  its build provenance was not checked: gh is not installed"
+    fi
     return 0
 }
 

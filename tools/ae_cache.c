@@ -1350,6 +1350,10 @@ static char* resolve_program(const char* prog) {
 #endif
 }
 
+char* ae_resolve_program(const char* prog) {
+    return resolve_program(prog);
+}
+
 /* #2477: the identity of the C compiler the build will run.
  *
  * The key covered the source, aetherc, ae, libaether and the flags, but not

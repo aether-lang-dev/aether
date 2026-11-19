@@ -267,9 +267,14 @@ no-op when you are already on the latest release.
 Versions are stored in `~/.aether/versions/`. The active version is symlinked to `~/.aether/current` (Linux/macOS) or copied to `~/.aether/bin/` (Windows).
 
 Before a release archive is unpacked, `ae install`, `ae upgrade` and `get.sh`
-check it against the sha256 digest GitHub's API lists for it, and refuse it
-when the digest does not match or cannot be had (no network to the API, or its
-rate limit of 60 requests an hour; set `GITHUB_TOKEN` to raise that).
+check it against the release's `SHA256SUMS` and the sha256 digest GitHub's API
+lists for it; with `cosign` installed they verify the keyless signature of
+`SHA256SUMS`, and with `gh` installed and logged in the archive's build
+provenance (`gh attestation verify`). They refuse an archive that fails a check,
+and say which checks they could not make. A release from before these files
+existed is checked against GitHub's digest alone, which needs the API (its rate
+limit is 60 requests an hour; set `GITHUB_TOKEN` to raise that). See
+[release-signing.md](release-signing.md).
 
 `ae version` tells you when a newer release exists, naming it and pointing at
 `ae upgrade`. It matters more than it sounds: `ae run` resolves the standard

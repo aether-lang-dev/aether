@@ -302,24 +302,21 @@ static int gh_find_asset(const char* json, const char* file,
     return 1;
 }
 
-/* Look the asset `file` up in the `tag` release's API listing of `slug`
- * ("owner/repo"): its id and its sha256 digest ("" when none is listed).
- * 0 on success; otherwise a one-line reason is left in why. */
-static int gh_release_asset_info(const char* slug, const char* tag, const char* file,
-                                 char* id, size_t idsz, char* digest, size_t dsz,
-                                 char* why, size_t whysz) {
+/* The `tag` release's API listing of `slug` ("owner/repo"), as a string the
+ * caller frees, or NULL with a one-line reason left in why. */
+static char* gh_release_json(const char* slug, const char* tag, char* why, size_t whysz) {
     char json_path[1024], url[768];
     /* Read back below: in ae's private temp directory, not at a name in the
      * shared one that another user could make first (#3744). */
     if (!ae_private_temp_path(json_path, sizeof(json_path), "release-asset.json")) {
         snprintf(why, whysz, "no private temp directory for the API's reply");
-        return 1;
+        return NULL;
     }
     snprintf(url, sizeof(url), "%s/repos/%s/releases/tags/%s", gh_api_base(), slug, tag);
     if (ae_download_raw(url, json_path, 30, 0, gh_token()) != 0) {
         remove(json_path);
         snprintf(why, whysz, "the API could not be read for %s (no network, no such release, or its rate limit)", tag);
-        return 1;
+        return NULL;
     }
     char* json = NULL;
     FILE* f = fopen(json_path, "rb");
@@ -332,7 +329,19 @@ static int gh_release_asset_info(const char* slug, const char* tag, const char* 
         fclose(f);
     }
     remove(json_path);
-    int found = json && gh_find_asset(json, file, id, idsz, digest, dsz);
+    if (!json) snprintf(why, whysz, "the API's listing of %s could not be read back", tag);
+    return json;
+}
+
+/* Look the asset `file` up in the `tag` release's API listing of `slug`
+ * ("owner/repo"): its id and its sha256 digest ("" when none is listed).
+ * 0 on success; otherwise a one-line reason is left in why. */
+static int gh_release_asset_info(const char* slug, const char* tag, const char* file,
+                                 char* id, size_t idsz, char* digest, size_t dsz,
+                                 char* why, size_t whysz) {
+    char* json = gh_release_json(slug, tag, why, whysz);
+    if (!json) return 1;
+    int found = gh_find_asset(json, file, id, idsz, digest, dsz);
     free(json);
     if (!found) {
         snprintf(why, whysz, "the %s release lists no asset called %s", tag, file);
@@ -367,37 +376,249 @@ static int gh_download_via_api(const char* owner, const char* repo, const char* 
     return 0;
 }
 
-/* Is the file at `path` the release asset `file` of `tag`? Checked against
- * the sha256 digest GitHub's API lists for the asset, whichever way the file
- * was fetched, before anything in it is unpacked (#3748): the release URL's
- * bytes used to be checked only for an archive's magic and size. 0 when the
- * digest matches. A digest that cannot be had (no network, the API's rate
- * limit, a listing with none) is a failure, not a pass; why says which. */
+/* ---- Release verification: SHA256SUMS, its signature, build provenance ----
+ *
+ * Every release since #3752 carries SHA256SUMS (the sha256 of each of its
+ * assets, as sha256sum writes them), SHA256SUMS.sigstore.json (a keyless
+ * cosign signature of that file, made by the release workflow with its
+ * GitHub OIDC identity and logged in Rekor) and a build provenance
+ * attestation for each asset (actions/attest-build-provenance). An archive
+ * is installed only when:
+ *
+ *   - its line in SHA256SUMS matches it, and so does the digest the API
+ *     lists, when the API could be read;
+ *   - with cosign on PATH, the signature verifies as made by the release
+ *     workflow of AE_GITHUB_REPO, under GitHub's token issuer;
+ *   - with gh on PATH and logged in, `gh attestation verify` accepts the
+ *     archive as built by that workflow.
+ *
+ * What could not be checked is said, never passed over: no cosign, or no
+ * gh, is a line on the output, not a refusal. A release from before #3752
+ * has neither file; its archive is checked against the API's digest, as
+ * #3748 did, so every older version still installs. */
+
+#define AE_SUMS_NAME "SHA256SUMS"
+#define AE_SIG_NAME  "SHA256SUMS.sigstore.json"
+
+/* Fetch the release file `name` to `dest`: the release URL, then, when the
+ * listing gave its id, the API. 0 when fetched. */
+static int gh_fetch_release_file(const char* slug, const char* tag, const char* name,
+                                 const char* json, const char* dest) {
+    char url[1024];
+    snprintf(url, sizeof(url), "%s/%s/releases/download/%s/%s", gh_web_base(), slug, tag, name);
+    if (ae_download_raw(url, dest, 60, 0, NULL) == 0) return 0;
+    remove(dest);
+    char id[32], digest[72];
+    if (!json || !gh_find_asset(json, name, id, sizeof(id), digest, sizeof(digest))) return 1;
+    snprintf(url, sizeof(url), "%s/repos/%s/releases/assets/%s", gh_api_base(), slug, id);
+    if (ae_download_raw(url, dest, 60, 1, gh_token()) != 0) {
+        remove(dest);
+        return 1;
+    }
+    return 0;
+}
+
+/* The sha256 the SHA256SUMS at `sums_path` gives `file`, into hex[65]. 1 when
+ * it names the file once, in a line as sha256sum writes one; 0 when it does
+ * not name it; -1 when it names it more than once, or in a malformed line. */
+static int sums_lookup(const char* sums_path, const char* file, char hex[65]) {
+    FILE* f = fopen(sums_path, "rb");
+    if (!f) return 0;
+    char line[1024];
+    int found = 0;
+    size_t flen = strlen(file);
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strcspn(line, "\r\n");
+        line[n] = '\0';
+        /* "<64 hex digits><space><space, or * for binary mode><name>" */
+        if (n != 66 + flen || strcmp(line + 66, file) != 0) continue;
+        int ok = line[64] == ' ' && (line[65] == ' ' || line[65] == '*');
+        for (int i = 0; i < 64 && ok; i++)
+            ok = (line[i] >= '0' && line[i] <= '9') || (line[i] >= 'a' && line[i] <= 'f');
+        if (!ok || found) { fclose(f); return -1; }
+        memcpy(hex, line, 64);
+        hex[64] = '\0';
+        found = 1;
+    }
+    fclose(f);
+    return found;
+}
+
+/* Run `cmd` with its output hidden: 1 when it exited 0. */
+static int verify_tool_ok(const char* cmd) {
+    return run_cmd_quiet(cmd) == 0;
+}
+
+/* Verify the keyless signature of SHA256SUMS with cosign: the certificate
+ * must name this repository's release workflow, run from main (a release the
+ * tag job made) or from the tag itself (a tag pushed by hand), and GitHub's
+ * token issuer. 1 verified, 0 refused. cosign 3 writes the sigstore bundle
+ * format, which cosign 2 reads only with --new-bundle-format, so a refusal
+ * is asked again with it. */
+static int cosign_verifies(const char* cosign, const char* tag, const char* sums,
+                           const char* sig) {
+    char tag_ref[300];
+    snprintf(tag_ref, sizeof(tag_ref), "refs/tags/%s", tag);
+    const char* refs[2] = { "refs/heads/main", tag_ref };
+    for (int fmt = 0; fmt < 2; fmt++) {
+        for (int r = 0; r < 2; r++) {
+            char cmd[4096];
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" verify-blob%s --bundle \"%s\""
+                     " --certificate-identity https://github.com/%s/.github/workflows/release.yml@%s"
+                     " --certificate-oidc-issuer https://token.actions.githubusercontent.com \"%s\"",
+                     cosign, fmt ? " --new-bundle-format" : "", sig, AE_GITHUB_REPO, refs[r], sums);
+            if (verify_tool_ok(cmd)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Is the file at `path` the release asset `file` of `tag`? See above. 0 when
+ * it is, with what was checked and what was not printed; otherwise why says
+ * why not, and nothing in it may be unpacked. */
 static int gh_verify_release_asset(const char* slug, const char* tag, const char* file,
                                    const char* path, char* why, size_t whysz) {
-    char id[32], digest[72], reason[256];
-    if (gh_release_asset_info(slug, tag, file, id, sizeof(id), digest, sizeof(digest),
-                              reason, sizeof(reason)) != 0) {
-        snprintf(why, whysz,
-                 "%s cannot be verified: %s, so its sha256 digest is unknown. Nothing was "
-                 "installed. Try again later, or set GITHUB_TOKEN to raise the API's rate limit.",
-                 file, reason);
-        return 1;
+    char reason[256] = "";
+    char* json = gh_release_json(slug, tag, reason, sizeof(reason));
+    char id[32], digest[72] = "";
+    int listed = json && gh_find_asset(json, file, id, sizeof(id), digest, sizeof(digest));
+    char sid[32], sdig[72];
+    int sums_listed = json && gh_find_asset(json, AE_SUMS_NAME, sid, sizeof(sid), sdig, sizeof(sdig));
+    if (json && !listed) {
+        digest[0] = '\0';
+        snprintf(reason, sizeof(reason), "the %s release lists no asset called %s", tag, file);
     }
-    if (!digest[0]) {
-        snprintf(why, whysz, "%s cannot be verified: the %s release lists no sha256 digest for it. "
-                             "Nothing was installed.", file, tag);
-        return 1;
-    }
+
     char got[65];
     if (ae_sha256_file_hex(path, got) != 0) {
+        free(json);
         snprintf(why, whysz, "%s cannot be verified: the download could not be read back.", file);
         return 1;
     }
-    if (strcmp(got, digest) != 0) {
-        snprintf(why, whysz, "%s does not match the sha256 digest GitHub lists for it (expected %s, "
-                             "got %s). Nothing was installed.", file, digest, got);
+
+    /* SHA256SUMS, when the release has one. Without the listing it is still
+     * tried at the release URL: a release that has it is checked by it. */
+    char sums_path[1024];
+    if (!ae_private_temp_path(sums_path, sizeof(sums_path), AE_SUMS_NAME)) {
+        free(json);
+        snprintf(why, whysz, "%s cannot be verified: no private temp directory.", file);
         return 1;
+    }
+    int have_sums = 0;
+    if (sums_listed || !json) {
+        have_sums = gh_fetch_release_file(slug, tag, AE_SUMS_NAME, json, sums_path) == 0;
+        if (!have_sums && sums_listed) {
+            free(json);
+            snprintf(why, whysz, "%s cannot be verified: the %s release lists %s, and it could not "
+                                 "be fetched. Nothing was installed. Try again later.",
+                     file, tag, AE_SUMS_NAME);
+            return 1;
+        }
+    }
+
+    if (!have_sums) {
+        /* A release from before #3752: GitHub's digest is all there is. */
+        free(json);
+        if (reason[0]) {
+            snprintf(why, whysz,
+                     "%s cannot be verified: %s, so its sha256 digest is unknown. Nothing was "
+                     "installed. Try again later, or set GITHUB_TOKEN to raise the API's rate limit.",
+                     file, reason);
+            return 1;
+        }
+        if (!digest[0]) {
+            snprintf(why, whysz, "%s cannot be verified: the %s release lists no sha256 digest for it. "
+                                 "Nothing was installed.", file, tag);
+            return 1;
+        }
+        if (strcmp(got, digest) != 0) {
+            snprintf(why, whysz, "%s does not match the sha256 digest GitHub lists for it (expected %s, "
+                                 "got %s). Nothing was installed.", file, digest, got);
+            return 1;
+        }
+        printf("Verified %s against its sha256 digest.\n", file);
+        printf("  %s predates signed checksums (%s): it has no signature or build provenance "
+               "to check.\n", tag, AE_SUMS_NAME);
+        return 0;
+    }
+
+    char want[65];
+    int s = sums_lookup(sums_path, file, want);
+    if (s != 1 || strcmp(got, want) != 0 || (digest[0] && strcmp(got, digest) != 0)) {
+        remove(sums_path);
+        free(json);
+        if (s != 1)
+            snprintf(why, whysz, "%s cannot be verified: %s %s. Nothing was installed.", file,
+                     AE_SUMS_NAME, s == 0 ? "does not list it"
+                                          : "lists it twice, or in a line sha256sum would not write");
+        else if (strcmp(got, want) != 0)
+            snprintf(why, whysz, "%s does not match its sha256 in %s (expected %s, got %s). Nothing "
+                                 "was installed.", file, AE_SUMS_NAME, want, got);
+        else
+            snprintf(why, whysz, "%s does not match the sha256 digest GitHub lists for it (expected %s, "
+                                 "got %s). Nothing was installed.", file, digest, got);
+        return 1;
+    }
+    printf("Verified %s against %s%s.\n", file, AE_SUMS_NAME,
+           digest[0] ? " and the sha256 digest GitHub lists" : "");
+
+    /* The signature of SHA256SUMS, with cosign. */
+    char* cosign = ae_resolve_program("cosign");
+    if (cosign) {
+        char sig_path[1024];
+        int have_sig = ae_private_temp_path(sig_path, sizeof(sig_path), AE_SIG_NAME) &&
+                       gh_fetch_release_file(slug, tag, AE_SIG_NAME, json, sig_path) == 0;
+        int ok = have_sig && cosign_verifies(cosign, tag, sums_path, sig_path);
+        if (have_sig) remove(sig_path);
+        free(cosign);
+        if (!ok) {
+            remove(sums_path);
+            free(json);
+            if (!have_sig)
+                snprintf(why, whysz, "%s cannot be verified: %s could not be fetched for cosign. "
+                                     "Nothing was installed.", file, AE_SIG_NAME);
+            else
+                snprintf(why, whysz, "the signature of %s for %s does not verify with cosign as "
+                                     "made by %s's release workflow. Nothing was installed.",
+                         AE_SUMS_NAME, tag, AE_GITHUB_REPO);
+            return 1;
+        }
+        printf("  The signature of %s verified with cosign (%s's release workflow).\n",
+               AE_SUMS_NAME, AE_GITHUB_REPO);
+    } else {
+        printf("  The signature of %s was not checked: cosign is not installed.\n", AE_SUMS_NAME);
+    }
+    remove(sums_path);
+    free(json);
+
+    /* The archive's build provenance, with gh. */
+    char* gh = ae_resolve_program("gh");
+    int gh_ready = 0;
+    if (gh) {
+        char cmd[2048];
+        snprintf(cmd, sizeof(cmd), "\"%s\" auth status", gh);
+        gh_ready = verify_tool_ok(cmd);
+    }
+    if (gh_ready) {
+        char cmd[4096];
+        snprintf(cmd, sizeof(cmd),
+                 "\"%s\" attestation verify \"%s\" --repo %s --signer-workflow "
+                 "%s/.github/workflows/release.yml",
+                 gh, path, AE_GITHUB_REPO, AE_GITHUB_REPO);
+        int ok = verify_tool_ok(cmd);
+        free(gh);
+        if (!ok) {
+            snprintf(why, whysz, "%s has no build provenance from %s's release workflow that "
+                                 "`gh attestation verify` accepts. Nothing was installed.",
+                     file, AE_GITHUB_REPO);
+            return 1;
+        }
+        printf("  Its build provenance verified with gh attestation verify.\n");
+    } else {
+        printf("  Its build provenance was not checked: gh is %s.\n",
+               gh ? "not logged in" : "not installed");
+        free(gh);
     }
     return 0;
 }
@@ -826,8 +1047,10 @@ static int cmd_version_install(const char* version) {
         }
     }
 
-    // #3748: the archive must be the one GitHub lists, by its sha256 digest,
-    // before anything in it is unpacked, on every download path.
+    // #3748, #3752: the archive must be the one the release lists, by its
+    // signed SHA256SUMS or, for an older release, GitHub's sha256 digest,
+    // before anything in it is unpacked, on every download path. The check
+    // prints what it verified and what it could not.
     {
         char why[512];
         if (gh_verify_release_asset(AE_GITHUB_REPO, vtag, filename, archive, why, sizeof(why)) != 0) {
@@ -835,7 +1058,6 @@ static int cmd_version_install(const char* version) {
             fprintf(stderr, "Error: %s\n", why);
             return 1;
         }
-        printf("Verified %s against its sha256 digest.\n", filename);
     }
 
     mkdirs(ver_dir);
