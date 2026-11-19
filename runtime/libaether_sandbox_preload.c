@@ -449,6 +449,20 @@ static int freopen_allowed(const char* path, const char* mode, FILE* stream) {
 #if defined(__linux__)
     int fd = stream ? fileno(stream) : -1;
     if (fd < 0) return 1;   // nothing to reopen: libc fails it
+    // A reopen of the same descriptor for no more than it already holds
+    // gains nothing, so it needs no grant: freopen(NULL, "rb", stdin), the
+    // portable way to put stdin in binary mode, reopens a pipe, a socket or
+    // a terminal, whose /proc/self/fd link names no path a grant can match
+    // (pipe:[123], /dev/pts/N), and was refused, with stdin closed. Asking
+    // for more (a read-only descriptor reopened for writing, which the
+    // reopen through /proc can grant) is checked against the path.
+    int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0) {
+        int held = (fl & O_ACCMODE) == O_RDWR   ? AETHER_ACCESS_READ | AETHER_ACCESS_WRITE
+                 : (fl & O_ACCMODE) == O_WRONLY ? AETHER_ACCESS_WRITE
+                                                : AETHER_ACCESS_READ;
+        if ((aether_fopen_access(mode) & ~held) == 0) return 1;
+    }
     char self[64];
     snprintf(self, sizeof self, "/proc/self/fd/%d", fd);
     return fopen_mode_allowed(self, mode);

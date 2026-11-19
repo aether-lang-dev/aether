@@ -65,6 +65,15 @@ int main(int argc, char** argv) {
         if (f) fclose(f);
         return rc;
     }
+    if (strcmp(c, "freopen-null-stdin-rb") == 0) {
+        // stdin reopened for no more than it holds (binary mode, the
+        // portable idiom): a pipe or a device no grant names, and it must
+        // still be open and readable afterwards.
+        (void)path;
+        FILE* f = freopen(NULL, "rb", stdin);
+        if (!f) return verdict(0);
+        return fileno(f) >= 0 ? 0 : 6;
+    }
     fprintf(stderr, "unknown case %s\n", c);
     return 2;
 }

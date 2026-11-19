@@ -85,6 +85,22 @@ else
     run_case "both grants: freopen(NULL, r+) opens" both freopen-null-r+ 0
 fi
 
+# freopen(NULL, "rb", stdin) asks for no more than stdin holds, so it needs
+# no grant: stdin here is /dev/null (above) or a pipe, whose
+# /proc/self/fd link names nothing a grant matches. It was refused, and
+# stdin closed with it.
+run_case "read grant: freopen(NULL, rb, stdin) on /dev/null keeps it" read freopen-null-stdin-rb 0
+printf 'piped\n' | LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/read.grants" \
+    AETHER_SANDBOX_LOG=none "$TMP/harness" freopen-null-stdin-rb "$DATA" >"$TMP/out" 2>"$TMP/err"
+got=$?
+if [ "$got" -eq 0 ]; then
+    echo "  [PASS] read grant: freopen(NULL, rb, stdin) on a pipe keeps it"
+else
+    echo "  [FAIL] read grant: freopen(NULL, rb, stdin) on a pipe: exit $got, expected 0"
+    sed 's/^/    /' "$TMP/err"
+    fail=1
+fi
+
 if ! grep -qF 'open modes sentinel' "$DATA"; then
     echo "  [FAIL] the file was changed by an open that was refused"
     fail=1
