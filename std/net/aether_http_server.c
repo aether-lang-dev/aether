@@ -5303,7 +5303,11 @@ void http_ws_client_free(HttpWsConn* ws) {
         if (ws->conn->fd >= 0) close(ws->conn->fd);
         free(ws->conn);
     }
-    if (ws->msg_buf) free(ws->msg_buf);
+    /* Grown by ws_msg_grow through aether_caps_realloc, so released through
+     * the cap with the size it holds: plain free() left msg_cap counted for
+     * every handle freed, and a program under a memory cap reached it
+     * holding nothing (#3758). */
+    aether_caps_free(ws->msg_buf, ws->msg_cap);
     free(ws);
 }
 
