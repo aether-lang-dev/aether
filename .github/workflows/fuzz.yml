@@ -115,7 +115,7 @@ jobs:
           targets="$(sh tests/fuzz/select_targets.sh --all --shard "$SHARD/3")"
         fi
         echo "targets=$targets" >> "$GITHUB_OUTPUT"
-        echo "Shard $SHARD/3 fuzzes: ${targets:-nothing (no target's inputs changed)}"
+        echo "Shard $SHARD/3 fuzzes: ${targets:-nothing, since no target input changed}"
 
     - name: Install packages
       if: steps.select.outputs.targets != ''
