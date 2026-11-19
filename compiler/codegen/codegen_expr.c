@@ -5615,6 +5615,19 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 if (arr) mark_var_declared_typed(gen, parent_promoted[p], arr);
                 else mark_var_declared(gen, parent_promoted[p]);
             }
+            /* A read-only capture is a binding of this body as well: the
+             * prologue's `T name = _env->name;` declares it, as the C
+             * signature declares a parameter. Codegen asks "is there a
+             * top-level function by this name?" in several places (a `fn`
+             * argument, a store, a ptr slot) and each defers to a local
+             * binding first through is_var_declared, so an unregistered
+             * capture lost to a same-named function: the closure passed the
+             * function's bare adapter on in place of the enclosing scope's
+             * value, env and all. Inside a closure the local must win
+             * exactly as it does outside one (#1657's scope rule). */
+            for (int a = 0; a < alias_cap_count; a++)
+                if (alias_caps[a] && !is_var_declared(gen, alias_caps[a]))
+                    mark_var_declared(gen, alias_caps[a]);
             /* #2462: the closure's parameters are declared by its C
              * signature, the way a function's are (codegen_func.c), so an
              * assignment to one in the body is a reassignment rather than a
