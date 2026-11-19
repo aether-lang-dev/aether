@@ -364,9 +364,21 @@ direct calls to the raw extern (`tcp_connect_raw`) are enforced.
 | `file.exists(path)` | `file_exists` | `"fs_read"` | Yes, returns 0 if denied |
 | `file.delete(path)` | `file_delete_raw` | `"fs_write"` | Yes, wrapper returns `"cannot delete file"` if denied |
 | `file.size(path)` | `file_size_raw` | `"fs_read"` | Yes, wrapper returns `(0, "cannot stat file")` if denied |
+| `fs.mtime(path)`, `file_mtime(path)` | `file_mtime_raw`, `file_mtime` | `"fs_read"` | Yes, wrapper returns `(0, "cannot stat file")` if denied |
+| `fs.list_dir(path)`, `dir.list(path)` | `dir_list_raw` | `"fs_read"` on the directory | Yes, wrapper returns `(null, "cannot list directory")` if denied |
+| `fs.glob(pattern)`, `fs.glob_multi(patterns)` | `fs_glob_raw`, `fs_glob_multi_raw` | `"fs_read"` on the directory the pattern starts in, and on each path it reports | Yes, wrapper returns `(null, "glob failed")` if denied; a path the caller may not read is left out of the result |
+| `dir_exists(path)` | `dir_exists` | `"fs_read"` | Yes, returns 0 if denied |
+| `fs.statvfs(path)` | `fs_try_statvfs` | `"fs_read"` | Yes, wrapper returns `"cannot statvfs path"` if denied |
+| `fs.create_dir(path)`, `fs.create_dir_with_mode(path, mode)` | `dir_create_raw`, `dir_create_mode_raw` | `"fs_write"` | Yes, wrapper returns `"cannot create directory"` (or a permission-denied kind) if denied |
+| `fs.delete_dir(path)` | `dir_delete_raw` | `"fs_write"` | Yes, wrapper returns `"cannot delete directory"` if denied |
 | `os.system(cmd)` | `os_system` | `"exec"`, for the shell and for `cmd` | Yes, returns -1 if denied |
 | `os.exec(cmd)` | `os_exec_raw` | `"exec"`, for the shell and for `cmd` | Yes, wrapper returns `("", "command failed")` if denied |
 | `os.getenv(name)` | `os_getenv` | `"env"` | Yes, returns null if denied |
+
+Listing, globbing or walking a directory reads the directory itself, so it
+needs a grant that matches the directory's path: `grant_fs_read("/data/*")`
+covers what is under `/data`, and `grant_fs_read("/data")` lets it be
+listed.
 
 Nested sandboxes are intersected, an inner sandbox cannot escalate
 beyond what the outer sandbox grants.

@@ -236,6 +236,63 @@ main() {
             sandbox.free(rw)
         }
 
+        // #3743: listing, globbing, mtime and the directory calls did no
+        // check at all, so a block with no grants could read and change the
+        // file system's shape.
+        spec.it("checks listing, globbing, mtime and directory calls") callback {
+            _e = fs.create_dir("${dir}/empty")
+            pats = list.new()
+            _a = list.add(pats, "${dir}/*.txt")
+            g = sandbox.new("no-fs") {}
+            sandbox.enforce(g) callback {
+                _l, lerr = fs.list_dir(dir)
+                spec.assert_err(lerr, "list_dir is refused")
+                _gl, gerr = fs.glob("${dir}/*.txt")
+                spec.assert_err(gerr, "glob is refused")
+                _gm, gmerr = fs.glob_multi(pats)
+                spec.assert_err(gmerr, "glob_multi is refused")
+                _t, merr = fs.mtime("${dir}/allowed.txt")
+                spec.assert_err(merr, "mtime is refused")
+                spec.assert_true(fs.file_mtime("${dir}/allowed.txt") == 0, "and so is the older file_mtime")
+                spec.assert_eq(fs.dir_exists(dir), 0, "dir_exists answers no, as file_exists does")
+                _st, _sf, _sa, serr = fs.statvfs(dir)
+                spec.assert_err(serr, "statvfs is refused")
+                cerr = fs.create_dir("${dir}/made")
+                spec.assert_err(cerr, "create_dir is refused")
+                ok, _k, _cm = fs.create_dir_with_mode("${dir}/made_mode", 448)
+                spec.assert_eq(ok, 0, "create_dir_with_mode is refused")
+                derr = fs.delete_dir("${dir}/empty")
+                spec.assert_err(derr, "delete_dir is refused")
+            }
+            sandbox.free(g)
+            list.free(pats)
+            spec.assert_eq(fs.exists("${dir}/made"), 0, "no directory was made")
+            spec.assert_eq(fs.exists("${dir}/made_mode"), 0, "with a mode either")
+            spec.assert_eq(fs.exists("${dir}/empty"), 1, "and none was removed")
+        }
+
+        spec.it("lists and globs a granted directory, and globs report only granted paths") callback {
+            g = sandbox.new("lister") {
+                grant_fs_read(dir)
+                grant_fs_read("${dir}/allowed*")
+            }
+            sandbox.enforce(g) callback {
+                l, lerr = fs.list_dir(dir)
+                spec.assert_ok(lerr, "the granted directory lists")
+                if lerr == "" { fs.dir_list_free(l) }
+                gl, gerr = fs.glob("${dir}/*.txt")
+                spec.assert_ok(gerr, "and globs")
+                if gerr == "" {
+                    spec.assert_eq(fs.dir_list_count(gl), 1, "with only the file it may read")
+                    if fs.dir_list_count(gl) == 1 {
+                        spec.assert_contains(fs.dir_list_get(gl, 0), "allowed.txt", "which is allowed.txt")
+                    }
+                    fs.dir_list_free(gl)
+                }
+            }
+            sandbox.free(g)
+        }
+
         spec.it("matches exec grants against the command line") callback {
             g = sandbox.new("echoer") {
                 grant_exec("echo *")
