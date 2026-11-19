@@ -77,6 +77,7 @@ static void buf_put(Buf* b, const void* d, size_t n) {
 /* What the script sent on a stream. */
 typedef struct {
     int opened, ended, reset, dispatched, valid, head;
+    int cancelled;             /* the client sent RST_STREAM on it, ended or not */
     int judged;                /* sent a field nghttp2 judges against the rest */
     int out_of_order;          /* opened at a lower id than one before it */
     char method[8], path[40], scheme[8];
@@ -273,6 +274,7 @@ static void script(In* in, Buf* wire, nghttp2_hd_deflater* deflater) {
             frame_header(wire, 4, NGHTTP2_RST_STREAM, 0, 1 + 2 * (sk % MAX_STREAMS));
             buf_put(wire, code, 4);
             if (!s->ended) s->reset = 1;
+            s->cancelled = 1;
             s->valid = 0;
             break;
         }
@@ -360,10 +362,16 @@ static void check_output(int standing) {
         p += 9 + len;
     }
     /* A response is owed while the connection stands: one the client ended
-     * with a connection error is not written. */
+     * with a connection error is not written, and nor is one the client
+     * cancelled. A client may send RST_STREAM on a stream it has ended (it is
+     * half-closed (local) on its side, RFC 9113 5.1), and the server then
+     * stops: nghttp2 drops a response it has not written yet. The harness
+     * owed one regardless, and failed when the RST_STREAM arrived in the same
+     * read as the request (the h2 crash of CI run 44568798645, now the seed
+     * crash_rst_after_end). */
     for (int k = 0; k < MAX_STREAMS && standing; k++) {
         Stream* s = &g_streams[k];
-        if (!s->dispatched || !hpack_ok) continue;
+        if (!s->dispatched || s->cancelled || !hpack_ok) continue;
         CHECK(got_headers[k] == 200, "dispatched stream %d got no :status 200 (%d)", k, got_headers[k]);
         CHECK(got_fields[k] == extra_fields(k) && !bad_field[k],
               "stream %d: the response carries %d of its %d fields%s", k, got_fields[k], extra_fields(k),

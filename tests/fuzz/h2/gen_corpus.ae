@@ -8,11 +8,13 @@
 // WINDOW_UPDATE between them, each pseudo-header left out, connection
 // fields, a stream reset before it ends, ids that go down; and raw frames
 // nghttp2 must refuse or ignore (a CONTINUATION with no HEADERS, a frame
-// longer than the maximum, a GOAWAY, an unknown type).
+// longer than the maximum, a GOAWAY, an unknown type); and the reproducers
+// fuzzing found, kept as regression seeds (crash_*).
 import std.os
 import std.io
 import std.fs
 import std.strbuilder
+import std.string
 
 extern exit(code: int)
 
@@ -54,6 +56,32 @@ fn write_seed(dir: string, name: string, b: ptr) {
         _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
         exit(1)
     }
+}
+
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits: a reproducer a fuzzing run found,
+// kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        b8(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    write_seed(dir, name, b)
 }
 
 fn frame(b: ptr, len: int, t: int, flags: int, id: int) {
@@ -202,4 +230,9 @@ main() {
     b8(b, 3)
     b8(b, 16)
     write_seed(dir, "raw_unknown_and_priority", b)
+
+    // CI run 44568798645: stream 3 ended, dispatched, then cancelled by the
+    // client in the same read; the harness owed it a response (fuzz_h2.c, G3).
+    hex_seed(dir, "crash_rst_after_end",
+             "0000000001010000010102100f0102000003010000000101000000256c61746520ffffff626f647904000241000007")
 }
