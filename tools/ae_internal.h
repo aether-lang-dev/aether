@@ -182,6 +182,14 @@ int cmd_version_use(const char* version);
 int cmd_install(int argc, char** argv);
 int cmd_upgrade(void);
 
+/* Delete a directory tree. Symlinks are removed, not followed (ae.c). */
+void ae_remove_tree(const char* path);
+
+/* ae_toolchain.c: `ae toolchain zig` fetches and verifies the pinned Zig
+ * (#3623). */
+int  cmd_toolchain(int argc, char** argv);
+void ae_toolchain_usage(FILE* out);
+
 /* ae_repl.c — the interactive REPL. */
 int cmd_repl(void);
 

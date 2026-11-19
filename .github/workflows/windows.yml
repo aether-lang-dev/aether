@@ -109,7 +109,7 @@ jobs:
       with:
         path: |
           .zig
-        key: zig-only-${{ hashFiles('scripts/get-zig.sh') }}
+        key: zig-only-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h') }}
 
     - name: Provision zig
       id: prov
@@ -128,7 +128,7 @@ jobs:
       with:
         path: |
           .zig
-        key: zig-only-${{ hashFiles('scripts/get-zig.sh') }}
+        key: zig-only-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h') }}
 
     # The fail-fast half: Windows-only -Werror breakage, MinGW __thread
     # traps and missing Win32 shims surface here, minutes into the PR.

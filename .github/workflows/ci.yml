@@ -472,7 +472,7 @@ jobs:
           .zig
           crossbuild/toolchain
           crossbuild/work/downloads
-        key: freebsd-cross-${{ hashFiles('scripts/get-zig.sh', 'crossbuild/deps.lock') }}
+        key: freebsd-cross-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'crossbuild/deps.lock') }}
 
     - name: Provision zig + FreeBSD base sysroot
       id: prov
@@ -497,7 +497,7 @@ jobs:
           .zig
           crossbuild/toolchain
           crossbuild/work/downloads
-        key: freebsd-cross-${{ hashFiles('scripts/get-zig.sh', 'crossbuild/deps.lock') }}
+        key: freebsd-cross-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'crossbuild/deps.lock') }}
 
     - name: Cross-build for FreeBSD (FREEBSD=1)
       run: |
@@ -599,9 +599,9 @@ jobs:
         path: |
           .zig
           .ci-cache/ae-cross
-        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'contrib/sqlite/amalgamation.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
+        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
         restore-keys: |
-          sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'contrib/sqlite/amalgamation.lock') }}-
+          sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock') }}-
 
     - name: Provision zig and the SQLite amalgamation
       run: |
@@ -631,7 +631,7 @@ jobs:
         path: |
           .zig
           .ci-cache/ae-cross
-        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'contrib/sqlite/amalgamation.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
+        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
 
   ci-freebsd-native:
     name: FreeBSD / native build + unit tests

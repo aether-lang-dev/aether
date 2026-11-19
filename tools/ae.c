@@ -4854,8 +4854,6 @@ static const char* vendored_sqlite_link(const char* cc, const char* ae_link,
  * one processor or one source leave the sources on the link command, which
  * then compiles them as before and reports an error as before. */
 
-static void ae_remove_tree(const char* path);
-
 static int ae_cpu_count(void) {
 #ifdef _WIN32
     SYSTEM_INFO si;
@@ -6511,7 +6509,7 @@ static char* ae_abspath(const char* path) {
 static char g_binimport_stubdirs[AE_BINIMPORT_STUBDIRS_MAX][256];
 static int g_binimport_stubdir_count = 0;
 
-static void ae_remove_tree(const char* path) {
+void ae_remove_tree(const char* path) {
 #ifdef _WIN32
     char* pattern = ae_path_printf("%s/*", path);
     WIN32_FIND_DATAA fd;
@@ -7425,6 +7423,8 @@ static int print_command_help(const char* cmd) {
         ae_checksec_usage();
     } else if (strcmp(cmd, "bindgen") == 0) {
         ae_bindgen_usage(stdout);
+    } else if (strcmp(cmd, "toolchain") == 0) {
+        ae_toolchain_usage(stdout);
     } else if (strcmp(cmd, "version") == 0) {
         printf("Usage: ae version [<subcommand>]\n");
         printf("  With no subcommand, print this binary's version, the aetherc it runs\n");
@@ -13289,6 +13289,7 @@ static void print_usage(void) {
     printf("  lib-path             Print the resolved module-search chain\n");
     printf("  lib-info <library>   Print the symbol catalog of an --emit=lib library\n");
     printf("  examples [dir]       Build the example programs into build/examples/\n");
+    printf("  toolchain zig        Install the pinned Zig for --target builds (--check verifies)\n");
     printf("  repl                 Start interactive REPL\n");
     printf("  install [<v>]        Install a release (latest if omitted)\n");
     printf("  upgrade              Install the latest release and switch to it\n");
@@ -14072,6 +14073,12 @@ int main(int argc, char** argv) {
     }
     if (strcmp(cmd, "fmt") == 0) {
         return cmd_fmt(sub_argc, sub_argv);
+    }
+    /* Before discover_toolchain, which sets AETHER_HOME to the toolchain it
+     * found: `ae toolchain` reads the user's AETHER_HOME to place its
+     * installs (#3623). */
+    if (strcmp(cmd, "toolchain") == 0) {
+        return cmd_toolchain(sub_argc, sub_argv);
     }
     // All other commands need the toolchain
     discover_toolchain();

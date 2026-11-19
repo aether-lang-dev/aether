@@ -367,7 +367,8 @@ int ae_download_ex(const char* url, const char* dest, int max_seconds) {
     return 1;
 }
 
-// Extract archive → dest_dir.
+/* Extract archive -> dest_dir: a .zip on Windows; a .tar.gz, or a .tar.xz
+ * (Zig's archives, for `ae toolchain zig`), elsewhere. */
 int ae_extract(const char* archive, const char* dest_dir) {
 #ifdef _WIN32
     char tmp[64];
@@ -376,8 +377,11 @@ int ae_extract(const char* archive, const char* dest_dir) {
     snprintf(ps_path, sizeof(ps_path), "%s\\%s", get_temp_dir(), tmp);
     FILE* ps = fopen(ps_path, "w");
     if (!ps) return 1;
+    /* Stop, as in ae_download_raw (#2530): an archive Expand-Archive could
+     * not read must end the script with exit code 1, not 0. */
     fprintf(ps,
         "$ProgressPreference='SilentlyContinue'\n"
+        "$ErrorActionPreference='Stop'\n"
         "Expand-Archive -Path '%s' -DestinationPath '%s' -Force\n",
         archive, dest_dir);
     fclose(ps);
@@ -388,8 +392,10 @@ int ae_extract(const char* archive, const char* dest_dir) {
     remove(ps_path);
     return r;
 #else
+    size_t n = strlen(archive);
+    const char* mode = (n > 7 && strcmp(archive + n - 7, ".tar.xz") == 0) ? "-xJf" : "-xzf";
     char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "tar -xzf \"%s\" -C \"%s\"", archive, dest_dir);
+    snprintf(cmd, sizeof(cmd), "tar %s \"%s\" -C \"%s\"", mode, archive, dest_dir);
     return system(cmd);
 #endif
 }
