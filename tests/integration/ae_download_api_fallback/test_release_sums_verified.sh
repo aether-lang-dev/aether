@@ -131,16 +131,40 @@ else
     chmod +x "$TOOLS/cosign" "$TOOLS/gh"
 fi
 
-# PATH without any cosign or gh of the machine's own.
+# PATH without any cosign or gh of the machine's own. A directory that holds
+# one is replaced by a mirror of it without them, not dropped: on a GitHub
+# Linux runner gh is /usr/bin/gh, and dropping /usr/bin took curl, tar and
+# sh with it, so every download failed ("both ways of fetching ... failed")
+# where Windows, whose gh has a directory of its own, passed.
 BARE_PATH=""
+mirrors=0
 old_ifs="$IFS"; IFS=:
 for d in $PATH; do
     [ -n "$d" ] || continue
     skip=0
     for t in cosign gh cosign.exe gh.exe; do [ -e "$d/$t" ] && skip=1; done
-    [ "$skip" = 1 ] || BARE_PATH="${BARE_PATH:+$BARE_PATH:}$d"
+    if [ "$skip" = 1 ]; then
+        mirrors=$((mirrors + 1))
+        m="$TMP/path_$mirrors"
+        mkdir -p "$m"
+        for f in "$d"/*; do
+            n="${f##*/}"
+            case "$n" in cosign|gh|cosign.exe|gh.exe|'*') continue ;; esac
+            ln -s "$f" "$m/$n" 2>/dev/null
+        done
+        d="$m"
+    fi
+    BARE_PATH="${BARE_PATH:+$BARE_PATH:}$d"
 done
 IFS="$old_ifs"
+for t in curl tar; do
+    PATH="$BARE_PATH" command -v "$t" >/dev/null 2>&1 ||
+        fail "the PATH without cosign and gh has no $t: $BARE_PATH"
+done
+for t in cosign gh; do
+    PATH="$BARE_PATH" command -v "$t" >/dev/null 2>&1 &&
+        fail "the PATH meant to have no $t still finds one: $(PATH="$BARE_PATH" command -v "$t")"
+done
 
 # The identity cosign and gh must both be given for v9.9.9, anchored at both
 # ends: the release workflow run from main or from this tag, and no other
