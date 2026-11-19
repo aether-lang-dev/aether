@@ -1,0 +1,54 @@
+// #3747: http.serve_static serves only what resolves inside its document
+// root. The driver, test_http_serve_static_sibling.sh, lays out a root with
+// symlinks in it and asks for each; this program is only the server.
+
+import std.http
+import std.os
+import std.fs
+import std.string
+
+extern exit(code: int)
+
+handler(req: ptr, res: ptr, ud: ptr) {
+    // The user data is the base directory main registered: os_getenv's C
+    // text, which string.from_cstr copies into a string.
+    http.serve_static(req, res, string.from_cstr(ud))
+}
+
+message StartSrv { raw: ptr }
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
+}
+
+main() {
+    base = os_getenv("TEST_BASE")
+    if base == 0 {
+        // Run on its own, with no env var, it skips: the real
+        // test driver in test_http_serve_static_sibling.sh sets
+        // TEST_BASE before launching us.
+        println("SKIP: TEST_BASE unset (run via test_http_serve_static_sibling.sh)")
+        exit(0)
+    }
+
+    raw = http.server_create(0)
+    http.server_set_host(raw, "127.0.0.1")
+    if raw == 0 {
+        println("FAIL: server_create")
+        exit(1)
+    }
+    http.server_get(raw, "/*", handler, base)
+    // #1920: bind on port 0 so the kernel picks a free one, and report it.
+    // server_start reuses a socket the caller already bound, so this also
+    // means READY is printed AFTER the listen socket exists rather than
+    // before it, which is what the fixed sleep in the runner was covering.
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    println("READY ${http.server_port(raw)}")
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+    sleep(60000)
+    exit(0)
+}

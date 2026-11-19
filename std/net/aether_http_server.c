@@ -8801,6 +8801,27 @@ static void http_serve_file_range(HttpServerResponse* res, const char* filepath,
     aether_caps_free(buf, alloc);
 }
 
+/* Whether canonical path `path` is `root` or lies inside it (#3747). A bare
+ * prefix match let `/srv/www-private/secret` pass for the root `/srv/www`,
+ * which is what a symlink in the document root pointing at a sibling
+ * directory resolves to. The prefix must end at a path separator, or at the
+ * end of `path`, or `root` must itself end in one (a root of `/` or `C:\`).
+ * On Windows the comparison ignores case and takes either separator. */
+static int static_path_within(const char* path, const char* root) {
+    size_t rl = strlen(root);
+#ifdef _WIN32
+    if (_strnicmp(path, root, rl) != 0) return 0;
+#define STATIC_IS_SEP(c) ((c) == '/' || (c) == '\\')
+#else
+    if (strncmp(path, root, rl) != 0) return 0;
+#define STATIC_IS_SEP(c) ((c) == '/')
+#endif
+    int ok = path[rl] == '\0' || STATIC_IS_SEP(path[rl]) ||
+             (rl > 0 && STATIC_IS_SEP(root[rl - 1]));
+#undef STATIC_IS_SEP
+    return ok;
+}
+
 // Static file serving handler (for use with wildcard routes)
 void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir) {
     const char* dir = (const char*)base_dir;
@@ -8842,7 +8863,7 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
         http_response_set_body(res, "404 - Not Found");
         return;
     }
-    if (strncmp(resolved, resolved_dir, strlen(resolved_dir)) != 0) {
+    if (!static_path_within(resolved, resolved_dir)) {
         http_response_set_status(res, 403);
         http_response_set_body(res, "403 - Forbidden");
         return;
@@ -8890,7 +8911,7 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
         http_response_set_body(res, "404 - Not Found");
         return;
     }
-    if (_strnicmp(resolved, resolved_dir, strlen(resolved_dir)) != 0) {
+    if (!static_path_within(resolved, resolved_dir)) {
         http_response_set_status(res, 403);
         http_response_set_body(res, "403 - Forbidden");
         return;
