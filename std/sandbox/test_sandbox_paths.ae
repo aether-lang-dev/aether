@@ -138,7 +138,7 @@ main() {
     if os.platform() == "windows" {
         _w = fs.write("${outside}/secret.txt", "secret")
         if make_junction("${box}/jout", outside) == 1 && make_junction("${box}/jin", "${box}/sub") == 1 &&
-           make_junction("${tmp}/boxj", box) == 1 {
+        make_junction("${tmp}/boxj", box) == 1 {
             have_junctions = 1
         }
     }

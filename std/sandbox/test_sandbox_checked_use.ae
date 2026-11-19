@@ -176,7 +176,7 @@ main() {
             // With the directory its own again, each call works in the box.
             done = 0
             sandbox.enforce(in_box) callback {
-                _p = fs.delete_dir("${box}/d/k")   // a leftover of the race, if any
+                _p = fs.delete_dir("${box}/d/k") // a leftover of the race, if any
                 e2 = fs.write("${box}/d/m.txt", "x")
                 e3 = fs.rename("${box}/d/m.txt", "${box}/d/n.txt")
                 u, _k, _e4 = fs.unlink("${box}/d/n.txt")
@@ -190,7 +190,7 @@ main() {
                 lfd, _lk, lerr = fs.lock_open("${box}/d/lock")
                 if lerr == "" { _c = io.fd_close(lfd) }
                 if e2 == "" && e3 == "" && u == 1 && e5 == "" && e6 == "" && e7 == "" &&
-                   terr == "" && tderr == "" && lerr == "" && fs.exists("${box}/d/atomic.txt") == 1 {
+                terr == "" && tderr == "" && lerr == "" && fs.exists("${box}/d/atomic.txt") == 1 {
                     done = 1
                 }
             }
