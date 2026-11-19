@@ -4777,6 +4777,9 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
                        ? conn_now_ms() + (long long)timeout_ms
                        : -1;
     int first_frame = 1;
+    /* A text or binary frame without FIN has begun a message that later
+     * continuation frames finish (RFC 6455 5.4). */
+    int in_message = 0;
 
     for (;;) {
         /* Bound the wait for the next frame header. Mid-message (a
@@ -4837,6 +4840,14 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
          * reserved control ones taken as data (#3759). */
         if ((opcode >= 0x3 && opcode <= 0x7) || opcode >= 0xB)
             return ws_fail(ws, 1002, "reserved opcode");
+        /* RSV1-3 mean something only under an extension that defines them,
+         * and neither end of std.http negotiates one, so a frame with any
+         * of them set fails the connection (RFC 6455 5.2, #3764). It was
+         * taken as if the bits were clear: a peer that believed it had
+         * permessage-deflate had its compressed bytes handed to the program
+         * as the message. */
+        if (hdr2[0] & 0x70)
+            return ws_fail(ws, 1002, "reserved bits set with no extension");
 
         if (opcode == WS_OP_PING || opcode == WS_OP_PONG || opcode == WS_OP_CLOSE) {
             /* A control frame carries at most 125 bytes and is never
@@ -4865,10 +4876,22 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
         }
 
         /* Data frame (text / binary / continuation): append it to the
-         * message, then stop at FIN. */
+         * message, then stop at FIN. A message is a text or binary frame
+         * then continuations up to the one with FIN, with only control
+         * frames between (RFC 6455 5.4). A continuation with no message in
+         * progress was taken as a message of its own, and a text or binary
+         * frame inside one restarted it, dropping what had arrived: both
+         * fail the connection (#3764). A message is begun and finished
+         * within one call, so the call's own state says whether one is in
+         * progress. */
+        if (opcode == WS_OP_CONT && !in_message)
+            return ws_fail(ws, 1002, "continuation frame with no message in progress");
+        if (opcode != WS_OP_CONT && in_message)
+            return ws_fail(ws, 1002, "new data frame inside a fragmented message");
         if (opcode == WS_OP_TEXT || opcode == WS_OP_BIN) {
             ws->msg_opcode = opcode;
             ws->msg_len = 0;  /* fresh message */
+            in_message = 1;
         }
         /* The message cap is checked before a byte of the frame is read or
          * a buffer grown for it: a frame may declare up to 2^63 bytes, and

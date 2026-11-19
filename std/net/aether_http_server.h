@@ -877,7 +877,10 @@ int http_ws_send_binary(HttpWsConn* ws, const void* data, int len);
 // A message past the handle's cap (HTTP_WS_DEFAULT_MAX_MESSAGE unless set)
 // closes the connection with 1009, checked before the frame is read. A
 // control frame over 125 bytes, or a fragmented one, closes it with 1002
-// (RFC 6455 5.5). Both return -1.
+// (RFC 6455 5.5). So do a reserved opcode, the wrong masking, a reserved
+// bit (RSV1-3; no extension is negotiated), a continuation frame with no
+// message in progress and a data frame inside a fragmented message (5.1,
+// 5.2, 5.4). Each returns -1.
 int http_ws_recv(HttpWsConn* ws);
 
 // The cap on one reassembled WebSocket message, by default (#3739). A

@@ -14,6 +14,11 @@
  *   8. a frame with reserved data opcode 0x3 closes with 1002 (#3759);
  *   9. a frame with reserved control opcode 0xB closes with 1002;
  *  10. an unmasked client frame closes with 1002 (RFC 6455 5.1).
+ *  11-13. a frame with RSV1, RSV2 or RSV3 set closes with 1002, since no
+ *      extension is negotiated (RFC 6455 5.2, #3764);
+ *  14. a continuation with no message in progress closes with 1002 (5.4);
+ *  15. a new data frame inside a fragmented message closes with 1002;
+ *  16. a ping between fragments is answered and the message reassembles.
  *
  * Usage: ws_probe <port>. Prints PASS/FAIL lines; exits 0 when all pass.
  *
@@ -92,13 +97,15 @@ static raw_sock ws_open(const char* path) {
 }
 
 /* A masked client frame whose header declares `declared` payload bytes, of
- * which the first `len` (from `payload`) are sent. */
-static int send_frame(raw_sock s, int fin, int opcode, const unsigned char* payload,
-                      size_t len, unsigned long long declared) {
+ * which the first `len` (from `payload`) are sent, with the reserved bits
+ * `rsv` (0x40 RSV1, 0x20 RSV2, 0x10 RSV3) set in its first byte. */
+static int send_frame_rsv(raw_sock s, int fin, int rsv, int opcode,
+                          const unsigned char* payload, size_t len,
+                          unsigned long long declared) {
     unsigned char hdr[14];
     size_t h = 0;
     static const unsigned char key[4] = { 0x11, 0x22, 0x33, 0x44 };
-    hdr[h++] = (unsigned char)((fin ? 0x80 : 0) | (opcode & 0x0F));
+    hdr[h++] = (unsigned char)((fin ? 0x80 : 0) | (rsv & 0x70) | (opcode & 0x0F));
     if (declared < 126) {
         hdr[h++] = (unsigned char)(0x80 | declared);
     } else if (declared <= 0xFFFF) {
@@ -118,6 +125,13 @@ static int send_frame(raw_sock s, int fin, int opcode, const unsigned char* payl
     int rc = len ? raw_send_all(s, (const char*)m, len) : 0;
     free(m);
     return rc;
+}
+
+/* The same with no reserved bit set: every frame a conforming client sends
+ * when no extension was negotiated. */
+static int send_frame(raw_sock s, int fin, int opcode, const unsigned char* payload,
+                      size_t len, unsigned long long declared) {
+    return send_frame_rsv(s, fin, 0, opcode, payload, len, declared);
 }
 
 /* A frame header with no mask, as a server sends it and a client must not:
@@ -344,6 +358,55 @@ int main(int argc, char** argv) {
     if (s == RAW_SOCK_INVALID) return 1;
     send_unmasked_header(s, 0x1);
     check(close_code(s) == 1002, "an unmasked client frame closes with 1002");
+    raw_socket_close(s);
+
+    /* 11-13. A reserved bit with no extension negotiated: 1002 (RFC 6455
+     * 5.2, #3764). The server negotiates none, so RSV1 (permessage-deflate's
+     * bit) is as reserved as the others, on a data frame and on a control
+     * frame alike. */
+    static const struct { int rsv; int opcode; const char* what; } rsv_cases[] = {
+        { 0x40, 0x1, "a text frame with RSV1 set closes with 1002" },
+        { 0x20, 0x2, "a binary frame with RSV2 set closes with 1002" },
+        { 0x10, 0x9, "a ping with RSV3 set closes with 1002" },
+    };
+    for (size_t i = 0; i < sizeof(rsv_cases) / sizeof(rsv_cases[0]); i++) {
+        s = ws_open("/ws");
+        if (s == RAW_SOCK_INVALID) return 1;
+        send_frame_rsv(s, 1, rsv_cases[i].rsv, rsv_cases[i].opcode, data, 0, 0);
+        check(close_code(s) == 1002, rsv_cases[i].what);
+        raw_socket_close(s);
+    }
+
+    /* 14. A continuation with no message in progress: 1002 (RFC 6455 5.4).
+     * Taken as a message of its own, it was echoed as len=5. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 1, 0x0, data, 5, 5);
+    check(close_code(s) == 1002, "a continuation frame with no message in progress closes with 1002");
+    raw_socket_close(s);
+
+    /* 15. A new data frame in the middle of a fragmented message: 1002. It
+     * restarted the message, dropping the first fragment. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 0, 0x1, data, 5, 5);
+    send_frame(s, 1, 0x1, data, 7, 7);
+    check(close_code(s) == 1002, "a text frame inside a fragmented message closes with 1002");
+    raw_socket_close(s);
+
+    /* 16. A control frame between fragments is allowed (5.4) and the message
+     * still reassembles: the ping is answered, then len=10 comes back. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 0, 0x2, data, 5, 5);
+    send_frame(s, 1, 0x9, data, 3, 3);
+    send_frame(s, 1, 0x0, data + 5, 5, 5);
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    int pong_ok = (n == 3 && op == 0xA);
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    if (n >= 0) buf[n] = '\0';
+    check(pong_ok && n >= 0 && op == 0x1 && strcmp((char*)buf, "len=10") == 0,
+          "a ping between two fragments is answered and the message reassembles");
     raw_socket_close(s);
 
     if (failures) {

@@ -803,6 +803,14 @@ its server. `ws_recv` returns `-1` after each. Browsers and every
 conforming client mask their frames, and `ws_connect`'s handles always
 have.
 
+Neither end negotiates an extension (no `Sec-WebSocket-Extensions`), so a
+frame with any of RSV1, RSV2 or RSV3 set closes the connection with `1002`
+(5.2, #3764). Fragments must come in order (5.4): a message is a text or
+binary frame and then continuation frames up to the one with FIN, with
+only control frames (a ping, say) between them. A continuation frame with
+no message in progress, or a text or binary frame inside a fragmented
+message, closes the connection with `1002`. Both ends apply these rules.
+
 ## Server-Sent Events
 
 ```aether,fragment

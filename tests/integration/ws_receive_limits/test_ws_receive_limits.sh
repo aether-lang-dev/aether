@@ -14,6 +14,11 @@
 # client, close with 1002 (RFC 6455 5.2 and 5.1); so does a masked frame
 # from the server, at the client.
 #
+# #3764: a frame with RSV1, RSV2 or RSV3 set (no extension is negotiated),
+# a continuation frame with no message in progress and a data frame inside
+# a fragmented message close with 1002 (RFC 6455 5.2, 5.4); a ping between
+# two fragments is still answered and the message still reassembles.
+#
 # ws_probe.c sends the frames over a raw socket, since no library client
 # sends them; wsserver.ae is the server. For the client side, `ws_probe
 # relay` stands between wsclient.ae and the server: it passes the handshake
@@ -109,4 +114,4 @@ sed -n '2,$p' "$TMP/relay.log"
 grep -q "PASS: a client closes with 1002 on a masked server frame" "$TMP/relay.log" \
     || fail "the client did not close with 1002 on a masked server frame"
 
-echo "  [PASS] ws_receive_limits: message cap (1009), control frames, reserved opcodes and masking (1002), growth as bytes arrive"
+echo "  [PASS] ws_receive_limits: message cap (1009), control frames, reserved opcodes, masking, reserved bits and fragment order (1002), growth as bytes arrive"
