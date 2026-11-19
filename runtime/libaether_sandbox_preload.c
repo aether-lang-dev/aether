@@ -209,6 +209,179 @@ static void parse_grants(const char* data, int len) {
 extern char** environ;
 static void snapshot_sandbox_env(void);
 
+// ---------------------------------------------------------------------------
+// The kernel's hold on a permanent policy (#3751)
+// ---------------------------------------------------------------------------
+//
+// A grant file (or the shared memory or descriptor spawn_sandboxed hands
+// over) that holds the line "policy:permanent" says the policy is this
+// process's for its whole life: nothing will lift it. The constructor then
+// asks Landlock to hold the same file grants for the whole process, before
+// main runs, so a call that goes round libc (a raw syscall instruction, a
+// static helper it starts) meets the kernel too:
+//   fs_read, fs_write, fs and exec grants become Landlock rules, as the
+//   kernel layer of a sandboxed spawn makes them (aether_landlock.h);
+//   tcp grants with a port become connect rules on Landlock ABI 4 and up,
+//   and with no tcp grant at all connect is refused; a tcp grant with no
+//   port, or a tcp_listen grant, leaves that right to the wrappers;
+//   the floor a running program needs is added: the loader's cache and its
+//   libraries' directory, the locale archive, /dev/null and /dev/urandom.
+// Without the line nothing changes: an in-process enforce block, which is
+// entered and left, cannot be held this way (Landlock cannot be lifted), and
+// a grant file written before #3751 keeps working as it did.
+//
+// Where the kernel has no Landlock, or a grant cannot be written as a
+// Landlock rule (a suffix pattern such as "*.log"), the policy holds at libc
+// only, and the log says so. The restriction needs PR_SET_NO_NEW_PRIVS: a
+// set-user-ID program this process starts no longer gains its owner's
+// rights.
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "sandbox/aether_landlock.h"
+#include <sys/prctl.h>
+
+static const char* exec_path(void);
+
+// A line in the log about the sandbox itself (the denials' sink).
+static void log_note(const char* what) {
+    if (log_mode == LOG_NONE) return;
+    if (log_mode == LOG_STDERR) {
+        fprintf(stderr, "AETHER_SANDBOX: %s\n", what);
+        return;
+    }
+    if (!log_file) log_file = real_fopen ? real_fopen("aether-sandbox.log", "a") : NULL;
+    if (log_file) {
+        fprintf(log_file, "AETHER_SANDBOX: %s\n", what);
+        fflush(log_file);
+    }
+}
+
+// The program a bare name runs, as execvp finds it on PATH; malloc'd, or
+// NULL when there is none.
+static char* ll_resolve(const char* word) {
+    const char* p = exec_path();
+    size_t wl = strlen(word);
+    for (;;) {
+        const char* colon = strchr(p, ':');
+        size_t dl = colon ? (size_t)(colon - p) : strlen(p);
+        char* cand = (char*)malloc(dl + 2 + wl + 1);
+        if (!cand) return NULL;
+        if (dl) {
+            memcpy(cand, p, dl);
+            cand[dl] = '/';
+            memcpy(cand + dl + 1, word, wl + 1);
+        } else {
+            memcpy(cand, word, wl + 1);
+        }
+        struct stat st;
+        if (stat(cand, &st) == 0 && S_ISREG(st.st_mode) && access(cand, X_OK) == 0) return cand;
+        free(cand);
+        if (!colon) return NULL;
+        p = colon + 1;
+    }
+}
+
+static int grant_is(int i, const char* cat, const char* pat) {
+    return strcmp(grants[i].cat, cat) == 0 && strcmp(grants[i].pat, pat) == 0;
+}
+
+static void landlock_backstop(void) {
+    int permanent = 0;
+    for (int i = 0; i < grant_count; i++) {
+        if (grant_is(i, "*", "*")) return;   // grant_all: nothing to hold
+        if (grant_is(i, "policy", "permanent")) permanent = 1;
+    }
+    if (!permanent) return;
+    int abi = aether_landlock_abi();
+    if (abi <= 0) {
+        log_note("landlock: this kernel has none (Linux 5.13+, landlock in its lsm= list); "
+                 "the permanent policy holds at libc only");
+        return;
+    }
+    uint64_t fs = LL_FS_V1 | (abi >= 2 ? LL_FS_REFER : 0) | (abi >= 3 ? LL_FS_TRUNCATE : 0);
+    uint64_t net = abi >= 4 ? (LL_NET_BIND_TCP | LL_NET_CONNECT_TCP) : 0;
+    for (int i = 0; i < grant_count; i++) {
+        char host[256];
+        if (strcmp(grants[i].cat, "tcp_listen") == 0) net &= ~LL_NET_BIND_TCP;
+        if (strcmp(grants[i].cat, "tcp") == 0 &&
+            aether_split_host_port(grants[i].pat, host, sizeof host) < 0)
+            net &= ~LL_NET_CONNECT_TCP;
+    }
+    struct ll_ruleset_attr attr = { .handled_access_fs = fs, .handled_access_net = net, .scoped = 0 };
+    long rfd = aether_landlock_syscall(LL_CREATE_RULESET, (long)&attr, abi >= 4 ? 16L : 8L, 0);
+    if (rfd < 0) {
+        log_note("landlock: cannot make a ruleset; the permanent policy holds at libc only");
+        return;
+    }
+    AetherLandlock l = { (int)rfd, fs };
+    char why[600];
+    why[0] = '\0';
+    for (int i = 0; i < grant_count && !why[0]; i++) {
+        const char* cat = grants[i].cat;
+        const char* pat = grants[i].pat;
+        int rc = 0;
+        if (strcmp(cat, "fs_read") == 0) rc = aether_landlock_pattern(&l, pat, LL_READ);
+        else if (strcmp(cat, "fs_write") == 0) rc = aether_landlock_pattern(&l, pat, LL_WRITE);
+        else if (strcmp(cat, "fs") == 0) rc = aether_landlock_pattern(&l, pat, LL_READ | LL_WRITE);
+        else if (strcmp(cat, "exec") == 0) rc = aether_landlock_exec_pattern(&l, pat, ll_resolve);
+        else if (strcmp(cat, "tcp") == 0 && (net & LL_NET_CONNECT_TCP)) {
+            char host[256];
+            int port = aether_split_host_port(pat, host, sizeof host);
+            struct ll_net_port_attr np = { .allowed_access = LL_NET_CONNECT_TCP, .port = (uint64_t)port };
+            if (port >= 0 && aether_landlock_syscall(LL_ADD_RULE, (long)rfd, LL_RULE_NET_PORT, (long)&np) != 0)
+                rc = -1;
+        }
+        if (rc == 1)
+            snprintf(why, sizeof why, "landlock: the %s grant '%s' cannot be a Landlock rule; "
+                     "the permanent policy holds at libc only", cat, pat);
+        else if (rc < 0)
+            snprintf(why, sizeof why, "landlock: no rule for the %s grant '%s' (%s); "
+                     "the permanent policy holds at libc only", cat, pat, strerror(errno));
+    }
+    // The floor a running program needs past its own image: the loader's
+    // cache and the directory of its C library (a later dlopen), the locale
+    // archive, /dev/null and /dev/urandom.
+    static const char* const floor_read[] = { "/etc/ld.so.cache", "/usr/lib/locale", "/dev/urandom" };
+    for (size_t i = 0; !why[0] && i < sizeof floor_read / sizeof floor_read[0]; i++)
+        if (aether_landlock_rule(&l, floor_read[i], LL_FS_READ_FILE) != 0)
+            snprintf(why, sizeof why, "landlock: no rule for %s; the permanent policy holds at libc only",
+                     floor_read[i]);
+    if (!why[0] && aether_landlock_rule(&l, "/dev/null", LL_FS_READ_FILE | LL_FS_WRITE_FILE) != 0)
+        snprintf(why, sizeof why, "landlock: no rule for /dev/null; the permanent policy holds at libc only");
+    Dl_info info;
+    void* in_libc = (void*)real_open;
+    if (!why[0] && real_open && dladdr(in_libc, &info) && info.dli_fname) {
+        char real[PATH_MAX];
+        if (realpath(info.dli_fname, real)) {
+            char* slash = strrchr(real, '/');
+            if (slash && slash != real) {
+                *slash = '\0';
+                if (aether_landlock_rule(&l, real, LL_FS_READ_FILE) != 0)
+                    snprintf(why, sizeof why, "landlock: no rule for %s; the permanent policy holds at "
+                             "libc only", real);
+            }
+        }
+    }
+    // The log is opened now: the ruleset does not let the process make it
+    // later.
+    if (!why[0] && log_mode == LOG_FILE && !log_file && real_fopen)
+        log_file = real_fopen("aether-sandbox.log", "a");
+    if (!why[0] && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+        snprintf(why, sizeof why, "landlock: PR_SET_NO_NEW_PRIVS refused (%s); the permanent policy "
+                 "holds at libc only", strerror(errno));
+    if (!why[0] && aether_landlock_syscall(LL_RESTRICT_SELF, rfd, 0, 0) != 0)
+        snprintf(why, sizeof why, "landlock: restrict_self refused (%s); the permanent policy holds at "
+                 "libc only", strerror(errno));
+    close((int)rfd);
+    if (why[0]) {
+        log_note(why);
+        return;
+    }
+    char done[96];
+    snprintf(done, sizeof done, "landlock: the permanent policy is held by the kernel too (ABI %d)", abi);
+    log_note(done);
+}
+#endif
+
 #if defined(__linux__)
 // The second stage of the exec fence (runtime/sandbox/
 // aether_sandbox_kernel_linux.c, "The program's own execve"). The spawn's
@@ -283,7 +456,10 @@ static void install_no_exec_filter(void) {
 #endif
 
 // Load grants from shared memory or file
+static int g_preload_constructing = 0;
+
 static void __attribute__((constructor)) sandbox_init(void) {
+    g_preload_constructing = 1;
     // Resolve real libc functions FIRST, before we intercept getenv
     real_open = dlsym(RTLD_NEXT, "open");
     real_connect = dlsym(RTLD_NEXT, "connect");
@@ -395,7 +571,12 @@ static void __attribute__((constructor)) sandbox_init(void) {
             }
         }
     }
+#if defined(__linux__) && !defined(__ANDROID__)
+    // A permanent policy, held by the kernel too, before main runs (#3751).
+    if (source_loaded) landlock_backstop();
+#endif
     sandbox_active = source_requested;
+    g_preload_constructing = 0;
 
     if (log_mode == LOG_STDERR && sandbox_active) {
         fprintf(stderr, "AETHER_SANDBOX: active with %d grants\n", grant_count);
@@ -600,6 +781,14 @@ static const AetherSandboxFsOps preload_ops = {
 // (aether_sandbox.c, fs_preload_here).
 __attribute__((visibility("default"))) int aether_sandbox_preload_present(void) { return 1; }
 
+// The functions behind the wrappers, for the in-process runtime's lookups
+// (aether_sandbox_stat and its kin): a lookup is not something this
+// library holds, and walking through its openat would check each directory
+// on the way as an open of it.
+__attribute__((visibility("default"))) const AetherSandboxFsOps* aether_sandbox_preload_ops(void) {
+    return &preload_ops;
+}
+
 // `path` as an absolute name: relative to the directory `dirfd` is open
 // on, or to the working directory for AT_FDCWD. An empty path (AT_EMPTY_PATH)
 // is the descriptor's own file. 0 when the descriptor names no path.
@@ -764,9 +953,11 @@ FILE* fopen(const char* path, const char* mode) {
 //
 // With a path, the file is opened by steps 1 to 3 and the stream reopened
 // on that descriptor through /proc/self/fd/N, which names the file opened
-// and nothing a swap can change; where /proc is not mounted (and on
-// FreeBSD), on the resolved path, which leaves the directories on its way
-// to a swap between the check and the reopen.
+// and nothing a swap can change. On the BSDs, which have no /proc, the
+// descriptor is put in the stream's place (dup2) and the stream reopened
+// with no name, which only sets its mode. On Linux with /proc not mounted
+// the reopen is by the resolved path, which leaves the directories on its
+// way to a swap between the check and the reopen.
 //
 // fdopen needs no wrapper: it opens nothing, and every libc refuses a mode
 // the descriptor's own access does not allow.
@@ -836,12 +1027,27 @@ static FILE* fs_freopen(freopen_fn real, const char* path, const char* mode, FIL
     }
     again[m] = '\0';
     const char* name = resolved;
+    FILE* fp = NULL;
+    int done = 0;
 #if defined(__linux__)
     char self[64];
     snprintf(self, sizeof self, "/proc/self/fd/%d", fd);
     if (access(self, F_OK) == 0) name = self;
+#else
+    // No /proc: the descriptor the walk opened is put in the stream's
+    // place (dup2), and the stream reopened on it with no name: the BSD
+    // libcs then only set the descriptor's flags and the stream's mode,
+    // refusing a mode the descriptor's access does not allow.
+    int sfd = stream ? fileno(stream) : -1;
+    if (sfd >= 0) {
+        fflush(stream);
+        if (dup2(fd, sfd) >= 0) {
+            fp = real(NULL, again, stream);
+            done = 1;
+        }
+    }
 #endif
-    FILE* fp = real(name, again, stream);
+    if (!done) fp = real(name, again, stream);
     int err = errno;
     close(fd);
     errno = err;
@@ -1243,21 +1449,16 @@ static int fs_changed_file(int dirfd, const char* path, int nofollow, char resol
 // look first, leaving only that name to a swap between the look and the
 // call).
 static int (*real_fchmodat)(int, const char*, mode_t, int) = NULL;
+static int (*real_chmod)(const char*, mode_t) = NULL;
 static int fs_chmod_at(const char* resolved, mode_t mode) {
     char name[PATH_MAX];
     int d = aether_sandbox_anchor(resolved, name, sizeof name, &preload_ops);
     if (d < 0) return -1;
-    int r = FS_REAL(fchmodat)(d, name, mode, AT_SYMLINK_NOFOLLOW);
-    if (r != 0 && (errno == ENOTSUP || errno == EOPNOTSUPP || errno == EINVAL)) {
-        struct stat st;
-        if (fstatat(d, name, &st, AT_SYMLINK_NOFOLLOW) != 0) r = -1;
-        else if (S_ISLNK(st.st_mode)) { errno = EACCES; r = -1; }
-        else r = FS_REAL(fchmodat)(d, name, mode, 0);
-    }
-    FS_AT_CALL(d, r);
+    int (*fchmodat_fn)(int, const char*, mode_t, int) = FS_REAL(fchmodat);
+    int (*chmod_fn)(const char*, mode_t) = FS_REAL(chmod);
+    FS_AT_CALL(d, aether_sandbox_chmod_at(d, name, mode, &preload_ops, fchmodat_fn, chmod_fn));
 }
 
-static int (*real_chmod)(const char*, mode_t) = NULL;
 int chmod(const char* path, mode_t mode) {
     if (!policy_in_force()) return FS_REAL(chmod)(path, mode);
     char resolved[PATH_MAX];
@@ -1507,7 +1708,7 @@ static int fs_temp_fill(char* tmpl, int suffix) {
     return 1;
 }
 
-static int fs_mkstemps(char* tmpl, int suffix, int flags) {
+static int fs_mkstemps_at(int dirfd, char* tmpl, int suffix, int flags) {
     size_t len = tmpl ? strlen(tmpl) : 0;
     if (!tmpl || suffix < 0 || len < (size_t)suffix + 6) { errno = EINVAL; return -1; }
     char keep[6];
@@ -1515,12 +1716,16 @@ static int fs_mkstemps(char* tmpl, int suffix, int flags) {
     for (int attempt = 0; attempt < 100; attempt++) {
         memcpy(tmpl + len - (size_t)suffix - 6, keep, 6);
         if (!fs_temp_fill(tmpl, suffix)) return -1;
-        int fd = fs_open_checked(AT_FDCWD, tmpl,
+        int fd = fs_open_checked(dirfd, tmpl,
                                  O_RDWR | O_CREAT | O_EXCL | (flags & ~O_ACCMODE), 0600);
         if (fd >= 0 || errno != EEXIST) return fd;
     }
     errno = EEXIST;
     return -1;
+}
+
+static int fs_mkstemps(char* tmpl, int suffix, int flags) {
+    return fs_mkstemps_at(AT_FDCWD, tmpl, suffix, flags);
 }
 
 static int (*real_mkstemp)(char*) = NULL;
@@ -1967,7 +2172,7 @@ int __open64(const char* path, int flags, ...) {
     return fs_open_checked(AT_FDCWD, path, flags | O_LARGEFILE, mode);
 }
 
-#if defined(__GLIBC__)
+#if defined(__linux__)   // glibc, and musl, which exports them too
 // __xmknod and __xmknodat: what mknod and mknodat compiled to before glibc
 // 2.33, still exported for those programs.
 static int (*real___xmknodat)(int, int, const char*, mode_t, dev_t*) = NULL;
@@ -2401,6 +2606,9 @@ static int fd_path(int fd, char out[PATH_MAX], char run[PATH_MAX]) {
 // Is any policy in force here: a grant file, or this thread's in-process
 // levels (an enforce block, a host bridge's sandboxed run)?
 static int policy_in_force(void) {
+    // The constructor's own calls (the Landlock rules it makes) are not
+    // held, and the runtime is not asked before its own constructors ran.
+    if (g_preload_constructing) return 0;
     int in_process = aether_sandbox_levels_here ? aether_sandbox_levels_here() : 0;
     return sandbox_active || in_process > 0;
 }
@@ -3582,3 +3790,210 @@ aether_syscall_arg_t syscall(aether_syscall_arg_t number, ...) {
     return real_syscall(number, args[0], args[1], args[2], args[3], args[4], args[5]);
 #endif
 }
+
+#if defined(__FreeBSD__)
+// FreeBSD's own path calls (#3751). Each is checked as the calls above are:
+// what it changes needs fs_write, what it reads or lists fs_read.
+
+// The blocks forms of scandir (clang's blocks; this file is not built with
+// -fblocks, so a block is taken by its ABI: a struct whose fourth member is
+// the function that runs it, called with the block first). Listed as
+// scandir is, its filter and comparison run through the block.
+struct fs_block { void* isa; int flags; int reserved; void (*invoke)(void); };
+static __thread void* fs_select_block;
+static __thread void* fs_compar_block;
+static int fs_select_tramp(const struct dirent* e) {
+    struct fs_block* b = (struct fs_block*)fs_select_block;
+    int (*run)(void*, const struct dirent*);
+    memcpy(&run, &b->invoke, sizeof run);
+    return run(b, e);
+}
+static int fs_compar_tramp(const struct dirent** a, const struct dirent** z) {
+    struct fs_block* b = (struct fs_block*)fs_compar_block;
+    int (*run)(void*, const struct dirent**, const struct dirent**);
+    memcpy(&run, &b->invoke, sizeof run);
+    return run(b, a, z);
+}
+static int fs_scandir_blocks(int dirfd, const char* path, struct dirent*** list, void* sel, void* cmp) {
+    void* outer_sel = fs_select_block;
+    void* outer_cmp = fs_compar_block;
+    fs_select_block = sel;
+    fs_compar_block = cmp;
+    int r = fs_list_scandir(dirfd, path, list, sel ? fs_select_tramp : NULL, cmp ? fs_compar_tramp : NULL);
+    fs_select_block = outer_sel;
+    fs_compar_block = outer_cmp;
+    return r;
+}
+
+static int (*real_scandir_b)(const char*, struct dirent***, void*, void*) = NULL;
+int scandir_b(const char* path, struct dirent*** list, void* sel, void* cmp) {
+    if (!policy_in_force()) return FS_REAL(scandir_b)(path, list, sel, cmp);
+    return fs_scandir_blocks(AT_FDCWD, path, list, sel, cmp);
+}
+
+static int (*real_scandirat_b)(int, const char*, struct dirent***, void*, void*) = NULL;
+int scandirat_b(int dirfd, const char* path, struct dirent*** list, void* sel, void* cmp) {
+    if (!policy_in_force()) return FS_REAL(scandirat_b)(dirfd, path, list, sel, cmp);
+    return fs_scandir_blocks(dirfd, path, list, sel, cmp);
+}
+
+// mkostempsat: mkostemps relative to a directory descriptor.
+static int (*real_mkostempsat)(int, char*, int, int) = NULL;
+int mkostempsat(int dirfd, char* tmpl, int suffix, int flags) {
+    if (!policy_in_force()) return FS_REAL(mkostempsat)(dirfd, tmpl, suffix, flags);
+    return fs_mkstemps_at(dirfd, tmpl, suffix, flags);
+}
+
+// File flags: chflagsat from the anchor, the name not followed (lchflags
+// and chflagsat's AT_SYMLINK_NOFOLLOW act on a link itself; chflags acts on
+// the resolution, which has no symlink at its end).
+static int (*real_chflagsat)(int, const char*, unsigned long, int) = NULL;
+static int fs_chflags_at(int dirfd, const char* path, unsigned long fl, int nofollow) {
+    char resolved[PATH_MAX];
+    if (!fs_changed_file(dirfd, path, nofollow, resolved)) return -1;
+    char name[PATH_MAX];
+    int d = aether_sandbox_anchor(resolved, name, sizeof name, &preload_ops);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(chflagsat)(d, name, fl, AT_SYMLINK_NOFOLLOW));
+}
+
+static int (*real_chflags)(const char*, unsigned long) = NULL;
+int chflags(const char* path, unsigned long fl) {
+    if (!policy_in_force()) return FS_REAL(chflags)(path, fl);
+    return fs_chflags_at(AT_FDCWD, path, fl, 0);
+}
+
+static int (*real_lchflags)(const char*, unsigned long) = NULL;
+int lchflags(const char* path, unsigned long fl) {
+    if (!policy_in_force()) return FS_REAL(lchflags)(path, fl);
+    return fs_chflags_at(AT_FDCWD, path, fl, 1);
+}
+
+int chflagsat(int dirfd, const char* path, unsigned long fl, int atflag) {
+    if (!policy_in_force()) return FS_REAL(chflagsat)(dirfd, path, fl, atflag);
+    return fs_chflags_at(dirfd, path, fl, (atflag & AT_SYMLINK_NOFOLLOW) != 0);
+}
+
+// funlinkat: unlinkat that removes the name only while it is still the
+// file `fd` is open on. The name is checked and anchored as unlinkat's.
+static int (*real_funlinkat)(int, const char*, int, int) = NULL;
+int funlinkat(int dirfd, const char* path, int fd, int flags) {
+    if (!policy_in_force()) return FS_REAL(funlinkat)(dirfd, path, fd, flags);
+    char name[PATH_MAX];
+    int d = fs_on_name(dirfd, path, name);
+    if (d < 0) return -1;
+    FS_AT_CALL(d, FS_REAL(funlinkat)(d, name, fd, flags));
+}
+
+// Calls with no form relative to a directory: checked on the resolution
+// and made on it, the resolved path given in place of the one written (a
+// swap between the check and the call is in the directories on the way
+// only, the last name having been resolved).
+#define FS_BY_NAME(RET, NAME, PARAMS, ARGS, PATHARG, NOFOLLOW, ACCESS, ARGS_RESOLVED) \
+    static RET (*real_##NAME) PARAMS = NULL;                                    \
+    RET NAME PARAMS {                                                           \
+        if (!policy_in_force()) return FS_REAL(NAME) ARGS;                      \
+        char resolved[PATH_MAX];                                                \
+        if (!fs_allowed(AT_FDCWD, PATHARG, NOFOLLOW, ACCESS, resolved)) return (RET)-1; \
+        return FS_REAL(NAME) ARGS_RESOLVED;                                     \
+    }
+
+FS_BY_NAME(int, revoke, (const char* path), (path), path, 0, AETHER_ACCESS_WRITE, (resolved))
+FS_BY_NAME(int, undelete, (const char* path), (path), path, 1, AETHER_ACCESS_WRITE, (resolved))
+FS_BY_NAME(int, unmount, (const char* path, int flags), (path, flags), path, 0, AETHER_ACCESS_WRITE,
+           (resolved, flags))
+FS_BY_NAME(long, extattr_set_file,
+           (const char* path, int ns, const char* name, const void* data, size_t n),
+           (path, ns, name, data, n), path, 0, AETHER_ACCESS_WRITE, (resolved, ns, name, data, n))
+FS_BY_NAME(long, extattr_set_link,
+           (const char* path, int ns, const char* name, const void* data, size_t n),
+           (path, ns, name, data, n), path, 1, AETHER_ACCESS_WRITE, (resolved, ns, name, data, n))
+FS_BY_NAME(int, extattr_delete_file, (const char* path, int ns, const char* name), (path, ns, name),
+           path, 0, AETHER_ACCESS_WRITE, (resolved, ns, name))
+FS_BY_NAME(int, extattr_delete_link, (const char* path, int ns, const char* name), (path, ns, name),
+           path, 1, AETHER_ACCESS_WRITE, (resolved, ns, name))
+FS_BY_NAME(int, acl_set_file, (const char* path, int type, void* acl), (path, type, acl), path, 0,
+           AETHER_ACCESS_WRITE, (resolved, type, acl))
+FS_BY_NAME(int, acl_set_link_np, (const char* path, int type, void* acl), (path, type, acl), path,
+           1, AETHER_ACCESS_WRITE, (resolved, type, acl))
+FS_BY_NAME(int, acl_delete_def_file, (const char* path), (path), path, 0, AETHER_ACCESS_WRITE,
+           (resolved))
+FS_BY_NAME(int, acl_delete_def_link_np, (const char* path), (path), path, 1, AETHER_ACCESS_WRITE,
+           (resolved))
+FS_BY_NAME(int, acl_delete_file_np, (const char* path, int type), (path, type), path, 0,
+           AETHER_ACCESS_WRITE, (resolved, type))
+FS_BY_NAME(int, acl_delete_link_np, (const char* path, int type), (path, type), path, 1,
+           AETHER_ACCESS_WRITE, (resolved, type))
+FS_BY_NAME(int, __acl_set_file, (const char* path, int type, void* acl), (path, type, acl), path, 0,
+           AETHER_ACCESS_WRITE, (resolved, type, acl))
+FS_BY_NAME(int, __acl_set_link, (const char* path, int type, void* acl), (path, type, acl), path, 1,
+           AETHER_ACCESS_WRITE, (resolved, type, acl))
+FS_BY_NAME(int, __acl_delete_file, (const char* path, int type), (path, type), path, 0,
+           AETHER_ACCESS_WRITE, (resolved, type))
+FS_BY_NAME(int, __acl_delete_link, (const char* path, int type), (path, type), path, 1,
+           AETHER_ACCESS_WRITE, (resolved, type))
+FS_BY_NAME(int, extattrctl, (const char* path, int cmd, const char* file, int ns, const char* name),
+           (path, cmd, file, ns, name), path, 0, AETHER_ACCESS_WRITE, (resolved, cmd, file, ns, name))
+
+// exect: execve with tracing on, checked as execve is.
+static int (*real_exect)(const char*, char* const[], char* const[]) = NULL;
+int exect(const char* path, char* const argv[], char* const envp[]) {
+    if (!real_exect) real_exect = dlsym(RTLD_NEXT, "exect");
+    if (policy_in_force()) {
+        if (!path || !check_grant("exec", path)) {
+            errno = EACCES;
+            return -1;
+        }
+        if (sandbox_active) {
+            char* merged_env[MAX_EXEC_ENV_ENTRIES + 1];
+            if (!child_env(envp, merged_env)) return -1;
+            return real_exect(path, argv, merged_env);
+        }
+    }
+    return real_exect(path, argv, envp);
+}
+
+// nmount: the mount point is the iovec pair named "fspath".
+struct iovec;
+static int (*real_nmount)(struct iovec*, unsigned int, int) = NULL;
+int nmount(struct iovec* iov, unsigned int n, int flags) {
+    if (policy_in_force()) {
+        struct { void* base; size_t len; } const* v = (const void*)iov;
+        const char* fspath = NULL;
+        for (unsigned i = 0; i + 1 < n; i += 2) {
+            if (v[i].base && v[i].len == sizeof "fspath" && memcmp(v[i].base, "fspath", sizeof "fspath") == 0)
+                fspath = (const char*)v[i + 1].base;
+        }
+        char resolved[PATH_MAX];
+        if (!fspath || !fs_allowed(AT_FDCWD, fspath, 0, AETHER_ACCESS_WRITE, resolved)) {
+            errno = EACCES;
+            return -1;
+        }
+    }
+    return FS_REAL(nmount)(iov, n, flags);
+}
+
+// mount(2) on FreeBSD: (type, dir, flags, data).
+static int (*real_mount)(const char*, const char*, int, void*) = NULL;
+int mount(const char* type, const char* dir, int flags, void* data) {
+    if (policy_in_force()) {
+        char resolved[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, dir, 0, AETHER_ACCESS_WRITE, resolved)) return -1;
+    }
+    return FS_REAL(mount)(type, dir, flags, data);
+}
+
+// _open and _openat: libc's own names for open and openat, exported, which
+// a program can call by name.
+int _open(const char* path, int flags, ...) {
+    FS_MODE_ARG(flags)
+    if (!policy_in_force()) return FS_REAL(openat)(AT_FDCWD, path, flags, mode);
+    return fs_open_checked(AT_FDCWD, path, flags, mode);
+}
+
+int _openat(int dirfd, const char* path, int flags, ...) {
+    FS_MODE_ARG(flags)
+    if (!policy_in_force()) return FS_REAL(openat)(dirfd, path, flags, mode);
+    return fs_open_checked(dirfd, path, flags, mode);
+}
+#endif // __FreeBSD__

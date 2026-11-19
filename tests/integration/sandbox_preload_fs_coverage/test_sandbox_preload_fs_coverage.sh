@@ -8,9 +8,10 @@
 # Two checks:
 #   1. Each name in WRAPPED that this C library exports is exported by the
 #      preload library too (a wrapper that was dropped, or never written).
-#   2. On glibc, each exported name that looks like a path call (the
-#      FAMILY pattern below) is in WRAPPED, LOOKUPS or NOT_A_PATH, so a call
-#      glibc adds later is noticed rather than left open.
+#   2. On glibc, musl and FreeBSD's libc, each exported name that looks like
+#      a path call (the FAMILY pattern below) is wrapped, a lookup, or not a
+#      path, so a call a C library adds later is noticed rather than left
+#      open.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -70,10 +71,10 @@ nm -D --defined-only "$LIB" 2>/dev/null \
 # file system"), and the program starts (exec, spawn, dlopen).
 WRAPPED="
 open open64 __open __open64 __open_2 __open64_2 openat openat64 __openat_2 __openat64_2
-creat creat64 fopen fopen64 freopen freopen64 
+creat creat64 fopen fopen64 freopen freopen64
 opendir scandir scandir64 scandirat scandirat64 glob glob64 nftw nftw64 ftw ftw64
 fts_open fts_read fts64_open fts64_read
-unlink unlinkat remove rmdir mkdir mkdirat mknod mknodat __xmknod __xmknodat mkfifo mkfifoat
+unlink unlinkat remove rmdir mkdir mkdirat mknod mknodat mkfifo mkfifoat
 rename renameat symlink symlinkat link linkat
 chmod fchmodat lchmod chown lchown fchownat truncate truncate64
 utime utimes lutimes futimesat utimensat
@@ -85,7 +86,16 @@ posix_spawn posix_spawnp posix_spawn_file_actions_addopen dlopen
 # Linux only: the calls (or their shapes) the BSDs do not share.
 WRAPPED_LINUX="
 mount umount umount2 renameat2 setxattr lsetxattr removexattr lremovexattr open_by_handle_at
-execveat pidfd_spawn pidfd_spawnp dlmopen
+execveat pidfd_spawn pidfd_spawnp dlmopen __xmknod __xmknodat
+"
+# FreeBSD only: its file flags, extended attributes and ACLs set by path,
+# its blocks forms, its mount calls, and libc's own exported open names.
+WRAPPED_FREEBSD="
+scandir_b scandirat_b mkostempsat chflags lchflags chflagsat funlinkat revoke undelete
+mount unmount nmount extattrctl extattr_set_file extattr_set_link extattr_delete_file
+extattr_delete_link acl_set_file acl_set_link_np acl_delete_def_file acl_delete_def_link_np
+acl_delete_file_np acl_delete_link_np __acl_set_file __acl_set_link __acl_delete_file
+__acl_delete_link exect execvP _open _openat
 "
 
 # Lookups: they read no file's content and change nothing, so they are not
@@ -98,18 +108,27 @@ LOOKUPS="
 stat stat64 lstat lstat64 fstatat fstatat64 statx __xstat __xstat64 __lxstat __lxstat64
 __fxstatat __fxstatat64 access faccessat euidaccess eaccess readlink readlinkat realpath
 canonicalize_file_name getxattr lgetxattr listxattr llistxattr statfs statfs64 statvfs
-statvfs64 __statfs pathconf name_to_handle_at chdir chroot open_tree mount_setattr
+statvfs64 __statfs pathconf lpathconf name_to_handle_at chdir chroot open_tree mount_setattr
 posix_spawn_file_actions_addchdir_np
+extattr_get_file extattr_get_link extattr_list_file extattr_list_link
+acl_get_file acl_get_link_np __acl_get_file __acl_get_link __acl_aclcheck_file
+__acl_aclcheck_link acl_valid_file_np acl_valid_link_np acl_extended_file_np
+acl_extended_file_nofollow_np acl_extended_link_np
 "
 
 # Names the FAMILY pattern finds that take no path: a descriptor, a stream,
-# a terminal, a log, an fts or glob handle already opened, or (create_module)
-# a kernel module.
+# a terminal, a log, an fts or glob handle already opened, a kernel module
+# (create_module), a link-level address (link_addr), an ACL in memory.
 NOT_A_PATH="
 open_memstream open_wmemstream openlog openpty fopencookie create_module
 globfree globfree64 glob_pattern_p
 fts_close fts_children fts_set fts64_close fts64_children fts64_set
+fts_get_clientptr fts_get_stream fts_set_clientptr link_addr link_ntoa
 "
+# On Linux glibc keeps BSD names that only fail with ENOSYS there.
+if [ "$os" = Linux ]; then
+    NOT_A_PATH="$NOT_A_PATH chflags lchflags revoke"
+fi
 
 in_list() {
     case " $(echo "$2" | tr '\n' ' ') " in
@@ -118,9 +137,20 @@ in_list() {
     return 1
 }
 
+# Which C library this is: glibc, musl or FreeBSD's.
+flavour=other
+if grep -qx 'gnu_get_libc_version' "$TMP/libc.names"; then
+    flavour=glibc
+elif [ "$os" = FreeBSD ]; then
+    flavour=freebsd
+elif [ "$os" = Linux ]; then
+    flavour=musl
+fi
+
 fail=0
 ALL_WRAPPED="$WRAPPED"
 if [ "$os" = Linux ]; then ALL_WRAPPED="$WRAPPED $WRAPPED_LINUX"; fi
+if [ "$os" = FreeBSD ]; then ALL_WRAPPED="$WRAPPED $WRAPPED_FREEBSD"; fi
 
 # 1. Every wrapped name this libc has, the preload has.
 missing=""
@@ -136,23 +166,35 @@ else
     echo "  [PASS] every wrapped entry point this C library exports is wrapped"
 fi
 
-# 2. On glibc, nothing that looks like a path call is left unclassified.
-if grep -qx 'gnu_get_libc_version' "$TMP/libc.names"; then
-    FAMILY='^_*(open|creat|fopen|freopen|opendir|scandir|glob|n?ftw|fts|unlink|remove|rmdir|mkdir|mknod|mkfifo|rename|symlink|link|chmod|lchmod|fchmodat|chown|lchown|fchownat|truncate|utime|lutime|futimesat|utimensat|setxattr|lsetxattr|removexattr|lremovexattr|mkstemp|mkostemp|mkdtemp|tmpfile|stat|lstat|fstatat|statx|access|faccessat|euidaccess|eaccess|readlink|realpath|canonicalize_file_name|getxattr|lgetxattr|listxattr|llistxattr|statfs|statvfs|pathconf|name_to_handle_at|chdir|chroot|mount|umount|exec|fexecve|pidfd_spawn|dlopen|dlmopen|__xmknod|__xstat|__lxstat|__fxstatat)'
+# 2. On glibc, musl and FreeBSD's libc, nothing that looks like a path call
+#    is left unclassified.
+FAMILY='^_*(open|creat|fopen|freopen|opendir|scandir|glob|n?ftw|fts|unlink|remove|rmdir|mkdir|mknod|mkfifo|rename|symlink|link|chmod|lchmod|fchmodat|chown|lchown|fchownat|truncate|utime|lutime|futimesat|utimensat|setxattr|lsetxattr|removexattr|lremovexattr|mkstemp|mkostemp|mkdtemp|tmpfile|stat|lstat|fstatat|statx|access|faccessat|euidaccess|eaccess|readlink|realpath|canonicalize_file_name|getxattr|lgetxattr|listxattr|llistxattr|statfs|statvfs|pathconf|lpathconf|name_to_handle_at|chdir|chroot|mount|umount|unmount|nmount|exec|fexecve|pidfd_spawn|dlopen|dlmopen|__xmknod|__xstat|__lxstat|__fxstatat|chflags|lchflags|funlinkat|revoke|undelete|extattr|acl_|__acl_)'
+if [ "$flavour" != other ]; then
     unknown=""
     for name in $(grep -E "$FAMILY" "$TMP/libc.names"); do
         case "$name" in
             posix_spawnattr_*) continue ;;
+            # An ACL or an extended attribute held in memory or reached
+            # through a descriptor: no path.
+            acl_*_fd|acl_*_fd_np|__acl_*_fd|extattr_*_fd) continue ;;
+            extattr_namespace_to_string|extattr_string_to_namespace) continue ;;
         esac
         if in_list "$name" "$ALL_WRAPPED" || in_list "$name" "$LOOKUPS" || in_list "$name" "$NOT_A_PATH"; then
             continue
         fi
-        # A fortified lookup (__readlink_chk, __realpath_chk) is its lookup.
         case "$name" in
+            # A fortified lookup (__readlink_chk, __realpath_chk) is its lookup.
             __*_chk)
                 base="${name#__}"
                 base="${base%_chk}"
                 if in_list "$base" "$LOOKUPS"; then continue; fi ;;
+            # The rest of FreeBSD's acl_* build and read ACLs in memory; the
+            # ones that take a path are listed above.
+            acl_*)
+                case "$name" in
+                    *_file*|*_link*) ;;
+                    *) continue ;;
+                esac ;;
         esac
         unknown="$unknown $name"
     done
@@ -167,13 +209,13 @@ if grep -qx 'gnu_get_libc_version' "$TMP/libc.names"; then
         unknown="$unknown $name"
     done
     if [ -n "$unknown" ]; then
-        echo "  [FAIL] path calls neither wrapped nor classified:$unknown"
+        echo "  [FAIL] path calls neither wrapped nor classified ($flavour):$unknown"
         fail=1
     else
-        echo "  [PASS] every path call glibc exports is wrapped or classified"
+        echo "  [PASS] every path call this C library ($flavour) exports is wrapped or classified"
     fi
 else
-    echo "  [SKIP] the unclassified-name sweep runs on glibc"
+    echo "  [SKIP] the unclassified-name sweep knows glibc, musl and FreeBSD's libc"
 fi
 
 echo ""

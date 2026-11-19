@@ -2301,7 +2301,7 @@ else ifeq ($(shell uname -s),FreeBSD)
 SANDBOX_PRELOAD := $(BUILD_DIR)/libaether_sandbox.so
 endif
 ifneq ($(SANDBOX_PRELOAD),)
-$(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_path.h runtime/aether_sandbox_match.h
+$(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_path.h runtime/aether_sandbox_match.h runtime/sandbox/aether_landlock.h
 	@echo "Building sandbox preload library..."
 	@mkdir -p $(dir $@)
 	@# The old library goes first: a rebuild that failed left it in place and

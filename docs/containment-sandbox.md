@@ -406,16 +406,41 @@ the kernel stands behind it.
 `run_sandboxed`). The checks are std's own, made by the calling thread
 against its levels.
 
-- Holds: every std call in the table above, checked where its path leads.
-  The call is then made on the path the check resolved, following no
-  symlink: an open with `openat2` and `RESOLVE_NO_SYMLINKS` on Linux where
-  the kernel has it, otherwise one directory at a time from `/` with
-  `O_NOFOLLOW`; a call on a name (unlink, rmdir, rename, mkdir, symlink,
-  link, chmod) with its `*at` variant from that directory. A directory
-  swapped for a symlink by another thread or process between the check and
-  the call fails the call instead of being followed out of the grant
-  (#3751). On Windows an open is checked a second time on the final path
-  of what it opened (`GetFinalPathNameByHandleW`), and refused there.
+- Holds: every std call in the table above, checked where its path leads,
+  and made on what was checked (#3751), so a directory swapped for a
+  symlink or a junction by another thread or process between the check and
+  the call is not followed out of the grant:
+  - On POSIX the call is made on the resolution following no symlink: an
+    open with `openat2` and `RESOLVE_NO_SYMLINKS` on Linux where the kernel
+    has it, otherwise one directory at a time from `/` with `O_NOFOLLOW`; a
+    call on a name (unlink, rmdir, rename, mkdir, symlink, link, chmod, a
+    lookup) with its `*at` variant from the directory opened that way.
+    `fs.write_atomic` makes its temporary and renames it from that
+    directory; `fs.make_temp_file` and `fs.make_temp_dir` make their name
+    in the directory that was checked; `fs.walk` descends with `openat`
+    from each directory; the lookups (`fs.exists`, `fs.stat`, `fs.size`,
+    `fs.mtime`, `fs.is_dir`, `fs.is_symlink`, `fs.readlink`,
+    `fs.realpath`, `fs.statvfs`) are `fstatat` (or `readlinkat`, or
+    `fstatvfs` of a walked descriptor) from the anchor; `fs.watch`
+    watches the walked descriptor through `/proc/self/fd/N` (inotify) or
+    the descriptor itself (kqueue).
+  - On Windows what a call acts on, or the directory it acts in, is opened
+    without changing it and the final path of the handle is checked
+    (`GetFinalPathNameByHandleW`) before anything happens: an open for
+    writing never truncates or creates by name (no `CREATE_ALWAYS` or
+    `TRUNCATE_EXISTING`); the file is emptied with `SetEndOfFile` once
+    verified, and a file the call created and then refused is deleted
+    through its handle. Unlink, rmdir and remove set the disposition of a
+    handle opened with `DELETE` and `FILE_FLAG_OPEN_REPARSE_POINT`; rename
+    and a hard link go through `NtSetInformationFile` with the verified
+    destination directory as `RootDirectory`; mkdir, `mkdir -p`,
+    `fs.write_atomic`'s temporary and the temporary files are made by
+    `NtCreateFile` relative to a verified directory; `fs.copy` copies
+    between two checked handles; a lookup, `fs.readlink` and
+    `fs.realpath` verify the handle they read; `fs.watch` reads changes
+    from a verified directory handle (`ReadDirectoryChangesW`). A symlink
+    is made by name (`CreateSymbolicLinkW` has no handle form), then
+    opened and verified, and removed again if a swap sent it elsewhere.
 - Calls on a name check that name (its directory resolved, the name kept),
   not where a symlink there leads: removing a symlink in a granted
   directory that points out is allowed and leaves its target alone, and
@@ -423,15 +448,21 @@ against its levels.
   hard link needs `fs_write` on the new name, and the new name may not
   reach the file more than the old one may (`fs_read` and `fs_write` on
   the target for whichever the new name has).
+- `fs.lock_open` needs `fs_write`, as it always has; inside an enforce
+  block its descriptor reads as well only where `fs_read` is granted too
+  (the lock itself, `flock` or `LockFileEx`, takes a write-only one).
 - Does not hold: code that does not go through std (an extern, inline
   assembly, a library's own calls), other threads (each thread has its own
-  levels), and on Windows the side effect of an open that a junction
-  swapped in redirected (a `"w"` open has truncated the file it reached
-  before the second check refuses it). `fs.write_atomic`'s temporary and
-  its rename, `fs.lock_open`, the temporary files of `fs.make_temp_file`
-  and `fs.make_temp_dir`, and the lookups (`fs.exists`, `fs.stat`,
-  `fs.realpath`, `fs.watch`) are checked on the path and then made on it,
-  so a swap between the two moves them. There is no kernel backstop.
+  levels), and a few windows that remain by the platform's design. On
+  Windows a symlink exists for a moment, by name, before it is verified and
+  removed; a hard link and a file that a swapped-in junction would create
+  are refused before anything changes. On a POSIX system whose `*at` calls
+  re-resolve by name instead of from the descriptor (Cygwin and MSYS2
+  emulate them so), the walk holds nothing more than a check by name.
+  Without `/proc` on Linux, `fs.watch` watches by name and compares the
+  file it reaches with the one it opened. There is no kernel backstop: the
+  levels are entered and left, and Landlock cannot be lifted once applied,
+  so an in-process enforce block cannot ask the kernel to hold it.
 
 **Standalone preload** (`LD_PRELOAD=libaether_sandbox.so` with a grant
 file, the shared memory or the descriptor `spawn_sandboxed` hands over).
@@ -446,42 +477,72 @@ the process.
   `renameat`, `renameat2`, `symlink`, `link`, `chmod`, `lchmod`,
   `fchmodat`, `chown`, `lchown`, `fchownat`, `truncate`, the times, the
   extended attributes, `mkstemp` and its kin, `mkdtemp`, `tmpfile`,
-  `open_by_handle_at`, `mount`, `posix_spawn_file_actions_addopen`), each
-  made in the same three steps as in-process: resolved (relative to its
-  directory descriptor for an `*at` call, read from `/proc/self/fd` or
-  `F_KINFO`; it was the working directory), checked, and made on the
-  resolution following no symlink. The process starts (`execve` and the
-  rest of the family, `posix_spawn`, `fork`, `system`, `popen`), `dlopen`
-  and `dlmopen`, `connect`, `bind`, `listen`, `accept`, `getenv`, raw
-  `syscall()`, and executable memory. A test lists every path call of the
-  C library and fails on one that is neither wrapped nor named as a
-  lookup (`tests/integration/sandbox_preload_fs_coverage`).
+  `open_by_handle_at`, `mount`, `posix_spawn_file_actions_addopen`; on
+  FreeBSD also `scandir_b`, `scandirat_b`, `mkostempsat`, the file flags,
+  the extended attributes and ACLs set by path, `funlinkat`, `revoke`,
+  `undelete`, `nmount`, `unmount`, `exect` and libc's exported `_open` and
+  `_openat`), each made in the same three steps as in-process: resolved
+  (relative to its directory descriptor for an `*at` call, read from
+  `/proc/self/fd` or `F_KINFO`; it was the working directory), checked, and
+  made on the resolution following no symlink. A chmod that glibc before
+  2.32 cannot make without following goes through `/proc/self/fd/N` of the
+  name opened `O_PATH|O_NOFOLLOW`, or through a descriptor opened for it.
+  A `freopen` with a path reopens the stream through `/proc/self/fd/N` of
+  the file the walk opened, or on the BSDs puts that descriptor in the
+  stream's place (`dup2`) and reopens it with no name. The process starts
+  (`execve` and the rest of the family, `posix_spawn`, `fork`, `system`,
+  `popen`), `dlopen` and `dlmopen`, `connect`, `bind`, `listen`, `accept`,
+  `getenv`, raw `syscall()`, and executable memory. A test lists every
+  path call of glibc, musl and FreeBSD's libc and fails on one that is
+  neither wrapped nor named as a lookup
+  (`tests/integration/sandbox_preload_fs_coverage`).
 - Lookups are not wrapped: `stat` and its kin, `access`, `readlink`,
-  `realpath`, `getxattr`, `statfs`, `pathconf`, `chdir`. They say that a
-  name exists and what it is, never what it holds, and libc and the
-  runtime make them for their own needs (a `PATH` search, the resolution
-  above). `mkdir` of a name that exists answers `EEXIST` without a grant,
-  as a lookup would, so `mkdir -p` works through the directories above a
-  grant.
-- Does not hold: anything that does not call libc's exported functions (a
-  static binary, a raw `syscall` instruction, `io_uring`), libc's calls to
-  itself (glibc's `fopen` opens on its internal `open`, which is why
-  `fopen` has a wrapper of its own), and a process that unsets
-  `LD_PRELOAD` before an exec the policy allowed. There is no kernel
-  backstop in this mode.
+  `realpath`, `getxattr`, `statfs`, `pathconf`, `chdir`, FreeBSD's ACL and
+  extended attribute reads. They say that a name exists and what it is,
+  never what it holds, and libc and the runtime make them for their own
+  needs (a `PATH` search, the resolution above). `mkdir` of a name that
+  exists answers `EEXIST` without a grant, as a lookup would, so `mkdir -p`
+  works through the directories above a grant.
+- **A permanent policy is held by the kernel too.** A grant file (or the
+  shared memory or descriptor) with the line `policy:permanent` says the
+  policy is the process's for its whole life. The constructor then applies
+  Landlock to the whole process from its grants, before `main`: `fs_read`,
+  `fs_write`, `fs` and `exec` grants become Landlock rules as they do for a
+  spawned child, tcp grants with a port become connect rules on Landlock
+  ABI 4 and up (with no tcp grant, connect is refused; a tcp grant with no
+  port or a `tcp_listen` grant leaves that right to the wrappers), and the
+  floor a running program needs is added (the loader's cache and its C
+  library's directory, the locale archive, `/dev/null`, `/dev/urandom`).
+  The log is opened first, and the restriction sets `PR_SET_NO_NEW_PRIVS`,
+  so a set-user-ID program the process starts no longer gains its owner's
+  rights. Without the line nothing changes. On a kernel without Landlock,
+  or with a grant Landlock cannot express (a suffix pattern such as
+  `*.log`), the policy holds at libc only, and the log says so
+  (`AETHER_SANDBOX: landlock: ...`).
+- Does not hold, without `policy:permanent` or without Landlock: anything
+  that does not call libc's exported functions (a static binary, a raw
+  `syscall` instruction, `io_uring`), libc's calls to itself (glibc's
+  `fopen` opens on its internal `open`, which is why `fopen` has a wrapper
+  of its own), and a process that unsets `LD_PRELOAD` before an exec the
+  policy allowed. On Linux with `/proc` not mounted, an `*at` call from a
+  directory descriptor is refused (the descriptor's path cannot be read)
+  and a `freopen` with a path reopens by the resolved name. FreeBSD's ACL,
+  extended attribute and `revoke` calls have no form relative to a
+  directory and are made by the resolved name.
 
 **Spawned child** (`spawn_sandboxed`, `sandbox.spawn_socket`). The
 preload, as above, inside the child, and on Linux the kernel behind it:
 Landlock holds the child's file access to the grants (read and write by
 path, inherited by everything it starts, a static binary included), and a
 seccomp filter holds process creation, `ptrace` and the other raw calls
-listed below. On FreeBSD an Aether child also enters Capsicum. This is the
-only mode where a call that goes round libc meets a wall.
+listed below. On FreeBSD an Aether child also enters Capsicum. With a
+permanent policy the standalone preload's process has the Landlock half of
+this; the seccomp filter stays the spawn's.
 
 Choose by what runs: trusted Aether code limiting itself, in-process;
 cooperative native code (a plugin, an interpreter) in this process, the
-preload; code that may try to escape, a spawned child on Linux or FreeBSD.
-
+preload, with `policy:permanent` where nothing will lift the policy; code
+that may try to escape, a spawned child on Linux or FreeBSD.
 
 ## Per-function effect tags
 
