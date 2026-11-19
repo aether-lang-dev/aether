@@ -297,9 +297,18 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
         printf 'tcp_listen:*\nenv:TARGET\nenv:LISTEN\ntcp:%s\n' "$1" >"$TMP/grants"
         _listen=v4
         [ "$2" = "::1" ] && _listen=v6
+        _rc=0
         _got=$(LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$TMP/grants" \
-               TARGET="$2" LISTEN="$_listen" "$TMP/dial" 2>&1) || :
-        [ "$_got" = "$3" ] || fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
+               TARGET="$2" LISTEN="$_listen" "$TMP/dial" 2>&1) || _rc=$?
+        if [ "$_got" != "$3" ]; then
+            # Say how the dial ended, and run it once more with the sandbox's
+            # log on, so a failure names its cause instead of an empty string.
+            LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=stderr AETHER_SANDBOX_GRANTS="$TMP/grants" \
+                TARGET="$2" LISTEN="$_listen" "$TMP/dial" >"$TMP/dial.again" 2>&1
+            printf '    dial exited %s; again with the sandbox log (exit %s):\n' "$_rc" "$?"
+            sed 's/^/      /' "$TMP/dial.again" | head -40
+            fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
+        fi
     }
     dial "127.0.0.1" "127.0.0.1" allowed
     dial "127.0.0.1" "::ffff:127.0.0.1" allowed
