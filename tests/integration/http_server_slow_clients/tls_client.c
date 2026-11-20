@@ -6,6 +6,8 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/bio.h>
+#include <stdio.h>
+#include <errno.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -35,7 +37,14 @@ void* slow_tls_connect(int fd) {
     SSL* ssl = SSL_new(ctx);
     SSL_CTX_free(ctx);   /* the SSL holds its own reference */
     if (!ssl) return 0;
-    if (SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1) {
+    int rc = SSL_set_fd(ssl, fd) != 1 ? -2 : SSL_connect(ssl);
+    if (rc != 1) {
+        /* Why, so a round that fails here says so in the run log. */
+        char why[256] = "";
+        unsigned long e = ERR_peek_last_error();
+        if (e) ERR_error_string_n(e, why, sizeof why);
+        fprintf(stderr, "    tls client: handshake failed (rc %d, SSL_get_error %d, errno %d): %s\n",
+                rc, rc == -2 ? -1 : SSL_get_error(ssl, rc), errno, why[0] ? why : "no OpenSSL error");
         ERR_clear_error();
         SSL_free(ssl);
         return 0;
