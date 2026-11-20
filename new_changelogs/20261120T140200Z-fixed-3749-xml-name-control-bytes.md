@@ -5,3 +5,6 @@
   pretty printer wrote it back out. Such a byte now ends the name and the
   tag is refused as malformed. Names are otherwise read as leniently as
   before. Found by the XML fuzz target.
+  An empty CDATA section (`<![CDATA[]]>`) is no text event: the reader
+  gave one with no characters, which the builder's copy of the document
+  (writing empty text as nothing) did not have.

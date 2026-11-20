@@ -503,6 +503,14 @@ int xml_next(XmlParser* p) {
                     return xml_fail_at(p, k, msg);
                 }
             }
+            /* An empty section holds no character data, so it is no text
+             * event: one with no characters read back from nothing, and a
+             * document and its builder's copy differed by an event (the xml
+             * fuzz target's round trip, #3749). */
+            if (n == 0) {
+                p->pos = (size_t)(end - p->buf) + 3;
+                continue;
+            }
             p->text = (char*)malloc(n + 1);
             if (!p->text) return xml_fail(p, "out of memory in CDATA");
             memcpy(p->text, p->buf + s, n);

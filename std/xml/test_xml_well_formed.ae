@@ -70,6 +70,31 @@ raw(b0: int, b1: int, b2: int, b3: int, n: int) -> string {
     return bytes.finish(b, n)
 }
 
+// `doc` must parse to EOF with `want` text events.
+text_events(doc: string, want: int) -> int {
+    p = xml.parser(doc)
+    n = 0
+    err = ""
+    done = 0
+    while done == 0 {
+        ev = xml.next(p)
+        if ev == xml.EVENT_EOF {
+            done = 1
+        } else if ev == xml.EVENT_ERROR {
+            err = xml.error(p)
+            done = 1
+        } else if ev == xml.EVENT_TEXT {
+            n = n + 1
+        }
+    }
+    xml.free(p)
+    if err != "" || n != want {
+        println("  FAIL: ${doc}: ${n} text events, want ${want} ('${err}')")
+        return 1
+    }
+    return 0
+}
+
 main() {
     println("=== test_xml_well_formed ===")
     fails = 0
@@ -149,6 +174,13 @@ main() {
     fails = fails + accept("<!DOCTYPE d [ <!ELEMENT d ANY> <!ENTITY e \"x\"> ]><d>a&e;b&amp;</d>", "a&e;b&")
     fails = fails + refuse("<!DOCTYPE d><d>&e;</d>", "reference to undeclared entity &e;")
     fails = fails + refuse("<!DOCTYPE d [<!ELEMENT d ANY>]><d>&e;</d>", "reference to undeclared entity &e;")
+
+    // An empty CDATA section holds no character data: no text event, so a
+    // document and the builder's copy of it (which writes empty text as
+    // nothing) read alike. The reader gave an event with no text (#3749).
+    fails = fails + text_events("<a><![CDATA[]]></a>", 0)
+    fails = fails + text_events("<a>x<![CDATA[]]>y</a>", 2)
+    fails = fails + text_events("<a><![CDATA[z]]></a>", 1)
 
     if fails > 0 {
         println("FAIL: ${fails} checks failed")
