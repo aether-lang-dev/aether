@@ -953,6 +953,9 @@ static int px_copy(AetherProxyExchange* px) {
                         const char* v = colon + 1;
                         while (v < eol && (*v == ' ' || *v == '\t')) v++;
                         size_t vl = (size_t)(eol - v);
+                        /* Neither leading nor trailing whitespace is part of a
+                         * value (RFC 9110 5.5); the pass-through trims both too. */
+                        while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
 
                         /* The value only has to be NUL-terminated for the
                          * setter. Doing that with an allocation cost a
@@ -1283,6 +1286,10 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
         const char* v = colon + 1;
         while (v < cr && (*v == ' ' || *v == '\t')) v++;
         size_t vl = (size_t)(cr - v);
+        /* Leading and trailing whitespace is not part of a value (RFC 9110
+         * 5.5), as the copying path reads it: "Content-Length: 1   " went
+         * out as "1   " there and "1" here (#3749). */
+        while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
 
         /* A name or value carrying a line ending would end the head early and
          * let the rest be read as a second response (CWE-113). The copying
