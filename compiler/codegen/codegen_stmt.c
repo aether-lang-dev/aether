@@ -11653,8 +11653,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         copy->node_type = stmt->node_type ? clone_type(stmt->node_type) : NULL;
                         add_child(copy, stmt->children[0]);
                         add_child(copy, stmt->children[1]);
+                        /* The body only: this statement's prelude has run,
+                         * and a match, an `or` block or a trailing block on
+                         * the right is bound already. Through
+                         * generate_statement it was emitted again, and the
+                         * bound name printed as an undeclared one. */
                         print_indent(gen);
-                        generate_statement(gen, copy);
+                        generate_statement_body(gen, copy);
                         print_indent(gen);
                         emit_state_store_open(gen, stmt->value);
                         fprintf(gen->output, "_ae_sv); }\n");

@@ -361,12 +361,15 @@ static inline void aether_slice_release_msg(const void* p) {
  * functions, noreturn was only inferred, with the definition visible and
  * optimization on, and cl.exe and -Og builds inlined the message's
  * argument setup and its variadic call into every indexing site. Still
- * `static inline`, with inlining refused: a program has its own copy, there
- * is no runtime symbol to link, and one that never uses a helper gets no
- * code for it (a plain `static` function was emitted unused at -O0, 224
- * bytes in every program). */
+ * `static inline`: a program has its own copy, there is no runtime symbol
+ * to link, and one that never uses a helper gets no code for it (a plain
+ * `static` function was emitted unused at -O0, 224 bytes in every program).
+ * GCC and clang keep a cold function out of its callers without being told
+ * (MinGW GCC at -O2: 144 bytes of hot code where main has 256); `noinline`
+ * beside `inline` is an -Wattributes error under -Werror. cl.exe, which
+ * has no cold, is told noinline. */
 #if defined(__GNUC__) || defined(__clang__)
-#define AETHER_SLICE_FAIL static inline __attribute__((cold, noinline, noreturn))
+#define AETHER_SLICE_FAIL static inline __attribute__((cold, noreturn))
 #elif defined(_MSC_VER)
 #define AETHER_SLICE_FAIL static __inline __declspec(noinline) __declspec(noreturn)
 #else

@@ -8,12 +8,14 @@
 // statement has for a float right side: `n %= 2.5` did not compile (C has no
 // `%` on a double) and `n *= 2.5` past the int range was a plain, undefined
 // conversion where a local saturates (#3524). And `&count` took the address
-// of the relaxed load, which C refused. Each result here is compared with
-// the same statement on a local.
+// of the relaxed load, which C refused. Then op= on a copy of the field
+// emitted its right side's control prelude twice: a `match` or an `or`
+// block there printed its bound name undeclared. Each result here is
+// compared with the same statement on a local.
 
 extern exit(code: int)
 
-message Go {}
+message Go { b: int }
 message Done {}
 
 actor A {
@@ -25,8 +27,12 @@ actor A {
     state wide: long = 4000000000000000000
     state frac: int = 10
     state addr_ok = 0
+    state m: int = 5
+    state orv: int = 1
     receive {
-        Go() -> {
+        Go(b) -> {
+            m += match b { 6 -> 10 _ -> 0 }
+            orv += half(b - 10) or { 7 }
             rem %= 2.5
             big *= 2.5
             neg *= 2.5
@@ -39,6 +45,11 @@ actor A {
         }
         Done() -> {}
     }
+}
+
+half(n: int) -> int! {
+    if n < 0 { return 0, "negative" }
+    return n / 2
 }
 
 fn check(cond: bool, msg: string) {
@@ -65,7 +76,13 @@ main() {
     frac -= 0.75
 
     a = spawn(A())
-    a ! Go {}
+    int m = 5
+    b = 6
+    m += match b { 6 -> 10 _ -> 0 }
+    int orv = 1
+    orv += half(b - 10) or { 7 }
+
+    a ! Go { b: 6 }
     wait_for_idle()
     check(a.rem == rem, "rem %= 2.5: state ${a.rem}, local ${rem}")
     check(a.big == big && big == 2147483647, "big *= 2.5 saturates: state ${a.big}, local ${big}")
@@ -75,5 +92,7 @@ main() {
     check(a.wide == wide, "wide *= 3.5: state ${a.wide}, local ${wide}")
     check(a.frac == frac, "frac -= 0.75: state ${a.frac}, local ${frac}")
     check(a.addr_ok == 1, "&rem is the field's address")
+    check(a.m == m && m == 15, "m += match: state ${a.m}, local ${m}")
+    check(a.orv == orv && orv == 8, "orv += f() or {}: state ${a.orv}, local ${orv}")
     println("PASS: state op= follows the rules of a local's")
 }

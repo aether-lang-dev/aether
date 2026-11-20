@@ -88,12 +88,24 @@ static int pad_cmp(const void* a, const void* b) {
     return strcmp(*(char* const*)a, *(char* const*)b);
 }
 
-/* Whether `path` is a symbolic link (on Windows, any reparse point: a
- * symlink or a junction). */
+/* Whether `path` is a symbolic link (on Windows, a symlink or a junction:
+ * a reparse point of those two tags. Other reparse points are ordinary
+ * files and folders, a OneDrive placeholder among them). */
+#ifndef IO_REPARSE_TAG_SYMLINK
+#define IO_REPARSE_TAG_SYMLINK 0xA000000CL
+#endif
+#ifndef IO_REPARSE_TAG_MOUNT_POINT
+#define IO_REPARSE_TAG_MOUNT_POINT 0xA0000003L
+#endif
 static int pad_is_link(const char* path) {
 #ifdef _WIN32
     DWORD a = GetFileAttributesA(path);
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(path, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 1;   /* cannot tell: treated as a link, never followed */
+    FindClose(h);
+    return fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK || fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT;
 #else
     struct stat st;
     return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
@@ -188,6 +200,10 @@ static int pad_write_file(const char* path, const char* data, size_t len) {
     struct stat st;
     int have_mode = stat(path, &st) == 0;
     int mode = have_mode ? (int)(st.st_mode & 07777) : 0644;
+    /* A file the run may not write is left alone, and before a temporary
+     * exists: on Windows a read-only one could be neither replaced nor its
+     * read-only temporary removed. */
+    if (have_mode && access(path, W_OK) != 0) return -1;
     size_t need = strlen(path) + 48;
     char* tmp = (char*)malloc(need);
     if (!tmp) return -1;
@@ -195,7 +211,7 @@ static int pad_write_file(const char* path, const char* data, size_t len) {
     int fd = -1;
     for (int tries = 0; tries < 100 && fd < 0; tries++) {
         snprintf(tmp, need, "%s.pad-%ld-%u", path, (long)getpid(), seq++);
-        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, mode);
+        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, mode | 0200);
         if (fd < 0 && errno != EEXIST) break;
     }
     if (fd < 0) { free(tmp); return -1; }
@@ -647,6 +663,9 @@ typedef struct {
     PadRefusal* refs;
     int nrefs;
     int refcap;
+    /* A file of the run did not compile, so what it hands to C is not
+     * known: no module's struct is rewritten. */
+    int incomplete;
 } PadRun;
 
 /* The next line of `*cur` (cut in place, '\r' dropped), or NULL. */
@@ -686,9 +705,11 @@ static void pad_plan_run(PadRun* run, const PadList* files, const PadOpts* o, in
         p->canon = pad_canon(p->path);
         char* text = NULL;
         if (aetherc_capture_stdout_whole(flags, p->path, NULL, &text) != 0) {
-            fprintf(stderr, "ae pad: %s does not compile; nothing rewritten\n", p->path);
+            fprintf(stderr, "ae pad: %s does not compile; nothing rewritten in it, nor in any "
+                            "module, since what it hands to C is not known\n", p->path);
             free(text);
             *bad = 1;
+            run->incomplete = 1;
             continue;
         }
         p->plan = text;
@@ -759,6 +780,10 @@ static const char* pad_run_refusal(const PadRun* run, const PadPlan* p, const ch
             *from = r->from;
             return r->reason;
         }
+    }
+    if (!p->has_main && run->incomplete) {
+        *from = NULL;
+        return "a file of this run does not compile, so its uses of this module are not known";
     }
     if (!p->has_main) {
         for (int j = 0; j < run->nplans; j++)
@@ -1007,6 +1032,33 @@ int cmd_pad(int argc, char** argv) {
         if (!pad_walk(paths.v[i], &files)) {
             fprintf(stderr, "ae pad: no such path: %s\n", paths.v[i]);
             bad = 1;
+        }
+    }
+    /* One entry per file however many paths reach it (`src src/a.ae`):
+     * phase one plans each once, and a second visit would apply a plan made
+     * before the first one's rewrite. */
+    {
+        PadList uniq;
+        memset(&uniq, 0, sizeof(uniq));
+        char** seen = (char**)calloc((size_t)(files.n > 0 ? files.n : 1), sizeof(char*));
+        int nseen = 0;
+        for (int i = 0; seen && i < files.n; i++) {
+            char* c = pad_canon(files.v[i]);
+            int dup = 0;
+            for (int k = 0; c && k < nseen && !dup; k++) dup = strcmp(seen[k], c) == 0;
+            if (dup || !c) {
+                free(c);
+                continue;
+            }
+            seen[nseen++] = c;
+            pad_list_add(&uniq, files.v[i]);
+        }
+        if (seen) {
+            for (int k = 0; k < nseen; k++) free(seen[k]);
+            free(seen);
+            for (int i = 0; i < files.n; i++) free(files.v[i]);
+            free(files.v);
+            files = uniq;
         }
     }
 

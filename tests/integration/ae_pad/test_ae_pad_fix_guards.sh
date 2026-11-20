@@ -124,6 +124,56 @@ AE
 guard_has "a module's struct used only in Aether" "$TMP/local/fix.out" \
     "src/geom/module.ae:4: struct Vec reordered to b, a, c (24 -> 16 bytes)"
 
+# Two paths that reach one file: it is planned and rewritten once. A second
+# visit applied the plan made before the first rewrite, and failed.
+guard_project overlap <<'AE'
+import geom
+
+main() {
+    v = Vec { a: 1, b: 2, c: 3 }
+    println("${v.b}")
+}
+AE
+(cd "$TMP/overlap" && "$AE" pad --fix src src/geom/module.ae > fix.out 2>&1) || {
+    echo "  [FAIL] ae_pad_fix_guards: --fix with a path inside another failed"
+    sed 's/^/        /' "$TMP/overlap/fix.out" | head -10
+    fail=1
+}
+if [ "$(grep -c "struct Vec reordered" "$TMP/overlap/fix.out")" != "1" ]; then
+    echo "  [FAIL] ae_pad_fix_guards: overlapping paths did not rewrite Vec exactly once"
+    sed 's/^/        /' "$TMP/overlap/fix.out" | head -10
+    fail=1
+fi
+
+# A program of the run that does not compile: what it hands to C is not
+# known, so no module's struct is rewritten, though another program uses
+# Vec only in Aether.
+guard_project broken <<'AE'
+import geom
+
+main() {
+    v = Vec { a: 1, b: 2, c: 3 }
+    println("${v.b}")
+}
+AE
+cat > "$TMP/broken/src/other.ae" <<'AE'
+import geom
+
+extern draw(v: *Vec)
+
+main() {
+    this does not parse
+}
+AE
+(cd "$TMP/broken" && "$AE" pad --fix src > fix.out 2>&1) && {
+    echo "  [FAIL] ae_pad_fix_guards: --fix with a program that does not compile exited 0"
+    fail=1
+}
+guard_has "a run with a file that does not compile" "$TMP/broken/fix.out" \
+    "a file of this run does not compile, so its uses of this module are not known"
+guard_same "the module beside a program that does not compile" \
+    "$TMP/broken/module_before.ae" "$TMP/broken/src/geom/module.ae"
+
 # 2. A *S that becomes an untyped ptr.
 mkdir -p "$TMP/untyped" && cd "$TMP/untyped" || exit 1
 cat > untyped.ae <<'AE'
