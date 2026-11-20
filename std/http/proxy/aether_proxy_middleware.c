@@ -135,6 +135,45 @@ static int is_hop_by_hop(const char* name) {
  * many times as the upstream sent it. Each was set, which kept the last of
  * them only, while the pass-through forwarded them all (#3749, found by the
  * proxy-response fuzzer). */
+/* Whether the Content-Length fields among the lines from `p` to `end` (a
+ * head or a header block; a line without a colon, the status line, is
+ * passed over) may be forwarded on an answer to HEAD: each value is digits
+ * only, and every one is the same. A sender does not forward a value that
+ * is not 1*DIGIT (RFC 9110 8.6), and differing values are an invalid
+ * message (RFC 9112 6.3). An answer to HEAD has no body, so its framing
+ * never reads them; neither proxy path forwards them instead, where the
+ * pass-through kept the first ("2") and the copying path the last ("0 OK")
+ * of the same answer (#3749). No Content-Length at all agrees. */
+static int proxy_head_lengths_agree(const char* p, const char* end) {
+    const char* first = NULL;
+    size_t first_len = 0;
+    while (p < end) {
+        const char* nl = memchr(p, '\n', (size_t)(end - p));
+        const char* eol = nl ? nl : end;
+        const char* le = eol;
+        if (le > p && le[-1] == '\r') le--;
+        const char* colon = memchr(p, ':', (size_t)(le - p));
+        if (colon && colon - p == 14 && http_ci_eq(p, "Content-Length", 14)) {
+            const char* v = colon + 1;
+            while (v < le && (*v == ' ' || *v == '\t')) v++;
+            const char* ve = le;
+            while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            if (ve == v) return 0;
+            for (const char* c = v; c < ve; c++)
+                if (*c < '0' || *c > '9') return 0;
+            if (!first) {
+                first = v;
+                first_len = (size_t)(ve - v);
+            } else if ((size_t)(ve - v) != first_len || memcmp(first, v, first_len) != 0) {
+                return 0;
+            }
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return 1;
+}
+
 static void proxy_put_header(HttpServerResponse* res, const char* key, const char* value) {
     if (strcasecmp(key, "Content-Type") == 0 || strcasecmp(key, "Server") == 0 ||
         strcasecmp(key, "Content-Length") == 0)
@@ -936,6 +975,10 @@ static int px_copy(AetherProxyExchange* px) {
     /* Headers — parse the raw block, drop hop-by-hop. */
     const char* headers_block = http_response_headers(px->resp);
     int seen_content_type = 0;
+    /* An answer to HEAD forwards the upstream's Content-Length only when
+     * every one it sent is the same number (proxy_head_lengths_agree). */
+    int head_drop_length = req && req->method && strcmp(req->method, "HEAD") == 0 &&
+        headers_block && !proxy_head_lengths_agree(headers_block, headers_block + strlen(headers_block));
     if (headers_block) {
         const char* p = headers_block;
         while (*p) {
@@ -949,7 +992,8 @@ static int px_copy(AetherProxyExchange* px) {
                 if (kl < sizeof(keybuf)) {
                     memcpy(keybuf, p, kl);
                     keybuf[kl] = '\0';
-                    if (!is_hop_by_hop(keybuf)) {
+                    if (!is_hop_by_hop(keybuf) &&
+                        !(head_drop_length && strcasecmp(keybuf, "Content-Length") == 0)) {
                         const char* v = colon + 1;
                         while (v < eol && (*v == ' ' || *v == '\t')) v++;
                         size_t vl = (size_t)(eol - v);
@@ -1255,6 +1299,9 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
      * already emitted and minus the hop-by-hop headers, which belong to the
      * connection this proxy terminated and not to the message. */
     int saw_content_length = 0;
+    /* An answer to HEAD forwards the upstream's Content-Length only when
+     * every one it sent is the same number, as the copying path does. */
+    int head_drop_length = d->head_only && !proxy_head_lengths_agree(hstart, hend);
     for (const char* p = hstart; p < hend; ) {
         const char* cr = memchr(p, '\r', (size_t)(hend - p));
         if (!cr || cr + 1 >= raw + header_bytes || cr[1] != '\n') break;
@@ -1282,7 +1329,7 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
         /* Once: an upstream may repeat the field with one value (RFC 9112
          * 6.3), and the copying path holds it in one slot, at the first
          * one's position (#3749). */
-        if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && saw_content_length) {
+        if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && (saw_content_length || head_drop_length)) {
             p = cr + 2;
             continue;
         }

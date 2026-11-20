@@ -11,3 +11,7 @@
   did, so a repaired head goes the copying path too. Before, the
   pass-through relayed "Content-Length: 1\rX: y" as one field with the
   value "1 X: y". Found by the proxy-response fuzz target.
+  On an answer to HEAD neither path forwards a Content-Length the
+  upstream stated badly: each value must be digits only and every one the
+  same (RFC 9110 8.6, RFC 9112 6.3). The pass-through kept the first of
+  "2" and "0 OK", the copying path the last.
