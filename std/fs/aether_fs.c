@@ -773,8 +773,32 @@ const char* fs_ftruncate_raw(File* file, int64_t length) {
     return "";
 }
 
-/* fsync — flush kernel buffers to disk. Required after pwrite for
- * durability guarantees. POSIX fsync(2) / Windows _commit. */
+#ifndef _WIN32
+/* Flush `fd` to the device, which is what every durable call here means by
+ * a sync: fs.fsync, fs.fd_fsync and write_atomic's staged file. On macOS
+ * fsync(2) hands the data to the drive and returns while it may still sit
+ * in the drive's own write cache, which a power loss drops; fcntl(F_FULLFSYNC)
+ * asks the drive to flush that cache too, and is what macOS documents for
+ * durability. A filesystem that does not take it (some network and FUSE
+ * ones) refuses it, and fsync(2) is then the best there is. Elsewhere
+ * fsync(2). Retried on EINTR. 0, or -1 with errno set. */
+static int aether_fs_sync_fd(int fd) {
+#ifdef F_FULLFSYNC
+    for (;;) {
+        if (fcntl(fd, F_FULLFSYNC) == 0) return 0;
+        if (errno != EINTR) break;
+    }
+    if (errno == EBADF || errno == EIO) return -1;
+#endif
+    while (fsync(fd) != 0) {
+        if (errno != EINTR) return -1;
+    }
+    return 0;
+}
+#endif
+
+/* fsync — flush to the device (aether_fs_sync_fd: F_FULLFSYNC on macOS).
+ * Required after pwrite for durability guarantees. Windows _commit. */
 /* Expose the OS-level descriptor inside an open File (issue #1003).
  * Exists so capability plumbing — capsicum.rights_limit() /
  * fcntls_limit() before capsicum.enter() — can narrow a descriptor the
@@ -799,7 +823,7 @@ const char* fs_fsync_raw(File* file) {
 #ifdef _WIN32
     if (_commit(fd) != 0) return "fsync failed";
 #else
-    if (fsync(fd) != 0) return "fsync failed";
+    if (aether_fs_sync_fd(fd) != 0) return "fsync failed";
 #endif
     return "";
 }
@@ -1578,7 +1602,7 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
         if (fflush(fp) != 0) {
             fsync_ok = 0;
             err_save = errno;
-        } else if (fsync(fileno(fp)) != 0) {
+        } else if (aether_fs_sync_fd(fileno(fp)) != 0) {
             fsync_ok = 0;
             err_save = errno;
         }
@@ -4867,15 +4891,14 @@ _tuple_int_int_string fs_fchmod_raw(int fd, int mode) {
 #endif
 }
 
-/* Flush the open file `fd` to the device: fsync(2), _commit on Windows. */
+/* Flush the open file `fd` to the device: aether_fs_sync_fd (F_FULLFSYNC on
+ * macOS, fsync(2) elsewhere), _commit on Windows. */
 _tuple_int_int_string fs_fd_fsync_raw(int fd) {
 #ifdef _WIN32
     if (aether_fs_fd_handle(fd) == INVALID_HANDLE_VALUE) return aether_fs_iks_err(aether_fs_win_kind(ERROR_INVALID_HANDLE), "fd_fsync: not an open descriptor");
     if (_commit(fd) != 0) return aether_fs_iks_errno("fd_fsync failed");
 #else
-    while (fsync(fd) != 0) {
-        if (errno != EINTR) return aether_fs_iks_errno("fd_fsync failed");
-    }
+    if (aether_fs_sync_fd(fd) != 0) return aether_fs_iks_errno("fd_fsync failed");
 #endif
     return aether_fs_iks_val(1);
 }

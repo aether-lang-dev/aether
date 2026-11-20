@@ -740,7 +740,7 @@
       <h3 class="function-name">fsync <span class="kind">fn</span></h3>
       <pre class="usage"><code>fsync(file) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">file: ptr</span></p>
-      <p class="doc">Flush kernel buffers for `file` to durable storage (POSIX fsync / Windows _commit). Required AFTER pwrite for the data-survives-crash guarantee — pwrite alone makes the bytes visible to other handles on the same machine but doesn't promise they reach the disk. Returns &quot;&quot; on success.</p>
+      <p class="doc">Flush kernel buffers for `file` to durable storage (fsync(2), and on macOS fcntl(F_FULLFSYNC), which also flushes the drive's write cache that fsync leaves; Windows _commit). Required AFTER pwrite for the data-survives-crash guarantee — pwrite alone makes the bytes visible to other handles on the same machine but doesn't promise they reach the disk. Returns &quot;&quot; on success.</p>
     </div>
     <div class="function" id="file_fd_raw" data-name="file_fd_raw">
       <h3 class="function-name">file_fd_raw <span class="kind">extern</span></h3>
@@ -814,7 +814,7 @@
       <h3 class="function-name">fd_fsync <span class="kind">fn</span></h3>
       <pre class="usage"><code>fd_fsync(fd) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">fd: int</span></p>
-      <p class="doc">Flush the open file `fd` to the device (fsync(2); _commit on Windows). (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
+      <p class="doc">Flush the open file `fd` to the device (fsync(2), F_FULLFSYNC on macOS as for fsync; _commit on Windows). (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
     </div>
     <div class="function" id="fd_truncate" data-name="fd_truncate">
       <h3 class="function-name">fd_truncate <span class="kind">fn</span></h3>
@@ -1055,7 +1055,7 @@
       <h3 class="function-name">write_atomic <span class="kind">fn</span></h3>
       <pre class="usage"><code>write_atomic(path, data)</code></pre>
       <p class="signature"><span class="sig-params">path: string, data: byte[]</span></p>
-      <p class="doc">Durable write: stage `data` into a sibling tmp file, fsync, then rename(2) over `path`. On crash between write and rename, the destination is either the old contents or the new — never a partial write. Binary-safe: the length travels with the slice (#2301), so embedded NULs survive. For a string pass `string.bytes(s)`; for a `std.bytes` buffer, `bytes.view(buf)`. Returns &quot;&quot; on success, error on failure (tmp create, write, fsync, rename — the tmp is removed if any step fails so the filesystem isn't littered with aborted writes).</p>
+      <p class="doc">Durable write: stage `data` into a sibling tmp file, fsync (F_FULLFSYNC on macOS, as fsync does), then rename(2) over `path`. On crash between write and rename, the destination is either the old contents or the new — never a partial write. Binary-safe: the length travels with the slice (#2301), so embedded NULs survive. For a string pass `string.bytes(s)`; for a `std.bytes` buffer, `bytes.view(buf)`. Returns &quot;&quot; on success, error on failure (tmp create, write, fsync, rename — the tmp is removed if any step fails so the filesystem isn't littered with aborted writes).</p>
     </div>
     <div class="function" id="rename" data-name="rename">
       <h3 class="function-name">rename <span class="kind">fn</span></h3>
