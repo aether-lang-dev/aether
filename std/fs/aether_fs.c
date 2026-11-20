@@ -1080,13 +1080,44 @@ int dir_delete_raw(const char* path) {
 // prefix before walking '/' separators so the loop never attempts
 // `mkdir("C:")` (which fails — the trailing-backslash form `C:\`
 // is the only valid shape, and that's already an existing root).
+#if defined(AETHER_HAS_SANDBOX)
+/* Each directory mkdir_p would make, parents and the path itself, is a write
+ * of its own (#3769): checked, and audited, before anything is made. A
+ * parent that is already a directory is walked through. 1 when every one
+ * is allowed. */
+static int fs_mkdir_p_allowed(const char* path) {
+    char buf[4096];
+    size_t len = strlen(path);
+    if (len >= sizeof(buf)) return 0;
+    memcpy(buf, path, len + 1);
+    size_t start = 1;
+    if (len >= 2 && ((buf[0] >= 'A' && buf[0] <= 'Z') || (buf[0] >= 'a' && buf[0] <= 'z')) &&
+        buf[1] == ':')
+        start = (len >= 3 && (buf[2] == '/' || buf[2] == '\\')) ? 3 : 2;
+    for (size_t i = start; i <= len; i++) {
+        if (i < len && buf[i] != '/' && buf[i] != '\\') continue;
+        char saved = buf[i];
+        buf[i] = '\0';
+        struct stat st;
+        if (buf[0] && (stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) &&
+            !aether_sandbox_check("fs_write", buf))
+            return 0;
+        buf[i] = saved;
+    }
+    return 1;
+}
+#endif
+
 int fs_mkdir_p_raw(const char* path) {
     if (!path || !*path) return 0;
 #if defined(AETHER_HAS_SANDBOX)
-    /* Inside an enforce block the whole path is checked once, as here
-     * always, and each directory made from the one before it, none
+    /* Inside an enforce block each directory it would make is checked
+     * first (#3769), and then each is made from the one before it, none
      * followed (#3751). */
-    if (aether_sandbox_levels_here() > 0) return aether_sandbox_mkdir_p(path, 0755) == 0 ? 1 : 0;
+    if (aether_sandbox_levels_here() > 0) {
+        if (!fs_mkdir_p_allowed(path)) { errno = EACCES; return 0; }
+        return aether_sandbox_mkdir_p(path, 0755) == 0 ? 1 : 0;
+    }
 #endif
     if (!aether_sandbox_check("fs_write", path)) return 0;
 
@@ -4187,6 +4218,8 @@ static void walk_recursive_verified(const char* dir, void* d, const char* suffix
         if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
             // Skip dot-prefixed directories (.git, .aeb, .vscode, …)
             if (name[0] == '.') continue;
+            // Entered only when it may be read (#3769), as walk_recursive.
+            if (!aether_sandbox_check("fs_read", fullpath)) continue;
             void* sub = aether_sandbox_win_opendir_at(d, name);
             if (sub) walk_recursive_verified(fullpath, sub, suffix_pattern, result);
         } else if (win_fnmatch(suffix_pattern, name)) {
@@ -4998,7 +5031,9 @@ static int fs_walk_recurse_verified(char* buf, size_t len, int depth,
         (*count)++;
         int rc = cb(env, buf, kind, depth);
         if (rc == 2) { buf[len] = '\0'; aether_sandbox_win_closedir(dir); return 2; }
-        if (rc != 1 && kind == FS_STAT_KIND_DIR) {
+        /* A directory below the root is entered only when it may be read
+         * (#3769), the check audited as fs_walk_recurse's is. */
+        if (rc != 1 && kind == FS_STAT_KIND_DIR && aether_sandbox_check("fs_read", buf)) {
             void* sub = aether_sandbox_win_opendir_at(dir, name);
             if (sub && fs_walk_recurse_verified(buf, len + 1 + nlen, depth + 1,
                                                 cb, env, count, sub) == 2) {
