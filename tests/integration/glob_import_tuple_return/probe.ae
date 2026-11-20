@@ -19,7 +19,9 @@ extern exit(code: int)
 main() {
     // Tuple-returning wrapper reached unqualified — the case that
     // previously failed to compile.
-    list, err = list_dir("/tmp")
+    // ".", not "/tmp": a native Windows binary has no /tmp, and an
+    // unopenable directory is an error now, not an empty listing.
+    list, err = list_dir(".")
     if err != "" {
         println("FAIL: list_dir errored: ${err}")
         exit(1)
