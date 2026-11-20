@@ -2294,6 +2294,14 @@ endif
 # change to the Makefile did, and a stale preload was tested and installed.
 SANDBOX_PRELOAD :=
 SANDBOX_PRELOAD_LIBS :=
+# The compiler the preload is built with. It is injected into programs this
+# build did not make (a contained child, the shell, timeout(1)), so it is
+# built as it ships, whatever compiler wrapper the rest of the build goes
+# through: under TSan, tests/scripts/sanitizer_sweep.sh points this at the
+# plain clang. A preload built under TSan needs __tsan_init from the program
+# it lands in, and it lands under TSan's own interceptors, whose REAL() calls
+# reach each of its wrappers.
+SANDBOX_PRELOAD_CC ?= $(CC)
 ifeq ($(shell uname -s),Linux)
 SANDBOX_PRELOAD := $(BUILD_DIR)/libaether_sandbox.so
 SANDBOX_PRELOAD_LIBS := -ldl -lrt
@@ -2309,7 +2317,7 @@ $(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_p
 	@# made. A failure is not fatal (spawn_sandboxed is then unavailable),
 	@# and the compiler's output is kept beside it to say why.
 	@rm -f $@
-	@if $(CC) -shared -fPIC -o $@ runtime/libaether_sandbox_preload.c $(SANDBOX_PRELOAD_LIBS) > $@.log 2>&1; then \
+	@if $(SANDBOX_PRELOAD_CC) -shared -fPIC -o $@ runtime/libaether_sandbox_preload.c $(SANDBOX_PRELOAD_LIBS) > $@.log 2>&1; then \
 	    rm -f $@.log; echo "✓ Sandbox preload: $@"; \
 	else \
 	    rm -f $@; echo "⚠ Sandbox preload: build failed, see $@.log (spawn_sandboxed will be unavailable)"; \

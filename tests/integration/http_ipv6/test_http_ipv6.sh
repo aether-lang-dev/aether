@@ -35,6 +35,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
+. "$ROOT/tests/lib/sweep_timeout.sh"
+# Bounds for the diagnostic reruns of a failed dial (section 7).
+sweep_timeout_bound DIAG_TIMEOUT "$ROOT" 60
+sweep_timeout_bound GDB_TIMEOUT "$ROOT" 180
 AE="$ROOT/build/ae"
 
 [ -x "$AE" ] || { echo "  [SKIP] http_ipv6: ae not built"; exit 0; }
@@ -317,7 +321,7 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
                 _rc2=0
                 TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$_pl" AETHER_SANDBOX_LOG=none \
                     AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$_target" LISTEN="$_listen" \
-                    timeout 60 "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
+                    $DIAG_TIMEOUT "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
                 printf '    rerun (%s): exit %s\n' "$1" "$_rc2"
                 sed 's/^/      | /' "$TMP/dial.again" | head -60
             }
@@ -328,7 +332,7 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
             # itself runs without it.
             if command -v gdb >/dev/null 2>&1; then
                 echo "    under gdb, sweep options:"
-                timeout 180 gdb -q -batch \
+                $GDB_TIMEOUT gdb -q -batch \
                     -ex "set environment LD_PRELOAD=$PRELOAD" \
                     -ex 'set environment AETHER_SANDBOX_LOG=none' \
                     -ex "set environment AETHER_SANDBOX_GRANTS=$TMP/grants" \
