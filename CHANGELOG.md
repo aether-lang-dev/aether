@@ -14,6 +14,105 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.929.0]
+
+### Added
+
+- **`http.query_param(req, name)` returns a query parameter decoded.**
+  `http.get_query_param` returns the value as it came on the wire, still
+  percent-encoded (`?q=a%20b` gives `"a%20b"`), matched against the raw key,
+  and said so nowhere; `get_path_param` is raw the same way. Both keep that
+  contract, now documented. The new accessor decodes as a form field reads
+  (`+` a space, the key decoded too) and returns `(value, err)`, with an
+  error for a malformed escape.
+
+### Changed
+
+- **`dir.list` and `fs.list_dir` report a directory they cannot open.**
+  BEHAVIOUR CHANGE. `dir_list_raw` returned an empty listing when `opendir`
+  failed, so `l, err = dir.list("/nonexistent")` gave `err = ""` and a count
+  of 0, the same as an empty directory, for a missing path, a regular file,
+  an unreadable directory and (on Windows) any `FindFirstFile` failure. Each
+  now returns `(null, "<path>: <cause>")`, worded as `fs.read`'s errors are
+  ("No such file or directory", "Not a directory", "Permission denied", a
+  sandbox refusal), and `dir_list_raw` returns null. A caller that took a
+  missing directory for an empty one must now check the error.
+  `fs.remove_tree` and `fs.copy_tree` say why they could not list a
+  directory (remove_tree said "cannot delete directory"), and
+  `tls13_cert.trust_store_add` passes the cause on.
+
+### Fixed
+
+- **Under `seal except` or `hide`, a tuple destructure binds a new local as
+  a plain binding does.** `r, err = f()` was refused (E0304 'r') when `r`
+  also named a top-level function, constant or extern, though `r = f()` in
+  the same sealed body compiled; listing `r` compiled, but admitted the
+  outer `r` too. A destructured name now shadows a file-level name as a
+  plain binding, a `for` variable and a `match` binding do.
+
+- **A hidden or sealed-out local can no longer be overwritten from inside
+  the block that hides it.** Beneath `hide x` (or a `seal except` that does
+  not list it), `x = 5` in a nested block was taken by the checker for a new
+  local, and the generated C wrote the enclosing `x`, the variable the
+  directive hid: the program printed 5 after the block. Aether has no
+  block-level shadowing of a local, so the binding is now refused (E0304,
+  "a local is not shadowed, pick another name"), plainly bound or
+  destructured. A `for` loop's variable and a `match` arm's binding are
+  fresh variables and stay accepted. `docs/hide-and-seal.md` promised a
+  fresh inner binding here; it now says what the language does.
+
+- **`seal except` and `hide` name a module as the source writes it.** A
+  module sharing its last segment with another loaded one (`services.mq`
+  beside `engines.mq`) is merged under its full path (`services_mq`), and a
+  module imported `as engine` under its own namespace; the merge rewrites
+  `mq.bump` and `engine.low` to those names. A seal admitted the module
+  only under the internal name (`seal except mq` refused `mq.bump`, E0304
+  'services_mq.bump'), and `hide mq` or `hide engine` hid none of its
+  members. A list entry naming the written prefix now covers the module,
+  for a call, a constant and a member taken as a value. E0304 names such a
+  member as written, with its module (`'mq.bump' of module 'services.mq'`),
+  and a selectively imported constant by its own name (`'K_SHAPE'`, was
+  `'aevg_K_SHAPE'`).
+
+- **std.os reports a child's exit status when the process ignores
+  SIGCHLD.** An ignored SIGCHLD (inherited across exec: the Erlang VM starts
+  its children so, and a library loaded into such a host has it) makes the
+  kernel reap each child as it exits, and `waitpid` fails with ECHILD.
+  `os.run_capture` read the child's output and returned
+  `(stdout, -1, "waitpid failed")`; `os.run`, `os_system`,
+  `run_pipe_drain_and_wait`, and `wait` / `wait_any` / `wait_pid` after
+  `spawn_proc`, `run_pipe` or `run_stdio` failed the same way (seen on
+  Linux; macOS does not auto-reap). While any child std.os started is unreaped, SIGCHLD is now
+  at its default, and the process's own disposition is put back when the
+  last one is reaped; a process that does not ignore SIGCHLD is never
+  touched. `docs/stdlib-reference.md` (std.os) says what a host may notice.
+
+- **A string passed to a number parameter is refused by the checker.**
+  `string.pad_start(s, 8, "0")` (the pad is a character code, an `int`, as
+  the reference says) passed `ae check` and failed in the C compiler with
+  "incompatible pointer to integer conversion"; so did a string given to
+  an Aether function's own `int`, `float` or `bool` parameter (gcc 11 only
+  warned, and passed the pointer as a number). It is now E0200 at the call,
+  `Argument 3 'pad_char' of 'string.pad_start': expected int, got string`,
+  and for a one-character literal the hint gives the code to pass
+  (`48` for `"0"`). A string to a `ptr` parameter is unchanged.
+
+- **`sandbox.grant_runtime` returns an error instead of panicking.** A name
+  it does not know, or an interpreter it cannot ask for its paths (not on
+  `PATH`, or exiting non-zero), panicked, and took a host process down with
+  it (sae builds grant lists inside a long-lived browser). It now grants
+  nothing and returns the reason, `""` when it granted the runtime's
+  library: `why = grant_runtime("python3")` in the `sandbox.new` block. A
+  list without the library fails closed, as before.
+
+- **`std.fs`'s durable calls flush past the drive's cache on macOS.**
+  `fs.fsync`, `fs.fd_fsync` and `fs.write_atomic` called `fsync(2)`, which
+  on macOS hands the data to the drive and returns while it may still sit
+  in the drive's write cache, lost on power failure. They now use
+  `fcntl(F_FULLFSYNC)` there, falling back to `fsync(2)` on a filesystem
+  that refuses it; elsewhere nothing changes. A durable write on macOS is
+  slower by what the flush costs.
+
 ## [0.928.0]
 
 ### Fixed
