@@ -148,6 +148,29 @@ main() {
             spec.assert_true(has_grant(g as ptr, 2, "fs", stored("fs", "/data/*")), "directory operations")
             sandbox.free(g)
         }
+
+        // It panicked, and took the host process down with it.
+        spec.it("grant_runtime returns the reason it could not ask, and grants nothing") callback {
+            unknown = ""
+            g = sandbox.new("unknown") {
+                unknown = grant_runtime("no_such_interpreter_xyz")
+            }
+            spec.assert_true(string.contains(unknown, "knows python3 and python") == 1,
+                "a name the table does not know is an error")
+            spec.assert_eq(list.size(g as ptr), 0, "and grants nothing")
+            sandbox.free(g)
+
+            // python3 where it cannot be found: an empty PATH directory.
+            saved = os.getenv("PATH")
+            _pe = os.setenv("PATH", dir)
+            g2 = sandbox.new("unasked") {}
+            why = sandbox.grant_runtime(g2, "python3")
+            if saved != null { _pr = os.setenv("PATH", saved) }
+            spec.assert_true(string.contains(why, "cannot ask python3 for its paths") == 1,
+                "an interpreter that cannot be run is an error")
+            spec.assert_eq(list.size(g2 as ptr), 0, "and grants nothing")
+            sandbox.free(g2)
+        }
     }
 
     spec.describe(fw, "std.sandbox enforce") {

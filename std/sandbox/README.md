@@ -169,7 +169,8 @@ The same grant list goes to:
   it returns an error and starts nothing. `sandbox.spawn_socket_uncontained`
   is the explicit way to run one with no sandbox. A foreign interpreter's
   start-up reads come from `grant_runtime("python3")`, which asks the
-  interpreter for them;
+  interpreter for them and returns the reason when it cannot ("" when it
+  could);
 - the host bridges, which run an embedded engine under it:
   `contrib.host.stunt` (the test double, `stunt.run_sandboxed(worker, code)`)
   here, and the Ruby, Tcl, Lua, Python and other bridges of

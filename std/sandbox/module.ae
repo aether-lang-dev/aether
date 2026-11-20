@@ -368,10 +368,15 @@ grant_without_landlock(_ctx: Grants) { add_grant(_ctx, "landlock", "optional") }
 //
 // It grants no exec: the interpreter is the program the spawn runs, and the
 // spawn's kernel layer lets the child execute that. The script the guest
-// runs is the host's to grant (grant_fs_read("guest.py")). A runtime that
-// cannot be asked (not installed, not on PATH) panics with the reason: a
-// grant list that silently lacked it would fail later, in the child, with
-// less to go on.
+// runs is the host's to grant (grant_fs_read("guest.py")).
+//
+// Returns "" when the runtime's library was granted, or the reason it could
+// not be: a name the table does not know, or an interpreter that cannot be
+// asked (not installed, not on PATH, exited non-zero). Nothing is granted
+// then, so the list fails closed: the interpreter cannot read its library
+// in the child. Check the result where the list is built, to report the
+// reason rather than the child's failure. (Through 0.926.0 it panicked,
+// which took a host process down with it.)
 fn runtime_query(name: string) -> string {
     if name == "python3" || name == "python" {
         return "import os, sys, sysconfig\nfor p in sys.path:\n    if not p or '\\n' in p: continue\n    r = os.path.realpath(p)\n    if os.path.isdir(r): print('D ' + r)\n    elif os.path.isfile(r): print('F ' + r)\nd = sysconfig.get_config_var('LIBDIR')\nl = sysconfig.get_config_var('LDLIBRARY')\nif d and l and os.path.isfile(os.path.join(d, l)):\n    print('P ' + os.path.join(os.path.realpath(d), l))\n"
@@ -379,11 +384,11 @@ fn runtime_query(name: string) -> string {
     return ""
 }
 
-// The runtime's library, readable: see above.
-grant_runtime(_ctx: Grants, name: string) {
+// The runtime's library, readable, or the reason it is not: see above.
+grant_runtime(_ctx: Grants, name: string) -> string {
     query = runtime_query(name)
     if query == "" {
-        panic("sandbox: grant_runtime knows python3 and python, not '${name}'; grant its library directories with grant_fs_read")
+        return "sandbox: grant_runtime knows python3 and python, not '${name}'; grant its library directories with grant_fs_read"
     }
     argv = list.new()
     list.add(argv, "-I")
@@ -392,10 +397,10 @@ grant_runtime(_ctx: Grants, name: string) {
     out, code, err = os_run_capture_status_raw(name, argv, null)
     list.free(argv)
     if err != "" {
-        panic("sandbox: grant_runtime(\"${name}\"): cannot ask ${name} for its paths: ${err}")
+        return "sandbox: grant_runtime(\"${name}\"): cannot ask ${name} for its paths: ${err}"
     }
     if code != 0 {
-        panic("sandbox: grant_runtime(\"${name}\"): ${name} exited ${code} when asked for its paths")
+        return "sandbox: grant_runtime(\"${name}\"): ${name} exited ${code} when asked for its paths"
     }
     rows = string.split(out, "\n")
     n = string.array_size(rows)
@@ -413,4 +418,5 @@ grant_runtime(_ctx: Grants, name: string) {
         i = i + 1
     }
     string.array_free(rows)
+    return ""
 }
