@@ -1980,7 +1980,11 @@ static int response_status_of(const char* header_block) {
     if (!sp) return 0;
     const unsigned char* d = (const unsigned char*)sp + 1;
     if (!isdigit(d[0]) || !isdigit(d[1]) || !isdigit(d[2])) return 0;
-    if (isdigit(d[3])) return 0;
+    /* A code is 100 through 599 (RFC 9110 15), and the reason, if any,
+     * follows a space (RFC 9112 4): "HTTP/0 011.2 OK" read as status 11,
+     * which a proxy then wrote back as "HTTP/1.1 11". */
+    if (d[0] < '1' || d[0] > '5') return 0;
+    if (d[3] != '\0' && d[3] != ' ' && d[3] != '\r' && d[3] != '\n') return 0;
     return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
 }
 

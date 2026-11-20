@@ -1068,7 +1068,10 @@ static int direct_status_of(const char* raw, size_t raw_len) {
     if ((size_t)(d - raw) + 3 > raw_len) return 0;
     if (!isdigit((unsigned char)d[0]) || !isdigit((unsigned char)d[1]) ||
         !isdigit((unsigned char)d[2])) return 0;
-    if ((size_t)(d - raw) + 3 < raw_len && isdigit((unsigned char)d[3])) return 0;
+    /* 100 through 599, then a space or the end of the line, as the copying
+     * path's response_status_of reads it. */
+    if (d[0] < '1' || d[0] > '5') return 0;
+    if ((size_t)(d - raw) + 3 < raw_len && d[3] != ' ' && d[3] != '\r' && d[3] != '\n') return 0;
     return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
 }
 
