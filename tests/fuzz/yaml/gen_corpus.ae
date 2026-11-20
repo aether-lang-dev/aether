@@ -115,4 +115,6 @@ main() {
         "26610a21213f0d7c2d0d6e3f24")
     hex_seed(dir, "crash_empty_entry_under_key",
         "613a20310d0a623a0d0a20202d00630d0a")
+    hex_seed(dir, "crash_flow_question_mark",
+        "3f205b2e2e2e612c3f5d0a")
 }
