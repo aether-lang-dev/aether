@@ -67,6 +67,17 @@ say()  { printf 'aether-install: %s\n' "$*"; }
 die()  { printf 'aether-install: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Git Bash and MSYS2 rewrite the arguments they hand a native Windows
+# program when those look like paths, and that takes in every backslash of a
+# regex: "release\.yml" reached gh.exe as "release/.yml", which no
+# certificate names, so the provenance check refused a good release (#3791
+# fixed scripts/verify-release-asset.sh, which has the same remedy). cosign
+# and gh are run with the rewriting off (MSYS_NO_PATHCONV for Git Bash,
+# MSYS2_ARG_CONV_EXCL for MSYS2) and given their files as Windows paths,
+# which the rewriting no longer makes for them. Elsewhere both are no-ops.
+unconverted() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$@"; }
+native_path() { if have cygpath; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
+
 have curl || die "curl is required."
 have tar  || die "tar is required."
 
@@ -380,10 +391,10 @@ gh_release_download() {
         _ghd_ok=0
         for _ghd_fmt in "" --new-bundle-format; do
             # shellcheck disable=SC2086
-            if cosign verify-blob $_ghd_fmt --bundle "$_ghd_sig" \
+            if unconverted cosign verify-blob $_ghd_fmt --bundle "$(native_path "$_ghd_sig")" \
                 --certificate-identity-regexp "$_ghd_idre" \
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-                "$_ghd_sums" >/dev/null 2>&1; then
+                "$(native_path "$_ghd_sums")" >/dev/null 2>&1; then
                 _ghd_ok=1
                 break
             fi
@@ -404,7 +415,7 @@ gh_release_download() {
     # identity, anchored. --signer-workflow matches a prefix and so takes the
     # release workflow run from any branch or tag.
     if have gh && gh auth status >/dev/null 2>&1; then
-        if ! gh attestation verify "$_ghd_d" --repo "$_ghd_r" \
+        if ! unconverted gh attestation verify "$(native_path "$_ghd_d")" --repo "$_ghd_r" \
             --cert-identity-regex "$_ghd_idre" \
             --cert-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1; then
             rm -f "$_ghd_d"
