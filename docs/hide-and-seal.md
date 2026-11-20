@@ -145,6 +145,17 @@ scope`, as for a hidden bare name. A member taken as a value
 same way. (A qualified call used to be reported as an undefined
 function, `E0301`, and a member taken as a value was not refused at all.)
 
+A list names a module as the source writes it: by the import's last
+segment (`import services.mq`, then `hide mq`), or by its alias (`import
+engines.mq as engine`, then `seal except engine`). That holds when another
+loaded module ends in the same segment, which gives this one its full path
+as its internal name (`services_mq`): that name is the compiler's, and a
+list never needs it. The diagnostic says which module it was, as in
+`'mq.bump' of module 'services.mq' is hidden in this scope`. (Through 0.926.0
+such a module, and any module imported under an alias, was admitted by a
+seal only under the internal name, and `hide mq` or `hide engine` hid
+none of its members.)
+
 (Don't reach for a built-in type keyword like `string` here: `hide
 string` fails earlier with `E0100`, because `string` is a reserved
 keyword and can't be used as an identifier at all.)

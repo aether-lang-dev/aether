@@ -867,6 +867,42 @@ static void reset_import_aliases(void) {
     strmap_free(&import_aliases);
 }
 
+/* A name as the source wrote it, for a hide / seal diagnostic. The merge
+ * renames what the checker meets: a module sharing its last segment with
+ * another loaded module carries its full path as its namespace
+ * (`services_mq.bump` for `mq.bump`), and a selectively imported constant
+ * is read under its merged name (`aevg_K_SHAPE` for `K_SHAPE`). Neither is
+ * a name the source wrote or a list could name. `qualified` is
+ * `<ns>.<member>` or a bare name; anything else comes back as it is. */
+static const char* hidden_name_as_written(const char* name) {
+    if (!name) return "?";
+    const char* dot = strchr(name, '.');
+    if (dot && global_module_registry) {
+        char ns[256];
+        size_t n = (size_t)(dot - name);
+        if (n >= sizeof(ns)) return name;
+        memcpy(ns, name, n);
+        ns[n] = '\0';
+        AetherModule* m = module_find_by_namespace(ns);
+        if (m && m->ns && m->name && strcmp(m->ns, ns) == 0 &&
+            strcmp(m->ns, module_last_segment(m->name)) != 0)
+            return aether_internf("%s%s' of module '%s", module_last_segment(m->name), dot,
+                                  m->name);
+        return name;
+    }
+    for (int i = 0; i < strmap_count(&import_aliases); i++) {
+        const char* q = (const char*)strmap_value_at(&import_aliases, i);
+        const char* qdot = q ? strrchr(q, '.') : NULL;
+        if (!qdot) continue;
+        AetherModule* m = global_module_registry
+            ? module_find_by_namespace(aether_intern_n(q, (size_t)(qdot - q))) : NULL;
+        const char* qns = m && m->ns ? m->ns : aether_intern_n(q, (size_t)(qdot - q));
+        if (strcmp(aether_internf("%s_%s", qns, qdot + 1), name) == 0)
+            return strmap_key_at(&import_aliases, i);
+    }
+    return name;
+}
+
 void register_namespace(const char* ns) {
     // Check if already registered
     for (int i = 0; i < namespace_count; i++) {
@@ -17340,7 +17376,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (expr->value && name_blocked_by_hide(table, expr->value)) {
                     error_msg = aether_internf(
                              "'%s' is hidden in this scope by `hide` or `seal except`",
-                             expr->value);
+                             hidden_name_as_written(expr->value));
                 } else {
                     error_msg = aether_internf("Undefined variable '%s'", expr->value ? expr->value : "?");
                     /* #2614: `low` of a `low.CONST` this scope cannot see. */
@@ -18499,8 +18535,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (qualified_prefix_blocked(table, expr->children[0]->value) ||
                     qualified_member_blocked(table, expr->children[0]->value, expr->value)) {
                     const char* msg = "";
-                    msg = aether_internf("'%s.%s' is hidden in this scope by `hide` or `seal except`",
-                             expr->children[0]->value, expr->value);
+                    msg = aether_internf("'%s' is hidden in this scope by `hide` or `seal except`",
+                             hidden_name_as_written(aether_internf("%s.%s",
+                                 expr->children[0]->value, expr->value)));
                     type_error(msg, expr->line, expr->column);
                     return 0;
                 }
@@ -22051,7 +22088,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 qualified_member_blocked(table, tmp, dot + 1)) {
                 error_msg = aether_internf(
                          "'%s' is hidden in this scope by `hide` or `seal except`",
-                         call->value);
+                         hidden_name_as_written(call->value));
                 free(tmp);
                 type_error(error_msg, call->line, call->column);
                 return 0;

@@ -77,6 +77,24 @@ run_accept_output() {
     fi
 }
 
+# Rejected, with a diagnostic that names what the source wrote.
+run_reject_message() {
+    case_name="$1"
+    src_file="$2"
+    want="$3"
+    if AETHER_HOME="" "$ROOT/build/ae" build "$src_file" -o $AE_TMP/ae_hide_out > $AE_TMP/ae_hide_log 2>&1; then
+        echo "  [FAIL] $case_name should have been rejected"
+        fail=$((fail + 1))
+    elif grep -qF "$want" $AE_TMP/ae_hide_log; then
+        echo "  [PASS] $case_name correctly rejected"
+        pass=$((pass + 1))
+    else
+        echo "  [FAIL] $case_name was rejected, but the diagnostic does not say $want:"
+        grep error $AE_TMP/ae_hide_log | sed 's/^/      /' | head -5
+        fail=$((fail + 1))
+    fi
+}
+
 # Case 1: direct read of a hidden variable from a nested block
 cat > $AE_TMP/ae_hide_read.ae << 'EOF'
 extern println(s: string)
@@ -781,6 +799,91 @@ main() {
 }
 EOF
 run_accept_output "a sealed block's loop variable and match binding are fresh" $AE_TMP/ae_seal_loop_var.ae "0 1 7 100 200 "
+
+# A module named in a list by the prefix the source writes for it: its last
+# segment, or its `as` alias. services.mq shares its last segment with
+# engines.mq, which it imports, so its namespace is `services_mq`; the
+# merge rewrote `mq.bump` to `services_mq.bump`, and `seal except mq`
+# refused it while `hide mq` hid nothing. An alias was rewritten the same
+# way (`engine.low` to `mq.low`).
+mkdir -p $AE_TMP/sealtwin/services/mq $AE_TMP/sealtwin/engines/mq $AE_TMP/sealtwin/aevg
+cat > $AE_TMP/sealtwin/services/mq/module.ae << 'EOF'
+import engines.mq as engine
+exports (KIND, bump)
+const KIND = 3
+bump(x: int) -> int { return engine.low(x) + KIND }
+EOF
+cat > $AE_TMP/sealtwin/engines/mq/module.ae << 'EOF'
+exports (low)
+low(x: int) -> int { return x }
+EOF
+cat > $AE_TMP/sealtwin/aevg/module.ae << 'EOF'
+exports (K_SHAPE, shape)
+const K_SHAPE = 5
+shape(x: int) -> int { return x + K_SHAPE }
+EOF
+# services.mq's own `import engines.mq` resolves through the library path.
+export AETHER_LIB_DIR="$AE_TMP/sealtwin"
+cat > $AE_TMP/sealtwin/twin_seal.ae << 'EOF'
+import services.mq
+f1(p: int) -> int {
+    seal except mq
+    return mq.bump(p) + mq.KIND
+}
+main() { println("${f1(1)}") }
+EOF
+run_accept_output "seal except admits a module sharing its last segment by that segment" $AE_TMP/sealtwin/twin_seal.ae "7 "
+
+cat > $AE_TMP/sealtwin/alias_seal.ae << 'EOF'
+import engines.mq as engine
+f1(p: int) -> int {
+    seal except engine
+    return engine.low(p)
+}
+main() { println("${f1(4)}") }
+EOF
+run_accept_output "seal except admits a module by its alias" $AE_TMP/sealtwin/alias_seal.ae "4 "
+
+cat > $AE_TMP/sealtwin/twin_hide.ae << 'EOF'
+import services.mq
+f1(p: int) -> int {
+    hide mq
+    return mq.bump(p)
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_message "hide of a module sharing its last segment hides it" $AE_TMP/sealtwin/twin_hide.ae "'mq.bump' of module 'services.mq' is hidden"
+
+cat > $AE_TMP/sealtwin/alias_hide.ae << 'EOF'
+import engines.mq as engine
+f1(p: int) -> int {
+    hide engine
+    return engine.low(p)
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_hidden "hide of a module's alias hides it" $AE_TMP/sealtwin/alias_hide.ae
+
+cat > $AE_TMP/sealtwin/twin_unlisted.ae << 'EOF'
+import services.mq
+f1(p: int) -> int {
+    seal except println
+    return mq.KIND
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_message "a seal without the module still refuses its constant" $AE_TMP/sealtwin/twin_unlisted.ae "'mq.KIND' of module 'services.mq' is hidden"
+
+cat > $AE_TMP/sealtwin/selective_const.ae << 'EOF'
+import aevg (K_SHAPE, shape)
+f1(p: int) -> int {
+    seal except shape
+    return shape(p) + K_SHAPE
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_message "a selectively imported constant is named as written" $AE_TMP/sealtwin/selective_const.ae "'K_SHAPE' is hidden"
+unset AETHER_LIB_DIR
 
 # Cleanup
 rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out $AE_TMP/ae_hide_log
