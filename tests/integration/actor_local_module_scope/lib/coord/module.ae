@@ -1,0 +1,21 @@
+// A module whose actor binds `f` in a handler, imported before picker.
+exports(Ping, start)
+
+message Ping { n: int }
+
+actor Worker {
+    state done = 0
+    receive { Ping(n) -> { done = done + n } }
+}
+
+actor Coord {
+    state k = 0
+    receive {
+        Ping(n) -> {
+            f = spawn(Worker())
+            f ! Ping { n: n }
+        }
+    }
+}
+
+start() -> int { return 1 }

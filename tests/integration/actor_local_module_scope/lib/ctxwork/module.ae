@@ -1,0 +1,13 @@
+// A module function with locals named like the program's handler local:
+// `f` is bound from a field read through a pointer, which the early
+// inference walk cannot type yet.
+exports(Ctx, rotate)
+
+struct Ctx { h5: long, h6: long }
+
+rotate(ctx: *Ctx) {
+    f = ctx.h5
+    g = ctx.h6
+    g = f
+    ctx.h6 = g + 1
+}

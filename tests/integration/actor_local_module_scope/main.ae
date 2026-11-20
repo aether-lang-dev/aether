@@ -1,0 +1,38 @@
+import ctxwork
+import coord
+import picker
+import std.list
+
+extern exit(code: int)
+
+message Job { n: int }
+
+actor Fetcher {
+    state done = 0
+    receive { Job(n) -> { done = done + n } }
+}
+
+actor Leader {
+    state k = 0
+    receive {
+        Job(n) -> {
+            f = spawn(Fetcher())
+            f ! Job { n: n }
+        }
+    }
+}
+
+main() {
+    c = ctxwork.Ctx { h5: 7, h6: 9 }
+    ctxwork.rotate(&c)
+    xs = list.new()
+    list.add(xs, xs)
+    p = picker.pick(xs)
+    same = p == xs
+    list.free(xs)
+    print(c.h6)
+    print(" ")
+    print(coord.start())
+    print(" ")
+    println(same)
+}
