@@ -4,8 +4,11 @@
 # reading fs.last_os_error() and comparing POSIX numbers that are wrong on
 # Windows. Each case makes the real condition:
 #
-#   EFBIG  a file-size limit (ulimit -f, SIGXFSZ ignored) and fd_truncate
-#          past it. Every POSIX host.
+#   EFBIG  a file-size limit (ulimit -f, SIGXFSZ ignored), then fd_pwrite_all
+#          and fd_truncate past it. Every POSIX host, except that FreeBSD's
+#          ftruncate does not look at the limit at all (a sparse extension
+#          succeeds; only a write is refused), so there fd_truncate is
+#          expected to succeed and only the write is checked.
 #   EROFS  a read-only volume: a read-only disk image on macOS, a read-only
 #          tmpfs in a user namespace on Linux (skipped where unprivileged
 #          user namespaces are off). create_dir_with_mode and unlink in it.
@@ -42,6 +45,7 @@ fail() {
 # ---- EFBIG ----
 cat > "$tmpdir/efbig.ae" <<EOF
 import std.fs
+import std.string
 
 main() {
     fd, k, m = fs.create_exclusive("$tmpdir/big.bin", 384)
@@ -51,6 +55,9 @@ main() {
     }
     ok, tk, _tm = fs.fd_truncate(fd, 1048576)
     println("truncate \${ok} \${tk}")
+    pb = string.bytes("x")
+    pok, pk, _pm = fs.fd_pwrite_all(fd, pb, 1048576)
+    println("pwrite \${pok} \${pk}")
 }
 EOF
 "$AE" build "$tmpdir/efbig.ae" -o "$tmpdir/efbig" >"$tmpdir/build.log" 2>&1 \
@@ -58,8 +65,11 @@ EOF
 # 8 blocks is 4 KB under sh's 512-byte blocks and 8 KB under bash's 1 KB.
 sh -c "trap '' XFSZ; ulimit -f 8 && exec '$tmpdir/efbig'" >"$tmpdir/efbig.log" 2>&1
 got="$(cat "$tmpdir/efbig.log")"
-[ "$got" = "truncate 0 14" ] \
-    || fail "fd_truncate past ulimit -f: expected 'truncate 0 14', got '$got'"
+want_truncate="truncate 0 14"
+[ "$(uname -s)" = FreeBSD ] && want_truncate="truncate 1 0"
+[ "$got" = "$want_truncate
+pwrite 0 14" ] \
+    || fail "past ulimit -f: expected '$want_truncate' then 'pwrite 0 14', got '$got'"
 echo "  [PASS] $NAME: EFBIG is KIND_FILE_TOO_BIG"
 
 # ---- EROFS ----
