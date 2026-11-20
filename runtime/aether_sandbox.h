@@ -280,6 +280,36 @@ int aether_sandbox_refused(void);
     ((void)(dir), (void)(prefix), (void)(is_dir), (void)(out), (void)(cap), -2)
 #define aether_sandbox_stat(path, nofollow, out) ((void)(path), (void)(nofollow), (void)(out), -1)
 #define aether_sandbox_realpath(path, out, cap) ((void)(path), (void)(out), (void)(cap), -1)
+#define aether_sandbox_mkdir_p(path, mode) ((void)(path), (void)(mode), -1)
+#ifdef _WIN32
+// What std calls on Windows whether or not a level is in force: as the
+// sandbox's own with none in force, in aether_sandbox.c (a source every
+// build compiles). The handle-relative ones exist only inside a level.
+void* aether_sandbox_win_open(const char* path, unsigned long desired, unsigned long flags,
+                              int nofollow, int access);
+#define aether_sandbox_win_handle_ok(handle, path, nofollow, access) \
+    ((void)(handle), (void)(path), (void)(nofollow), (void)(access), 1)
+#define aether_sandbox_win_verify_entry(path) ((void)(path), 0)
+#define aether_sandbox_win_opendir(path, pattern) ((void)(path), (void)(pattern), (void*)0)
+#define aether_sandbox_win_opendir_at(parent, name) ((void)(parent), (void)(name), (void*)0)
+#define aether_sandbox_win_readdir(dir, name, cap, attrs) \
+    ((void)(dir), (void)(name), (void)(cap), (void)(attrs), -1)
+#define aether_sandbox_win_closedir(dir) ((void)(dir))
+#define aether_sandbox_win_mkdir(path, sd) ((void)(path), (void)(sd), -1)
+#define aether_sandbox_win_open_watched(path) ((void)(path), (void*)0)
+// Called on Windows only inside a level (std falls back to its own calls
+// otherwise), which a build with no sandbox never has.
+#define aether_sandbox_open(path, flags, mode) ((void)(path), (void)(flags), (void)(mode), errno = ENOSYS, -1)
+#define aether_sandbox_unlink(path) ((void)(path), errno = ENOSYS, -1)
+#define aether_sandbox_rmdir(path) ((void)(path), errno = ENOSYS, -1)
+#define aether_sandbox_remove(path) ((void)(path), errno = ENOSYS, -1)
+#define aether_sandbox_mkdir(path, mode) ((void)(path), (void)(mode), errno = ENOSYS, -1)
+#define aether_sandbox_rename(from, to) ((void)(from), (void)(to), errno = ENOSYS, -1)
+#define aether_sandbox_link(target, linkpath) ((void)(target), (void)(linkpath), errno = ENOSYS, -1)
+#else
+#define aether_sandbox_readlink(path, buf, cap) ((long)readlink((path), (buf), (cap)))
+#define aether_sandbox_open_lookup(path) ((void)(path), -1)
+#endif
 #ifndef _WIN32
 #define aether_sandbox_open(path, flags, mode) open((path), (flags), (mode))
 #define aether_sandbox_opendir(path) ((void*)opendir(path))

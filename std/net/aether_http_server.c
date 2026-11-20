@@ -110,7 +110,7 @@ const char* http_status_text(int code) {
     }
 }
 
-#if !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__)
+#if AETHER_HAS_NETWORKING && !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__) && !defined(ESP_PLATFORM)
 #include <sys/resource.h>   /* getrlimit: http_server_default_connection_bound */
 #endif
 
@@ -120,10 +120,10 @@ const char* http_status_text(int code) {
  * between 16 and 32768. The proxy event loop's (loop_max_connections)
  * takes two, a proxied connection holding an upstream one too; the parking
  * lot's (park_max_connections) one. 4096 where there is no such limit to
- * read (Windows). */
+ * read (Windows, and builds with no networking or no getrlimit). */
 int http_server_default_connection_bound(int fds_per_connection) {
     if (fds_per_connection < 1) fds_per_connection = 1;
-#if !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__)
+#if AETHER_HAS_NETWORKING && !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__) && !defined(ESP_PLATFORM)
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) return 32768;
     long long m = ((long long)rl.rlim_cur - 64) / fds_per_connection;

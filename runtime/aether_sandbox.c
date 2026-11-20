@@ -2341,4 +2341,31 @@ const char* aether_sandbox_staged_for(const char* tmp) {
     if (!tmp || !t_stage_tmp || strcmp(tmp, t_stage_tmp) != 0) return NULL;
     return t_stage_path;
 }
+#elif defined(_WIN32)
+// No sandbox compiled in: std still opens through this one (tar's times,
+// chmod's handle), and with no level in force it is the plain open.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <stdlib.h>
+
+void* aether_sandbox_win_open(const char* path, unsigned long desired, unsigned long flags,
+                              int nofollow, int access) {
+    (void)access;
+    if (!path) { SetLastError(ERROR_INVALID_PARAMETER); return INVALID_HANDLE_VALUE; }
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (wlen <= 0) return INVALID_HANDLE_VALUE;
+    wchar_t* w = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
+    if (!w) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return INVALID_HANDLE_VALUE; }
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, w, wlen);
+    DWORD f = (DWORD)flags | FILE_FLAG_BACKUP_SEMANTICS;
+    if (nofollow) f |= FILE_FLAG_OPEN_REPARSE_POINT;
+    HANDLE h = CreateFileW(w, (DWORD)desired, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, f, NULL);
+    DWORD e = GetLastError();
+    free(w);
+    SetLastError(e);
+    return h;
+}
 #endif
