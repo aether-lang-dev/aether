@@ -1040,6 +1040,20 @@ static int dh_put(char** buf, size_t* cap, size_t* len, const char* s, size_t n)
     return 0;
 }
 
+/* A field's value as the copying path reads it: from just past the colon
+ * to the line's end, leading and trailing whitespace off (RFC 9110 5.5).
+ * The one rule for every field the pass-through writes: Content-Type ended
+ * "text/plain h: 3 " here and "text/plain h: 3" there when a bare CR the
+ * framing had turned into a space (#3572) ended it, and Content-Length
+ * "1   " (#3749, the proxy-response fuzzer, both times). */
+static const char* direct_field_value(const char* v, const char* eol, size_t* out_len) {
+    while (v < eol && (*v == ' ' || *v == '\t')) v++;
+    size_t vl = (size_t)(eol - v);
+    while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+    *out_len = vl;
+    return v;
+}
+
 /* Is every line of the head ended by CR LF, with no bare CR, bare LF or NUL
  * anywhere in it? The copying path reads a head through the client, which
  * turns each bare CR and NUL into a space (#3572) and ends lines only at
@@ -1206,12 +1220,12 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
         const char* colon = memchr(p, ':', (size_t)(cr - p));
         if (colon) {
             size_t kl = (size_t)(colon - p);
-            const char* v = colon + 1;
-            while (v < cr && (*v == ' ' || *v == '\t')) v++;
+            size_t vl = 0;
+            const char* v = direct_field_value(colon + 1, cr, &vl);
             if (kl == 12 && http_ci_eq(p, "Content-Type", 12)) {
-                ct = v; ct_len = (size_t)(cr - v);
+                ct = v; ct_len = vl;
             } else if (kl == 6 && http_ci_eq(p, "Server", 6)) {
-                sv = v; sv_len = (size_t)(cr - v);
+                sv = v; sv_len = vl;
             }
         }
         p = cr + 2;
@@ -1283,13 +1297,8 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
             continue;
         }
 
-        const char* v = colon + 1;
-        while (v < cr && (*v == ' ' || *v == '\t')) v++;
-        size_t vl = (size_t)(cr - v);
-        /* Leading and trailing whitespace is not part of a value (RFC 9110
-         * 5.5), as the copying path reads it: "Content-Length: 1   " went
-         * out as "1   " there and "1" here (#3749). */
-        while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+        size_t vl = 0;
+        const char* v = direct_field_value(colon + 1, cr, &vl);
 
         /* A name or value carrying a line ending would end the head early and
          * let the rest be read as a second response (CWE-113). The copying
