@@ -301,36 +301,45 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
         _got=$(LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$TMP/grants" \
                TARGET="$2" LISTEN="$_listen" "$TMP/dial" 2>&1) || _rc=$?
         if [ "$_got" != "$3" ]; then
-            # Say how the dial ended, and run it again four ways, one thing
-            # changed at a time, to name what the failure depends on: stdout
-            # a pipe (as above) or a file, and the sanitizer's own fault
-            # report on (with its stack, on stderr) or as the sweep set it.
-            # (set -e is on: a rerun's own failure must not end the script.)
-            _san="handle_segv=1:log_path=stderr"
-            for _how in pipe:sweep pipe:report file:sweep file:report; do
-                _out="${_how%%:*}"; _opts="${_how##*:}"
+            # Say how the dial ended, and run it again with one thing changed
+            # at a time, to name what the failure depends on. Known so far
+            # (TSan leg): it crashes under the sweep's options whether stdout
+            # is a pipe or a file, and runs clean with handle_segv=1 and
+            # log_path=stderr added. (set -e is on: a rerun's own failure must
+            # not end the script.)
+            _rerun() {   # $1 label, $2 TSAN/ASAN options to add, $3 "nopreload" or ""
                 _t="$TSAN_OPTIONS"; _a="$ASAN_OPTIONS"
-                if [ "$_opts" = report ]; then
-                    _t="${TSAN_OPTIONS:+$TSAN_OPTIONS:}$_san"; _a="${ASAN_OPTIONS:+$ASAN_OPTIONS:}$_san"
-                fi
+                if [ -n "$2" ]; then _t="${TSAN_OPTIONS:+$TSAN_OPTIONS:}$2"; _a="${ASAN_OPTIONS:+$ASAN_OPTIONS:}$2"; fi
+                _pl="$PRELOAD"; [ "$3" = nopreload ] && _pl=""
                 _rc2=0
-                if [ "$_out" = pipe ]; then
-                    # The dial's own status, out of the pipeline through a file.
-                    { TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none \
-                        AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$2" LISTEN="$_listen" \
-                        "$TMP/dial" 2>&1; echo "$?" >"$TMP/dial.rc"; } | cat >"$TMP/dial.again" || :
-                    _rc2=$(cat "$TMP/dial.rc" 2>/dev/null)
-                else
-                    TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none \
-                        AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$2" LISTEN="$_listen" \
-                        "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
-                fi
-                printf '    first dial exited %s; again (stdout a %s, sanitizer options %s): exit %s\n' \
-                    "$_rc" "$_out" "$_opts" "${_rc2:-?}"
-                echo "      ---- output ----"
-                sed 's/^/      | /' "$TMP/dial.again" | head -80
-                echo "      ---- end ----"
-            done
+                TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$_pl" AETHER_SANDBOX_LOG=none \
+                    AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$_target" LISTEN="$_listen" \
+                    "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
+                printf '    rerun (%s): exit %s\n' "$1" "$_rc2"
+                sed 's/^/      | /' "$TMP/dial.again" | head -60
+            }
+            echo "    first dial exited $_rc"
+            _target="$2"
+            _rerun "sweep options, no preload" "" nopreload
+            _rerun "sweep options + handle_segv=1" "handle_segv=1"
+            _rerun "sweep options + log_path=stderr" "log_path=stderr"
+            # The report files the sweep's log_path names, from this dial.
+            case "${TSAN_OPTIONS:-}${ASAN_OPTIONS:-}" in
+                *log_path=*)
+                    _lp=$(printf '%s:%s' "${TSAN_OPTIONS:-}" "${ASAN_OPTIONS:-}" | tr ':' '\n' | sed -n 's/^log_path=//p' | head -1)
+                    for _r in "$_lp".*dial*; do
+                        [ -f "$_r" ] && { echo "    report $_r:"; sed 's/^/      | /' "$_r" | head -60; }
+                    done ;;
+            esac
+            if command -v gdb >/dev/null 2>&1; then
+                echo "    under gdb, sweep options:"
+                gdb -q -batch -ex run -ex bt -ex 'info registers rip' \
+                    --args env LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none \
+                    AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$2" LISTEN="$_listen" \
+                    "$TMP/dial" 2>&1 | grep -vE '^\[|^Using host|^warning: ' | head -60 | sed 's/^/      gdb: /' || :
+            else
+                echo "    (no gdb on this runner)"
+            fi
             fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
         fi
     }
