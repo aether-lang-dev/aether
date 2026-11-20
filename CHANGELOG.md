@@ -14,6 +14,126 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.930.0]
+
+### Added
+
+- **`alloc.raw_aligned(a, size, alignment)` and `alloc.release_aligned`.** A
+  block at an address that is a multiple of `alignment`, a power of two at
+  least the size of a pointer: 64 lets a record own a cache line, which
+  malloc's 16 bytes do not promise. Through any allocator, the same way: it
+  is asked for `alignment - 1` bytes and a pointer's more, and the block is
+  the first aligned address in that. Asked by aephysics, whose solver keeps
+  each body's state in one 64-byte line (#3778).
+
+- **`ae pad`: the layout and padding of structs, messages and actor
+  state.** For every struct, message and actor a file declares it prints
+  each field's offset and size, the holes and the tail, the cache lines the
+  value spans, the smallest field order and what it saves:
+  `struct Rec { a: byte, b: long, c: byte, d: long, e: int }` is 40 bytes,
+  24 in the order `b, d, e, a, c`. `--json` gives the same for tools,
+  `--min-waste=N` exits 1 when a struct `--fix` may rewrite would save N
+  bytes or more, `--ptr=4` and `--target=<triple>` lay out for another
+  target, `--verify` compiles the program's C with a `_Static_assert` of
+  every number (`-fsyntax-only`) so the C compiler proves the report, and
+  `--fix` rewrites the reorderable structs to the smallest order, each field
+  with its comments, a second run changing nothing. Structs whose order C or
+  the program's metadata can see (extern structs, `@packed`, `@c_import`,
+  `extern type`, a struct in an extern or `--emit=lib` export signature or
+  carried by a message, `@derive(schema)`, `@observable`, and, conservatively,
+  structs reached through a pointer in a file that reads raw `std.mem`
+  offsets or whose pointer becomes an untyped `ptr`) are reported with the
+  reason and never rewritten, and a run refuses a module's struct that any
+  of its programs hands to C, and every struct of a module no program of the
+  run imports; messages and actor state are reported, never rewritten. It drives the new `aetherc
+  --emit=layout`, whose table (compiler/analysis/type_layout.c) now also
+  lays out sum types, so a message field of a sum type whose variants are
+  at most 4-aligned now sits with the 4-byte fields after the id (it ranked
+  with the 8-byte ones as an unknown); a C host built against an earlier
+  `--emit-header` header of such a message generates it again. See
+  docs/ae-pad.md (#3775).
+
+### Changed
+
+- **An actor's mailbox ring is 16 slots, not 32, and the size can be chosen
+  at build time.** The ring was 1552 of an ActorBase's 1720 bytes. At 16 an
+  actor is 43% smaller (a two-field actor is 1024 bytes where it was 1792),
+  and 1M idle actors peak at 721 MB where they took 1816; the send, ask and
+  idle rows of `make bench-core`, a new fan-in row (eight actors flooding
+  one) and skynet did not move. A burst past the ring waits in the actor's
+  overflow inbox, as before, so nothing is lost. `-DMAILBOX_SIZE=n` (a power
+  of two) chooses another size; the runtime and every program and library
+  built against it must use the same one, and another size is part of the
+  runtime ABI id (`+mailbox32`), so a library built with one is refused by a
+  runtime built with another. The runtime ABI revision is 4. The size of
+  ActorBase is checked against the notes that give it (#3776).
+
+### Fixed
+
+- **An unknown type on a message field or a state field is refused at its
+  declaration.** A struct field, a parameter and a local of a type the
+  program does not define were E0302 already; a message field and a state
+  field's written type were let through and reported only at a use, as
+  "expected florp, got int" or "'d' is duration, but this value is
+  Duration", and a message never sent reached C as an unknown type name
+  (#3785).
+
+- **An actor thread's exit no longer writes the actor after marking itself
+  gone.** When its death was already final, it ran the once-only finalize
+  test again after the mark that lets another thread free the actor, and
+  that write raced the free (TSan, #3789).
+
+### Performance
+
+- **An actor's `int`, `long` and `Duration` state is no longer a seq_cst
+  atomic in its handlers.** The fields are atomic so another thread's read
+  is never torn, and handlers used them with plain C operators, which on an
+  atomic is seq_cst: every write to state was a locked exchange on x86, and
+  no value stayed in a register. Handlers now read a field relaxed and store
+  it with a release, a plain store on x86, so a thread outside the actor
+  that reads one field still sees every write the handler made before it.
+  A handler loop that adds into a state field went from 6.00 to 0.33 ns per
+  iteration (`actor_state_loop`, a new row of `make bench-core`). `x op= y`
+  works on a copy with every rule it has for a local (a float right side
+  saturates, `%=` by a float is fmod), and `x++` is a load and a store, no
+  longer an atomic read-modify-write: the actor's step is the field's one
+  writer (#3772).
+
+- **A message's fields are laid out by alignment.** They were ranked by
+  kind (ints and bools, then pointers, then everything else in declaration
+  order), so a small field between two 8-byte ones cost padding:
+  `{ a: long, b: byte, c: long }` was 32 bytes, past the 28 a message
+  carries inline, and each send allocated a copy the receiver freed. Now the
+  4-byte fields follow the id, then the 2- and 1-byte ones, then the 8-byte
+  and pointer fields, then wider ones, declaration order kept within each:
+  that message is 24 bytes and travels inline (`send_long_byte_long`, 47.6
+  to 36.6 ns per message). The order comes from a new table of the C layout
+  of Aether types (compiler/analysis/type_layout.c). A C host built against
+  a `--emit-header` header from an earlier Aether must generate it again
+  (#3773).
+
+- **Hot words other threads write no longer share a cache line with words
+  a loop reads.** The scheduler core's `running`, which its loop reads on
+  every iteration, sat on the line of the lock every non-core sender takes
+  per send; a spawn's actor id counter beside the reclamation epoch every
+  core loads per iteration; the HTTP event loop's `stopping`, polled by
+  every driver, beside the counters each connection's start and end write;
+  and the memory cap's count, written by every allocation under a cap,
+  beside the words every allocation and every loop back-edge read. Each
+  group has a line of its own now, the padded spinlock is aligned to the
+  line it pads, the event loop and its drivers are allocated at that
+  alignment, `_Static_assert`s keep the pairs apart, and arming a deadline
+  stores its flag only when it is not set yet (#3774).
+
+- **A failed bounds check's helpers are out of line, cold and noreturn.**
+  The checks stay inline, and their failure is one call laid out after the
+  hot path: a function with a checked index has 144 bytes of hot code at -O2
+  where it had 256, the rest in `.text.unlikely`; -O0 and -Og builds are
+  unchanged. The runtime's rare paths (a send to an actor that has ended, a
+  send while the scheduler is stopped, a message dropped, a queue's
+  overflow) are cold too: 1408 bytes leave the scheduler's hot code and 336
+  the send path's (#3777).
+
 ## [0.929.0]
 
 ### Added
