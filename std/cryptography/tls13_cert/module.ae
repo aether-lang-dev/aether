@@ -773,6 +773,14 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
         return terr
     }
     tbs_end = asn1.reader_pos(cert)
+    // tbsCertificate is a SEQUENCE (RFC 5280 4.1): read_tlv takes any tag,
+    // so a TBS tagged otherwise (0x3d, found by the x509 fuzz target) was
+    // walked as one and its fields came out of the wrong bytes.
+    if asn1.last_tag(cert) != 0x30 {
+        asn1.reader_free(cert); asn1.reader_free(top); bytes.wipe_free(view); bytes.wipe_free(cert_body)
+        bytes.wipe_free(tbs_content)
+        return "tls13_cert: tbsCertificate is not a SEQUENCE"
+    }
     // Slice the full TBS DER out of cert_body (cert reads over cert_body).
     tbs_dlen = tbs_end - tbs_start
     full_tbs = bytes.new(tbs_dlen)
