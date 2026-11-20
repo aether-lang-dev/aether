@@ -1,0 +1,82 @@
+// Run by test_os_sigchld_ignored.sh twice, the same binary: once as it is,
+// once with SIGCHLD ignored by the process that execs it (as the Erlang VM
+// starts its children). Every call that starts a child and waits for it
+// must report the child's real exit status either way.
+import std.os
+import std.list
+import std.mem
+import std.io
+
+check(label: string, ok: bool) -> int {
+    if ok {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    return 1
+}
+
+main() {
+    if os.args_count() > 1 {
+        if os.args_get(1) == "exit3" {
+            println("child")
+            exit(3)
+        }
+    }
+    fails = 0
+    me = os.argv0()
+    av = list.new()
+    _ = list.add(av, "exit3")
+
+    out, code, err = os.run_capture(me, av, null)
+    fails = fails + check("run_capture: stdout, 3, no error",
+        out == "child\n" && code == 3 && err == "")
+    print("     run_capture gave (${code}, '${err}')\n")
+
+    rc = os.run(me, av, null)
+    fails = fails + check("run: 3", rc == 3)
+
+    _p, pc, perr = os.run_pipe_drain_and_wait(me, av, null)
+    fails = fails + check("run_pipe_drain_and_wait: 3", pc == 3 && perr == "")
+
+    fd, pid, serr = os.run_pipe(me, av, null)
+    if fd >= 0 { io.fd_close(fd) }
+    fails = fails + check("run_pipe starts", serr == "")
+    wc, werr = os.wait_pid(pid)
+    fails = fails + check("run_pipe then wait_pid: 3", wc == 3 && werr == "")
+
+    to, from, spid, sterr = os.run_stdio(me, av, null)
+    if to >= 0 { io.fd_close(to) }
+    fails = fails + check("run_stdio starts", sterr == "")
+    sc, swerr = os.wait_pid(spid)
+    fails = fails + check("run_stdio then wait_pid: 3", sc == 3 && swerr == "")
+    if from >= 0 { io.fd_close(from) }
+
+    t, te = os.spawn_proc(me, av, null)
+    fails = fails + check("spawn_proc starts", te == "")
+    tc, twerr = os.wait(t)
+    fails = fails + check("spawn_proc then wait: 3", tc == 3 && twerr == "")
+
+    // The child of an os.spawn that exits before its wait: the wait still
+    // reads its status, though the process ignores SIGCHLD.
+    t2, te2 = os.spawn_proc(me, av, null)
+    sleep(300)
+    toks = list.new()
+    _ = list.add(toks, mem.long_to_ptr(t2 as long))
+    got, ac, aerr = os.wait_any(toks)
+    fails = fails + check("spawn_proc, exited first, then wait_any: 3",
+        te2 == "" && got == t2 && ac == 3 && aerr == "")
+    list.free(toks)
+
+    sys = os.os_system("exit 4")
+    fails = fails + check("system: 4", sys == 4)
+
+    eo, ee = os.exec("echo shell")
+    fails = fails + check("exec: output", eo == "shell\n" && ee == "")
+
+    list.free(av)
+    if fails > 0 {
+        exit(1)
+    }
+    println("os_sigchld_ignored probe passed")
+}

@@ -39,7 +39,14 @@ fn add(g: sandbox.Grants, item: string) {
     if kind == "listen" { sandbox.grant_tcp_listen(g) return }
     if kind == "all" { sandbox.grant_all(g) return }
     if kind == "nolandlock" { sandbox.grant_without_landlock(g) return }
-    if kind == "runtime" { sandbox.grant_runtime(g, pat) return }
+    if kind == "runtime" {
+        why = sandbox.grant_runtime(g, pat)
+        if why != "" {
+            println("host: ${why}")
+            exit(2)
+        }
+        return
+    }
     if kind == "tcp" || kind == "udp" {
         host = pat
         port = 0

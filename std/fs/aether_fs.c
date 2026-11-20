@@ -158,6 +158,7 @@ void fs_release_pread(void) {}
 const char* fs_ftruncate_raw(File* f, int64_t l) { (void)f; (void)l; return "fs unavailable"; }
 const char* fs_fsync_raw(File* f) { (void)f; return "fs unavailable"; }
 DirList* dir_list_raw(const char* p) { (void)p; return NULL; }
+const char* dir_list_error(const char* p) { (void)p; return "cannot list directory: built without filesystem support"; }
 int dir_list_count(DirList* l) { (void)l; return 0; }
 const char* dir_list_get(DirList* l, int i) { (void)l; (void)i; return NULL; }
 int dir_list_kind(DirList* l, int i) { (void)l; (void)i; return 0; }
@@ -799,8 +800,32 @@ const char* fs_ftruncate_raw(File* file, int64_t length) {
     return "";
 }
 
-/* fsync — flush kernel buffers to disk. Required after pwrite for
- * durability guarantees. POSIX fsync(2) / Windows _commit. */
+#ifndef _WIN32
+/* Flush `fd` to the device, which is what every durable call here means by
+ * a sync: fs.fsync, fs.fd_fsync and write_atomic's staged file. On macOS
+ * fsync(2) hands the data to the drive and returns while it may still sit
+ * in the drive's own write cache, which a power loss drops; fcntl(F_FULLFSYNC)
+ * asks the drive to flush that cache too, and is what macOS documents for
+ * durability. A filesystem that does not take it (some network and FUSE
+ * ones) refuses it, and fsync(2) is then the best there is. Elsewhere
+ * fsync(2). Retried on EINTR. 0, or -1 with errno set. */
+static int aether_fs_sync_fd(int fd) {
+#ifdef F_FULLFSYNC
+    for (;;) {
+        if (fcntl(fd, F_FULLFSYNC) == 0) return 0;
+        if (errno != EINTR) break;
+    }
+    if (errno == EBADF || errno == EIO) return -1;
+#endif
+    while (fsync(fd) != 0) {
+        if (errno != EINTR) return -1;
+    }
+    return 0;
+}
+#endif
+
+/* fsync — flush to the device (aether_fs_sync_fd: F_FULLFSYNC on macOS).
+ * Required after pwrite for durability guarantees. Windows _commit. */
 /* Expose the OS-level descriptor inside an open File (issue #1003).
  * Exists so capability plumbing — capsicum.rights_limit() /
  * fcntls_limit() before capsicum.enter() — can narrow a descriptor the
@@ -825,7 +850,7 @@ const char* fs_fsync_raw(File* file) {
 #ifdef _WIN32
     if (_commit(fd) != 0) return "fsync failed";
 #else
-    if (fsync(fd) != 0) return "fsync failed";
+    if (aether_fs_sync_fd(fd) != 0) return "fsync failed";
 #endif
     return "";
 }
@@ -1823,7 +1848,7 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
         if (fflush(fp) != 0) {
             fsync_ok = 0;
             err_save = errno;
-        } else if (fsync(fileno(fp)) != 0) {
+        } else if (aether_fs_sync_fd(fileno(fp)) != 0) {
             fsync_ok = 0;
             err_save = errno;
         }
@@ -3931,11 +3956,20 @@ static int fs_winattr_to_kind(DWORD attr) {
 #endif
 
 // Directory listing
+/* Every failure is NULL, with its cause recorded as a failed read's is
+ * (aether_fs_read_fail_set), so dir_list_error() can say what it was. A
+ * directory that could not be opened (missing, not a directory, permission
+ * denied, refused by the sandbox) used to be an empty list with no error. */
 DirList* dir_list_raw(const char* path) {
-    if (!path) return NULL;
+    aether_fs_read_fail_reset();
+    if (!path) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_INVALID, 0);
+        return NULL;
+    }
     /* Listing reads the directory: fs_read on it, as fs.walk checks its
-     * root (#3743). A refusal is NULL, which the wrappers report as
-     * "cannot list directory". */
+     * root (#3743). A refusal is NULL with AETHER_FS_READ_FAIL_SANDBOX.
+     * `open_err` keeps the open's errno past the allocation below. */
+    int open_err = 0;
 #ifdef _WIN32
     /* Inside an enforce block the directory listed is the one checked: a
      * handle opened and verified, listed by NtQueryDirectoryFile (#3751).
@@ -3944,16 +3978,27 @@ DirList* dir_list_raw(const char* path) {
     void* wdir = NULL;
     int verified = 0;   /* in a block: listed through the handle or not at all */
     if (aether_sandbox_levels_here() > 0) {
+        errno = 0;
         wdir = aether_sandbox_win_opendir(path, NULL);
-        if (!wdir && aether_sandbox_refused()) return NULL;
+        if (!wdir && aether_sandbox_refused()) {
+            aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SANDBOX, 0);
+            return NULL;
+        }
+        if (!wdir) open_err = errno ? errno : EIO;
         verified = 1;
     } else if (!aether_sandbox_check("fs_read", path)) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SANDBOX, 0);
         return NULL;
     }
 #else
     /* On POSIX the directory listed is the one checked (#3751). */
+    errno = 0;
     DIR* dir = (DIR*)aether_sandbox_opendir(path);
-    if (!dir && aether_sandbox_refused()) return NULL;
+    if (!dir && aether_sandbox_refused()) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SANDBOX, 0);
+        return NULL;
+    }
+    if (!dir) open_err = errno ? errno : EIO;
 #endif
 
     /* #462: a directory with many entries is an unbounded surface — a
@@ -3966,6 +4011,7 @@ DirList* dir_list_raw(const char* path) {
 #else
         aether_sandbox_win_closedir(wdir);
 #endif
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_ALLOC, 0);
         return NULL;
     }
     list->entries = NULL;
@@ -3976,13 +4022,32 @@ DirList* dir_list_raw(const char* path) {
     #ifdef _WIN32
     WIN32_FIND_DATAA find_data;
     HANDLE hFind = INVALID_HANDLE_VALUE;
+    if (!wdir && verified) {
+        /* The verified open failed (missing, not a directory, denied):
+         * an error, as FindFirstFileA's failure is below. */
+        aether_caps_free(list, sizeof(DirList));
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, open_err);
+        return NULL;
+    }
     if (!wdir) {
-        if (verified) return list;   /* not there, or not a directory: empty, as FindFirstFileA leaves it */
         char search_path[MAX_PATH];
         snprintf(search_path, sizeof(search_path), "%s\\*", path);
         hFind = FindFirstFileA(search_path, &find_data);
         if (hFind == INVALID_HANDLE_VALUE) {
-            return list;
+            DWORD werr = GetLastError();
+            /* No entry at all: an empty drive root, which has no "." either. */
+            if (werr == ERROR_FILE_NOT_FOUND || werr == ERROR_NO_MORE_FILES) return list;
+            int err;
+            switch (werr) {
+                case ERROR_PATH_NOT_FOUND: case ERROR_INVALID_DRIVE: err = ENOENT; break;
+                case ERROR_DIRECTORY: err = ENOTDIR; break;
+                case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: err = EACCES; break;
+                case ERROR_FILENAME_EXCED_RANGE: err = ENAMETOOLONG; break;
+                default: err = EIO; break;
+            }
+            aether_caps_free(list, sizeof(DirList));
+            aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, err);
+            return NULL;
         }
     }
 
@@ -4031,7 +4096,11 @@ DirList* dir_list_raw(const char* path) {
     if (wdir) aether_sandbox_win_closedir(wdir);
     else FindClose(hFind);
     #else
-    if (!dir) return list;
+    if (!dir) {
+        aether_caps_free(list, sizeof(DirList));
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, open_err);
+        return NULL;
+    }
 
     int cap = 0;
     struct dirent* entry;
@@ -4081,6 +4150,17 @@ const char* dir_list_get(DirList* list, int index) {
 int dir_list_kind(DirList* list, int index) {
     if (!list || !list->kinds || index < 0 || index >= list->count) return 0;
     return list->kinds[index];
+}
+
+/* Why this thread's last dir_list_raw returned NULL, as "<path>: <reason>"
+ * ("No such file or directory", "Not a directory", "Permission denied",
+ * "blocked by sandbox policy ..."). Borrowed from thread-local storage, valid
+ * until this thread's next failed read or listing. */
+const char* dir_list_error(const char* path) {
+    if (s_read_fail_why == AETHER_FS_READ_FAIL_NONE)
+        return "cannot list directory";
+    if (s_read_fail_why == AETHER_FS_READ_FAIL_INVALID) return "cannot list directory: null path";
+    return aether_fs_read_fail_message(path);
 }
 
 void dir_list_free(DirList* list) {
@@ -5711,15 +5791,14 @@ _tuple_int_int_string fs_fchmod_raw(int fd, int mode) {
 #endif
 }
 
-/* Flush the open file `fd` to the device: fsync(2), _commit on Windows. */
+/* Flush the open file `fd` to the device: aether_fs_sync_fd (F_FULLFSYNC on
+ * macOS, fsync(2) elsewhere), _commit on Windows. */
 _tuple_int_int_string fs_fd_fsync_raw(int fd) {
 #ifdef _WIN32
     if (aether_fs_fd_handle(fd) == INVALID_HANDLE_VALUE) return aether_fs_iks_err(aether_fs_win_kind(ERROR_INVALID_HANDLE), "fd_fsync: not an open descriptor");
     if (_commit(fd) != 0) return aether_fs_iks_errno("fd_fsync failed");
 #else
-    while (fsync(fd) != 0) {
-        if (errno != EINTR) return aether_fs_iks_errno("fd_fsync failed");
-    }
+    if (aether_fs_sync_fd(fd) != 0) return aether_fs_iks_errno("fd_fsync failed");
 #endif
     return aether_fs_iks_val(1);
 }

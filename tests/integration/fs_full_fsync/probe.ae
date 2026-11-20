@@ -1,0 +1,45 @@
+// Run by test_fs_full_fsync.sh. Each durable call std.fs has syncs a file
+// and must succeed: fs.fsync on an open handle, fs.fd_fsync on a
+// descriptor, fs.write_atomic's staged file. A descriptor that is not open
+// is an error, not a quiet success.
+import std.fs
+import std.io
+import std.os
+import std.string
+
+extern exit(code: int)
+
+main() {
+    fails = 0
+    dir, derr = fs.make_temp_dir("", "ae_full_fsync")
+    if derr != "" {
+        println("SKIP: no temp dir (${derr})")
+        return
+    }
+
+    h, oerr = fs.open("${dir}/a.txt", "w")
+    if oerr != "" { println("FAIL open: ${oerr}"); exit(1) }
+    _w = fs.pwrite(h, string.bytes("durable"), 0 as long)
+    serr = fs.fsync(h)
+    if serr != "" { println("FAIL fs.fsync: ${serr}"); fails = fails + 1 }
+    _c = fs.close(h)
+
+    fd, _k, cerr = fs.create_exclusive("${dir}/b.txt", 420)
+    if cerr != "" { println("FAIL create_exclusive: ${cerr}"); exit(1) }
+    _n = io.fd_write(fd, string.bytes("durable"))
+    ok, _fk, ferr = fs.fd_fsync(fd)
+    if ok != 1 || ferr != "" { println("FAIL fs.fd_fsync: ${ferr}"); fails = fails + 1 }
+    io.fd_close(fd)
+
+    werr = fs.write_atomic("${dir}/c.txt", string.bytes("durable"))
+    if werr != "" { println("FAIL fs.write_atomic: ${werr}"); fails = fails + 1 }
+    back, rerr = fs.read("${dir}/c.txt")
+    if rerr != "" || back != "durable" { println("FAIL read back: '${back}' ${rerr}"); fails = fails + 1 }
+
+    bad, _bk, berr = fs.fd_fsync(fd)
+    if bad != 0 || berr == "" { println("FAIL fd_fsync of a closed descriptor succeeded"); fails = fails + 1 }
+
+    _r = fs.remove_tree(dir)
+    if fails > 0 { exit(1) }
+    println("fs_full_fsync probe passed")
+}

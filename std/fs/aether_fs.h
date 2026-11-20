@@ -291,6 +291,7 @@ typedef struct {
 } DirList;
 
 DirList* dir_list_raw(const char* path);
+const char* dir_list_error(const char* path);
 int dir_list_count(DirList* list);
 const char* dir_list_get(DirList* list, int index);
 // #966: file kind of entry `index` (0 unknown / 1 file / 2 dir /

@@ -31,13 +31,14 @@ main() {
     }
     dir.list_free(list)
 
-    // Listing a nonexistent directory — dir_list_raw eagerly allocates
-    // an empty DirList rather than returning NULL, so the wrapper can't
-    // distinguish "missing" from "empty" without a C-side change. Just
-    // verify the call doesn't crash and free whatever comes back.
-    empty_list, _ = dir.list("aether_test_nonexistent_dir_xyz_12345")
-    if empty_list != null {
-        dir.list_free(empty_list)
+    // Listing a nonexistent directory is an error, not an empty listing
+    // (test_dir_list_errors.ae covers the causes).
+    missing_list, merr = dir.list("aether_test_nonexistent_dir_xyz_12345")
+    if merr == "" || missing_list != null {
+        println("FAIL: listing a nonexistent dir should error")
+        if missing_list != null { dir.list_free(missing_list) }
+        dir.delete(tmpdir)
+        exit(1)
     }
 
     // Delete: returns "" on success

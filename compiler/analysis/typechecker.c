@@ -71,6 +71,7 @@ SymbolTable* create_symbol_table(SymbolTable* parent) {
     table->seal_whitelist = NULL;
     table->is_sealed = 0;
     table->binds_body = 0;
+    table->declares_fresh = 0;
     // Inherit the merged-body origin so nested scopes (loops, blocks,
     // closures inside a merged function) resolve qualified names against
     // the same module's imports.
@@ -209,6 +210,40 @@ static int name_blocked_by_hide(SymbolTable* table, const char* name) {
         t = t->parent;
     }
     return 0;
+}
+
+// Returns 1 if a `hide` or `seal except` blocks `name` and the binding it
+// blocks is a local of an enclosing body (a parameter, a local of an outer
+// block, an actor's state), not a file-level name (a function, const,
+// extern). A new binding of such a name cannot be fresh: Aether has no
+// block-level shadowing of a local, and the generated C names the outer
+// local, so `x = 5` there wrote the very variable the directive hid. A
+// file-level name is shadowed by a new local, and that local is fresh.
+static int hide_blocks_outer_local(SymbolTable* table, const char* name) {
+    if (!table || !name || table->declares_fresh) return 0;
+    for (SymbolTable* t = table; t; t = t->parent) {
+        int blocked_here = scope_name_is_hidden(t, name) ||
+                           (t->is_sealed && !scope_name_in_whitelist(t, name) &&
+                            !seal_admits_own(t, name));
+        if (blocked_here) {
+            for (SymbolTable* check = t->parent; check; check = check->parent) {
+                if (lookup_symbol_local(check, name)) return check->parent != NULL;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+// The refusal of a new binding of a hidden name: in the scope that hides
+// it, or (hide_blocks_outer_local) beneath a directive that hides a local
+// of an enclosing body.
+static const char* hide_decl_message(SymbolTable* table, const char* name) {
+    if (scope_name_is_hidden(table, name))
+        return aether_internf("cannot declare '%s', it is hidden in this scope by `hide`", name);
+    return aether_internf(
+        "cannot declare '%s', it is hidden in this scope by `hide` or `seal except` "
+        "(a local of an enclosing block; a local is not shadowed, pick another name)", name);
 }
 
 // Returns 1 if a `hide` or `seal except` between `table` and the root
@@ -830,6 +865,42 @@ static void reset_import_aliases(void) {
     for (int i = 0; i < strmap_count(&import_aliases); i++)
         free(strmap_value_at(&import_aliases, i));
     strmap_free(&import_aliases);
+}
+
+/* A name as the source wrote it, for a hide / seal diagnostic. The merge
+ * renames what the checker meets: a module sharing its last segment with
+ * another loaded module carries its full path as its namespace
+ * (`services_mq.bump` for `mq.bump`), and a selectively imported constant
+ * is read under its merged name (`aevg_K_SHAPE` for `K_SHAPE`). Neither is
+ * a name the source wrote or a list could name. `qualified` is
+ * `<ns>.<member>` or a bare name; anything else comes back as it is. */
+static const char* hidden_name_as_written(const char* name) {
+    if (!name) return "?";
+    const char* dot = strchr(name, '.');
+    if (dot && global_module_registry) {
+        char ns[256];
+        size_t n = (size_t)(dot - name);
+        if (n >= sizeof(ns)) return name;
+        memcpy(ns, name, n);
+        ns[n] = '\0';
+        AetherModule* m = module_find_by_namespace(ns);
+        if (m && m->ns && m->name && strcmp(m->ns, ns) == 0 &&
+            strcmp(m->ns, module_last_segment(m->name)) != 0)
+            return aether_internf("%s%s' of module '%s", module_last_segment(m->name), dot,
+                                  m->name);
+        return name;
+    }
+    for (int i = 0; i < strmap_count(&import_aliases); i++) {
+        const char* q = (const char*)strmap_value_at(&import_aliases, i);
+        const char* qdot = q ? strrchr(q, '.') : NULL;
+        if (!qdot) continue;
+        AetherModule* m = global_module_registry
+            ? module_find_by_namespace(aether_intern_n(q, (size_t)(qdot - q))) : NULL;
+        const char* qns = m && m->ns ? m->ns : aether_intern_n(q, (size_t)(qdot - q));
+        if (strcmp(aether_internf("%s_%s", qns, qdot + 1), name) == 0)
+            return strmap_key_at(&import_aliases, i);
+    }
+    return name;
 }
 
 void register_namespace(const char* ns) {
@@ -3344,6 +3415,44 @@ static void reject_scalar_for_ptr_argument(ASTNode* call, ASTNode* arg, Type* ar
                         arg->line, arg->column);
     else
         type_error(emsg, arg->line, arg->column);
+}
+
+/* A string passed to a number parameter (an int of any width, a byte, a
+ * float, a bool). Argument checking is lenient, so `string.pad_start(s, 8,
+ * "0")`, whose pad is a character code (`int`), passed `ae check` and only
+ * the C compiler refused it ("incompatible pointer to integer conversion");
+ * the same for an Aether function's own `int` parameter. A `ptr` is not
+ * refused here: an int goes to one on purpose, and the reverse is the
+ * universal pointer. A one-character string literal gets its character code
+ * in the hint, which is what such a parameter takes. */
+static void reject_string_for_scalar_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                              Type* param_type, int index,
+                                              const char* param_name) {
+    if (!arg_type || !param_type || arg_type->kind != TYPE_STRING) return;
+    if (arg->type == AST_NULL_LITERAL || param_type->distinct_name) return;
+    switch (param_type->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT32: case TYPE_UINT64:
+        case TYPE_BYTE: case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_LONGDOUBLE:
+        case TYPE_BOOL:
+            break;
+        default:
+            return;
+    }
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg), "Argument %d '%s' of '%s': expected %s, got string",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_name(param_type));
+    if (arg->type == AST_LITERAL && arg->value && strlen(arg->value) == 1 &&
+        param_type->kind != TYPE_BOOL && param_type->kind != TYPE_FLOAT &&
+        param_type->kind != TYPE_FLOAT32 && param_type->kind != TYPE_LONGDOUBLE) {
+        const char* hint = aether_internf(
+            "a one-character string is not a character: if '%s' takes a character code, "
+            "pass %d for \"%s\"",
+            param_name ? param_name : "?", (unsigned char)arg->value[0], arg->value);
+        type_error_hint(emsg, hint, arg->line, arg->column);
+    } else {
+        type_error(emsg, arg->line, arg->column);
+    }
 }
 
 /* An optional is never unwrapped implicitly (is_type_compatible's #340
@@ -14672,11 +14781,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     Symbol* visible = lookup_symbol(table, var->value);
                     if (!visible &&
                         (scope_name_is_hidden(table, var->value) ||
-                         name_blocked_by_hide(table, var->value))) {
+                         hide_blocks_outer_local(table, var->value))) {
                         const char* msg = "";
-                        msg = aether_internf(
-                                 "'%s' is hidden in this scope by `hide` or `seal except`",
-                                 var->value);
+                        msg = hide_decl_message(table, var->value);
                         type_error(msg, var->line, var->column);
                         slots_ok = 0;
                         continue;
@@ -14707,12 +14814,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // Forbid declaring a name that's been hidden in this scope —
             // shadowing a hidden binding would re-introduce position-sensitive
             // semantics. If you want a fresh name, pick a different one.
-            if (stmt->value && scope_name_is_hidden(table, stmt->value)) {
-                const char* error_msg = "";
-                error_msg = aether_internf(
-                         "cannot declare '%s', it is hidden in this scope by `hide`",
-                         stmt->value);
-                type_error(error_msg, stmt->line, stmt->column);
+            if (stmt->value &&
+                (scope_name_is_hidden(table, stmt->value) ||
+                 (!lookup_symbol(table, stmt->value) &&
+                  hide_blocks_outer_local(table, stmt->value)))) {
+                type_error(hide_decl_message(table, stmt->value), stmt->line, stmt->column);
                 return 0;
             }
             /* #2886: a local written as a function type that returns a
@@ -15854,7 +15960,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 if (init->type == AST_VARIABLE_DECLARATION && init->type_inferred &&
                     init->value && !for_init_names_bound(init->value, table))
                     init->type_inferred = 0;
+                loop_table->declares_fresh = 1;
                 typecheck_statement(init, loop_table);
+                loop_table->declares_fresh = 0;
             }
             
             // Type check condition (child 1). #3042 review: as for `if` and
@@ -17306,7 +17414,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (expr->value && name_blocked_by_hide(table, expr->value)) {
                     error_msg = aether_internf(
                              "'%s' is hidden in this scope by `hide` or `seal except`",
-                             expr->value);
+                             hidden_name_as_written(expr->value));
                 } else {
                     error_msg = aether_internf("Undefined variable '%s'", expr->value ? expr->value : "?");
                     /* #2614: `low` of a `low.CONST` this scope cannot see. */
@@ -18465,8 +18573,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (qualified_prefix_blocked(table, expr->children[0]->value) ||
                     qualified_member_blocked(table, expr->children[0]->value, expr->value)) {
                     const char* msg = "";
-                    msg = aether_internf("'%s.%s' is hidden in this scope by `hide` or `seal except`",
-                             expr->children[0]->value, expr->value);
+                    msg = aether_internf("'%s' is hidden in this scope by `hide` or `seal except`",
+                             hidden_name_as_written(aether_internf("%s.%s",
+                                 expr->children[0]->value, expr->value)));
                     type_error(msg, expr->line, expr->column);
                     return 0;
                 }
@@ -22017,7 +22126,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 qualified_member_blocked(table, tmp, dot + 1)) {
                 error_msg = aether_internf(
                          "'%s' is hidden in this scope by `hide` or `seal except`",
-                         call->value);
+                         hidden_name_as_written(call->value));
                 free(tmp);
                 type_error(error_msg, call->line, call->column);
                 return 0;
@@ -22674,6 +22783,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_string_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_scalar_for_ptr_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_string_for_scalar_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_ptr_for_string_argument(symbol->node, call, darg, da, param_type,
                                                    arg_slot + 1, param->value);
                     reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);

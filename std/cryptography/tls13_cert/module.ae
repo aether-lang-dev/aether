@@ -3577,7 +3577,7 @@ trust_store_add_pem(anchors: ptr, text: string) -> int {
 // Every file directly inside `dir`, through add_pem_text.
 fn add_pem_dir(anchors: ptr, dir: string) -> (int, string) {
     entries, lerr = fs.list_dir(dir)
-    if string.equals(lerr, "") != 1 { return 0, "cannot list trust store directory ${dir}" }
+    if string.equals(lerr, "") != 1 { return 0, "cannot list trust store directory: ${lerr}" }
     total = 0
     count = fs.dir_list_count(entries)
     i = 0

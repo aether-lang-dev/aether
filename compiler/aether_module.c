@@ -3738,6 +3738,29 @@ static int scope_binds_name(ASTNode* node, const char* name) {
     return has;
 }
 
+/* A `hide` or `seal except` list names a module by the prefix the source
+ * writes for it: the import's last segment, or its `as` alias. The merge
+ * rewrites that prefix in qualified calls and member reads to the module's
+ * namespace (`mq.bump` to `services_mq.bump` when another loaded module
+ * also ends in `mq`; `engine.low` to `mq.low` through `as engine`), so the
+ * typechecker meets the namespace, which no list could name: `seal except
+ * mq` refused every `mq.<member>`, and `hide mq` hid none of them. A list
+ * entry naming the written prefix now names the namespace too; the written
+ * name stays, as it may name a local. (`hide mq.bump` is an AST_IDENTIFIER
+ * with a dotted value and is rewritten in place, as a call is.) */
+static void directive_admit_namespace(ASTNode* node, const char* from, const char* to) {
+    if (!node || !from || !to || strcmp(from, to) == 0) return;
+    int names_from = 0;
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* c = node->children[i];
+        if (!c || c->type != AST_IDENTIFIER || !c->value) continue;
+        if (strcmp(c->value, to) == 0) return;
+        if (strcmp(c->value, from) == 0) names_from = 1;
+    }
+    if (!names_from) return;
+    add_child(node, create_ast_node(AST_IDENTIFIER, to, node->line, node->column));
+}
+
 /* #2209: rewrite the qualified prefix a scope WROTE for an import to the
  * namespace the import's symbols actually carry after the merge.
  *
@@ -3788,6 +3811,8 @@ static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char
             node->value = renamed;
         }
     }
+    if (node->type == AST_HIDE_DIRECTIVE || node->type == AST_SEAL_DIRECTIVE)
+        directive_admit_namespace(node, from, to);
     if (node->type == AST_MEMBER_ACCESS && node->child_count > 0 && node->value) {
         ASTNode* base = node->children[0];
         int target_exports_it = shadowed &&
@@ -3854,6 +3879,11 @@ static void rewrite_qualified_prefix_ambiguous(ASTNode* node, const char* from,
             }
             break;
         }
+    }
+    if (node->type == AST_HIDE_DIRECTIVE || node->type == AST_SEAL_DIRECTIVE) {
+        for (int i = 0; i < ncandidates; i++)
+            if (candidates[i])
+                directive_admit_namespace(node, from, module_namespace_of(candidates[i]->name));
     }
     if (node->type == AST_MEMBER_ACCESS && node->child_count > 0 && node->value) {
         ASTNode* base = node->children[0];

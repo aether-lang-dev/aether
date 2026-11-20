@@ -983,8 +983,12 @@ install keeps them, a distribution's `/usr/lib/python3.X`, a Homebrew or
 pyenv prefix, `/usr/local`; a table of paths would guess, per platform, and
 go stale. The table in `std/sandbox/module.ae` says only which interpreters
 can be asked and how (`python3`, `python` today). A name it does not know,
-or an interpreter that cannot be asked, panics with the reason, rather than
-leave a list that fails later inside the child. It grants no exec (the
+or an interpreter that cannot be asked (not on `PATH`, or exiting non-zero),
+grants nothing and returns the reason, `""` otherwise: check it where the
+list is built (`why = grant_runtime("python3")` in the block) to report that
+rather than the child's failure to start. A list without the runtime's
+library fails closed. (Through 0.926.0 it panicked, which took a host
+process down with it.) It grants no exec (the
 interpreter is the program the spawn runs) and not the guest's script.
 
 ### Where `spawn_sandboxed` finds the preload library
