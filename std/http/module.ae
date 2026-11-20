@@ -23,6 +23,9 @@
 // The implementations are in std/net/aether_http.c and std/net/aether_http_server.c
 // which are compiled into libaether.a
 
+import std.string
+import std.url
+
 exports(
     http_get_raw, http_get_with_timeout_raw, http_get_with_timeout_ns_raw,
     http_post_raw, http_put_raw, http_delete_raw,
@@ -87,7 +90,7 @@ exports(
     http_mime_type,
     serve_file, serve_static,
     request_method, request_path, request_body,
-    request_body_length, request_body_bytes, request_query,
+    request_body_length, request_body_bytes, request_query, query_param,
     request_remote_addr, request_remote_port,
     request_local_addr, request_local_port,
     request_scheme, request_is_tls, request_http_version,
@@ -978,6 +981,10 @@ extern http_server_use_middleware_loop_safe(server: ptr, middleware: ptr, user_d
 
 // HTTP Request - accessors
 extern http_get_header(req: ptr, name: string) -> string
+// The query parameter `name` as it came on the wire, still percent-encoded
+// (`?q=a%20b+c` gives "a%20b+c"), matched against the raw key; "" when the
+// request has none. A path parameter (get_path_param) is raw the same way.
+// For the decoded value, as a form field reads, use query_param.
 extern http_get_query_param(req: ptr, name: string) -> string
 extern http_get_path_param(req: ptr, name: string) -> string
 extern http_request_free(req: @frees ptr)
@@ -1200,6 +1207,21 @@ request_body_complete(req: ptr) -> int {
 
 request_query(req: ptr) -> string {
     return http_request_query(req)
+}
+
+// The query parameter `name`, decoded: percent-escapes resolved and '+' read
+// as a space, keys decoded before they are compared (`?a%20b=1` is "a b").
+// The first of a repeated key. Returns (value, ""), ("", "") when the
+// request has no such parameter, or ("", err) when the query string holds a
+// malformed percent-escape. get_query_param gives the raw value.
+query_param(req: ptr, name: string) -> (string, string) {
+    q, err = url.parse_query(http_request_query(req))
+    if err != "" {
+        return "", err
+    }
+    v = string.concat(url.query_get(q, name), "")
+    url.query_free(q)
+    return v, ""
 }
 
 request_remote_addr(req: ptr) -> string {

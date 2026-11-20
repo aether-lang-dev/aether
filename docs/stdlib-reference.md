@@ -39,7 +39,7 @@ header comment is the authoritative description.
 | `std.guest` | A guest in a sandboxed child process and the protocol to it: the host's side, with the worker's side in `std.guest.child`. | 22 | [guide](../std/guest/README.md) · [source](../std/guest/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 33 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 156 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 157 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
@@ -2347,8 +2347,9 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, and `http_server_e
 - `http.request_body_complete(req)` → `int` - 1 once every declared body byte has arrived (streaming: pulled off the wire; buffered: always 1). The natural chunked-loop terminator. `Transfer-Encoding: chunked` request bodies remain unsupported (no `Content-Length` → length 0, no body), a deliberate v1 semantics decision.
 - `http.request_query(req)` → `string` - Raw query string; empty if absent.
 - `http.get_header(req, name)` - Get request header
-- `http.get_query_param(req, name)` - Get query parameter
-- `http.get_path_param(req, name)` - Get URL path parameter
+- `http.get_query_param(req, name)` → `string` - The query parameter as it came on the wire, still percent-encoded (`?q=a%20b+c` gives `"a%20b+c"`), matched against the raw key; `""` when absent
+- `http.query_param(req, name)` → `(string, string)` - The query parameter decoded, as a form field reads: percent-escapes resolved, `+` a space, the key decoded before it is compared (`?a%20b=1` is `"a b"`); the first of a repeated key. `("", "")` when absent, `("", err)` for a malformed escape in the query string. For every value of a repeated key, `url.parse_query(http.request_query(req))` and `url.query_get_all`
+- `http.get_path_param(req, name)` - Get URL path parameter, raw as `get_query_param` is (not percent-decoded); decode one with `url.decode`, which reads `+` as a space
 - `http.request_free(req)` - Free request
 
 **Response Building:**

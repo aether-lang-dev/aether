@@ -88,4 +88,21 @@ EXPECT="a=[<null>] b=[B] c=[<null>]"
     echo "  [FAIL] substring-key query: expected '$EXPECT', got '$RESP'"; exit 1
 }
 
-echo "  [PASS] http_query_param_multi: per-key values stable across calls (#625)"
+# Test 5 — get_query_param is the raw value; query_param decodes it, '+'
+# as a space, and matches a decoded key. A malformed escape is an error.
+RESP=$(curl --silent --show-error --max-time 5 "$BASE/decoded?q=a%20b+c%2Bd&a%20b=1") || {
+    echo "  [FAIL] curl decoded failed"; exit 1
+}
+EXPECT="raw=[a%20b+c%2Bd] dec=[a b c+d] err=[] spaced=[1]"
+[ "$RESP" = "$EXPECT" ] || {
+    echo "  [FAIL] decoded query: expected '$EXPECT', got '$RESP'"; exit 1
+}
+RESP=$(curl --silent --show-error --max-time 5 "$BASE/decoded?q=%zz") || {
+    echo "  [FAIL] curl malformed failed"; exit 1
+}
+EXPECT="raw=[%zz] dec=[] err=[malformed encoding] spaced=[]"
+[ "$RESP" = "$EXPECT" ] || {
+    echo "  [FAIL] malformed query: expected '$EXPECT', got '$RESP'"; exit 1
+}
+
+echo "  [PASS] http_query_param_multi: per-key values stable across calls (#625), raw and decoded"

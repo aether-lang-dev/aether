@@ -159,6 +159,7 @@
     <li><a href="#request_body_length">request_body_length</a></li>
     <li><a href="#request_body_bytes">request_body_bytes</a></li>
     <li><a href="#request_query">request_query</a></li>
+    <li><a href="#query_param">query_param</a></li>
     <li><a href="#request_remote_addr">request_remote_addr</a></li>
     <li><a href="#request_remote_port">request_remote_port</a></li>
     <li><a href="#request_local_addr">request_local_addr</a></li>
@@ -902,6 +903,7 @@
       <h3 class="function-name">get_query_param <span class="kind">extern</span></h3>
       <pre class="usage"><code>get_query_param(req, name) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">req: ptr, name: string</span></p>
+      <p class="doc">The query parameter `name` as it came on the wire, still percent-encoded (`?q=a%20b+c` gives &quot;a%20b+c&quot;), matched against the raw key; &quot;&quot; when the request has none. A path parameter (get_path_param) is raw the same way. For the decoded value, as a form field reads, use query_param.</p>
     </div>
     <div class="function" id="get_path_param" data-name="get_path_param">
       <h3 class="function-name">get_path_param <span class="kind">extern</span></h3>
@@ -1056,6 +1058,12 @@
       <h3 class="function-name">request_query <span class="kind">fn</span></h3>
       <pre class="usage"><code>request_query(req) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="query_param" data-name="query_param">
+      <h3 class="function-name">query_param <span class="kind">fn</span></h3>
+      <pre class="usage"><code>query_param(req, name) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, name: string</span></p>
+      <p class="doc">The query parameter `name`, decoded: percent-escapes resolved and '+' read as a space, keys decoded before they are compared (`?a%20b=1` is &quot;a b&quot;). The first of a repeated key. Returns (value, &quot;&quot;), (&quot;&quot;, &quot;&quot;) when the request has no such parameter, or (&quot;&quot;, err) when the query string holds a malformed percent-escape. get_query_param gives the raw value.</p>
     </div>
     <div class="function" id="request_remote_addr" data-name="request_remote_addr">
       <h3 class="function-name">request_remote_addr <span class="kind">fn</span></h3>

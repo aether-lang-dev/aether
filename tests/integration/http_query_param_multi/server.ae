@@ -40,6 +40,18 @@ handle_missing(req: ptr, res: ptr, ud: ptr) {
     http.response_set_body(res, "nope=[${missing}]")
 }
 
+// The raw value and the decoded one side by side: get_query_param is the
+// value as it came on the wire, query_param decodes it (and the key).
+handle_decoded(req: ptr, res: ptr, ud: ptr) {
+    raw = http.get_query_param(req, "q")
+    if raw == null { raw = "<null>" }
+    dec, err = http.query_param(req, "q")
+    spaced, _e = http.query_param(req, "a b")
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "raw=[${raw}] dec=[${dec}] err=[${err}] spaced=[${spaced}]")
+}
+
 message StartSrv { raw: ptr }
 
 actor SrvActor {
@@ -58,6 +70,7 @@ main() {
     http.server_get(raw, "/multi", handle, 0)
     http.server_get(raw, "/single", handle_single, 0)
     http.server_get(raw, "/missing", handle_missing, 0)
+    http.server_get(raw, "/decoded", handle_decoded, 0)
     // #1920: bind on port 0 so the kernel picks a free one, and report it.
     // server_start reuses a socket the caller already bound, so this also
     // means READY is printed AFTER the listen socket exists rather than
