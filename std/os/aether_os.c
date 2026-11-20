@@ -270,6 +270,113 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
  * (#3201). */
 #define aether_environ (aether_spawn_environ())
 
+/* A child's exit status, whatever the host did to SIGCHLD.
+ *
+ * A process whose SIGCHLD is ignored (SIG_IGN, or SA_NOCLDWAIT) has its
+ * children reaped by the kernel as they exit, and waitpid on one fails with
+ * ECHILD. That disposition is inherited across exec, so a program the Erlang
+ * VM starts has it, and a library loaded into such a host has it too:
+ * os.run_capture read the child's whole stdout and then returned
+ * (stdout, -1, "waitpid failed"), and os.run returned -1.
+ *
+ * So the calls here make themselves independent of it, as most libraries
+ * that wait for their children do. While any child this file started is
+ * not yet reaped, SIGCHLD is at its default (no handler, no auto-reap);
+ * the disposition the process had is saved by the first fork and put back
+ * when the last such child is reaped. A process whose SIGCHLD is not
+ * ignored is never touched. The parts of the deal a caller may see:
+ *   - while a child of std.os is outstanding (an os.spawn not yet waited
+ *     for included), another child of the process that exits is left for
+ *     its parent to reap rather than reaped by the kernel;
+ *   - a host that changes SIGCHLD's disposition while one is outstanding
+ *     has it replaced by the saved one when the last is reaped.
+ * The shell os.system and os.exec start gets the saved disposition back in
+ * the child, as system() and popen() would have given it; every other child
+ * here starts with SIGCHLD at its default anyway (aether_child_reset_signals).
+ *
+ * The lock is held across the fork, so a pid is in the table before any
+ * thread can reap it. The child does not touch the lock, only the copy of
+ * the saved disposition (sigaction is async-signal-safe). */
+#include "../../runtime/utils/aether_thread.h"
+static pthread_mutex_t aether_chld_lock = PTHREAD_MUTEX_INITIALIZER;
+static pid_t* aether_chld_pids = NULL;   /* children not yet reaped */
+static int aether_chld_count = 0, aether_chld_cap = 0;
+static int aether_chld_swapped = 0;      /* SIGCHLD was ignored and is now default */
+static struct sigaction aether_chld_saved;
+
+/* Called with the lock held, when the table goes from empty to one. */
+static void aether_chld_take(void) {
+    struct sigaction cur;
+    if (sigaction(SIGCHLD, NULL, &cur) != 0) return;
+    if (cur.sa_handler != SIG_IGN && !(cur.sa_flags & SA_NOCLDWAIT)) return;
+    struct sigaction dfl = cur;
+    if (cur.sa_handler == SIG_IGN) dfl.sa_handler = SIG_DFL;
+    dfl.sa_flags &= ~SA_NOCLDWAIT;
+    if (sigaction(SIGCHLD, &dfl, NULL) == 0) {
+        aether_chld_saved = cur;
+        aether_chld_swapped = 1;
+    }
+}
+
+/* Called with the lock held, when the table goes from one to empty. */
+static void aether_chld_give_back(void) {
+    if (!aether_chld_swapped) return;
+    sigaction(SIGCHLD, &aether_chld_saved, NULL);
+    aether_chld_swapped = 0;
+}
+
+/* aether_fork, for every child this file waits for. In the parent the pid is
+ * in the table; in the child the saved SIGCHLD disposition is back. */
+static pid_t aether_os_fork(void) {
+    pthread_mutex_lock(&aether_chld_lock);
+    int room = aether_chld_count < aether_chld_cap;
+    if (!room) {
+        int ncap = aether_chld_cap ? aether_chld_cap * 2 : 16;
+        pid_t* grown = (pid_t*)realloc(aether_chld_pids, (size_t)ncap * sizeof(pid_t));
+        if (grown) {
+            aether_chld_pids = grown;
+            aether_chld_cap = ncap;
+            room = 1;
+        }
+    }
+    if (!room) {
+        pthread_mutex_unlock(&aether_chld_lock);
+        errno = ENOMEM;
+        return -1;
+    }
+    if (aether_chld_count == 0) aether_chld_take();
+    pid_t pid = aether_fork();
+    if (pid == 0) {
+        if (aether_chld_swapped) sigaction(SIGCHLD, &aether_chld_saved, NULL);
+        return 0;
+    }
+    if (pid > 0) {
+        aether_chld_pids[aether_chld_count++] = pid;
+    } else if (aether_chld_count == 0) {
+        aether_chld_give_back();
+    }
+    pthread_mutex_unlock(&aether_chld_lock);
+    return pid;
+}
+
+/* waitpid, for every wait in this file: a child it reaps leaves the table. */
+static pid_t aether_waitpid(pid_t pid, int* st, int flags) {
+    pid_t got = waitpid(pid, st, flags);
+    if (got <= 0) return got;
+    int saved_errno = errno;
+    pthread_mutex_lock(&aether_chld_lock);
+    for (int i = 0; i < aether_chld_count; i++) {
+        if (aether_chld_pids[i] == got) {
+            aether_chld_pids[i] = aether_chld_pids[--aether_chld_count];
+            if (aether_chld_count == 0) aether_chld_give_back();
+            break;
+        }
+    }
+    pthread_mutex_unlock(&aether_chld_lock);
+    errno = saved_errno;
+    return got;
+}
+
 static int aether_child_fd(int fd, int target);   /* below */
 
 /* A program that cannot start (#3170). exec fails in the forked child, so
@@ -354,13 +461,13 @@ static const char* aether_os_strerror_msg(const char* what, int err) {
 /* Reap a child whose exec failed. */
 static void aether_reap_failed(pid_t pid) {
     int st = 0;
-    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    while (aether_waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 }
 
 /* Wait for `pid`, retried on EINTR; its wait-status word, or -1. */
 static int aether_os_shell_wait(pid_t pid) {
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {
+    while (aether_waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) return -1;
     }
     return status;
@@ -416,7 +523,7 @@ static FILE* aether_os_shell_open(const char* cmd, pid_t* out_pid) {
         return NULL;
     }
     /* environ is read in the child, after the fork: see aether_child_exec. */
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid != 0) free(sh_owned);
     if (pid < 0) {
         close(pipefd[0]);
@@ -498,7 +605,7 @@ static int aether_os_system_posix(const char* cmd) {
     int sh_failed = 0;
     char* sh_owned = aether_sh_argv(sh_argv, cmd, &sh_failed);
     /* environ is read in the child, after the fork: see aether_child_exec. */
-    pid_t pid = sh_failed ? -1 : aether_fork();
+    pid_t pid = sh_failed ? -1 : aether_os_fork();
     if (pid != 0) free(sh_owned);
     if (pid == 0) {
         if (!intr_ignored) sigaction(SIGINT, &dfl, NULL);
@@ -1720,7 +1827,7 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
         return -1;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(errp[0]);
         close(errp[1]);
@@ -1742,7 +1849,7 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
     /* A program that could not start is -1, as on Windows (#3170). */
     int exec_err = aether_exec_errno(errp);
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {
+    while (aether_waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) return -1;
     }
     if (exec_err) return -1;
@@ -1785,7 +1892,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
         return NULL;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
@@ -1830,7 +1937,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
         close(pipefd[0]);
         // Reap the child so we don't leave a zombie
         int st = 0;
-        waitpid(pid, &st, 0);
+        aether_waitpid(pid, &st, 0);
         return NULL;
     }
     char buf[4096];
@@ -1841,7 +1948,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
             aether_caps_free(result, cap);
             close(pipefd[0]);
             int st = 0;
-            waitpid(pid, &st, 0);
+            aether_waitpid(pid, &st, 0);
             return NULL;
         }
         if (n == 0) break;
@@ -1854,7 +1961,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
                 aether_caps_free(result, old_cap);
                 close(pipefd[0]);
                 int st = 0;
-                waitpid(pid, &st, 0);
+                aether_waitpid(pid, &st, 0);
                 return NULL;
             }
             result = bigger;
@@ -1865,7 +1972,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     result[len] = '\0';
     close(pipefd[0]);
     int st = 0;
-    waitpid(pid, &st, 0);
+    aether_waitpid(pid, &st, 0);
     return (char*)string_adopt_caps_buffer(result, len, cap);
 }
 
@@ -1919,7 +2026,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
         return out;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
@@ -1960,7 +2067,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     if (!result) {
         close(pipefd[0]);
         int st = 0;
-        waitpid(pid, &st, 0);
+        aether_waitpid(pid, &st, 0);
         out._2 = "alloc failed";
         return out;
     }
@@ -1972,7 +2079,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
             aether_caps_free(result, cap);
             close(pipefd[0]);
             int st = 0;
-            waitpid(pid, &st, 0);
+            aether_waitpid(pid, &st, 0);
             out._2 = "read failed";
             return out;
         }
@@ -1985,7 +2092,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
                 aether_caps_free(result, old_cap);
                 close(pipefd[0]);
                 int st = 0;
-                waitpid(pid, &st, 0);
+                aether_waitpid(pid, &st, 0);
                 out._2 = "realloc failed";
                 return out;
             }
@@ -2000,7 +2107,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     string_release(out._0);
     out._0 = (const char*)string_adopt_caps_buffer(result, len, cap);
     int st = 0;
-    if (waitpid(pid, &st, 0) < 0) {
+    if (aether_waitpid(pid, &st, 0) < 0) {
         out._1 = -1;
         out._2 = "waitpid failed";
         return out;
@@ -2208,7 +2315,7 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
         return out;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(chanfd[0]);
         close(chanfd[1]);
@@ -2407,7 +2514,7 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
         return out;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(inp[0]); close(inp[1]);
         close(outp[0]); close(outp[1]);
@@ -2476,7 +2583,7 @@ _tuple_int_string os_wait_pid_raw(int pid) {
         return out;
     }
     int st = 0;
-    if (waitpid((pid_t)pid, &st, 0) < 0) {
+    if (aether_waitpid((pid_t)pid, &st, 0) < 0) {
         out._1 = "waitpid failed";
         return out;
     }
@@ -2538,7 +2645,7 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
         return out;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(errp[0]); close(errp[1]);
         aether_exec_release(&x);
@@ -2641,7 +2748,7 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
         return out;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(fd);
         close(errp[0]);
@@ -2690,7 +2797,7 @@ _tuple_int_string os_wait_raw(int token) {
     _tuple_int_string out = { -1, "" };
     if (token <= 0) { out._1 = "invalid token"; return out; }
     int st = 0;
-    if (waitpid((pid_t)token, &st, 0) < 0) { out._1 = "waitpid failed"; return out; }
+    if (aether_waitpid((pid_t)token, &st, 0) < 0) { out._1 = "waitpid failed"; return out; }
     group_reaped((pid_t)token);
     return posix_status_to_tuple(st);
 }
@@ -2709,7 +2816,7 @@ _tuple_int_int_string os_wait_any_raw(void* token_list) {
      * has no foreign children, so the reaped pid is always one of its
      * tokens. */
     int st = 0;
-    pid_t got = waitpid(-1, &st, 0);
+    pid_t got = aether_waitpid(-1, &st, 0);
     if (got < 0) { out._2 = "waitpid failed"; return out; }
     group_reaped(got);
 
@@ -2737,7 +2844,7 @@ _tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
     int st = 0;
     if (secs <= 0) {
         pid_t got;
-        while ((got = waitpid(-1, &st, 0)) < 0) {
+        while ((got = aether_waitpid(-1, &st, 0)) < 0) {
             if (errno != EINTR) { out._3 = "waitpid failed"; return out; }
         }
         group_reaped(got);
@@ -2750,7 +2857,7 @@ _tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
 
     int64_t deadline = os_now_monotonic_ms_raw() + (int64_t)secs * 1000;
     for (;;) {
-        pid_t got = waitpid(-1, &st, WNOHANG);
+        pid_t got = aether_waitpid(-1, &st, WNOHANG);
         if (got > 0) {
             group_reaped(got);
             _tuple_int_string s = posix_status_to_tuple(st);
@@ -2797,7 +2904,7 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
     if (!result) {
         close(read_fd);
         int st = 0;
-        waitpid((pid_t)pid, &st, 0);
+        aether_waitpid((pid_t)pid, &st, 0);
         out._2 = "alloc failed";
         return out;
     }
@@ -2809,7 +2916,7 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
             aether_caps_free(result, cap);
             close(read_fd);
             int st = 0;
-            waitpid((pid_t)pid, &st, 0);
+            aether_waitpid((pid_t)pid, &st, 0);
             out._2 = "read failed";
             return out;
         }
@@ -2822,7 +2929,7 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
                 aether_caps_free(result, old_cap);
                 close(read_fd);
                 int st = 0;
-                waitpid((pid_t)pid, &st, 0);
+                aether_waitpid((pid_t)pid, &st, 0);
                 out._2 = "realloc failed";
                 return out;
             }
@@ -2837,7 +2944,7 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
     string_release(out._0);
     out._0 = (const char*)string_adopt_caps_buffer(result, len, cap);
     int st = 0;
-    if (waitpid((pid_t)pid, &st, 0) < 0) {
+    if (aether_waitpid((pid_t)pid, &st, 0) < 0) {
         out._1 = -1;
         out._2 = "waitpid failed";
         return out;
@@ -2892,14 +2999,14 @@ _tuple_int_int_string os_wait_pid_timeout_raw(int pid, int secs) {
 
     int st = 0;
     if (secs <= 0) {
-        while (waitpid((pid_t)pid, &st, 0) < 0) {
+        while (aether_waitpid((pid_t)pid, &st, 0) < 0) {
             if (errno != EINTR) { out._2 = "waitpid failed"; return out; }
         }
     } else {
         int64_t deadline = os_now_monotonic_ms_raw() + (int64_t)secs * 1000;
         int reaped = 0;
         for (;;) {
-            pid_t r = waitpid((pid_t)pid, &st, WNOHANG);
+            pid_t r = aether_waitpid((pid_t)pid, &st, WNOHANG);
             if (r == (pid_t)pid) { reaped = 1; break; }
             if (r < 0) {
                 if (errno == EINTR) continue;
@@ -2977,7 +3084,7 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
         return out;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(errp[0]); close(errp[1]);
         aether_exec_release(&x);
@@ -3033,7 +3140,7 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
         int64_t deadline = os_now_monotonic_ms_raw() + (int64_t)timeout_secs * 1000;
         int reaped = 0;
         for (;;) {
-            pid_t r = waitpid(pid, &st, WNOHANG);
+            pid_t r = aether_waitpid(pid, &st, WNOHANG);
             if (r == pid) { reaped = 1; break; }
             if (r < 0) {
                 if (errno == EINTR) continue;
@@ -3050,20 +3157,20 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
             kill(target, SIGTERM);
             int64_t grace = os_now_monotonic_ms_raw() + 5000;
             while (os_now_monotonic_ms_raw() < grace) {
-                if (waitpid(pid, &st, WNOHANG) == pid) { reaped = 1; break; }
+                if (aether_waitpid(pid, &st, WNOHANG) == pid) { reaped = 1; break; }
                 struct timespec ts = { 0, 20 * 1000 * 1000 };
                 nanosleep(&ts, NULL);
             }
             if (!reaped) {
                 kill(target, SIGKILL);
-                waitpid(pid, &st, 0);
+                aether_waitpid(pid, &st, 0);
             }
             outcome = "timeout";
             exit_code = 124;
             handled = 1;
         }
     } else {
-        while (waitpid(pid, &st, 0) < 0) {
+        while (aether_waitpid(pid, &st, 0) < 0) {
             if (errno != EINTR) { outcome = "error"; exit_code = -1; handled = 1; break; }
         }
     }
@@ -3092,7 +3199,7 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
         kill(-group, SIGKILL);
         for (;;) {
             int st2 = 0;
-            pid_t r = waitpid(-group, &st2, WNOHANG);
+            pid_t r = aether_waitpid(-group, &st2, WNOHANG);
             if (r <= 0) break;
         }
     }
@@ -3193,7 +3300,7 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
         out._3 = xerr; return out;
     }
 
-    pid_t pid = aether_fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
@@ -3298,7 +3405,7 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     if (in_open) close(in_fd);
 
     int st = 0;
-    while (waitpid(pid, &st, 0) < 0) {
+    while (aether_waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR) {
             /* #462: free the capped capture buffers with their live
              * sizes (caps_free(NULL,0) is a no-op when never grown). */

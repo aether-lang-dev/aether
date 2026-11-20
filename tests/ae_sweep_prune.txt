@@ -19,6 +19,7 @@ tests/integration/ae_add_release_artifact/
 tests/integration/ae_cflags_extra_env/
 tests/integration/ae_run_cflags/
 tests/integration/ae_run_ends_with_ae/
+tests/integration/os_sigchld_ignored/
 tests/integration/sandbox_spawn_socket/
 tests/integration/server_jobs_helpers/
 tests/integration/aether_string_ffi_unwrap/
