@@ -117,5 +117,7 @@ main() {
     seed(dir, "crash_name_control", "<a><b\x0f><c>t</c></a>")
     hex_seed(dir, "crash_declaration_nul",
         "3c2100000000000000115d5d3e3c612f3e")
+    hex_seed(dir, "crash_text_del",
+        "3c613e266c743b622667743b2022616dffffffffffffffffffff7fcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfc7cfcfcfcfcfcfcfcfcfcf286c696e6520cfcfcfcfcfcfcfcfcfcfcf2f3ecfcfcfcfcfcfcfcfcfcf2f613e")
     seed(dir, "name_quote_amp", "<a><b\"c/><d&e/></a>")
 }
