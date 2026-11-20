@@ -191,7 +191,7 @@ main() {
     s3, pool3, opts3, cache3, srv3 = start(framed_get, padded_head, 1, "method_url")
     bad = bad + check("HEAD, a miss", probe(http.server_port(s3), "HEAD"), "200 length 2 body 0 pad [ v]")
     bad = bad + check("the same HEAD from the cache (#3782)", probe(http.server_port(s3), "HEAD"),
-                      "200 length 2 body 0 pad [ v]")
+        "200 length 2 body 0 pad [ v]")
     stop(s3, pool3, opts3, cache3, srv3)
 
     if bad > 0 {
