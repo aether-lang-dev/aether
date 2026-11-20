@@ -295,7 +295,19 @@ const char* yaml_emit_document_raw(void* doc) {
         empty[0] = '\0';
         return store_emit_string(empty);
     }
-    char* str = fy_emit_document_to_string(yaml_fyd(doc), FYECF_DEFAULT);
+    /* A root with an anchor or a tag is written after a "---": libfyaml reads
+     * a bare document's properties on the line of a block scalar indicator
+     * (`&a |-` then the content) as an empty scalar, and emitted it in just
+     * that shape, so `&a\n|-\nn?$` came back as '' (#3749, the yaml fuzz
+     * target). After "---" it reads the scalar whole. Other documents are
+     * emitted as they were. */
+    struct fy_node* root = fy_document_root(yaml_fyd(doc));
+    enum fy_emitter_cfg_flags flags = FYECF_DEFAULT;
+    if (fy_node_get_anchor(root) || fy_node_get_tag(root, NULL)) {
+        flags = (enum fy_emitter_cfg_flags)((flags & ~FYECF_DOC_START_MARK(FYECF_DOC_START_MARK_MASK)) |
+                                            FYECF_DOC_START_MARK_ON);
+    }
+    char* str = fy_emit_document_to_string(yaml_fyd(doc), flags);
     return store_emit_string(str);
 }
 
