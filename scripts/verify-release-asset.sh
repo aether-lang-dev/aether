@@ -121,8 +121,16 @@ else
 fi
 
 # Anchored: --signer-workflow matches a prefix, and so takes the release
-# workflow run from any branch or tag.
-gh attestation verify "$file" --repo "$repo" --cert-identity-regex "$idre" \
-    --cert-oidc-issuer https://token.actions.githubusercontent.com >/dev/null ||
+# workflow run from any branch or tag. gh's own report is kept and shown on
+# a failure: its one-line error is the same for a certificate that names
+# another identity as for one it cannot check at all.
+if ! gh attestation verify "$file" --repo "$repo" --cert-identity-regex "$idre" \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com >"$work/gh-verify.log" 2>&1; then
+    {
+        printf 'verify-release-asset: gh attestation verify said:\n'
+        sed 's/^/  /' "$work/gh-verify.log"
+        printf 'verify-release-asset: %s, asked for an identity matching %s\n' "$(gh --version | head -n 1)" "$idre"
+    } >&2
     die "$name has no build provenance from $repo's release workflow that gh accepts"
+fi
 say "$name's build provenance verified with gh attestation verify"

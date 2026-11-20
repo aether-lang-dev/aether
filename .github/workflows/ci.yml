@@ -1404,6 +1404,48 @@ jobs:
         done
 
   # ============================================================
+  # Windows: verify the latest release the way release.yml does
+  # release.yml's Windows leg checks the previous release with
+  # scripts/verify-release-asset.sh, from Git Bash, before the ABI matrix
+  # unpacks it. Only a release run reached that step, so 0.928.0 to 0.930.0
+  # each failed there after a full build. This job runs the same step on
+  # every PR. Keep its run block the same as release.yml's.
+  # ============================================================
+  ci-windows-release-verify:
+    name: Windows / verify the latest release (Git Bash)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: What a native program receives from Git Bash
+      shell: bash
+      run: |
+        # git.exe is a native Windows program, as gh.exe is, so it gets its
+        # arguments after Git Bash has rewritten what looks like a path.
+        tmp="$(cygpath -u "$RUNNER_TEMP")"
+        git rev-parse --sq-quote \
+          '^https://github\.com/o/r/\.github/workflows/release\.yml@refs/(heads/main|tags/v1\.2\.3)$' \
+          "$tmp/aether-x.zip"
+        gh --version | head -n 1
+
+    - name: Download and verify the latest release (Windows)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        WF_SHA: ${{ github.sha }}
+      run: |
+        tmp="$(cygpath -u "$RUNNER_TEMP")"
+        prev_tag="$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName)"
+        gh release download "$prev_tag" --repo "${{ github.repository }}" --pattern "aether-*-windows-x86_64.zip" --dir "$tmp"
+        vra="$tmp/verify-release-asset.sh"
+        cp scripts/verify-release-asset.sh "$vra"
+        sh "$vra" "${{ github.repository }}" "$prev_tag" "$tmp"/aether-*-windows-x86_64.zip
+
+  # ============================================================
   # Platform portability — cooperative scheduler, WASM, embedded
   # Verifies Aether compiles and runs on threadless platforms.
   # ============================================================
