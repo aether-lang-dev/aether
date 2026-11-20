@@ -316,8 +316,9 @@ TAG=v9.9.9
 # get.sh -----------------------------------------------------------------------
 # get.sh installs prebuilt .tar.gz archives on Linux, macOS and FreeBSD only.
 run_get() {   # $1 = case name
+    echo "    case get $1"
     PFX="$TMP/prefix_$1"
-    ( env -u GITHUB_TOKEN -u GH_TOKEN PATH="$RUN_PATH" PREFIX="$PFX" AE_GITHUB_WEB_BASE="$BASE" \
+    ( $AE_TIMEOUT env -u GITHUB_TOKEN -u GH_TOKEN PATH="$RUN_PATH" PREFIX="$PFX" AE_GITHUB_WEB_BASE="$BASE" \
         AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" "$TAG" ) >"$TMP/get_$1.log" 2>&1
 }
 get_ok() {   # $1 = case, $2 = what
