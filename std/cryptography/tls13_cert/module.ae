@@ -1761,7 +1761,11 @@ fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) -> int {
                 if (bytes.get(name_content, i) & 0xFF) == 0 { has_nul = 1 }
                 i = i + 1
             }
-            if has_nul == 0 {
+            // An empty dNSName names no host (RFC 5280 4.2.1.6 wants the
+            // preferred name syntax), so it is malformed as one holding a NUL
+            // is, and kept out of dns_names (the x509 fuzz target found one
+            // recorded).
+            if has_nul == 0 && nlen > 0 {
                 nm = bytes.new(nlen)
                 if nlen > 0 { bytes.set(nm, nlen - 1, 0) }
                 bytes.copy_from_bytes(nm, 0, name_content, 0, nlen)
