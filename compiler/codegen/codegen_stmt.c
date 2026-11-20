@@ -1038,6 +1038,24 @@ static void series_var(CodeGenerator* gen, ASTNode* id) {
     generate_expression(gen, id);
 }
 
+/* `<id> = <value>` for a collapsed series, the value written between the
+ * two calls. An atomic state field is stored with a release (#3772), as its
+ * assignment is: `id` read as a value is AETHER_STATE_LOAD, not a place. */
+static void series_store_begin(CodeGenerator* gen, ASTNode* id) {
+    if (id && id->type == AST_IDENTIFIER && actor_state_atomic_bits(gen, id->value)) {
+        emit_state_store_open(gen, id->value);
+        return;
+    }
+    series_var(gen, id);
+    fprintf(gen->output, " = ");
+}
+
+static void series_store_end(CodeGenerator* gen, ASTNode* id) {
+    if (id && id->type == AST_IDENTIFIER && actor_state_atomic_bits(gen, id->value))
+        fprintf(gen->output, ")");
+    fprintf(gen->output, ";\n");
+}
+
 // Try to detect and emit a collapsed arithmetic series loop.
 // Returns 1 if the loop was collapsed and emitted; 0 otherwise (caller emits normally).
 static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
@@ -1279,33 +1297,36 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
             const char* tri = after
                 ? "(_ae_sn % 2 == 0 ? (_ae_sn / 2) * (_ae_sn + 1) : _ae_sn * (_ae_sn / 2 + 1))"
                 : "(_ae_sn % 2 == 0 ? (_ae_sn / 2) * (_ae_sn - 1) : _ae_sn * ((_ae_sn - 1) / 2))";
-            series_var(gen, acc_ids[i]);
-            fprintf(gen->output, " = (%s)((uint64_t)(int64_t)", acc_ctype);
+            series_store_begin(gen, acc_ids[i]);
+            fprintf(gen->output, "(%s)((uint64_t)(int64_t)", acc_ctype);
             series_var(gen, acc_ids[i]);
             fprintf(gen->output, " + %lluULL * ((uint64_t)(int64_t)", acc_scale[i]);
             series_var(gen, cond_left);
             fprintf(gen->output, " * _ae_sn + %lluULL * ", counter_step);
             fputs(tri, gen->output);
-            fprintf(gen->output, "));\n");
+            fprintf(gen->output, "))");
+            series_store_end(gen, acc_ids[i]);
             emitted_linear = 1;
         } else {
             // Invariant addend: added once per trip.
-            series_var(gen, acc_ids[i]);
-            fprintf(gen->output, " = (%s)((uint64_t)(int64_t)", acc_ctype);
+            series_store_begin(gen, acc_ids[i]);
+            fprintf(gen->output, "(%s)((uint64_t)(int64_t)", acc_ctype);
             series_var(gen, acc_ids[i]);
             fprintf(gen->output, " + (uint64_t)(int64_t)(");
             generate_expression(gen, acc_addends[i]);
-            fprintf(gen->output, ") * _ae_sn);\n");
+            fprintf(gen->output, ") * _ae_sn)");
+            series_store_end(gen, acc_ids[i]);
         }
     }
 
     // counter = c0 + step * T
     codegen_maybe_emit_line(gen, stmts[counter_idx]);
     print_indent(gen);
+    series_store_begin(gen, cond_left);
+    fprintf(gen->output, "(%s)((uint64_t)(int64_t)", counter_ctype);
     series_var(gen, cond_left);
-    fprintf(gen->output, " = (%s)((uint64_t)(int64_t)", counter_ctype);
-    series_var(gen, cond_left);
-    fprintf(gen->output, " + _ae_sn * %lluULL);\n", counter_step);
+    fprintf(gen->output, " + _ae_sn * %lluULL)", counter_step);
+    series_store_end(gen, cond_left);
 
     unindent(gen);
     print_indent(gen);
@@ -7745,6 +7766,11 @@ static void emit_destructure_state_store(CodeGenerator* gen, const char* name, T
                 opt_slot_text(cg_intern(get_c_type(st)), pt, tmp_id, j, 0, 0, NULL));
         return;
     }
+    if (actor_state_atomic_bits(gen, name)) {   /* #3772 */
+        emit_state_store_open(gen, name);
+        fprintf(gen->output, "_tup%d._%d);\n", tmp_id, j);
+        return;
+    }
     fprintf(gen->output, "self->%s = _tup%d._%d;\n", name, tmp_id, j);
 }
 
@@ -10396,6 +10422,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "_aether_store_%s(&self->%s, ", sname, stmt->value);
                     emit_struct_take(gen, stmt->children[0], sname, stmt->value);
                     fprintf(gen->output, ");\n");
+                } else if (stmt->child_count > 0 && actor_state_atomic_bits(gen, stmt->value)) {
+                    /* #3772: an atomic field is written with a release. */
+                    emit_state_store_open(gen, stmt->value);
+                    generate_expression(gen, stmt->children[0]);
+                    fprintf(gen->output, ");\n");
                 } else {
                     fprintf(gen->output, "self->%s", stmt->value);
                     if (stmt->child_count > 0) {
@@ -11603,6 +11634,43 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
                 }
 
+                /* #3772: `x op= y` on an atomic state field is `op=` on a
+                 * local copy of it, read relaxed, then stored with a release.
+                 * The copy goes through this same statement's emission, so
+                 * every rule of `op=` holds as for a local: a float right
+                 * side converts with saturation, `%=` by a float is fmod, `/=`
+                 * and the shifts keep their integer rules (#3524). As an
+                 * atomic `op=` it was a seq_cst read-modify-write, a locked
+                 * instruction on x86, for a field the actor's step alone
+                 * writes. */
+                {
+                    int sbits = is_state_var ? actor_state_atomic_bits(gen, stmt->value) : 0;
+                    if (sbits) {
+                        fprintf(gen->output, "{ %s _ae_sv = AETHER_STATE_LOAD(self->%s);\n",
+                                sbits == 32 ? "int" : "int64_t", stmt->value);
+                        ASTNode* copy = create_ast_node(AST_COMPOUND_ASSIGNMENT, "_ae_sv",
+                                                        stmt->line, stmt->column);
+                        copy->node_type = stmt->node_type ? clone_type(stmt->node_type) : NULL;
+                        add_child(copy, stmt->children[0]);
+                        add_child(copy, stmt->children[1]);
+                        /* The body only: this statement's prelude has run,
+                         * and a match, an `or` block or a trailing block on
+                         * the right is bound already. Through
+                         * generate_statement it was emitted again, and the
+                         * bound name printed as an undeclared one. */
+                        print_indent(gen);
+                        generate_statement_body(gen, copy);
+                        print_indent(gen);
+                        emit_state_store_open(gen, stmt->value);
+                        fprintf(gen->output, "_ae_sv); }\n");
+                        /* The operator and the right side are the
+                         * statement's; only the node made here is freed. */
+                        copy->children[0] = copy->children[1] = NULL;
+                        copy->child_count = 0;
+                        free_ast_node(copy);
+                        break;
+                    }
+                }
                 /* #2428: `v op= x` on an eight-lane value is `v = helper(v, x)`
                  * (the halves form is a struct; see codegen_expr.c). The
                  * typechecker records the target's type on the node for this. */

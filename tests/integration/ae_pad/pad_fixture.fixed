@@ -1,0 +1,95 @@
+// ae pad fixture (#3775): structs whose layout is known by hand, a message
+// and an actor. The test reports it, proves the report against the C
+// compiler (--verify), rewrites it (--fix), and runs it before and after:
+// the output must not change.
+
+// The issue's example: 40 bytes in this order, 24 by alignment.
+struct Rec {
+    b: long
+    d: long
+    e: int
+    a: byte
+    c: byte
+}
+
+struct Inner {
+    flag: byte
+    value: float
+}
+
+struct Outer {
+    inner: Inner
+    count: int
+    // The tag says which kind of record this is.
+    tag: byte // one byte
+}
+
+struct Arr {
+    vals: long[2],
+    k: byte,
+    m: byte
+}
+
+struct Maybe { v: long?, w: int?, ok: byte, z: byte }
+
+// Already as tight as it gets.
+struct Tight {
+    x: long
+    y: int
+    z: byte
+}
+
+struct Circle { r: float }
+struct Square { side: int }
+type Shape = Circle | Square
+
+struct Holder {
+    pad: byte
+    shape: Shape
+}
+
+extern struct CPair {
+    a: byte
+    b: long
+}
+
+extern struct Packed @packed {
+    a: byte
+    b: long
+    c: uint16
+}
+
+message Sample {
+    a: long
+    b: byte
+    c: long
+}
+
+actor Counter {
+    state hits = 0
+    state last: long = 0
+    state seen = false
+
+    receive {
+        Sample(a, b, c) -> {
+            hits = hits + 1
+            last = a + c
+            seen = b > 0
+        }
+    }
+}
+
+main() {
+    r = Rec { a: 1, b: 20, c: 3, d: 40, e: 5 }
+    o = Outer { tag: 7, inner: Inner { flag: 1, value: 2.5 }, count: 9 }
+    q = Arr { k: 1, vals: [10, 20], m: 2 }
+    w = Maybe { ok: 1, v: 30, z: 4, w: none }
+    t = Tight { x: 1, y: 2, z: 3 }
+    h = Holder { pad: 1, shape: Square { side: 6 } }
+    total = r.a + r.b + r.c + r.d + r.e + o.tag + o.count + q.k + q.vals[1] + q.m + w.ok + w.z + t.x + t.y + t.z + h.pad
+    println("total ${total} inner ${o.inner.value}")
+    c = spawn(Counter())
+    c ! Sample { a: 1, b: 2, c: 3 }
+    wait_for_idle()
+    println("sent")
+}

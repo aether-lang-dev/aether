@@ -1,0 +1,77 @@
+// ae pad refusals (#3775): every struct here would be smaller in another
+// order, and each is one `ae pad --fix` must leave as written, because
+// something other than this program's source reads its field order.
+import std.mem
+
+extern struct Imported @c_import {
+    a: byte
+    b: long
+    c: byte
+}
+
+extern type Opaque
+
+struct ToC {
+    a: byte
+    b: long
+    c: byte
+}
+
+extern takes_to_c(p: *ToC) -> int
+
+struct Exported {
+    a: byte
+    b: long
+    c: byte
+}
+
+read_exported(p: *Exported) -> long {
+    return p.b
+}
+
+struct Carried {
+    a: byte
+    b: long
+    c: byte
+}
+
+message Carry {
+    item: Carried
+}
+
+struct Raw {
+    a: byte
+    b: long
+    c: byte
+}
+
+@derive(schema)
+struct Schema {
+    a: byte
+    b: long
+    c: byte
+}
+
+struct Watched @observable {
+    a: byte
+    b: long
+    c: byte
+}
+
+struct Inside {
+    a: byte
+    b: long
+    c: byte
+}
+
+extern struct Wrap {
+    inner: Inside
+    n: int
+}
+
+main() {
+    r = heap.new(Raw)
+    mem.set_long(r as ptr, 8, 5)
+    println("${mem.get_long(r as ptr, 8)}")
+    heap.free(r)
+}

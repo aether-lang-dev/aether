@@ -45,11 +45,16 @@ make bench-core-compare BASE=../base
 `BENCH_ONLY=send,strings` picks programs, `BENCH_OWNERSHIP=,` leaves out the
 ownership programs, and the table also goes to `build/bench-core.tsv`. Rows:
 
-- **send**: ns per message for a one-int, a two-int and a string field
-  message, the string forwarded as received or built fresh per send
+- **send**: ns per message for a one-int, a two-int, a long-byte-long and a
+  string field message, the string forwarded as received or built fresh per
+  send
 - **ask**: ns per ask round trip, from main and from inside a handler
 - **idle**: ns per message of one ping-pong pair beside 0, 1k and 100k idle
   actors
+- **state**: ns per iteration of a handler loop that reads and writes an
+  `int` state field
+- **fanin**: ns per message into one actor from main alone and from eight
+  actors at once, the bursts a mailbox ring overflows
 - **strings**: concat, interpolation, substring, index_of through 256 KiB,
   split of a 2000 field line
 - **maps**: put and get with string keys

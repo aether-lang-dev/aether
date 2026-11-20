@@ -1026,8 +1026,9 @@ TEST(codegen_emit_header_message_matches_generated_struct) {
     ASSERT_NOT_NULL(in_c);
     ASSERT_NOT_NULL(in_h);
     ASSERT_STREQ(in_c, in_h);
-    /* Packed, as the runtime has always laid messages out. */
-    ASSERT_STREQ("\nint _message_id;\nint a;\nint b;\nint c;\nconst char* s;\nvoid* p;\ndouble f;\n", in_c);
+    /* Packed by alignment (#3773): the 4-byte fields after the id, then the
+     * 8-byte ones, a double and pointers alike, in declaration order. */
+    ASSERT_STREQ("\nint _message_id;\nint a;\nint b;\nint c;\nconst char* s;\ndouble f;\nvoid* p;\n", in_c);
 
     /* The lone int of an inline-payload message is intptr_t on both sides. */
     char* bump_c = struct_body_after(buf, "typedef struct Bump {");

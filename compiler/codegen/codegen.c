@@ -1,4 +1,5 @@
 #include "../analysis/quote.h"
+#include "../analysis/type_layout.h"
 #include "../analysis/actor_protocol.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -510,26 +511,38 @@ const char* get_single_int_field(MessageDef* msg_def) {
 
 /* The C struct of a message (#2517). The .c and the embedding header
  * (--emit-header) both write it from here and nowhere else, so a C host
- * reads the offsets the generated code wrote. The order packs the fields:
- * ints and bools first, then pointer-sized fields, then everything else,
- * after the `_message_id` that is always first. Returns the number of
- * fields written to `out`, which holds at least msg_def->child_count. */
-static int message_field_rank(ASTNode* field) {
-    if (!field->node_type) return 2;
-    switch (field->node_type->kind) {
-        case TYPE_INT: case TYPE_BOOL: return 0;
-        case TYPE_ACTOR_REF: case TYPE_STRING: case TYPE_PTR: return 1;
-        default: return 2;
+ * reads the offsets the generated code wrote. The order packs the fields by
+ * alignment (#3773): after the 4-byte `_message_id` that is always first,
+ * the 4-byte fields, then the 2-byte and the 1-byte ones, which fill the
+ * rest of the first 8 bytes, then the 8-byte and pointer fields, then
+ * wider ones; declaration order within each. The padding is then at most
+ * the bytes before the first 8-aligned field and the tail. Ranked by kind,
+ * `{ a: long, b: byte, c: long }` was 32 bytes, past the 28 a message
+ * carries inline (AETHER_MSG_INLINE_BYTES), so each send allocated; by
+ * alignment it is 24. A field whose layout type_layout_of does not know
+ * ranks with the 8-byte ones. Returns the number of fields written to
+ * `out`, which holds at least msg_def->child_count. */
+static int message_field_rank(ASTNode* program, ASTNode* field) {
+    LayoutTarget tgt;
+    TypeLayout l;
+    layout_target_default(&tgt);
+    if (!field->node_type || !type_layout_of(field->node_type, program, &tgt, &l)) return 3;
+    switch (l.align) {
+        case 4: return 0;
+        case 2: return 1;
+        case 1: return 2;
+        case 8: return 3;
+        default: return l.align < 8 ? 3 : 4;
     }
 }
 
-int message_struct_fields(ASTNode* msg_def, ASTNode** out) {
+int message_struct_fields(ASTNode* program, ASTNode* msg_def, ASTNode** out) {
     int n = 0;
-    for (int rank = 0; rank < 3; rank++) {
+    for (int rank = 0; rank < 5; rank++) {
         for (int i = 0; i < msg_def->child_count; i++) {
             ASTNode* field = msg_def->children[i];
             if (field && field->type == AST_MESSAGE_FIELD && field->value &&
-                message_field_rank(field) == rank) {
+                message_field_rank(program, field) == rank) {
                 out[n++] = field;
             }
         }
@@ -558,9 +571,9 @@ const char* message_field_c_type(ASTNode* msg_def, ASTNode* field) {
 
 /* The lines between the braces of a message struct, one per field, at
  * `indent` levels of four spaces. */
-static void emit_message_struct_body(ASTNode* msg_def, FILE* out, int indent) {
+static void emit_message_struct_body(ASTNode* program, ASTNode* msg_def, FILE* out, int indent) {
     ASTNode** fields = (ASTNode**)malloc((size_t)(msg_def->child_count + 1) * sizeof(ASTNode*));
-    int n = fields ? message_struct_fields(msg_def, fields) : 0;
+    int n = fields ? message_struct_fields(program, msg_def, fields) : 0;
     for (int level = 0; level < indent; level++) fprintf(out, "    ");
     fprintf(out, "int _message_id;\n");
     for (int i = 0; i < n; i++) {
@@ -2302,7 +2315,7 @@ void emit_message_to_header(CodeGenerator* gen, ASTNode* msg_def) {
 
     // The struct the generated .c declares, field for field (#2517).
     fprintf(gen->header_file, "typedef struct {\n");
-    emit_message_struct_body(msg_def, gen->header_file, 1);
+    emit_message_struct_body(gen->program, msg_def, gen->header_file, 1);
     fprintf(gen->header_file, "} %s;\n", msg_name);
 }
 
@@ -8897,7 +8910,7 @@ static void emit_message_definition(CodeGenerator* gen, ASTNode* child) {
         indent(gen);
         // The field order and types are the ones the embedding
         // header gets (#2517).
-        emit_message_struct_body(child, gen->output, gen->indent_level);
+        emit_message_struct_body(gen->program, child, gen->output, gen->indent_level);
 
         MessageFieldDef* first_field = NULL;
         MessageFieldDef* last_field = NULL;
@@ -10586,6 +10599,37 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#include \"aether_bounds_check.h\"");
         print_line(gen, "#include \"aether_runtime_types.h\"");
         print_line(gen, "#include \"aether_compiler.h\"");
+        print_line(gen, "");
+        /* #3772: an actor's handlers read its atomic state fields relaxed
+         * and write them with a release store (actor_state_atomic_bits in
+         * codegen_actor.c), never a seq_cst one, which on x86 was a locked
+         * exchange. Release, not relaxed: a thread outside the actor that
+         * reads a field (`w.done`, an acquire) then sees every write the
+         * handler made before it, as it did when each store was seq_cst. On
+         * x86 a release store is a plain store; on ARM64 it is stlr. `++`
+         * and `--` load and store, with no read-modify-write: the actor's
+         * step is the field's one writer. The step wraps, as the atomic
+         * increment it replaces did. The stores are functions, not macros:
+         * a generated value may hold commas and preprocessor lines. */
+        print_line(gen, "#define AETHER_STATE_LOAD(f) atomic_load_explicit(&(f), memory_order_relaxed)");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED void aether_state_store32(atomic_int* f, int v) {");
+        print_line(gen, "    atomic_store_explicit(f, v, memory_order_release);");
+        print_line(gen, "}");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED void aether_state_store64(_Atomic int64_t* f, int64_t v) {");
+        print_line(gen, "    atomic_store_explicit(f, v, memory_order_release);");
+        print_line(gen, "}");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED int aether_state_step32(atomic_int* f, int d, int post) {");
+        print_line(gen, "    int o = atomic_load_explicit(f, memory_order_relaxed);");
+        print_line(gen, "    int n = (int)((unsigned int)o + (unsigned int)d);");
+        print_line(gen, "    atomic_store_explicit(f, n, memory_order_release);");
+        print_line(gen, "    return post ? o : n;");
+        print_line(gen, "}");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t aether_state_step64(_Atomic int64_t* f, int64_t d, int post) {");
+        print_line(gen, "    int64_t o = atomic_load_explicit(f, memory_order_relaxed);");
+        print_line(gen, "    int64_t n = (int64_t)((uint64_t)o + (uint64_t)d);");
+        print_line(gen, "    atomic_store_explicit(f, n, memory_order_release);");
+        print_line(gen, "    return post ? o : n;");
+        print_line(gen, "}");
         print_line(gen, "");
         print_line(gen, "/* current_core_id and friends are reached through calls, never named:");
         print_line(gen, "   the TLS model differs between the shipped archive and the user's");

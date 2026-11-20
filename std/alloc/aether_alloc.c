@@ -1,6 +1,7 @@
 /* Copyright (c) 2026 Aether Developers. */
 #include "aether_alloc.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,6 +47,38 @@ void* aether_allocator_realloc(AetherAllocator* a, void* ptr,
 void aether_allocator_free(AetherAllocator* a, void* ptr, size_t size) {
     if (!a || !ptr || !a->free_fn) return;
     a->free_fn(a->data, ptr, size);
+}
+
+/* #3778: a block at `align`, a power of two and a multiple of
+ * sizeof(void*), through any allocator alike, the system one included: it
+ * is asked for `size + align - 1 + sizeof(void*)` bytes, the block is the
+ * first aligned address past a pointer's room, and the pointer before it
+ * holds what the allocator gave, for the release. No allocator is told
+ * apart from the others: a self-contained library carries a system
+ * allocator of its own, so a handle one copy made can reach another copy's
+ * release, and a test of which allocator it is (the platform's aligned
+ * allocator for the system one) freed a block through the wrong free. */
+static int align_ok(size_t align) {
+    return align >= sizeof(void*) && (align & (align - 1)) == 0;
+}
+
+static size_t aligned_extra(size_t align) {
+    return align - 1 + sizeof(void*);
+}
+
+void* aether_allocator_alloc_aligned(AetherAllocator* a, size_t size, size_t align) {
+    if (!a || !align_ok(align)) return NULL;
+    if (!a->alloc_fn || size > SIZE_MAX - aligned_extra(align)) return NULL;
+    char* got = (char*)a->alloc_fn(a->data, size + aligned_extra(align));
+    if (!got) return NULL;
+    uintptr_t at = ((uintptr_t)got + sizeof(void*) + align - 1) & ~(uintptr_t)(align - 1);
+    ((void**)at)[-1] = got;
+    return (void*)at;
+}
+
+void aether_allocator_free_aligned(AetherAllocator* a, void* block, size_t size, size_t align) {
+    if (!a || !block || !align_ok(align) || !a->free_fn) return;
+    a->free_fn(a->data, ((void**)block)[-1], size + aligned_extra(align));
 }
 
 /* aether_allocator_arena lives in runtime/memory/aether_arena.c: it must

@@ -12,7 +12,7 @@ header comment is the authoritative description.
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
 | `std.actors` | Name registry, death notices, links, and ending and restarting actors. | 18 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
-| `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
+| `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 8 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 7 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume; pan, pitch, looping, groups, a queue source and a headless engine for the game-engine mixer. | 46 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
 | `std.audit` | Query the sandbox audit trail. | 5 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |

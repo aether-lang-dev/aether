@@ -112,10 +112,12 @@ typedef struct {
 } AetherIoEntry;
 
 // Optimized spinlock with PAUSE instruction (cuts wake-up wasted cycles in a busy-spin)
+// One cache line, aligned to one (#3774): padded but not aligned, it
+// straddled two lines and shared the first with the words before it.
 typedef struct {
     atomic_flag lock;
-    char padding[63];  // Cache line alignment to prevent false sharing
-} OptimizedSpinlock;
+    char padding[63];
+} AETHER_ALIGNED(64) OptimizedSpinlock;
 
 static inline void spinlock_init(OptimizedSpinlock* lock) {
     atomic_flag_clear(&lock->lock);
@@ -153,7 +155,9 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
  * Senders' reads of assigned_core and dead used to share the lines the
  * stepping core writes at every step (the mailbox count's, step_lock's), so
  * each send from another core cost the next step transfers of those lines
- * back to its core. sizeof(ActorBase) is 1720: the table slot (#3540) took
+ * back to its core. sizeof(ActorBase) is 952 (1720 with the 32-slot ring it
+ * had before #3776, which shrank by twelve whole lines, so the groups after
+ * it keep their lines): the table slot (#3540) took
  * the last line's free bytes. On a target with 4-byte pointers the groups
  * fall elsewhere on their lines; nothing reads a field by its offset. */
 #define AETHER_ACTOR_BASE_FIELDS \
@@ -302,6 +306,14 @@ typedef struct {
     AETHER_ACTOR_BASE_FIELDS
 } ActorBase;
 
+/* #3776: the size the notes above give, checked so the number cannot drift:
+ * on a 64-bit target with the default 16-slot mailbox, 784 of its bytes. */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && \
+    UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu && MAILBOX_SIZE == 16
+_Static_assert(sizeof(ActorBase) == 952,
+               "sizeof(ActorBase) changed: update the layout notes above it");
+#endif
+
 /* #3534: the payload the handler of `msg` runs on, in a generated actor's
  * step: one that travelled in the message copied to `copy` (the actor's
  * _aether_step_inline, where its fields are aligned and a panic that
@@ -396,16 +408,25 @@ typedef struct {
     int slot;
 } AetherReady;
 
+/* The Scheduler's words are grouped by who writes them, a line per group
+ * (#3774): the core's loop reads `running` at the top of every iteration,
+ * and a word another thread writes on the same line (the foreign lock, a
+ * spawn's actor_count) cost the core a miss each time it was written. The
+ * groups and the pairs that must not share a line are checked after the
+ * struct. */
 typedef struct {
+    // Written by the core's own thread or rarely: the line its loop reads.
     int core_id;
     pthread_t thread;
-    _Atomic(AetherActorTable*) actor_table;
-    _Atomic int actor_count;
+    atomic_int running;
     // The reclamation epoch this core's thread last observed at the top of
     // its loop, or 0 while the thread is not running (#2509). A released
     // actor is freed only once every core is past the epoch it was released
     // in; see the reclamation notes in multicore_scheduler.c.
     _Atomic uint64_t reclaim_epoch;
+    // Written by whichever thread registers or removes an actor of this core.
+    AETHER_ALIGNED(64) _Atomic(AetherActorTable*) actor_table;
+    _Atomic int actor_count;
     // Per-sender SPSC channels: from_queues[src] is written ONLY by core src.
     // Each channel is a true SPSC queue, so no CAS or locks are needed on the
     // producer side. from_queues[MAX_CORES] is the channel for every thread
@@ -415,17 +436,19 @@ typedef struct {
     // producer at a time (#2083: a pool-thread `!` raced the main thread on
     // this slot and the message was silently lost).
     LockFreeQueue from_queues[MAX_CORES + 1];
-    pthread_mutex_t foreign_lock;
-    atomic_int running;
+    // Locked and unlocked by every non-core sender on each send: a line of
+    // its own, beside the channel it guards.
+    AETHER_ALIGNED(64) pthread_mutex_t foreign_lock;
+
+    // Written by the core's thread alone, read by others for placement,
+    // stealing and counting.
     // The messages this core has taken from its queues, a measure of its
     // load for placement and work stealing. Counted by the core itself as it
     // drains (#3541), its one writer: a sender added to it on every send,
     // an atomic add on a line of the receiving core's.
-    atomic_int work_count;
+    AETHER_ALIGNED(64) atomic_int work_count;
     atomic_int steal_attempts;  // Cumulative count of successful work-steal operations
     atomic_int idle_cycles;     // Track how long core has been idle
-    OptimizedSpinlock actor_lock;  // Serializes every writer of actor_table / actor_count
-
     // Per-core message counters, read cross-thread by
     // count_pending_messages(), so _Atomic to avoid torn reads on
     // weakly-ordered architectures (e.g. ARM64). Both are written by this
@@ -433,7 +456,10 @@ typedef struct {
     // threads count on shared atomic counters (count_sent, count_processed).
     _Atomic uint64_t messages_sent;      // Messages sent FROM this core
     _Atomic uint64_t messages_processed; // Messages processed ON this core
-    char counter_padding[48];    // Cache line padding to prevent false sharing
+
+    // Taken by every writer of actor_table / actor_count; a line of its own
+    // (OptimizedSpinlock is one aligned line).
+    OptimizedSpinlock actor_lock;
 
     // Message coalescing buffer — amortises enqueue atomics across bursts
     struct {
@@ -533,6 +559,20 @@ typedef struct {
         int cap;
     } AETHER_ALIGNED(64) ready_in;
 } Scheduler;
+
+/* #3774: the words that must not share a cache line keep their own. A
+ * compiler without an alignment attribute (AETHER_ALIGNED empty) lays the
+ * struct out without the groups, and is not checked. */
+#define AETHER_APART(a, b) (offsetof(Scheduler, a) / 64 != offsetof(Scheduler, b) / 64)
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && \
+    (AETHER_GCC_COMPAT || defined(_MSC_VER))
+_Static_assert(AETHER_APART(running, foreign_lock) && AETHER_APART(running, actor_count) &&
+               AETHER_APART(running, actor_lock) && AETHER_APART(running, work_count) &&
+               AETHER_APART(foreign_lock, work_count) && AETHER_APART(actor_lock, work_count) &&
+               AETHER_APART(actor_count, work_count) && AETHER_APART(foreign_lock, actor_lock),
+               "Scheduler: a word other threads write shares a line with one it should not");
+#endif
+#undef AETHER_APART
 
 extern Scheduler schedulers[MAX_CORES];
 extern int num_cores;

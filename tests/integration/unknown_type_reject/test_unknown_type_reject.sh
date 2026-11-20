@@ -10,7 +10,7 @@
 # `and` and `not` the help names the operator Aether spells. Every kind of
 # type the program declares is still a type: a struct, an enum, a sum, a
 # bitstruct, a distinct type, a cfn type, an actor and a C overlay, as a
-# local, a parameter and a field.
+# local, a parameter and a field, and a message field (#3785).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -97,6 +97,58 @@ main() {
 AE
 refused field "Unknown type 'Shape': the field 'first'" "declare the struct, enum or sum"
 
+# #3785: a message field and a state field's written type, refused at the
+# declaration. They were reported only at a use, as a mismatch ("'d' is
+# florp, but this value is int").
+cat > "$TMP/message_field.ae" <<'AE'
+message Paint {
+    shade: Shade
+}
+
+main() {
+    println("x")
+}
+AE
+refused message_field "Unknown type 'Shade': the field 'shade'" "declare the struct, enum or sum"
+
+cat > "$TMP/state_field.ae" <<'AE'
+message Go {}
+
+actor Painter {
+    state d: Shade = 0
+    receive {
+        Go() -> { println("go") }
+    }
+}
+
+main() {
+    p = spawn(Painter())
+    p ! Go {}
+}
+AE
+refused state_field "Unknown type 'Shade': the state field 'd'" "declare the struct, enum or sum"
+if grep -q "Type mismatch in state initialization" "$TMP/state_field.log"; then
+    echo "  [FAIL] unknown_type_reject: the unknown state type was also reported as a mismatch"
+    fail=1
+fi
+
+cat > "$TMP/state_no_value.ae" <<'AE'
+message Go {}
+
+actor Painter {
+    state d: Shade
+    receive {
+        Go() -> { println("go") }
+    }
+}
+
+main() {
+    p = spawn(Painter())
+    p ! Go {}
+}
+AE
+refused state_no_value "Unknown type 'Shade': the state field 'd'" "declare the struct, enum or sum"
+
 cat > "$TMP/array_param.ae" <<'AE'
 total(xs: Shape[2]) -> int {
     return 2
@@ -130,6 +182,13 @@ cfn Callback(n: int) -> int
 
 message Ping {
     n: int
+}
+
+message Moved {
+    at: Point
+    c: Color
+    m: Meters
+    f: Flags
 }
 
 struct Holder {

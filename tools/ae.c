@@ -5756,6 +5756,36 @@ void build_gcc_cmd(char* cmd, size_t size,
     free(opt);
 }
 
+/* #3775: the command that checks `c_file` compiles, -fsyntax-only, with the C
+ * compiler, the include paths and the cflags a build of it uses, then
+ * `extra`. Nothing is written and nothing is linked, so it takes none of the
+ * link arguments build_gcc_cmd adds (gcc warns of each unused input). */
+void build_syntax_check_cmd(char* cmd, size_t size, const char* c_file, const char* extra) {
+#ifdef _WIN32
+    if (!ensure_gcc_windows()) {
+        set_failing_cmd(cmd, size);
+        return;
+    }
+    const char* cc = s_gcc_cmd;
+#else
+    const char* cc = posix_driven_cc();
+    if (!cc) {
+        fprintf(stderr, "Error: no C compiler found (looked for gcc, then cc).\n");
+        set_failing_cmd(cmd, size);
+        return;
+    }
+#endif
+    const char* ae_includes = get_aether_include_flags(c_file);
+    if (!ae_includes) {   /* out of memory, said */
+        set_failing_cmd(cmd, size);
+        return;
+    }
+    int w = snprintf(cmd, size, "%s -fsyntax-only%s%s %s %s %s %s \"%s\"%s", cc, AETHER_WRAP_CFLAGS,
+                     bracket_depth_flags(cc), AETHER_REQUIRED_DEFINES, get_cflags(),
+                     tc.include_flags, ae_includes, c_file, extra ? extra : "");
+    if (w >= (int)size) cmd_too_long(cmd, size, w);
+}
+
 /* The runtime sources of a wasm build, as emcc arguments: each path
  * runtime/coop_runtime_sources.txt lists, under the source root (share/aether
  * on an installed tree), one per line of the file, comments (#) and blank
@@ -7520,6 +7550,8 @@ static int print_command_help(const char* cmd) {
         fmt_usage();
     } else if (strcmp(cmd, "checksec") == 0) {
         ae_checksec_usage();
+    } else if (strcmp(cmd, "pad") == 0) {
+        ae_pad_usage(stdout);
     } else if (strcmp(cmd, "bindgen") == 0) {
         ae_bindgen_usage(stdout);
     } else if (strcmp(cmd, "toolchain") == 0) {
@@ -8118,7 +8150,7 @@ typedef struct {
     CapturedParam* params;
 } CapturedFunction;
 
-static int aetherc_capture_stdout_whole(const char* arg1, const char* in_path,
+int aetherc_capture_stdout_whole(const char* arg1, const char* in_path,
                                         const char* arg2_or_null, char** out);
 
 /* Run aetherc with the given args and capture stdout into out_buf. Output
@@ -8143,7 +8175,7 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
 }
 
 /* aetherc_capture_stdout into a heap string of any length, for free(). */
-static int aetherc_capture_stdout_whole(const char* arg1, const char* in_path,
+int aetherc_capture_stdout_whole(const char* arg1, const char* in_path,
                                         const char* arg2_or_null, char** out) {
     *out = ae_path_printf("%s", "");
     char* cmd;
@@ -12492,7 +12524,7 @@ static int ae_fetch_source(const char* tool, const char* package, const char* ve
 
 /* Replaces `path` with `tmp`, also where the platform's rename will not
  * replace a file that exists. */
-static int ae_replace_file(const char* tmp, const char* path) {
+int ae_replace_file(const char* tmp, const char* path) {
 #ifdef _WIN32
     return MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
 #else
@@ -13402,6 +13434,7 @@ static void print_usage(void) {
     printf("  fmt [--check] [path] Format source (stdin->stdout, or files/dirs in place)\n");
     printf("  bindgen consts <h>   Import C macro constants from a header as Aether consts\n");
     printf("  inspect [file.ae]    Show what a script declares (imports, capabilities, exports, decls)\n");
+    printf("  pad [path]...        Report struct, message and actor layout and padding (--fix, --verify)\n");
     printf("  test [file|dir]...   Discover and run tests (--list, --format=tap|aeocha-v1)\n");
     printf("  add <package>        Add a dependency\n");
     printf("  cache [gc|clear]     Show, trim to its limit, or clear the build cache\n");
@@ -14222,6 +14255,7 @@ int main(int argc, char** argv) {
     if (strcmp(cmd, "build") == 0)    return cmd_build(sub_argc, sub_argv);
     if (strcmp(cmd, "check") == 0)    return cmd_check(sub_argc, sub_argv);
     if (strcmp(cmd, "inspect") == 0)  return cmd_inspect(sub_argc, sub_argv);
+    if (strcmp(cmd, "pad") == 0)      return cmd_pad(sub_argc, sub_argv);
     if (strcmp(cmd, "test") == 0)     return cmd_test(sub_argc, sub_argv);
     if (strcmp(cmd, "examples") == 0) return cmd_examples(sub_argc, sub_argv);
     if (strcmp(cmd, "add") == 0)      return cmd_add(sub_argc, sub_argv);

@@ -166,6 +166,16 @@ int ae_version_ok(const char* v);
 int aetherc_capture_stdout(const char* arg1, const char* in_path,
                            const char* extra_flag,
                            char* out, size_t out_sz);
+/* The same into a heap string of any length (*out, for free()), which is
+ * always set. `arg2_or_null` is the output path, the null device when NULL. */
+int aetherc_capture_stdout_whole(const char* arg1, const char* in_path,
+                                 const char* arg2_or_null, char** out);
+/* Replaces `path` with `tmp`, also where rename will not replace a file. */
+int ae_replace_file(const char* tmp, const char* path);
+
+/* ae_pad.c: `ae pad`, the struct layout report (#3775). */
+int  cmd_pad(int argc, char** argv);
+void ae_pad_usage(FILE* out);
 
 int  run_cmd(const char* cmd);
 int  run_cmd_quiet(const char* cmd);
@@ -178,6 +188,8 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size,
 void build_gcc_cmd(char* cmd, size_t size,
                    const char* c_file, const char* out_file,
                    bool optimize, const char* extra_files);
+/* `c_file` compiled -fsyntax-only as a build compiles it, then `extra`. */
+void build_syntax_check_cmd(char* cmd, size_t size, const char* c_file, const char* extra);
 
 /* ae_version.c — version manager (list/install/switch releases). */
 int cmd_version(int argc, char** argv);

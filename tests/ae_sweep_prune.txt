@@ -14,6 +14,7 @@ tests/integration/actor_ref_after_release/
 tests/integration/actor_ref_field_reject/
 tests/integration/actor_state_base_member_reject/
 tests/integration/ae_inspect/
+tests/integration/ae_pad/
 tests/integration/ae_add_hash_pin/
 tests/integration/ae_add_release_artifact/
 tests/integration/ae_cflags_extra_env/

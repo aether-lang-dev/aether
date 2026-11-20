@@ -4907,7 +4907,10 @@ static void emit_capture_array_copy(CodeGenerator* gen, const char* name, const 
  * as the arm's own reads spell it; anything else is its name. */
 static const char* capture_source(CodeGenerator* gen, const char* name) {
     if (!is_actor_state_var(gen, name)) return name;
-    return cg_internf("%s->%s", gen->state_self_alias ? gen->state_self_alias : "self", name);
+    const char* self = gen->state_self_alias ? gen->state_self_alias : "self";
+    if (actor_state_atomic_bits(gen, name))   /* #3772: a relaxed read */
+        return cg_internf("AETHER_STATE_LOAD(%s->%s)", self, name);
+    return cg_internf("%s->%s", self, name);
 }
 
 static int capture_is_promoted(CodeGenerator* gen, const char* name, const char* parent_func);
@@ -10606,7 +10609,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     const char* alias = gen->state_self_alias
                                       ? gen->state_self_alias
                                       : "self";
-                    fprintf(gen->output, "%s->%s", alias, expr->value);
+                    /* #3772: an atomic field is read relaxed. A store
+                     * target is never this read: the assignment, `op=`
+                     * and `++` emitters write the field themselves. */
+                    if (!gen->generating_lvalue && actor_state_atomic_bits(gen, expr->value))
+                        fprintf(gen->output, "AETHER_STATE_LOAD(%s->%s)", alias, expr->value);
+                    else
+                        fprintf(gen->output, "%s->%s", alias, expr->value);
                 } else {
                     fprintf(gen->output, "%s", expr->value);
                 }
@@ -11644,6 +11653,30 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ")");
                 break;
+            }
+            /* #3772: `++` / `--` on an atomic state field, a relaxed load
+             * and a release store; postfix yields the old value, prefix the
+             * new. `&` takes the field's address, as before: the field is a
+             * place there, not the value AETHER_STATE_LOAD reads. */
+            if (expr->child_count >= 1 && expr->value && expr->children[0] &&
+                expr->children[0]->type == AST_IDENTIFIER &&
+                !strcmp(expr->value, "&") && actor_state_atomic_bits(gen, expr->children[0]->value)) {
+                fprintf(gen->output, "(&%s->%s)",
+                        gen->state_self_alias ? gen->state_self_alias : "self",
+                        expr->children[0]->value);
+                break;
+            }
+            if (expr->child_count >= 1 && expr->value && expr->children[0] &&
+                expr->children[0]->type == AST_IDENTIFIER &&
+                (!strcmp(expr->value, "++") || !strcmp(expr->value, "--"))) {
+                int bits = actor_state_atomic_bits(gen, expr->children[0]->value);
+                if (bits) {
+                    fprintf(gen->output, "aether_state_step%d(&%s->%s, %s, %d)", bits,
+                            gen->state_self_alias ? gen->state_self_alias : "self",
+                            expr->children[0]->value, expr->value[0] == '+' ? "1" : "-1",
+                            annotation_has_marker(expr->annotation, "postfix") ? 1 : 0);
+                    break;
+                }
             }
             /* #2457: postfix `i++` / `i--` yields the old value, so it must
              * reach C as postfix too, not as the prefix form. */
