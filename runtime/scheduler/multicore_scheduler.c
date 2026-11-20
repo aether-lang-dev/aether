@@ -5098,11 +5098,19 @@ void scheduler_release_actor(ActorBase* actor) {
 }
 
 void scheduler_actor_thread_exit(ActorBase* actor) {
+    // Whether the death is final already (scheduler_actor_thread_finalize
+    // ran it), read while this thread still holds the actor. Past the mark
+    // below another thread may see the thread gone and free the actor, so
+    // nothing here touches it then unless the mark makes this thread the
+    // one to finalize. actor_finalize's own once-only test is a write, and
+    // made a second time on a death already final it raced that free
+    // (#3789, TSan in test_actor_thread_panic_drains_inbox).
+    int final = atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_FINALIZED;
     int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_THREAD_GONE, memory_order_acq_rel);
     // Ended after the thread's last look at its bits (#2974): a kill that
     // came then finds the thread gone, or this finds the kill; whichever
     // is second finalizes, once.
-    if ((was & AETHER_ACTOR_ENDED) && !(was & AETHER_ACTOR_RELEASED)) actor_finalize(actor);
+    if ((was & AETHER_ACTOR_ENDED) && !(was & AETHER_ACTOR_RELEASED) && !final) actor_finalize(actor);
     if (was & AETHER_ACTOR_RELEASED) actor_end(actor);
 }
 
