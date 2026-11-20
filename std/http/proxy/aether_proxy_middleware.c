@@ -1071,6 +1071,14 @@ static int direct_head_clean(const char* raw, size_t header_bytes) {
         if (c == '\0') return 0;
         if (c == '\r' && (i + 1 >= header_bytes || raw[i + 1] != '\n')) return 0;
         if (c == '\n' && (i == 0 || raw[i - 1] != '\r')) return 0;
+        /* A line that starts with SP or HTAB is an obs-fold, the line before
+         * it continued (RFC 9112 5.2), and the copying path reads it so: a
+         * bare CR the framing turned into a space (#3572) after
+         * "Content-Length: 1" made the next field part of that value there
+         * and a field of its own here, and the two lengths differed (#3749,
+         * the proxy-response fuzzer). Such a head is the copying path's to
+         * answer, as one with a bare CR is. */
+        if (c == '\n' && i + 1 < header_bytes && (raw[i + 1] == ' ' || raw[i + 1] == '\t')) return 0;
     }
     return 1;
 }
