@@ -363,7 +363,6 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
     #include <fcntl.h>
     #include <limits.h>
     #include <poll.h>
-    #include <sys/ioctl.h>         /* FIONREAD: conn_fd_unread (#3405) */
     #include <errno.h>
     /* Linux, macOS and FreeBSD sendfile(2) live in different headers with
      * different signatures. Only one is pulled in per platform.
@@ -8231,68 +8230,38 @@ static void conn_apply_send_timeout(HttpServer* server, HttpConn* c) {
 #endif
 }
 
-/* Bytes received on fd and not yet read, or -1. */
-static long conn_fd_unread(int fd) {
-#if defined(_WIN32)
-    u_long n = 0;
-    if (ioctlsocket((SOCKET)fd, FIONREAD, &n) != 0) return -1;
-    return (long)n;
-#else
-    int n = 0;
-    if (ioctl(fd, FIONREAD, &n) != 0) return -1;
-    return (long)n;
-#endif
-}
-
 /* A connection its socket says is readable: will a read find a request?
  *
  * On a plain connection readable is bytes of one, or the peer's end. On a
  * TLS connection it can be records with no application data, a KeyUpdate
  * above all, which a read handles and then waits behind for the whole idle
  * timeout, holding a worker for nothing (#3405). So TLS asks the library
- * without waiting:
- * - the pure server handles the whole records the socket holds (its
- *   pending check takes only what FIONREAD counts) and reports data, or an
- *   end or an error;
- * - OpenSSL peeks with the socket non-blocking for that one call.
+ * without waiting, as the wait for a request's first bytes does
+ * (conn_tls_idle_probe): plaintext already decrypted, part of a record, or
+ * the end or an error is a request to serve; only whole records with no
+ * data leave the connection idle.
  * 1 when a read now has data, or an end or an error to report; 0 when the
  * connection should wait in the lot instead. Readable with nothing to read
  * is the peer's end, which a read must see. */
 static int conn_readable_has_request(HttpConn* conn) {
-    if (conn->pure_tls) {
-        /* Counted before the pending check, which takes what is there: bytes
-         * that held no data (a KeyUpdate) leave the socket empty after it,
-         * and only a socket empty before it is the peer's end. */
-        long before = conn_fd_unread(conn->fd);
-        if (pt_server_pending(conn->pure_tls) > 0) return 1;   /* not part of a record */
-        return before <= 0;
+    /* The same answer the wait for a request's first bytes gives
+     * (conn_tls_idle_probe): only whole records with no data leave the
+     * connection idle, and a record begun is a request begun. This check
+     * called part of a record idle (OpenSSL's WANT_READ with the bytes
+     * already taken, the pure server's -1), so a connection parked before
+     * its client's first byte went back to the lot at every byte of a
+     * head sent slowly, until its idle time ran out, and was closed with a
+     * close_notify and no 408 (http_server_slow_clients on macOS, where the
+     * first wait after the handshake can end before that byte). */
+    if (conn->pure_tls || conn->ssl) {
+        if (conn_tls_buffered(conn)) return 1;
+        int has = conn_tls_idle_probe(conn) != 0;
+        /* The probe leaves an OpenSSL socket non-blocking on POSIX for the
+         * read it is followed by; here the connection may go back to the
+         * lot instead, as blocking as it came. */
+        if (conn->ssl) conn_sock_nonblocking(conn, 0);
+        return has;
     }
-#ifdef AETHER_HAS_OPENSSL
-    if (conn->ssl) {
-        SSL* ssl = (SSL*)conn->ssl;
-        if (SSL_pending(ssl) > 0) return 1;
-        char b;
-#if defined(_WIN32)
-        u_long on = 1, off = 0;
-        ioctlsocket((SOCKET)conn->fd, FIONBIO, &on);
-#else
-        conn_set_nonblocking(conn, 1);
-#endif
-        int n = SSL_peek(ssl, &b, 1);
-        int err = n > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, n);
-#if defined(_WIN32)
-        ioctlsocket((SOCKET)conn->fd, FIONBIO, &off);
-#else
-        conn_set_nonblocking(conn, 0);
-#endif
-        if (n > 0) return 1;
-        if (err == SSL_ERROR_WANT_READ) {
-            ERR_clear_error();
-            return 0;
-        }
-        return 1;
-    }
-#endif
     return 1;
 }
 

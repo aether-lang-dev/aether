@@ -31,3 +31,7 @@
   so whatever the millisecond clock says a moment later: a poll may return
   a fraction of a millisecond early (macOS), and a TLS head cut there was
   taken for an idle connection and closed with no 408.
+  A parked TLS connection that wakes on part of a record (a head on its
+  way, a byte at a time) is served, as the wait for a request's first
+  bytes already treated it; it went back to the lot at every byte until
+  its idle time ran out and was closed with no 408.
