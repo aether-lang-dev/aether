@@ -359,16 +359,18 @@ static inline void aether_slice_release_msg(const void* p) {
  * checks stay inline (aether_slice_at, aether_array_index), and their
  * failure is one call the compiler lays out after the hot path. As inline
  * functions, noreturn was only inferred, with the definition visible and
- * optimization on: cl.exe, -O0 and -Og builds inlined the message's
- * argument setup and its variadic call into every indexing site. Static,
- * so a program has its own copy and there is no runtime symbol to link;
- * `unused`, as a program that never fails a check never calls one. */
+ * optimization on, and cl.exe and -Og builds inlined the message's
+ * argument setup and its variadic call into every indexing site. Still
+ * `static inline`, with inlining refused: a program has its own copy, there
+ * is no runtime symbol to link, and one that never uses a helper gets no
+ * code for it (a plain `static` function was emitted unused at -O0, 224
+ * bytes in every program). */
 #if defined(__GNUC__) || defined(__clang__)
-#define AETHER_SLICE_FAIL static __attribute__((cold, noinline, noreturn, unused))
+#define AETHER_SLICE_FAIL static inline __attribute__((cold, noinline, noreturn))
 #elif defined(_MSC_VER)
-#define AETHER_SLICE_FAIL static __declspec(noinline) __declspec(noreturn)
+#define AETHER_SLICE_FAIL static __inline __declspec(noinline) __declspec(noreturn)
 #else
-#define AETHER_SLICE_FAIL static
+#define AETHER_SLICE_FAIL static inline
 #endif
 
 AETHER_SLICE_FAIL void aether_slice_panicf(const char* fmt, ...) {
