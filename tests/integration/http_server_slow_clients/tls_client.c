@@ -15,9 +15,34 @@
 #else
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/select.h>
+#include <fcntl.h>
 #endif
 
 int slow_tls_available(void) { return 1; }
+
+static void set_nonblocking(int fd, int on) {
+#ifdef _WIN32
+    u_long mode = on ? 1 : 0;
+    ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+#else
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) fcntl(fd, F_SETFL, on ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK));
+#endif
+}
+
+/* 1 when `fd` is readable within `ms`. */
+static int readable_within(int fd, int ms) {
+    fd_set rd;
+    FD_ZERO(&rd);
+#ifdef _WIN32
+    FD_SET((SOCKET)fd, &rd);
+#else
+    FD_SET(fd, &rd);
+#endif
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    return select(fd + 1, &rd, NULL, NULL, &tv) > 0;
+}
 
 static void recv_timeout_ms(int fd, int ms) {
 #ifdef _WIN32
@@ -52,11 +77,22 @@ void* slow_tls_connect(int fd) {
     }
     /* A TLS 1.3 server sends its session tickets after the handshake; read
      * them now, so the socket turning readable later means the server
-     * answered or closed. The read times out once they are taken. */
-    recv_timeout_ms(fd, 300);
+     * answered or closed. Read without blocking, for as long as more
+     * arrives within 300 ms: a blocking read that ran into a receive
+     * timeout failed the connection where the timeout is not a retry
+     * (Windows' WSAETIMEDOUT), and OpenSSL 4 keeps it failed, so every
+     * SSL_write after it failed with SSL_ERROR_SSL and nothing queued
+     * (the UCRT64 leg; OpenSSL 3 let the write through). */
+    set_nonblocking(fd, 1);
     char scratch[256];
-    (void)SSL_read(ssl, scratch, (int)sizeof(scratch));
+    while (readable_within(fd, 300)) {
+        int n = SSL_read(ssl, scratch, (int)sizeof(scratch));
+        if (n > 0) continue;
+        int e = SSL_get_error(ssl, n);
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) break;
+    }
     ERR_clear_error();
+    set_nonblocking(fd, 0);
     recv_timeout_ms(fd, 5000);
     return ssl;
 }

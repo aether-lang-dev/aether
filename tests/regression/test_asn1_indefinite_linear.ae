@@ -14,6 +14,7 @@
 import std.bytes
 import std.os
 import std.string
+import std.io
 import std.cryptography.asn1
 
 extern exit(code: int)
@@ -73,5 +74,8 @@ main() {
     if fails > 0 {
         exit(1)
     }
-    println("PASS: an indefinite length reads in linear time (${elapsed} ms for ${N} TLVs)")
+    // The time on stderr: stdout is compared between -O2 and -O0 builds
+    // (test-ae-opt-diff), and a measurement differs every run.
+    _w = io.stderr_write("${elapsed} ms for ${N} TLVs\n")
+    println("PASS: an indefinite length reads in linear time")
 }
