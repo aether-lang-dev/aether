@@ -132,20 +132,33 @@ void* yaml_parse_raw(const char* yaml_str) {
         cfg.diag = diag;
     }
 
+    /* The copy's line breaks are line feeds: CRLF and a lone CR become LF.
+     * YAML normalizes every line break in scalar content to one line feed
+     * (1.2, 5.4), so no parsed value changes, and the emitter's writer of a
+     * block scalar's source lines splits them on LF only: `|-\rn?$`, its
+     * lines ended by CR, emitted with the content gone (#3749, the fuzz
+     * target again). */
     size_t n = strlen(yaml_str);
-    int add_lb = n > 0 && yaml_str[n - 1] != '\n' && yaml_str[n - 1] != '\r';
-    char* src = (char*)malloc(n + (size_t)add_lb + 1);
+    char* src = (char*)malloc(n + 2);
     if (!src) {
         if (diag) fy_diag_unref(diag);
         snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf), "out of memory");
         g_yaml_err_set = 1;
         return NULL;
     }
-    memcpy(src, yaml_str, n);
-    if (add_lb) src[n] = '\n';
-    src[n + (size_t)add_lb] = '\0';
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = yaml_str[i];
+        if (c == '\r') {
+            if (i + 1 < n && yaml_str[i + 1] == '\n') i++;
+            c = '\n';
+        }
+        src[m++] = c;
+    }
+    if (m > 0 && src[m - 1] != '\n') src[m++] = '\n';
+    src[m] = '\0';
 
-    struct fy_document *doc = fy_document_build_from_string(&cfg, src, n + (size_t)add_lb);
+    struct fy_document *doc = fy_document_build_from_string(&cfg, src, m);
 
     if (!doc && diag) {
         void *prev = NULL;
