@@ -915,6 +915,28 @@ static int fs_open_checked(int dirfd, const char* path, int flags, unsigned mode
         entry = 0;
         flags |= O_DIRECTORY;
     }
+#ifdef O_TMPFILE
+    if ((flags & O_TMPFILE) == O_TMPFILE) {
+        // An unnamed file made in the directory `path` names: a new entry in
+        // it, as a named file made there is, so checked as one (the kernel
+        // shows it as "<dir>/#<inode>", the name fs_link_from_fd checks when
+        // it is given one), not as a write of the directory itself, which a
+        // grant of "dir/*" does not cover.
+        char joined[PATH_MAX], dir[PATH_MAX], ent[PATH_MAX];
+        if (!fs_at_path(dirfd, path, joined) || !aether_sandbox_canon_path(joined, dir, sizeof dir)) {
+            log_deny("fs_write", path ? path : "(null)");
+            errno = EACCES;
+            return -1;
+        }
+        size_t dl = strlen(dir);
+        int en = snprintf(ent, sizeof ent, "%s%s#tmpfile", dir, (dl && dir[dl - 1] == '/') ? "" : "/");
+        if (en < 0 || (size_t)en >= sizeof ent) { errno = ENAMETOOLONG; return -1; }
+        int acc = fs_open_access(flags) | AETHER_ACCESS_WRITE;
+        if ((acc & AETHER_ACCESS_READ) && !check_resolved("fs_read", ent)) { errno = EACCES; return -1; }
+        if (!check_resolved("fs_write", ent)) { errno = EACCES; return -1; }
+        return aether_sandbox_walk(dir, flags, mode, &preload_ops);
+    }
+#endif
     int access = fs_open_access(flags);
     char resolved[PATH_MAX];
     const char* target = (dirfd == AT_FDCWD && path) ? staged_write_target(path, flags) : path;
