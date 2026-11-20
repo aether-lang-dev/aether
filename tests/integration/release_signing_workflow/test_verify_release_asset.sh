@@ -94,7 +94,11 @@ grep -q "^gh attestation verify " "$TMP/tools.log" || fail "gh attestation verif
 # Both with the identity anchored at both ends: the release workflow run
 # from main or from this tag, and no other ref (--signer-workflow, a prefix
 # match, took any).
-IDENTITY="^https://github\\.com/aether-lang-dev/aether/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$(printf '%s' "$ABOVE" | sed 's/[.]/\\./g'))\$"
+# Written without a backslash: Git Bash and MSYS2 turn "\." into "/." in an
+# argument on its way to a native gh.exe or cosign.exe, and the release job's
+# Windows leg then matched nothing (0.928.0 to 0.930.0 went unpublished).
+IDENTITY="^https://github[.]com/aether-lang-dev/aether/[.]github/workflows/release[.]yml@refs/(heads/main|tags/$(printf '%s' "$ABOVE" | sed 's/[.]/[.]/g'))\$"
+case "$IDENTITY" in *\\*) fail "the expected identity has a backslash, which MSYS rewrites" ;; esac
 for flag in "cosign verify-blob .*--certificate-identity-regexp" "gh attestation verify .*--cert-identity-regex"; do
     arg="$(grep "^$flag " "$TMP/tools.log" | head -1 | sed "s/^$flag \([^ ]*\).*/\1/")"
     [ "$arg" = "$IDENTITY" ] || fail "${flag%% *} was given the identity '$arg', not '$IDENTITY'" "$TMP/tools.log"

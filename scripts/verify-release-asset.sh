@@ -103,10 +103,15 @@ say "$name matches its line in SHA256SUMS"
 # release workflow, run from main (a release the tag job made) or from TAG
 # (a tag pushed by hand), and no other ref. The repository and the tag are
 # literal text in the pattern. The same as get.sh's and ae's.
+# No backslash where one can be avoided: a dot is written [.], not \., here
+# and in the pattern below. Git Bash and MSYS2 rewrite an argument that looks
+# like a path before a native program (gh.exe, cosign.exe) gets it, and turn
+# "\." into "/.", so the pattern matched nothing on Windows and the release
+# job there refused every signed release (0.928.0 to 0.930.0 went unpublished).
 regex_literal() {
-    printf '%s' "$1" | sed 's/[]\\.*^$+?(){}|[]/\\&/g'
+    printf '%s' "$1" | sed -e 's/[]\\^[]/\\&/g' -e 's/[.*$+?(){}|]/[&]/g'
 }
-idre="^https://github\\.com/$(regex_literal "$repo")/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$(regex_literal "$tag"))\$"
+idre="^https://github[.]com/$(regex_literal "$repo")/[.]github/workflows/release[.]yml@refs/(heads/main|tags/$(regex_literal "$tag"))\$"
 
 if have cosign; then
     [ -s "$work/SHA256SUMS.sigstore.json" ] ||

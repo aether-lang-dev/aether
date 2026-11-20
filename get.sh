@@ -175,8 +175,13 @@ gh_http() {
 
 # regex_literal TEXT : TEXT with each character an extended regular
 # expression reads as syntax escaped, for an identity pattern.
+# No backslash where one can be avoided: a dot is written [.], not \., here
+# and in the pattern below. Git Bash and MSYS2 rewrite an argument that looks
+# like a path before a native program (gh.exe, cosign.exe) gets it, and turn
+# "\." into "/.", so the pattern matched nothing on Windows and the release
+# job there refused every signed release (0.928.0 to 0.930.0 went unpublished).
 regex_literal() {
-    printf '%s' "$1" | sed 's/[]\\.*^$+?(){}|[]/\\&/g'
+    printf '%s' "$1" | sed -e 's/[]\\^[]/\\&/g' -e 's/[.*$+?(){}|]/[&]/g'
 }
 
 # release_signed TAG : 0 when TAG (vX.Y.Z, anything after Z ignored) is at or
@@ -364,7 +369,7 @@ gh_release_download() {
     # repository and the tag are literal text in the pattern.
     _ghd_rr="$(regex_literal "$_ghd_r")"
     _ghd_rt="$(regex_literal "$_ghd_t")"
-    _ghd_idre="^https://github\\.com/$_ghd_rr/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$_ghd_rt)\$"
+    _ghd_idre="^https://github[.]com/$_ghd_rr/[.]github/workflows/release[.]yml@refs/(heads/main|tags/$_ghd_rt)\$"
 
     # The signature of SHA256SUMS: keyless, with that identity, under
     # GitHub's token issuer. cosign 2 reads the sigstore bundle cosign 3
