@@ -1450,6 +1450,24 @@ jobs:
         cp scripts/verify-release-asset.sh "$vra"
         sh "$vra" "${{ github.repository }}" "$prev_tag" "$tmp"/aether-*-windows-x86_64.zip
 
+    # get.sh builds the same identity regex and hands it, and its files, to
+    # the same native cosign and gh. It installs no prebuilt on Windows, so
+    # this runs its gh_release_download on its own: first against stand-in
+    # native tools that log what they receive, then against the real release.
+    - name: get.sh hands native tools its arguments unchanged (Windows)
+      shell: bash
+      run: bash tests/integration/release_signing_workflow/test_getsh_native_args.sh
+
+    - name: get.sh verifies the latest release (Windows)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        tmp="$(cygpath -u "$RUNNER_TEMP")"
+        prev_tag="$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName)"
+        sh tests/integration/release_signing_workflow/getsh_download.sh "$prev_tag" "aether-${prev_tag#v}-windows-x86_64.zip" "$tmp/get-sh-asset.zip"
+        test -s "$tmp/get-sh-asset.zip"
+
   # ============================================================
   # Platform portability — cooperative scheduler, WASM, embedded
   # Verifies Aether compiles and runs on threadless platforms.
