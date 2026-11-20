@@ -71,6 +71,7 @@ SymbolTable* create_symbol_table(SymbolTable* parent) {
     table->seal_whitelist = NULL;
     table->is_sealed = 0;
     table->binds_body = 0;
+    table->declares_fresh = 0;
     // Inherit the merged-body origin so nested scopes (loops, blocks,
     // closures inside a merged function) resolve qualified names against
     // the same module's imports.
@@ -209,6 +210,40 @@ static int name_blocked_by_hide(SymbolTable* table, const char* name) {
         t = t->parent;
     }
     return 0;
+}
+
+// Returns 1 if a `hide` or `seal except` blocks `name` and the binding it
+// blocks is a local of an enclosing body (a parameter, a local of an outer
+// block, an actor's state), not a file-level name (a function, const,
+// extern). A new binding of such a name cannot be fresh: Aether has no
+// block-level shadowing of a local, and the generated C names the outer
+// local, so `x = 5` there wrote the very variable the directive hid. A
+// file-level name is shadowed by a new local, and that local is fresh.
+static int hide_blocks_outer_local(SymbolTable* table, const char* name) {
+    if (!table || !name || table->declares_fresh) return 0;
+    for (SymbolTable* t = table; t; t = t->parent) {
+        int blocked_here = scope_name_is_hidden(t, name) ||
+                           (t->is_sealed && !scope_name_in_whitelist(t, name) &&
+                            !seal_admits_own(t, name));
+        if (blocked_here) {
+            for (SymbolTable* check = t->parent; check; check = check->parent) {
+                if (lookup_symbol_local(check, name)) return check->parent != NULL;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+// The refusal of a new binding of a hidden name: in the scope that hides
+// it, or (hide_blocks_outer_local) beneath a directive that hides a local
+// of an enclosing body.
+static const char* hide_decl_message(SymbolTable* table, const char* name) {
+    if (scope_name_is_hidden(table, name))
+        return aether_internf("cannot declare '%s', it is hidden in this scope by `hide`", name);
+    return aether_internf(
+        "cannot declare '%s', it is hidden in this scope by `hide` or `seal except` "
+        "(a local of an enclosing block; a local is not shadowed, pick another name)", name);
 }
 
 // Returns 1 if a `hide` or `seal except` between `table` and the root
@@ -14672,11 +14707,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     Symbol* visible = lookup_symbol(table, var->value);
                     if (!visible &&
                         (scope_name_is_hidden(table, var->value) ||
-                         name_blocked_by_hide(table, var->value))) {
+                         hide_blocks_outer_local(table, var->value))) {
                         const char* msg = "";
-                        msg = aether_internf(
-                                 "'%s' is hidden in this scope by `hide` or `seal except`",
-                                 var->value);
+                        msg = hide_decl_message(table, var->value);
                         type_error(msg, var->line, var->column);
                         slots_ok = 0;
                         continue;
@@ -14707,12 +14740,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // Forbid declaring a name that's been hidden in this scope —
             // shadowing a hidden binding would re-introduce position-sensitive
             // semantics. If you want a fresh name, pick a different one.
-            if (stmt->value && scope_name_is_hidden(table, stmt->value)) {
-                const char* error_msg = "";
-                error_msg = aether_internf(
-                         "cannot declare '%s', it is hidden in this scope by `hide`",
-                         stmt->value);
-                type_error(error_msg, stmt->line, stmt->column);
+            if (stmt->value &&
+                (scope_name_is_hidden(table, stmt->value) ||
+                 (!lookup_symbol(table, stmt->value) &&
+                  hide_blocks_outer_local(table, stmt->value)))) {
+                type_error(hide_decl_message(table, stmt->value), stmt->line, stmt->column);
                 return 0;
             }
             /* #2886: a local written as a function type that returns a
@@ -15854,7 +15886,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 if (init->type == AST_VARIABLE_DECLARATION && init->type_inferred &&
                     init->value && !for_init_names_bound(init->value, table))
                     init->type_inferred = 0;
+                loop_table->declares_fresh = 1;
                 typecheck_statement(init, loop_table);
+                loop_table->declares_fresh = 0;
             }
             
             // Type check condition (child 1). #3042 review: as for `if` and

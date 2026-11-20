@@ -55,6 +55,28 @@ run_accept() {
     fi
 }
 
+# Accepted, and the program prints what it should: a binding the compiler
+# admits must also be the binding the generated code uses.
+run_accept_output() {
+    case_name="$1"
+    src_file="$2"
+    want="$3"
+    if ! AETHER_HOME="" "$ROOT/build/ae" build "$src_file" -o $AE_TMP/ae_hide_out > $AE_TMP/ae_hide_log 2>&1; then
+        echo "  [FAIL] $case_name should have been accepted:"
+        grep error $AE_TMP/ae_hide_log | sed 's/^/      /' | head -5
+        fail=$((fail + 1))
+        return
+    fi
+    got="$($AE_TMP/ae_hide_out | tr '\n' ' ')"
+    if [ "$got" = "$want" ]; then
+        echo "  [PASS] $case_name correctly accepted"
+        pass=$((pass + 1))
+    else
+        echo "  [FAIL] $case_name printed '$got', expected '$want'"
+        fail=$((fail + 1))
+    fi
+}
+
 # Case 1: direct read of a hidden variable from a nested block
 cat > $AE_TMP/ae_hide_read.ae << 'EOF'
 extern println(s: string)
@@ -666,6 +688,99 @@ f1(p: int) -> int {
 main() { println("${f1(1)}") }
 EOF
 run_reject_hidden "hide still hides a parameter" $AE_TMP/ae_hide_param.ae
+
+# A new local named like a file-level name (a function, a const, an extern)
+# shadows it, under a seal or beneath a hide, whether bound by `r = ...` or
+# by a tuple destructure. The destructure was refused (E0304 'r') though the
+# plain binding was accepted; listing `r` would have admitted the outer `r`.
+cat > $AE_TMP/ae_seal_tuple_shadow.ae << 'EOF'
+extern abs(x: int) -> int
+r(x: int) -> int { return x }
+const K = 40
+pair(x: int) -> (int, string) { return x, "" }
+f1(p: int) -> int {
+    seal except pair
+    r, err = pair(p)
+    K, e2 = pair(p + 1)
+    abs, e3 = pair(p + 2)
+    if err != "" { return 0 }
+    return r + K + abs
+}
+f2(p: int) -> int {
+    hide r
+    {
+        r, err = pair(p)
+        return r * 10
+    }
+}
+main() { println("${f1(1)} ${f2(5)} ${r(7)} ${K}") }
+EOF
+run_accept_output "a destructured local shadows a file-level name" $AE_TMP/ae_seal_tuple_shadow.ae "6 50 7 40 "
+
+# A local of an enclosing block is not shadowed: Aether has no block-level
+# shadowing of locals, and a binding of the name beneath a hide or seal
+# wrote the hidden outer variable itself (this printed "5 5"). Refused,
+# whether bound plainly or destructured. A for loop's own variable and a
+# match arm's binding are fresh C variables, and stay accepted.
+cat > $AE_TMP/ae_hide_nested_local.ae << 'EOF'
+main() {
+    x = 1
+    c = 1
+    if c > 0 {
+        hide x
+        if c > 0 {
+            x = 5
+            println("${x}")
+        }
+    }
+    println("${x}")
+}
+EOF
+run_reject_hidden "a nested binding of a hidden outer local" $AE_TMP/ae_hide_nested_local.ae
+
+cat > $AE_TMP/ae_seal_nested_local.ae << 'EOF'
+main() {
+    x = 1
+    c = 1
+    if c > 0 {
+        seal except println
+        x = 5
+        println("${x}")
+    }
+    println("${x}")
+}
+EOF
+run_reject_hidden "a sealed block's binding of an outer local" $AE_TMP/ae_seal_nested_local.ae
+
+cat > $AE_TMP/ae_seal_nested_tuple.ae << 'EOF'
+pair(x: int) -> (int, string) { return x, "" }
+f1(p: int) -> int {
+    c = 1
+    if c > 0 {
+        seal except pair
+        p, err = pair(5)
+    }
+    return p
+}
+main() { println("${f1(1)}") }
+EOF
+run_reject_hidden "a sealed block's destructure of a parameter" $AE_TMP/ae_seal_nested_tuple.ae
+
+cat > $AE_TMP/ae_seal_loop_var.ae << 'EOF'
+main() {
+    i = 100
+    v = 200
+    c = 1
+    if c > 0 {
+        seal except println
+        for i in 0..2 { println("${i}") }
+        a = [7, 8]
+        match a { [v | t] -> println("${v}")  _ -> println("none") }
+    }
+    println("${i} ${v}")
+}
+EOF
+run_accept_output "a sealed block's loop variable and match binding are fresh" $AE_TMP/ae_seal_loop_var.ae "0 1 7 100 200 "
 
 # Cleanup
 rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out $AE_TMP/ae_hide_log

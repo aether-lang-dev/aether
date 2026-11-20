@@ -73,9 +73,10 @@ footgun.
 
 If the outer block hides `x`, every nested block, closure, and
 trailing-block lambda inside it also has `x` hidden. There is no way to
-"un-hide" a name in a nested block, declaring a fresh variable with
-the same name in a nested block is allowed, but that's a fresh binding
-in a child scope, not a re-exposure of the parent's hidden binding.
+"un-hide" a name in a nested block. A nested block may bind a new local
+named like a hidden file-level name (a function, a constant, an extern),
+which shadows it; it may not bind one named like a hidden *local* of an
+enclosing block (see [Interaction with shadowing](#interaction-with-shadowing)).
 
 ### Does NOT reach through call boundaries
 
@@ -261,6 +262,14 @@ always visible inside that block, regardless of what's hidden:
 }
 ```
 
+A new local may take the name of a file-level function, constant or extern
+the block does not list: it shadows that name for the rest of the block, and
+the outer one stays out of reach. This holds for every way a block binds a
+name: `r = f()`, a tuple destructure `r, err = f()`, a `for` loop's variable,
+a `match` arm's binding. Listing the name instead would admit the outer one,
+which is the opposite of what the block wants. (Through 0.926.0 a destructure
+was refused with E0304 where the plain binding was accepted.)
+
 ### A value keeps its type
 
 The directives decide which *names* a block may write. They do not change
@@ -340,22 +349,32 @@ hidden:
 }
 ```
 
-You MAY declare it in a nested child block, that's a fresh binding in
-the child's own scope, lexically unrelated to the hidden outer one:
+A nested block may bind a new local named like a hidden file-level name
+(a function, a constant, an extern): that is a fresh binding which shadows
+it, as above. It may NOT bind one named like a hidden local of an enclosing
+block (a parameter, an outer block's local, an actor's state field):
 
 ```aether,fragment
-{
-    hide x
+f(p: int) -> int {
+    x = 1
     {
-        var x = 5     // OK, fresh binding in inner block
-        println(x)    // refers to the inner binding
+        hide x
+        {
+            x = 5         // E0304: cannot declare 'x', it is hidden ...
+            p, err = g()  // E0304: the same, for a parameter
+        }
     }
+    return x
 }
 ```
 
-This is consistent with normal lexical shadowing and means
-`hide` cannot trap a programmer who wants to use a popular name like
-`i` or `x` for unrelated purposes deeper in the call tree.
+Aether has no block-level shadowing of a local: `x = 5` in a nested block
+re-binds the enclosing `x`. Through 0.926.0 the checker took the binding
+beneath the hide for a new local and the generated code wrote the hidden
+outer variable, so a hidden or sealed-out local could be overwritten from
+inside the block that hid it. Pick another name. A `for` loop's own variable
+and a `match` arm's binding are fresh variables of their own, and may take
+the name.
 
 ## Minimal reference card
 
@@ -364,7 +383,8 @@ This is consistent with normal lexical shadowing and means
 | `hide a, b, c` | Names `a`, `b`, `c` from outer scopes are not in this block (or any nested block within it). |
 | `seal except a, b, c` | EVERY name from outer scopes is invisible in this block, except `a`, `b`, `c`. Local bindings inside the block are still visible, and on a function's body so are its parameters. |
 | `hide x` followed by `var x = …` in the same scope | Compile error, cannot redeclare a hidden name. |
-| `hide x` then a nested block declaring `var x = …` | OK, fresh binding in the child scope. |
+| `hide x` then a nested block declaring `x = …`, `x` a file-level function, const or extern | OK, a new local that shadows it (a tuple destructure too). |
+| `hide x` or `seal except …` then a nested block declaring `x = …`, `x` a local of an enclosing block | Compile error: a local is not shadowed. A `for` variable or `match` binding of that name is fine. |
 | `hide x` then calling a visible function that reads `x` from its own scope | OK, name resolution at the call site doesn't touch `x`. |
 | `seal except printf, malloc` then trying to call `free` | Compile error, `free` is not in the whitelist. |
 | `hide http` then `http.get("x")` | Compile error, qualified access blocked because the prefix is hidden (reported as `E0301` undefined, since the hidden prefix resolves to no symbol). |

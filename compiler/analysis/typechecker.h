@@ -107,6 +107,11 @@ typedef struct SymbolTable {
     // beneath it admits these, as a closure's seal admits its own
     // parameters: they are the body's own names, not ambient ones.
     int binds_body;
+    // A scope whose new bindings codegen declares as C variables of their
+    // own, in a C scope of their own: a for loop's init (#2734). Beneath a
+    // `hide` or `seal except` such a binding is a fresh local even when the
+    // directive hides a local of the same name (hide_blocks_outer_local).
+    int declares_fresh;
     // Issue #243 sealed scopes, #2614: when this scope (or any ancestor)
     // is code cloned in from a module by module_merge_into_program, the
     // registered name of that module (the node's origin_module, which
