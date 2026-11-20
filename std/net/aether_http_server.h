@@ -90,6 +90,11 @@ typedef struct {
      * answers 413. Trailing, as the fields above. */
     int64_t body_max;
     int     body_refused;
+    /* Set when the client sent the body too slowly for the server's body
+     * budget (limits.body_timeout_ms and body_min_rate, #3737) while the
+     * handler read it: what it read ended short, and the server answers
+     * 408 and closes. */
+    int     body_timed_out;
 } HttpRequest;
 
 // HTTP Response
@@ -199,10 +204,162 @@ typedef void (*HttpRequestHook)(HttpRequest* req,
 // HTTP Server
 struct HttpConn;
 
+// ============================================================================
+// Resource limits (#3750)
+// ============================================================================
+//
+// Every bound a server puts on what one client can make it hold (memory, a
+// worker, a connection), in one struct with one set of defaults. A server
+// starts with http_server_limits_default's values; each limit has a setter,
+// and the setters that existed before the struct (server_set_keepalive,
+// server_set_max_body, ...) write into it. docs/http-server.md "Resource
+// limits" is the same table for programs.
+//
+//   field                     default  setter (std.http)                 past it
+//   idle_timeout_ms           30 s     server_set_keepalive (idle)       the wait fails, connection closed
+//   tls_handshake_timeout_ms  30 s     server_set_tls_handshake_timeout  connection closed
+//   head_timeout_ms           30 s     server_set_head_timeout           408, connection closed
+//   body_timeout_ms           30 s     server_set_body_timeout           408, connection closed
+//   body_min_rate             500 B/s  server_set_body_timeout           (extends body_timeout_ms)
+//   body_rate_window_ms       60 s     server_set_body_rate_window       (the most body_min_rate credit kept)
+//   max_body                  64 MiB   server_set_max_body               413 (HTTP/2: RST_STREAM CANCEL)
+//   max_chunked_body          8 MiB    none (clamped to max_body)        413, connection closed
+//   ws_max_message            64 MiB   server_set_ws_max_message         close 1009
+//   h2_max_concurrent_streams 100      server_set_h2                     the new stream is reset
+//   h2_max_header_list        32 KiB   none                              431, the stream reset
+//   h2_max_age_ms             1 h      server_set_h2_max_age             GOAWAY, then closed
+//   loop_max_connections      derived  server_set_loop_max_connections   oldest silent one closed, else 503
+//   park_max_connections      derived  server_set_park_max_connections   longest idle one closed
+//   max_connections_per_ip    0 (off)  server_set_max_connections_per_ip 503, connection closed
+//   per_ip_ipv6_prefix        64       server_set_max_connections_per_ip (an IPv6 client counts by this prefix)
+//
+// The proxy event loop (Linux and macOS, a server whose work is a reverse
+// proxy) holds the same head, body and handshake budgets, by the clock. Its
+// connection bound, loop_max_connections, is 0 by default: half the
+// process's open-file limit, less 64, when the loop starts, since each
+// proxied connection needs an upstream descriptor too. At it, the loop
+// closes its oldest connection that has sent nothing of a request (a kept
+// one between requests, or a fresh one), and answers 503 when there is none.
+//
+// HTTP/2 also holds no more than max_body of request bodies on one
+// connection (a stream past it is refused), resets a stream whose request
+// is not whole within the head and body budgets, and closes a connection
+// with no stream open for idle_timeout_ms. On a stop it refuses the streams
+// whose requests have not arrived whole and gives the rest idle_timeout_ms
+// to finish. The HTTP client's limits are HttpClientLimits in aether_http.h.
+//
+// The body's budget: the server waits on the client for a body no longer
+// than body_timeout_ms plus one second for every body_min_rate bytes it has
+// received, counting only the time it waits (not the handler's between
+// reads). body_min_rate 0 makes body_timeout_ms an absolute bound on that
+// wait. The rate is held over a sliding window: what the budget has left
+// never grows past body_rate_window_ms through bytes received, so a client
+// that sends a burst and then trickles below body_min_rate is cut off
+// within that window of falling behind, not after the burst's whole
+// credit (a 60 MiB burst earned 35 hours). 0 keeps the whole credit.
+//
+// A timeout of 0 turns that bound off; the sizes must be positive. Fixed
+// parse limits, not in the struct because a buffer is sized by them: a
+// request head 16 KiB (HTTP_CONN_BUF_CAP, 431), a request line 2 KiB (414),
+// a header line 1 KiB and 50 headers (431).
+
+#define HTTP_DEFAULT_IDLE_TIMEOUT_MS  30000
+#define HTTP_DEFAULT_HEAD_TIMEOUT_MS  30000
+#define HTTP_DEFAULT_TLS_HANDSHAKE_TIMEOUT_MS 30000
+#define HTTP_DEFAULT_BODY_TIMEOUT_MS  30000
+#define HTTP_DEFAULT_BODY_MIN_RATE    500
+#define HTTP_DEFAULT_BODY_RATE_WINDOW_MS 60000
+#define HTTP_DEFAULT_MAX_BODY         ((int64_t)64 * 1024 * 1024)
+#define HTTP_DEFAULT_MAX_CHUNKED_BODY ((int64_t)8 * 1024 * 1024)
+#define HTTP_WS_DEFAULT_MAX_MESSAGE   ((size_t)64 * 1024 * 1024)
 // The SETTINGS_MAX_CONCURRENT_STREAMS an HTTP/2 server advertises when
 // http_server_set_h2_raw was given 0 (#3738). nghttp2's own local default is
 // unlimited, so without it a client could open streams without bound.
 #define HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS 100
+#define HTTP_H2_DEFAULT_MAX_HEADER_LIST 32768
+#define HTTP_H2_DEFAULT_MAX_AGE_MS     3600000
+
+typedef struct HttpServerLimits {
+    // How long a connection may wait on its client with nothing arriving
+    // (each read of a request, and of a TLS handshake), and how long a send
+    // may make no progress; also how long a kept-alive connection waits for
+    // its next request.
+    int     idle_timeout_ms;
+    // How long a TLS handshake may take as a whole, from the connection's
+    // first read.
+    int     tls_handshake_timeout_ms;
+    // How long a request head may take to arrive whole, from its first byte.
+    int     head_timeout_ms;
+    // The body's budget (above): a grace in ms, and the rate in bytes a
+    // second that extends it.
+    int     body_timeout_ms;
+    int     body_min_rate;
+    // The most the body's budget keeps of the time bytes earned it: the
+    // window over which body_min_rate is held (above).
+    int     body_rate_window_ms;
+    // The largest body http_request_body buffers; an HTTP/2 stream's body
+    // too, since HTTP/2 holds each whole.
+    int64_t max_body;
+    // The largest chunked request body, which is read whole before the
+    // handler runs; never more than max_body.
+    int64_t max_chunked_body;
+    // The largest WebSocket message a handle this server upgrades
+    // reassembles.
+    size_t  ws_max_message;
+    // SETTINGS_MAX_CONCURRENT_STREAMS on an HTTP/2 connection.
+    int     h2_max_concurrent_streams;
+    // The largest header list an HTTP/2 request may have, counted as
+    // SETTINGS_MAX_HEADER_LIST_SIZE counts one (name, value and 32 bytes a
+    // field); advertised in that setting.
+    int     h2_max_header_list;
+    // The most connections the proxy event loop holds at once; 0 for half
+    // the process's open-file limit less 64, read when the loop starts.
+    int     loop_max_connections;
+    // The most idle keep-alive connections the parking lot holds (the
+    // worker path waits on them there, not on a worker); 0 for the process's
+    // open-file limit less 64. At it the one idle longest is closed.
+    int     park_max_connections;
+    // The most connections one client address may hold on the server,
+    // the worker path and the event loop together; 0, the default, for no
+    // limit. Off by default: behind a load balancer or a NAT every client
+    // arrives from one address, and a limit would refuse real traffic (as
+    // nginx's limit_conn is opt-in). An IPv6 client counts by its first
+    // per_ip_ipv6_prefix bits (64 by default: one host usually holds a
+    // whole /64), an IPv4 one by its address.
+    int     max_connections_per_ip;
+    int     per_ip_ipv6_prefix;
+    // How long an HTTP/2 connection may live: past it the server sends
+    // GOAWAY, lets the streams it has finish, and closes, no later than
+    // idle_timeout_ms after. An HTTP/2 connection with no stream open
+    // closes after idle_timeout_ms; frames that open none do not keep it.
+    int     h2_max_age_ms;
+} HttpServerLimits;
+
+// The defaults above, as a struct.
+void http_server_limits_default(HttpServerLimits* limits);
+
+// One connection's share of its client address's count, for
+// limits.max_connections_per_ip: the address (an IPv4 one as an IPv4-mapped
+// IPv6 address, an IPv6 one cut to per_ip_ipv6_prefix bits), and whether it
+// is counted.
+typedef struct HttpIpSlot {
+    unsigned char key[16];
+    int           held;
+} HttpIpSlot;
+
+// Count the connection on `fd` against its client address. With `enforce`,
+// one past limits.max_connections_per_ip is refused: -1, nothing counted.
+// 0 otherwise; with no limit set, or no address to read (a Unix socket),
+// nothing is counted. http_server_ip_release gives the count back.
+int  http_server_ip_acquire(struct HttpServer* server, int fd, HttpIpSlot* slot, int enforce);
+void http_server_ip_release(struct HttpServer* server, HttpIpSlot* slot);
+
+// The default bound for loop_max_connections (fds_per_connection 2, a
+// proxied connection holds an upstream descriptor too) and
+// park_max_connections (1): the process's open-file limit less 64, divided
+// by that, between 16 and 32768; 4096 where there is no such limit to read
+// (Windows).
+int http_server_default_connection_bound(int fds_per_connection);
 
 typedef struct HttpServer {
     int socket_fd;
@@ -265,7 +422,6 @@ typedef struct HttpServer {
     //     apply uniformly.
     // Off by default; enable via http_server_set_h2_raw().
     int h2_enabled;
-    int h2_max_concurrent_streams;  /* SETTINGS_MAX_CONCURRENT_STREAMS; 0 → HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS (#3738) */
 
     // Per-stream concurrent dispatch worker count. When > 0, the
     // stream-level dispatch runs on the shared std.worker pool,
@@ -382,11 +538,10 @@ typedef struct HttpServer {
     // parsing successive requests until either:
     //   - the client sends Connection: close,
     //   - keep_alive_max requests have been served, or
-    //   - keep_alive_idle_ms elapses with no new bytes on the socket.
+    //   - limits.idle_timeout_ms elapses with no new bytes on the socket.
     // The default is 0 (single-request, matches pre-#260 behaviour).
     int keep_alive_enabled;
     int keep_alive_max;              // 0 means "unlimited"
-    int keep_alive_idle_ms;          // 0 means "use SO_RCVTIMEO default (30s)"
 
     // Accept-side I/O poller: wait for client data before dispatching to worker
     AetherIoPoller accept_poller;   // Platform poller for single-accept mode
@@ -454,20 +609,14 @@ typedef struct HttpServer {
     // setup), so a driver recomputes its cached plan only then
     // (http_server_loop_plan, #3269).
     _Atomic int loop_plan_gen;
-    // The cap on one WebSocket message reassembled by a handle this server
-    // upgrades (#3739): HTTP_WS_DEFAULT_MAX_MESSAGE unless
-    // http_server_set_ws_max_message_raw set another.
-    size_t ws_max_message;
-    // The largest request body http_request_body buffers, in bytes (#3740):
-    // HTTP_DEFAULT_MAX_BODY unless http_server_set_max_body_raw set another.
-    // A handler that reads its body with http_request_body_read streams it
-    // and is not bounded by this. HTTP/2 holds every stream's body whole, so
-    // there a stream whose DATA passes it is reset (#3738).
-    int64_t max_body;
-    // The longest a request head may take to arrive whole, in ms from its
-    // first byte, answered 408 past it (#3737): HTTP_DEFAULT_HEAD_TIMEOUT_MS
-    // unless http_server_set_head_timeout_raw set another; 0 for none.
-    int head_timeout_ms;
+    // Every resource limit, in one place (#3750): see HttpServerLimits.
+    // Set before the server starts; the request paths read it unlocked.
+    HttpServerLimits limits;
+    // The connections each client address holds, for
+    // limits.max_connections_per_ip: buckets of counts under ip_lock, made
+    // when the first is counted (http_server_ip_acquire).
+    void* ip_buckets;
+    pthread_mutex_t ip_lock;
 } HttpServer;
 
 // ============================================================================
@@ -565,7 +714,8 @@ void http_server_thread_leave(HttpServer* server);
 //     handler).
 // The same idle timeout bounds each read and write of a TLS handshake, on
 // both backends (#3703): a client that stalls in its handshake is closed
-// as one that stalls in a request is.
+// as one that stalls in a request is. The handshake as a whole has its own
+// deadline (limits.tls_handshake_timeout_ms, #3737).
 // Returns "" on success; "server is null" on bad input.
 const char* http_server_set_keepalive_raw(HttpServer* server,
                                           int enabled,
@@ -877,15 +1027,17 @@ int http_ws_send_binary(HttpWsConn* ws, const void* data, int len);
 // A message past the handle's cap (HTTP_WS_DEFAULT_MAX_MESSAGE unless set)
 // closes the connection with 1009, checked before the frame is read. A
 // control frame over 125 bytes, or a fragmented one, closes it with 1002
-// (RFC 6455 5.5). Both return -1.
+// (RFC 6455 5.5). So do a reserved opcode, the wrong masking, a reserved
+// bit (RSV1-3; no extension is negotiated), a continuation frame with no
+// message in progress and a data frame inside a fragmented message (5.1,
+// 5.2, 5.4). Each returns -1.
 int http_ws_recv(HttpWsConn* ws);
 
-// The cap on one reassembled WebSocket message, by default (#3739). A
-// server applies its own (http_server_set_ws_max_message_raw) to the
-// handles it upgrades, and a handle can be given another with
-// http_ws_set_max_message_raw. The limit is what a message length (an int)
-// can report.
-#define HTTP_WS_DEFAULT_MAX_MESSAGE ((size_t)64 * 1024 * 1024)
+// The cap on one reassembled WebSocket message is HTTP_WS_DEFAULT_MAX_MESSAGE
+// by default (#3739, with the other limits above). A server applies its own
+// (http_server_set_ws_max_message_raw) to the handles it upgrades, and a
+// handle can be given another with http_ws_set_max_message_raw. No cap can
+// pass what a message length (an int) can report.
 #define HTTP_WS_MAX_MESSAGE_LIMIT   ((size_t)INT_MAX - 1)
 
 // The largest message `ws` reassembles from now on, in bytes. Returns ""
@@ -939,8 +1091,12 @@ int         http_ws_message_length(HttpWsConn* ws);
 // Send a close frame with the given code (1000 = normal,
 // 1001 = going away, 1002 = protocol error, 1008 = policy
 // violation, 1011 = internal error) and an optional reason.
-// Reason may be NULL/empty. Idempotent.
-void http_ws_close(HttpWsConn* ws, int code, const char* reason);
+// Reason may be NULL/empty, is UTF-8, and is cut at the last whole
+// code point within 123 bytes. Returns "" (also on a handle already
+// closed), or why nothing was sent: a code a close frame may not
+// carry (RFC 6455 7.4: only 1000-1003, 1007-1014 and 3000-4999), or a
+// reason that is not UTF-8. A refused close leaves the handle open.
+const char* http_ws_close(HttpWsConn* ws, int code, const char* reason);
 
 // Server-Sent Events (#260 Tier 2). An SSE handler "owns" the
 // connection — the server writes the initial 200 response with
@@ -1123,21 +1279,81 @@ const char* http_request_path(HttpRequest* req);
 // any size and is not bounded by it.
 const char* http_request_body(HttpRequest* req);
 
-// The largest request body http_request_body buffers by default (#3740).
-#define HTTP_DEFAULT_MAX_BODY ((int64_t)64 * 1024 * 1024)
-
 // The largest request body http_request_body buffers on this server, in
-// bytes. Returns "" or why the value was refused (not positive).
+// bytes (limits.max_body, HTTP_DEFAULT_MAX_BODY by default). Returns "" or
+// why the value was refused (not positive).
 const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes);
-
-// The longest a request head may take to arrive whole, from its first byte,
-// by default (#3737).
-#define HTTP_DEFAULT_HEAD_TIMEOUT_MS 30000
 
 // The longest a request head may take to arrive whole, from its first byte;
 // past it the server answers 408 and closes. 0 turns the bound off, leaving
 // only the per-read idle timeout. Returns "" or why the value was refused.
 const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout_ns);
+
+// The body's budget (#3737): the server waits on the client for a request
+// body no longer than timeout_ns, plus a second for each min_rate bytes
+// received; only the time it waits counts. Past it a body the server reads
+// before the handler runs is answered 408, and one the handler reads
+// (http_request_body, http_request_body_read) ends short and the response
+// becomes 408; the connection closes either way. 0 for the timeout turns the
+// bound off; 0 for the rate makes the timeout absolute. Returns "" or why
+// the values were refused.
+const char* http_server_set_body_timeout_raw(HttpServer* server, int64_t timeout_ns,
+                                             int64_t min_rate);
+
+// The window over which the body's minimum rate is held (#3737), 60 s by
+// default: what is left of the body's budget never grows past it through
+// bytes received, so a client that sent a burst and then fell behind
+// body_min_rate is cut off within it. 0 keeps every byte's credit, as
+// before. Returns "" or why the value was refused.
+const char* http_server_set_body_rate_window_raw(HttpServer* server, int64_t window_ns);
+
+// What is left of a body's budget, `left_ms`, after bytes earned it
+// `credit_ms` more: never past `window_ms` (0 for no bound) through the
+// credit, though a budget already past it is kept. The one rule for the
+// worker path, the proxy event loop and HTTP/2.
+static inline int64_t http_body_budget_credit(int64_t left_ms, int64_t credit_ms,
+                                              int window_ms) {
+    int64_t n = left_ms + credit_ms;
+    if (window_ms > 0 && n > window_ms) n = left_ms > window_ms ? left_ms : window_ms;
+    return n;
+}
+
+// The longest a TLS handshake may take as a whole (#3737), on both TLS
+// backends; past it the connection is closed. 0 leaves only the idle
+// timeout on each of its reads. Returns "" or why the value was refused.
+const char* http_server_set_tls_handshake_timeout_raw(HttpServer* server, int64_t timeout_ns);
+
+// How long an HTTP/2 connection may live (#3738), 1 h by default: past it
+// the server sends GOAWAY, lets the streams it has finish, and closes no
+// later than the idle timeout after. 0 for no bound. An HTTP/2 connection
+// with no stream open closes after the idle timeout whatever this is.
+// Returns "" or why the value was refused.
+const char* http_server_set_h2_max_age_raw(HttpServer* server, int64_t timeout_ns);
+
+// The most connections the proxy event loop holds at once (limits.
+// loop_max_connections); 0 for the default, half the process's open-file
+// limit less 64 when the loop starts. At it the loop closes its oldest
+// connection that has sent nothing of a request, else answers 503. Returns
+// "" or why the value was refused.
+const char* http_server_set_loop_max_connections_raw(HttpServer* server, int max_connections);
+
+// The most idle keep-alive connections the worker path's parking lot holds
+// (limits.park_max_connections); 0 for the default, the process's open-file
+// limit less 64 (a parked connection holds one descriptor).
+// At it the connection idle longest is closed to make room. It was a fixed
+// 4096, and a connection the full lot declined waited on its worker, so
+// idle clients past it held the workers. Returns "" or why it was refused.
+const char* http_server_set_park_max_connections_raw(HttpServer* server, int max_connections);
+
+// The most connections one client address may hold (limits.
+// max_connections_per_ip), 0 for no limit, the default; past it a new
+// connection is answered 503 and closed (closed alone over TLS). An IPv6
+// client counts by its first ipv6_prefix bits (1 to 128; 64, one host's
+// usual share, by default). Off by default because behind a load balancer
+// or a NAT every client arrives from one address. Returns "" or why the
+// values were refused.
+const char* http_server_set_max_connections_per_ip_raw(HttpServer* server, int max_connections,
+                                                       int ipv6_prefix);
 
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,

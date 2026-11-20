@@ -1315,3 +1315,161 @@ TEST_CATEGORY(http_server_sends_a_whole_response_through_short_sends, TEST_CATEG
     free(body);
 }
 #endif
+
+/* ---- Found by the proxy-response fuzzer (#3749) -------------------------
+ *
+ * tests/fuzz/proxy_response checks that the reverse proxy's two ways of
+ * answering from an upstream's response, the copying path and the
+ * pass-through, write the same head, and that the head is well formed. Its
+ * seeds failed on four things, pinned here. */
+
+/* As in std/net/aether_http_internal.h, which this file includes on POSIX
+ * only. */
+HttpResponse* http_response_alloc_empty(void);
+void http_response_fill_from_bytes(HttpResponse* response, char* buf, size_t len);
+
+/* An upstream that closes having sent no head, or bytes that are not HTTP,
+ * came back as status 0 with no error, and the proxy wrote "HTTP/1.1 0" to
+ * its client. */
+TEST(http_response_with_no_head_is_an_error) {
+    const char* cases[] = { "", "SSH-2.0-OpenSSH_9.6\r\n", "HTTP/1.1 200 OK\r\nContent-Le" };
+    for (int i = 0; i < 3; i++) {
+        HttpResponse* r = http_response_alloc_empty();
+        ASSERT_NOT_NULL(r);
+        char* buf = strdup(cases[i]);
+        ASSERT_NOT_NULL(buf);
+        http_response_fill_from_bytes(r, buf, strlen(buf));
+        const char* err = http_response_error(r);
+        ASSERT_TRUE(err != NULL && err[0] != '\0');
+        free(buf);
+        http_response_free(r);
+    }
+}
+
+/* A response held 50 headers and dropped the rest without a word, so a
+ * proxied response with more lost them on the copying path. */
+TEST(http_response_holds_more_than_fifty_headers) {
+    HttpServerResponse* res = http_response_create();
+    ASSERT_NOT_NULL(res);
+    char k[32], v[32];
+    for (int i = 0; i < 120; i++) {
+        snprintf(k, sizeof k, "X-Added-%d", i);
+        snprintf(v, sizeof v, "a%d", i);
+        http_response_add_header(res, k, v);
+    }
+    for (int i = 0; i < 90; i++) {
+        snprintf(k, sizeof k, "X-Set-%d", i);
+        snprintf(v, sizeof v, "s%d", i);
+        http_response_set_header(res, k, v);
+    }
+    ASSERT_EQ(2 + 120 + 90, res->header_count);
+    char* out = http_response_serialize(res);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, "\r\nX-Added-119: a119\r\n") != NULL);
+    ASSERT_TRUE(strstr(out, "\r\nX-Set-89: s89\r\n") != NULL);
+    free(out);
+    /* A reset response grows again from the arrays it kept. */
+    http_response_reset(res);
+    for (int i = 0; i < 130; i++) {
+        snprintf(k, sizeof k, "X-Again-%d", i);
+        http_response_add_header(res, k, "x");
+    }
+    ASSERT_EQ(2 + 130, res->header_count);
+    http_server_response_free(res);
+}
+
+static HttpServerResponse* proxy_exchange_for(const char* method, const char* upstream_bytes,
+                                              AetherProxyOpts** opts_out, HttpRequest** req_out,
+                                              AetherProxyExchange* px) {
+    AetherProxyPool* pool = aether_proxy_pool_new(AETHER_PROXY_LB_ROUND_ROBIN, 5, 0, 0);
+    if (!pool || aether_proxy_upstream_add(pool, "http://127.0.0.1:9", 1)[0] != '\0') return NULL;
+    AetherProxyOpts* opts = aether_proxy_opts_new();
+    if (!opts) return NULL;
+    opts->pool = pool;
+    char line[64];
+    snprintf(line, sizeof line, "%s /x HTTP/1.1\r\nHost: h\r\n\r\n", method);
+    HttpRequest* req = http_parse_request(line);
+    HttpServerResponse* res = http_response_create();
+    if (!req || !res || aether_proxy_exchange_begin(px, req, res, opts, NULL) != PX_NEED_SEND) return NULL;
+    http_request_free_raw(px->outbound);
+    free(px->upstream_url);
+    px->outbound = NULL;
+    px->upstream_url = NULL;
+    if (upstream_bytes) {
+        HttpResponse* resp = http_response_alloc_empty();
+        char* buf = strdup(upstream_bytes);
+        if (!resp || !buf) return NULL;
+        http_response_fill_from_bytes(resp, buf, strlen(buf));
+        free(buf);
+        px->resp = resp;
+        aether_proxy_exchange_resume(px, 0);
+    }
+    *opts_out = opts;
+    *req_out = req;
+    return res;
+}
+
+/* A repeated field (Set-Cookie above all) was set, so the copying path kept
+ * the last one only, where the pass-through forwarded each. */
+TEST(http_proxy_copying_path_keeps_repeated_fields) {
+    AetherProxyOpts* opts = NULL;
+    HttpRequest* req = NULL;
+    AetherProxyExchange px;
+    HttpServerResponse* res = proxy_exchange_for("GET",
+        "HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Type: text/plain\r\n"
+        "Content-Type: text/x\r\nContent-Length: 2\r\n\r\nok", &opts, &req, &px);
+    ASSERT_NOT_NULL(res);
+    int cookies = 0, types = 0;
+    for (int i = 0; i < res->header_count; i++) {
+        if (strcasecmp(res->header_keys[i], "Set-Cookie") == 0) {
+            ASSERT_STREQ(cookies == 0 ? "a=1" : "b=2", res->header_values[i]);
+            cookies++;
+        }
+        if (strcasecmp(res->header_keys[i], "Content-Type") == 0) types++;
+    }
+    ASSERT_EQ(2, cookies);
+    ASSERT_EQ(1, types);   /* still one slot: the object is created holding it */
+    http_server_response_free(res);
+    http_request_free(req);
+    aether_proxy_opts_free(opts);
+}
+
+/* An interim response ahead of the final one: the pass-through read the
+ * status from the first line and answered 100 with the interim's fields in
+ * front of the final ones. It declines, and the copying path answers. */
+TEST(http_proxy_pass_through_declines_an_interim_answer) {
+    AetherProxyOpts* opts = NULL;
+    HttpRequest* req = NULL;
+    AetherProxyExchange px;
+    HttpServerResponse* res = proxy_exchange_for("GET", NULL, &opts, &req, &px);
+    ASSERT_NOT_NULL(res);
+    const char* raw = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+    const char* final_end = strstr(strstr(raw, "200 OK"), "\r\n\r\n") + 4;
+    AetherProxyDirect d;
+    memset(&d, 0, sizeof d);
+    ASSERT_EQ(-1, aether_proxy_direct_take(&px, 0, raw, strlen(raw), (size_t)(final_end - raw), &d));
+    /* And the final response alone still passes through. */
+    const char* plain = final_end - strlen("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n");
+    ASSERT_EQ(0, aether_proxy_direct_take(&px, 0, plain, strlen(plain), (size_t)(final_end - plain), &d));
+    ASSERT_EQ(200, d.status);
+    http_server_response_free(res);
+    http_request_free(req);
+    aether_proxy_opts_free(opts);
+}
+
+/* A Content-Length the upstream repeated with one value was written once a
+ * line by the pass-through, where the copying path holds one. */
+TEST(http_proxy_pass_through_states_content_length_once) {
+    const char* raw = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-A: 1\r\nContent-Length: 2\r\n\r\nok";
+    AetherProxyDirect d;
+    memset(&d, 0, sizeof d);
+    d.status = 200;
+    d.body = strstr(raw, "\r\n\r\n") + 4;
+    d.body_len = 2;
+    char* buf = NULL;
+    size_t cap = 0, len = 0;
+    ASSERT_EQ(0, aether_proxy_direct_head(&d, raw, (size_t)(d.body - raw), &buf, &cap, &len));
+    ASSERT_STREQ("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nServer: Aether/1.0\r\n"
+                 "Content-Length: 2\r\nX-A: 1\r\n\r\n", buf);
+    free(buf);
+}

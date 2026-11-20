@@ -1,0 +1,116 @@
+// Writes the seed corpus for the TLS 1.3 record fuzz target into the
+// directory named on the command line (corpus/ beside this file, as
+// `make fuzz-corpus` runs it). Edit this file, not the seeds.
+//
+// A seed is six bytes of settings (see fuzz_tls13_record.ae) and a payload:
+// a plaintext of each content type under each AEAD, with and without
+// padding, a type of zero and an unknown one, a change to each part of the
+// sealed record (header type, version, length, ciphertext, tag), plaintexts
+// at and past 2^14 bytes split by seal_records; and received records with
+// every header check_header refuses.
+import std.os
+import std.io
+import std.fs
+import std.strbuilder
+
+extern exit(code: int)
+
+const NO_CHANGE = 65535
+
+fn seed(dir: string, name: string, flags: int, ctype: int, pad: int, mpos: int, mxor: int, payload: string, extra: int) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append_byte(b, flags)
+    _b = strbuilder.append_byte(b, ctype)
+    _c = strbuilder.append_byte(b, pad)
+    _d = strbuilder.append_byte(b, (mpos >> 8) & 255)
+    _e = strbuilder.append_byte(b, mpos & 255)
+    _f = strbuilder.append_byte(b, mxor)
+    _g = strbuilder.append(b, payload)
+    i = 0
+    while i < extra {
+        _h = strbuilder.append_byte(b, 65 + (i % 26))
+        i = i + 1
+    }
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// A received record: a header and `n` bytes after it.
+fn received(dir: string, name: string, flags: int, t: int, declared: int, n: int) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append_byte(b, flags + 4)
+    i = 0
+    while i < 5 {
+        _b = strbuilder.append_byte(b, 0)
+        i = i + 1
+    }
+    _c = strbuilder.append_byte(b, t)
+    _d = strbuilder.append_byte(b, 3)
+    _e = strbuilder.append_byte(b, 3)
+    _f = strbuilder.append_byte(b, (declared >> 8) & 255)
+    _g = strbuilder.append_byte(b, declared & 255)
+    i = 0
+    while i < n {
+        _h = strbuilder.append_byte(b, (i * 31) & 255)
+        i = i + 1
+    }
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // Sealed, under each AEAD (0 ChaCha20-Poly1305, 1 AES-128-GCM, 2 AES-256-GCM).
+    seed(dir, "chacha_handshake", 0, 22, 0, NO_CHANGE, 0, "\x01\x02\x03\x05hello", 0)
+    seed(dir, "aes128_appdata_padded", 1, 23, 12, NO_CHANGE, 0, "GET / HTTP/1.1\r\n\r\n", 0)
+    seed(dir, "aes256_alert", 2, 21, 0, NO_CHANGE, 0, "\x02\x28", 0)
+    seed(dir, "empty_appdata", 0, 23, 0, NO_CHANGE, 0, "", 0)
+    seed(dir, "type_zero", 0, 0, 3, NO_CHANGE, 0, "data", 0)
+    seed(dir, "all_zero", 1, 0, 8, NO_CHANGE, 0, "", 0)
+    seed(dir, "unknown_type", 2, 24, 0, NO_CHANGE, 0, "heartbeat", 0)
+    seed(dir, "ccs_type", 0, 20, 0, NO_CHANGE, 0, "\x01", 0)
+
+    // A change to each part of a sealed record (5-byte header, then the
+    // ciphertext and its 16-byte tag).
+    seed(dir, "change_type", 0, 23, 0, 0, 1, "payload", 0)
+    seed(dir, "change_version", 1, 23, 0, 2, 4, "payload", 0)
+    seed(dir, "change_length_up", 0, 23, 0, 3, 128, "payload", 0)
+    seed(dir, "change_length_down", 2, 23, 0, 4, 3, "payload", 0)
+    seed(dir, "change_ciphertext", 0, 22, 0, 6, 255, "payload", 0)
+    seed(dir, "change_tag", 1, 22, 0, 20, 1, "payload", 0)
+
+    // At and past 2^14 bytes, sealed whole and split by seal_records.
+    seed(dir, "max_plaintext", 8, 23, 0, NO_CHANGE, 0, "", 16384)
+    seed(dir, "over_max_split", 8, 23, 0, NO_CHANGE, 0, "", 16400)
+    seed(dir, "max_plus_padding", 1, 23, 1, NO_CHANGE, 0, "", 16384)
+    seed(dir, "ciphertext_overflow", 2, 22, 255, NO_CHANGE, 0, "", 16384)
+    seed(dir, "split_handshake", 9, 22, 0, NO_CHANGE, 0, "", 17000)
+
+    // Received records.
+    received(dir, "recv_appdata", 0, 23, 40, 40)
+    received(dir, "recv_short", 1, 23, 10, 10)
+    received(dir, "recv_overrun", 2, 23, 100, 30)
+    received(dir, "recv_overflow", 0, 23, 16641, 20)
+    received(dir, "recv_plain_overflow", 0, 22, 16385, 20)
+    received(dir, "recv_empty_handshake", 0, 22, 0, 0)
+    received(dir, "recv_empty_alert", 1, 21, 0, 16)
+    received(dir, "recv_unknown_type", 2, 24, 20, 20)
+    received(dir, "recv_ccs", 0, 20, 1, 1)
+    received(dir, "recv_header_only", 0, 23, 0, 0)
+}

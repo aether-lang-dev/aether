@@ -74,6 +74,19 @@ handle_n(req: ptr, res: ptr, ud: ptr) {
     http.response_set_body(res, "q=${q}")
 }
 
+// 300 fields, past the 256 the HTTP/2 glue used to keep: it dropped the
+// rest without a word once the response's arrays could grow past 256.
+handle_many(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    i = 0
+    while i < 300 {
+        http.response_set_header(res, "x-field-${i}", "v${i}")
+        i = i + 1
+    }
+    http.response_set_body(res, "many")
+}
+
 // The connection's metadata, which every request carries, an h2 stream's
 // too (#3175): the peer the kernel reports, whether it has a port, the
 // local address, the TLS state and the scheme.
@@ -131,6 +144,7 @@ main() {
     http.server_get(raw, "/big", handle_big, 0)
     http.server_get(raw, "/n", handle_n, 0)
     http.server_get(raw, "/peer", handle_peer, 0)
+    http.server_get(raw, "/many", handle_many, 0)
 
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }

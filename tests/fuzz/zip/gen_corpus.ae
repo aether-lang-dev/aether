@@ -1,0 +1,134 @@
+// Writes the seed corpus for the zip fuzz target into the directory named on
+// the command line (corpus/ beside this file, as `make fuzz-corpus` runs
+// it). Edit this file, not the seeds.
+//
+// A seed is an options byte (see fuzz_zip.ae) and an archive std.zip's own
+// writer makes: stored and deflated files, directories, nested paths, an
+// empty archive, entries past the limits, and the names std/zip/test_zip.ae
+// checks extract refuses (`..`, an absolute path, a drive letter,
+// backslashes, a name that is only a dot) written into real archives; plus
+// a few cut and damaged copies of one.
+import std.os
+import std.io
+import std.fs
+import std.bytes
+import std.string
+import std.zip
+
+extern exit(code: int)
+
+fn put(dir: string, name: string, flags: int, archive: string, n: int) {
+    out = bytes.new(n + 1)
+    bytes.set_length(out, n + 1)
+    bytes.set(out, 0, flags)
+    i = 0
+    while i < n {
+        bytes.set(out, i + 1, string.char_at_n(archive, n, i) & 255)
+        i = i + 1
+    }
+    err = fs.write_binary("${dir}/${name}", bytes.view(out)[0..n + 1])
+    bytes.free(out)
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+fn add(w: ptr, name: string, data: string, method: int) {
+    err = zip.writer_add(w, name, string.bytes(data), method, 6)
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: adding ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// The archive `w` holds, as a seed; the writer is freed.
+fn done(dir: string, name: string, flags: int, w: ptr) {
+    archive, n, err = zip.writer_finish(w)
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+    put(dir, name, flags, archive, n)
+    zip.writer_free(w)
+}
+
+// One entry called `entry`, holding "pwned!".
+fn one(dir: string, name: string, entry: string) {
+    w = zip.writer_new()
+    add(w, entry, "pwned!", zip.METHOD_STORED)
+    done(dir, name, 0, w)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    w = zip.writer_new()
+    add(w, "hello.txt", "hello, world\n", zip.METHOD_STORED)
+    _d = zip.writer_add_dir(w, "d")
+    add(w, "d/packed.txt", "deflate me deflate me deflate me deflate me", zip.METHOD_DEFLATE)
+    add(w, "d/e/deep.bin", "\x01\x02\x03\xff", zip.METHOD_STORED)
+    done(dir, "plain", 0, w)
+
+    w = zip.writer_new()
+    done(dir, "empty_archive", 0, w)
+
+    one(dir, "dotdot", "../outside/canary")
+    one(dir, "dotdot_inside", "a/../../outside/canary")
+    one(dir, "absolute", "/tmp/aether_fuzz_zip_absolute")
+    one(dir, "drive", "C:/aether_fuzz_zip_drive")
+    one(dir, "backslash", "..\\outside\\canary")
+    one(dir, "dot_only", ".")
+
+    w = zip.writer_new()
+    add(w, "1", "a", zip.METHOD_STORED)
+    add(w, "2", "b", zip.METHOD_STORED)
+    add(w, "3", "c", zip.METHOD_STORED)
+    add(w, "4", "d", zip.METHOD_STORED)
+    done(dir, "over_max_entries", 2, w)
+
+    big = ""
+    i = 0
+    while i < 30 {
+        big = "${big}0123456789"
+        i = i + 1
+    }
+    w = zip.writer_new()
+    add(w, "big.txt", big, zip.METHOD_DEFLATE)
+    done(dir, "over_max_entry_bytes", 4, w)
+
+    w = zip.writer_new()
+    add(w, "dup.txt", "first", zip.METHOD_STORED)
+    add(w, "dup.txt", "second", zip.METHOD_STORED)
+    done(dir, "duplicate_names", 0, w)
+
+    // Damaged copies of a small archive.
+    w = zip.writer_new()
+    add(w, "x.txt", "the quick brown fox", zip.METHOD_DEFLATE)
+    archive, n, err = zip.writer_finish(w)
+    zip.writer_free(w)
+    if err != "" { exit(1) }
+    put(dir, "cut_in_half", 0, archive, n / 2)
+    put(dir, "no_eocd", 0, archive, n - 10)
+    flipped = bytes.new(n)
+    bytes.set_length(flipped, n)
+    j = 0
+    while j < n {
+        c = string.char_at_n(archive, n, j) & 255
+        // A byte in the middle of the deflated data: the CRC must catch it.
+        if j == 40 { c = c ^ 255 }
+        bytes.set(flipped, j, c)
+        j = j + 1
+    }
+    put(dir, "crc_mismatch", 0, bytes.string_from_slice(bytes.view(flipped)[0..n]), n)
+    bytes.free(flipped)
+}

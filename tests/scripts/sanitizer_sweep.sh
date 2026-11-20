@@ -121,6 +121,15 @@ if [ "$san" = tsan ]; then
     esac
     for cc_name in gcc cc clang; do wrap "$cc_name" "$real"; done
     base_cc=clang
+    # The sandbox preload is built by the plain compiler (the Makefile's
+    # SANDBOX_PRELOAD_CC). It lands in programs the sweep did not build, and
+    # under TSan's interceptors, whose REAL() calls reach its wrappers: built
+    # under TSan, it would not load into timeout(1) (undefined __tsan_init),
+    # and a TSan program it was preloaded into died with SIGSEGV
+    # (http_ipv6). ASan and UBSan builds keep it instrumented: there it loads
+    # and runs, and their checks cover its code.
+    SANDBOX_PRELOAD_CC="$real"
+    export SANDBOX_PRELOAD_CC
 else
     for cc_name in gcc cc; do
         real=$(PATH=$plain_path command -v "$cc_name" 2>/dev/null) || continue

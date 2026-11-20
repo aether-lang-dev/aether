@@ -1,0 +1,438 @@
+// std.sandbox: a call uses the path its check resolved (#3751).
+//
+// A check resolves a path and matches where it leads. The call after it used
+// to be handed the path as written, which the kernel resolved again, so a
+// directory swapped for a symlink (a junction on Windows) between the two
+// was followed out of the grant. A worker thread here, outside the enforce
+// block, swaps a directory of the box with a link to a directory outside it,
+// over and over, with renames, while the enforce block reads and writes
+// through that directory. Nothing outside may be read or written: on POSIX
+// the call is made on the checked resolution following no symlink, and on
+// Windows the final path of what was opened is checked again (a write there
+// can still reach the file before that second check, so the write race runs
+// on POSIX only).
+//
+// The calls that act on a name itself (unlink, rename, mkdir, the new name
+// of a link) are checked on that name, not on where a symlink there leads,
+// and a hard link may not make a file reachable under a grant it does not
+// have.
+
+import std.spec
+import std.sandbox
+import std.os
+import std.fs
+import std.worker
+import std.string
+import std.list
+import std.io
+
+extern exit(code: int)
+
+// Set by the main thread when the swapping should stop.
+var stop_swap: int = 0
+// The box the worker swaps in, set before it starts.
+var swap_box: string = ""
+// Swaps the worker made, read after it stopped.
+var swaps_made: int = 0
+
+// box/d is a directory of the box half the time and a link out the other
+// half: d -> d_real, d_link -> d, d -> d_link, d_real -> d, each a rename.
+fn swap_until_stopped() {
+    d = "${swap_box}/d"
+    real = "${swap_box}/d_real"
+    link = "${swap_box}/d_link"
+    while stop_swap == 0 {
+        _a = fs.rename(d, real)
+        _b = fs.rename(link, d)
+        _c = fs.rename(d, link)
+        _e = fs.rename(real, d)
+        swaps_made = swaps_made + 1
+    }
+}
+
+// A Windows junction at `link` to the directory `target`: 1 when made.
+fn make_junction(link: string, target: string) -> int {
+    l = string.replace_all(link, "/", "\\")
+    t = string.replace_all(target, "/", "\\")
+    argv = list.new()
+    list.add(argv, "-NoProfile")
+    list.add(argv, "-NonInteractive")
+    list.add(argv, "-Command")
+    list.add(argv, "New-Item -ItemType Junction -Path '${l}' -Target '${t}' | Out-Null")
+    _o, code, err = os.run_capture("powershell.exe", argv, null)
+    list.free(argv)
+    if err != "" || code != 0 { return 0 }
+    return 1
+}
+
+// A link at `link` to the directory `target`: a symlink, or on Windows a
+// junction. 1 when made.
+fn make_dir_link(link: string, target: string) -> int {
+    if os.platform() == "windows" { return make_junction(link, target) }
+    err = fs.symlink(target, link)
+    if err != "" { return 0 }
+    return fs.is_symlink(link)
+}
+
+main() {
+    fw = spec.init()
+
+    tmp, terr = fs.make_temp_dir("", "ae_sandbox_use")
+    if terr != "" {
+        println("cannot make a fixture directory: ${terr}")
+        exit(1)
+    }
+    windows = 0
+    if os.platform() == "windows" { windows = 1 }
+    box = "${tmp}/box"
+    outside = "${tmp}/outside"
+    _m1 = fs.mkdir_p("${box}/d")
+    _m2 = fs.mkdir_p(outside)
+    _w1 = fs.write("${box}/d/secret.txt", "inside")
+    _w2 = fs.write("${outside}/secret.txt", "outside")
+    // The names the race test's calls use, outside: changed, removed or
+    // seen only by a call that followed the swapped link.
+    _w4 = fs.write("${outside}/w.txt", "outside-w")
+    _w5 = fs.write("${outside}/n.txt", "keep")
+    _w6 = fs.write("${outside}/only_out.txt", "only outside")
+    _m3 = fs.mkdir_p("${outside}/k")
+    _w7 = fs.write("${box}/d/w.txt", "inside-w")
+    _w3 = fs.write("${box}/inside.txt", "inside")
+    have_dir_link = make_dir_link("${box}/d_link", outside)
+    no_dir_link = "no symlink or junction could be made here"
+    have_links = 0
+    if windows == 0 {
+        _s1 = fs.symlink("${outside}/secret.txt", "${box}/out_link")
+        _s2 = fs.symlink("${box}/inside.txt", "${outside}/in_link")
+        _s3 = fs.symlink("${outside}/gone.txt", "${box}/dangling")
+        if fs.is_symlink("${box}/out_link") == 1 && fs.is_symlink("${outside}/in_link") == 1 {
+            have_links = 1
+        }
+    }
+    no_links = "POSIX symlinks only"
+
+    in_box = sandbox.new("box") {
+        grant_fs_read("${box}/*")
+        grant_fs_write("${box}/*")
+    }
+    swap_box = box
+
+    spec.describe(fw, "std.sandbox: a call reaches what its check saw") {
+        spec.it_when(have_dir_link, "a read never reaches a link swapped in after the check", no_dir_link) callback {
+            stop_swap = 0
+            ok = worker.run(| _c: ptr | { swap_until_stopped() }, | _c: ptr | {})
+            escaped = 0
+            inside = 0
+            i = 0
+            sandbox.enforce(in_box) callback {
+                while i < 20000 && escaped == 0 {
+                    got, err = fs.read("${box}/d/secret.txt")
+                    if err == "" && got == "outside" { escaped = escaped + 1 }
+                    if err == "" && got == "inside" { inside = inside + 1 }
+                    i = i + 1
+                }
+            }
+            stop_swap = 1
+            if ok { worker.wait() }
+            worker.drain(16)
+            spec.assert_eq(escaped, 0, "nothing outside the box was read")
+            spec.assert_true(inside > 0, "and the box's own file was")
+            spec.assert_true(swaps_made > 0, "while the directory was being swapped")
+        }
+        // Every kind of call, through box/d while the worker swaps it: a
+        // write over a file (truncating), a new file, a rename, an unlink, a
+        // mkdir and an rmdir, write_atomic, a temporary file and directory,
+        // a lock file, and lookups. outside/ holds files with the names
+        // those calls use, so a call that followed the link would change
+        // them, or make new ones, or (a lookup) see one that only exists
+        // there.
+        spec.it_when(have_dir_link, "no call reaches a link swapped in after its check", no_dir_link) callback {
+            stop_swap = 0
+            ok = worker.run(| _c: ptr | { swap_until_stopped() }, | _c: ptr | {})
+            seen = 0
+            i = 0
+            sandbox.enforce(in_box) callback {
+                while i < 3000 {
+                    _e1 = fs.write("${box}/d/w.txt", "x")
+                    _e2 = fs.write("${box}/d/m.txt", "x")
+                    _e3 = fs.rename("${box}/d/m.txt", "${box}/d/n.txt")
+                    _u, _k, _e4 = fs.unlink("${box}/d/n.txt")
+                    _e5 = fs.create_dir("${box}/d/k")
+                    _e6 = fs.delete_dir("${box}/d/k")
+                    _e7 = fs.write_atomic("${box}/d/atomic.txt", string.bytes("x"))
+                    t, terr = fs.make_temp_file("${box}/d", "t")
+                    if terr == "" { _d1 = fs.delete(t) }
+                    td, tderr = fs.make_temp_dir("${box}/d", "t")
+                    if tderr == "" { _d2 = fs.delete_dir(td) }
+                    lfd, _lk, lerr = fs.lock_open("${box}/d/lock")
+                    if lerr == "" { _c = io.fd_close(lfd) }
+                    if fs.exists("${box}/d/only_out.txt") == 1 { seen = seen + 1 }
+                    i = i + 1
+                }
+            }
+            stop_swap = 1
+            if ok { worker.wait() }
+            worker.drain(16)
+            // With the directory its own again, each call works in the box.
+            done = 0
+            sandbox.enforce(in_box) callback {
+                _p = fs.delete_dir("${box}/d/k") // a leftover of the race, if any
+                e2 = fs.write("${box}/d/m.txt", "x")
+                e3 = fs.rename("${box}/d/m.txt", "${box}/d/n.txt")
+                u, _k, _e4 = fs.unlink("${box}/d/n.txt")
+                e5 = fs.create_dir("${box}/d/k")
+                e6 = fs.delete_dir("${box}/d/k")
+                e7 = fs.write_atomic("${box}/d/atomic.txt", string.bytes("x"))
+                t, terr = fs.make_temp_file("${box}/d", "t")
+                if terr == "" { _d1 = fs.delete(t) }
+                td, tderr = fs.make_temp_dir("${box}/d", "t")
+                if tderr == "" { _d2 = fs.delete_dir(td) }
+                lfd, _lk, lerr = fs.lock_open("${box}/d/lock")
+                if lerr == "" { _c = io.fd_close(lfd) }
+                if e2 == "" && e3 == "" && u == 1 && e5 == "" && e6 == "" && e7 == "" &&
+                terr == "" && tderr == "" && lerr == "" && fs.exists("${box}/d/atomic.txt") == 1 {
+                    done = 1
+                }
+            }
+            got_w, _rw = fs.read("${outside}/w.txt")
+            spec.assert_str_eq(got_w, "outside-w", "a write never truncated or rewrote the outside file")
+            got_n, _rn = fs.read("${outside}/n.txt")
+            spec.assert_str_eq(got_n, "keep", "an unlink or a rename never reached the outside file")
+            spec.assert_eq(fs.exists("${outside}/k"), 1, "an rmdir never removed the outside directory")
+            spec.assert_eq(fs.exists("${outside}/m.txt"), 0, "no new file was made outside")
+            spec.assert_eq(fs.exists("${outside}/atomic.txt"), 0, "no write_atomic landed outside")
+            spec.assert_eq(fs.exists("${outside}/lock"), 0, "no lock file was made outside")
+            l, lerr2 = fs.list_dir(outside)
+            n_out = 0
+            if lerr2 == "" {
+                n_out = fs.dir_list_count(l)
+                fs.dir_list_free(l)
+            }
+            spec.assert_eq(n_out, 5 + have_links, "nothing else appeared outside (no temporary file or directory)")
+            spec.assert_eq(seen, 0, "a lookup never saw a file that is only outside")
+            spec.assert_eq(done, 1, "and each call works in the box when the directory is its own")
+            spec.assert_true(swaps_made > 0, "while the directory was being swapped")
+        }
+        // chmod and the listings (list_dir, walk, glob) act on what their
+        // check saw too: on Windows through a verified handle, where they
+        // used to call SetFileAttributesW, SetNamedSecurityInfoW and
+        // FindFirstFileA by name after the check.
+        spec.it_when(have_dir_link, "chmod and a listing never reach a link swapped in after the check", no_dir_link) callback {
+            _wc1 = fs.write("${box}/d/c.txt", "inside-c")
+            _wc2 = fs.write("${outside}/c.txt", "outside-c")
+            stop_swap = 0
+            ok = worker.run(| _c: ptr | { swap_until_stopped() }, | _c: ptr | {})
+            listed_out = 0
+            i = 0
+            sandbox.enforce(in_box) callback {
+                while i < 3000 {
+                    _ok, _kind, _e = fs.chmod("${box}/d/c.txt", 292) // 0o444, read-only
+                    l, lerr = fs.list_dir("${box}/d")
+                    if lerr == "" {
+                        n = fs.dir_list_count(l)
+                        j = 0
+                        while j < n {
+                            if fs.dir_list_get(l, j) == "only_out.txt" { listed_out = listed_out + 1 }
+                            j = j + 1
+                        }
+                        fs.dir_list_free(l)
+                    }
+                    g, gerr = fs.glob("${box}/d/only_out*")
+                    if gerr == "" {
+                        listed_out = listed_out + fs.dir_list_count(g)
+                        fs.dir_list_free(g)
+                    }
+                    i = i + 1
+                }
+            }
+            stop_swap = 1
+            if ok { worker.wait() }
+            worker.drain(16)
+            werr = fs.write("${outside}/c.txt", "outside-c")
+            spec.assert_str_eq(werr, "", "chmod never made the outside file read-only")
+            spec.assert_eq(listed_out, 0, "a listing never named a file that is only outside")
+            spec.assert_true(swaps_made > 0, "while the directory was being swapped")
+            _r1, _rk1, _re1 = fs.chmod("${box}/d/c.txt", 420)
+            _r2, _rk2, _re2 = fs.chmod("${outside}/c.txt", 420)
+            _d1 = fs.delete("${box}/d/c.txt")
+            _d2 = fs.delete("${outside}/c.txt")
+        }
+    }
+
+    spec.describe(fw, "std.sandbox: calls on a name check the name") {
+        spec.it_when(have_links, "removes a symlink in the box that points out, and leaves what it points at", no_links) callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.delete("${box}/out_link")
+            }
+            spec.assert_str_eq(err, "", "the link in the box is removed")
+            spec.assert_eq(fs.is_symlink("${box}/out_link"), 0, "it is gone")
+            spec.assert_eq(fs.exists("${outside}/secret.txt"), 1, "its target is not")
+        }
+        spec.it_when(have_links, "refuses to remove a symlink outside the box that points in", no_links) callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.delete("${outside}/in_link")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.is_symlink("${outside}/in_link"), 1, "the link outside is still there")
+        }
+        spec.it_when(have_links, "refuses to rename a symlink outside the box that points in", no_links) callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.rename("${outside}/in_link", "${box}/moved_link")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.is_symlink("${outside}/in_link"), 1, "the link outside was not moved")
+        }
+        spec.it_when(have_links, "sees a dangling symlink in the box as the link it is", no_links) callback {
+            is_link = 0
+            target = ""
+            sandbox.enforce(in_box) callback {
+                is_link = fs.is_symlink("${box}/dangling")
+                t, _terr = fs.readlink("${box}/dangling")
+                target = t
+            }
+            spec.assert_eq(is_link, 1, "is_symlink answers for the link itself")
+            spec.assert_contains(target, "gone.txt", "and readlink reads it")
+        }
+        // A junction is a link to Windows' name resolution and to fs.is_symlink:
+        // fs.unlink removes it inside a block as outside one, and what it points
+        // at stays.
+        spec.it_when(windows, "unlinks a junction in the box, and leaves what it points at", "Windows junctions") callback {
+            made = make_junction("${box}/j", outside)
+            uerr = "not tried"
+            if made == 1 {
+                sandbox.enforce(in_box) callback {
+                    _u, _k, e = fs.unlink("${box}/j")
+                    uerr = e
+                }
+            }
+            spec.assert_eq(made, 1, "the junction is made")
+            spec.assert_str_eq(uerr, "", "unlink removes it")
+            spec.assert_eq(fs.exists("${box}/j"), 0, "it is gone")
+            spec.assert_eq(fs.exists("${outside}/secret.txt"), 1, "what it pointed at is not")
+        }
+        // "name/" is a directory to the kernel: an unlink of it removes
+        // nothing, an open that would create makes no file, and a symlink
+        // there is followed, not removed. The checked calls used to drop the
+        // slash and act on the name as whatever it was.
+        spec.it_when(1 - windows, "takes a name with a trailing slash for a directory, as the kernel does", "POSIX paths") callback {
+            _w = fs.write("${box}/slash_f", "x")
+            _m = fs.mkdir_p("${box}/slash_d")
+            eu = ""
+            ew = ""
+            ed = "not tried"
+            el = ""
+            sandbox.enforce(in_box) callback {
+                _u, _k, e1 = fs.unlink("${box}/slash_f/")
+                eu = e1
+                ew = fs.write("${box}/slash_new/", "x")
+                ed = fs.delete_dir("${box}/slash_d/")
+                if have_dir_link == 1 {
+                    _u2, _k2, e2 = fs.unlink("${box}/d_link/")
+                    el = e2
+                }
+            }
+            spec.assert_true(eu != "", "unlink of 'file/' is refused (ENOTDIR)")
+            spec.assert_eq(fs.exists("${box}/slash_f"), 1, "and the file stays")
+            spec.assert_true(ew != "", "a write to 'new/' is refused (EISDIR)")
+            spec.assert_eq(fs.exists("${box}/slash_new"), 0, "and makes no file")
+            spec.assert_str_eq(ed, "", "rmdir of 'dir/' removes the directory")
+            spec.assert_eq(fs.exists("${box}/slash_d"), 0, "it is gone")
+            if have_dir_link == 1 {
+                spec.assert_true(el != "", "unlink of 'link/' is refused")
+                spec.assert_eq(fs.is_symlink("${box}/d_link"), 1, "and the link stays")
+            }
+            _d = fs.delete("${box}/slash_f")
+        }
+        spec.it("refuses a hard link that would put a file outside the box under its grants") callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.hard_link("${outside}/secret.txt", "${box}/hard")
+            }
+            spec.assert_true(err != "", "refused")
+            spec.assert_eq(fs.exists("${box}/hard"), 0, "no second name in the box")
+        }
+        // fs.lock_open needs fs_write only, as it always has; inside an enforce
+        // block without fs_read its descriptor is write-only, which the lock
+        // takes (flock, LockFileEx).
+        spec.it("takes a lock on a file it may only write") callback {
+            wonly = sandbox.new("write only") {
+                grant_fs_write("${box}/*")
+            }
+            got = 0
+            err = ""
+            sandbox.enforce(wonly) callback {
+                lfd, _lk, lerr = fs.lock_open("${box}/held.lock")
+                err = lerr
+                if lerr == "" {
+                    g, _k2, _e2 = fs.try_lock(lfd, 1)
+                    got = g
+                    _u, _k3, _e3 = fs.unlock(lfd)
+                    _c = io.fd_close(lfd)
+                }
+            }
+            sandbox.free(wonly)
+            spec.assert_str_eq(err, "", "the lock file opens with fs_write alone")
+            spec.assert_eq(got, 1, "and the lock is taken")
+        }
+        // A file a block opens is shared as fopen shares it: on Windows the
+        // open that may create asks for DELETE, and a handle that kept it
+        // made every later open of the file (fopen, another process) fail
+        // with a sharing violation while it was open.
+        spec.it("leaves a file it holds open for others to open, in this process and another") callback {
+            log = "${box}/shared.log"
+            fresh = "${box}/fresh.log"
+            _w = fs.write(log, "first\n")
+            _d = fs.delete(fresh)
+            held_log = null
+            held_fresh = null
+            oerr = ""
+            sandbox.enforce(in_box) callback {
+                a, aerr = fs.open(log, "a")
+                held_log = a
+                b, berr = fs.open(fresh, "w")
+                held_fresh = b
+                oerr = "${aerr}${berr}"
+            }
+            spec.assert_str_eq(oerr, "", "both open in the block")
+            got_log, rerr = fs.read(log)
+            got_fresh, rerr2 = fs.read(fresh)
+            spec.assert_str_eq(rerr, "", "an fopen of the appended file opens while it is held")
+            spec.assert_str_eq(got_log, "first\n", "and reads it")
+            spec.assert_str_eq(rerr2, "", "an fopen of the file the block made opens while it is held")
+            argv = list.new()
+            prog = "cat"
+            if windows == 1 {
+                prog = "cmd.exe"
+                list.add(argv, "/c")
+                list.add(argv, "type")
+                list.add(argv, string.replace_all(log, "/", "\\"))
+            } else {
+                list.add(argv, log)
+            }
+            out, code, cerr = os.run_capture(prog, argv, null)
+            list.free(argv)
+            spec.assert_str_eq(cerr, "", "another process starts")
+            spec.assert_eq(code, 0, "and opens the held file")
+            spec.assert_contains(out, "first", "and reads it")
+            _c1 = fs.close(held_log)
+            _c2 = fs.close(held_fresh)
+            spec.assert_str_eq(got_fresh, "", "the new file is empty")
+        }
+        spec.it("makes a hard link between two names of the box") callback {
+            err = ""
+            sandbox.enforce(in_box) callback {
+                err = fs.hard_link("${box}/inside.txt", "${box}/inside_too.txt")
+            }
+            spec.assert_str_eq(err, "", "linked")
+            spec.assert_eq(fs.exists("${box}/inside_too.txt"), 1, "and there")
+        }
+    }
+
+    sandbox.free(in_box)
+    worker.pool_shutdown()
+    _r = fs.remove_tree(tmp)
+    exit(spec.run_summary(fw))
+}

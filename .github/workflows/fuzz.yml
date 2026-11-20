@@ -1,18 +1,26 @@
 name: Fuzz
 
-# Coverage-guided fuzzing of the parsers that read what a peer sends (#3543):
-# std.cbor's decoder, std.ipc's frame reader, the HTTP/1 request head on the
-# server's path, the chunked body decoder, the client's URL and Location
-# readers, and std.json. Each target runs under libFuzzer, ASan and UBSan and
-# checks properties of its contract, not only that nothing crashes
-# (tests/fuzz/README.md): `make fuzz-ci`, every target for FUZZ_SECONDS from
-# its committed seed corpus.
+# Coverage-guided fuzzing of every decoder that reads what a peer or an
+# untrusted file sends (#3543, #3749): std.cbor's decoder, std.ipc's frame
+# reader, the HTTP/1 request head on the server's path, the chunked body
+# decoder, the client's URL and Location readers, std.json, the WebSocket
+# frame reader, the HTTP/2 glue over nghttp2, the reverse proxy's handling of
+# an upstream response, std.xml, std.yaml with the vendored libfyaml,
+# std.msgpack, std.tar and std.zip extraction, the TLS 1.3 record layer and
+# handshake parsers, and X.509, ASN.1 and PEM. Each target runs under
+# libFuzzer, ASan and UBSan and checks properties of its contract, not only
+# that nothing crashes (tests/fuzz/README.md): `make fuzz-ci`, each target for
+# FUZZ_SECONDS from its committed seed corpus.
 #
 # A short budget, 60 s a target: a parser's shallow bugs are found in seconds
 # from good seeds (a Content-Length truncation, a double free on a request
-# line with no version), and a longer run belongs on a developer's machine
-# with FUZZ_SECONDS. About 6 minutes of fuzzing and 4 of building. So it runs
-# on the PRs that change what it fuzzes or how, and on every push to main.
+# line with no version), and depth belongs to the weekly run. Seventeen
+# targets would be 17 minutes in one job, so the targets are split across
+# three shards that run side by side, about 6 minutes of fuzzing and 4 of
+# building each. A pull request fuzzes only the targets its changes reach
+# (tests/fuzz/select_targets.sh, which also names the paths below); a change
+# to what every target is built with reaches them all. Every push to main
+# fuzzes them all, and a weekly run gives each target 10 minutes.
 #
 # On a failure the reproducers (crash-*, leak-*, timeout-*, oom-* under
 # build/fuzz/<target>/) are uploaded: rerun one with that target's binary,
@@ -24,18 +32,47 @@ on:
   pull_request:
     branches: [ main, develop ]
     paths:
+      # The decoders (tests/fuzz/select_targets.sh's table).
       - 'std/net/**'
+      - 'std/http/server/h2/**'
+      - 'std/http/proxy/**'
       - 'std/json/**'
       - 'std/cbor/**'
       - 'std/ipc/**'
-      # The harnesses link the runtime and std.string and take their flags
-      # from the Makefile (FUZZ_STD_CFLAGS): a change there changes what is
-      # fuzzed.
+      - 'std/xml/**'
+      - 'std/yaml/**'
+      - 'std/msgpack/**'
+      - 'std/tar/**'
+      - 'std/zip/**'
+      - 'std/zlib/**'
+      - 'std/hash/**'
+      - 'std/cryptography/**'
+      - 'std/fs/**'
+      - 'std/os/**'
+      - 'std/io/**'
+      - 'std/list/**'
+      - 'std/bignum/**'
+      - 'std/bits/**'
+      - 'std/encoding/**'
+      - 'std/intarr/**'
+      - 'std/strbuilder/**'
+      # What every target is built with: the runtime, the compiler and ae
+      # (the Aether targets are compiled by `ae build --emit=obj`), the std
+      # modules each one links, and the flags the Makefile hands the
+      # harnesses (FUZZ_STD_CFLAGS).
       - 'runtime/**'
+      - 'compiler/**'
+      - 'tools/**'
       - 'std/string/**'
+      - 'std/bytes/**'
+      - 'std/mem/**'
       - 'Makefile'
       - 'tests/fuzz/**'
       - '.github/workflows/fuzz.yml'
+      - '.github/actions/apt-install/**'
+  schedule:
+    # Weekly, Sunday 03:17 UTC: every target for 10 minutes.
+    - cron: '17 3 * * 0'
   workflow_dispatch:
     inputs:
       seconds:
@@ -47,39 +84,70 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   fuzz:
-    name: Linux / Clang + libFuzzer
+    name: Linux / Clang + libFuzzer (shard ${{ matrix.shard }}/3)
     # Ubuntu 24.04's clang is 18, whose libFuzzer and sanitizer runtimes are
     # in libclang-rt-18-dev.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Six targets a shard: 10 minutes of building and fuzzing at 60 s each,
+    # a little over an hour at the weekly run's 600.
+    timeout-minutes: ${{ github.event_name == 'schedule' && 90 || 30 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+    # Which targets this shard fuzzes: on a pull request the ones its
+    # changes reach, else every one; then this shard's share.
+    - name: Select the targets
+      id: select
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        SHARD: ${{ matrix.shard }}
+      run: |
+        set -eu
+        if [ "${{ github.event_name }}" = pull_request ]; then
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
+          targets="$(sh tests/fuzz/select_targets.sh --changed "$RUNNER_TEMP/changed.txt" --shard "$SHARD/3")"
+        else
+          targets="$(sh tests/fuzz/select_targets.sh --all --shard "$SHARD/3")"
+        fi
+        echo "targets=$targets" >> "$GITHUB_OUTPUT"
+        echo "Shard $SHARD/3 fuzzes: ${targets:-nothing, since no target input changed}"
+
     - name: Install packages
+      if: steps.select.outputs.targets != ''
       uses: ./.github/actions/apt-install
       with:
-        packages: clang libclang-rt-18-dev make bc pkg-config
+        # libnghttp2-dev: the h2 target, and the server's HTTP/2 support in
+        # the libaether it links.
+        packages: clang libclang-rt-18-dev make bc pkg-config libnghttp2-dev
         scope: fuzz
 
     - name: Build the toolchain
+      if: steps.select.outputs.targets != ''
       run: make -j"$(nproc)" compiler ae stdlib
 
     - name: make fuzz-ci
+      if: steps.select.outputs.targets != ''
       env:
-        FUZZ_SECONDS: ${{ github.event.inputs.seconds || '60' }}
+        FUZZ_TARGETS: ${{ steps.select.outputs.targets }}
+        FUZZ_SECONDS: ${{ github.event.inputs.seconds || (github.event_name == 'schedule' && '600') || '60' }}
       run: make fuzz-ci
 
     - name: Upload the reproducers
       if: failure()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
-        name: fuzz-reproducers
+        name: fuzz-reproducers-${{ matrix.shard }}
         path: |
           build/fuzz/*/crash-*
           build/fuzz/*/leak-*

@@ -1,7 +1,9 @@
 // The server for http_server_h2_limits (#3738): HTTP/2 on with no stream
-// count given, and a body limit of 20000 bytes. POST /len answers with the
-// length of the body. Prints "NO_H2" and exits when the build has no
-// libnghttp2, which the driver reports as a skip.
+// count given, a body limit of 20000 bytes, an idle timeout of 1 s, head
+// and body budgets of 1 s each, and connections that live 3 s. POST /len
+// answers with the length of the body, GET /ping with "pong". Prints
+// "NO_H2" and exits when the build has no libnghttp2, which the driver
+// reports as a skip.
 
 import std.http
 
@@ -13,10 +15,23 @@ len_handler(req: ptr, res: ptr, ud: ptr) {
     http.http_response_set_body(res, "len=${http.request_body_length(req)}")
 }
 
+ping_handler(req: ptr, res: ptr, ud: ptr) {
+    http.http_response_set_status(res, 200)
+    http.http_response_set_body(res, "pong")
+}
+
 message StartSrv { raw: ptr }
 actor SrvActor {
     state s = 0
     receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
+}
+
+// Each limit setter, or the reason it refused, which ends the run.
+must(what: string, err: string) {
+    if err != "" {
+        println("FAIL: ${what}: ${err}")
+        exit(1)
+    }
 }
 
 main() {
@@ -28,9 +43,17 @@ main() {
         println("NO_H2 ${herr}")
         exit(0)
     }
-    merr = http.server_set_max_body(raw, 20000)
-    if merr != "" { println("FAIL: server_set_max_body: ${merr}"); exit(1) }
+    must("server_set_max_body", http.server_set_max_body(raw, 20000))
+    must("server_set_keepalive", http.server_set_keepalive(raw, 1, 0, 1000ms))
+    must("server_set_head_timeout", http.server_set_head_timeout(raw, 1000ms))
+    must("server_set_body_timeout", http.server_set_body_timeout(raw, 1000ms, 1000))
+    if http.server_set_h2_max_age(raw, -1ms) == "" {
+        println("FAIL: server_set_h2_max_age accepted a negative age")
+        exit(1)
+    }
+    must("server_set_h2_max_age", http.server_set_h2_max_age(raw, 3000ms))
     http.http_server_post(raw, "/len", len_handler, null)
+    http.http_server_get(raw, "/ping", ping_handler, null)
     if http.server_bind(raw, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)

@@ -17,6 +17,10 @@
 #      installed,
 #   4. a listing with no digest refuses (ae; get.sh has the same branch),
 #   5. get.sh does not fall back to a source build after a refusal.
+# The release is v0.9.9, below the signing floor (SIGNED_SINCE in get.sh):
+# it has no SHA256SUMS, as a release from before #3752, and is checked by
+# its digest. A release at or above the floor without SHA256SUMS is refused
+# (test_release_sums_verified.sh).
 # HOME and USERPROFILE are redirected so the real ~/.aether is never touched.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -56,14 +60,14 @@ PLAT="$("$AE" version 2>&1 | tr -d '\r' | sed -n 's/^Platform:[[:space:]]*//p' |
 # bin/aetherc, lib/aether/libaether.a (an `ar` archive) and enough bulk to be
 # over the 1 KB floor. A .zip on Windows, as the releases are there.
 mkdir -p "$TMP/pkg/bin" "$TMP/pkg/lib/aether" "$TMP/pkg/share/aether" "$TMP/rel"
-printf '#!/bin/sh\necho aetherc 9.9.9\n' > "$TMP/pkg/bin/aetherc"
+printf '#!/bin/sh\necho aetherc 0.9.9\n' > "$TMP/pkg/bin/aetherc"
 chmod 755 "$TMP/pkg/bin/aetherc"; cp "$TMP/pkg/bin/aetherc" "$TMP/pkg/bin/ae"
 { printf '!<arch>\n'; head_c 70000 /dev/urandom; } > "$TMP/pkg/lib/aether/libaether.a"
 head_c 20000 /dev/urandom > "$TMP/pkg/share/aether/pad.bin"
-echo 9.9.9 > "$TMP/pkg/VERSION"
+echo 0.9.9 > "$TMP/pkg/VERSION"
 case "$PLAT" in
     windows*)
-        ASSET="aether-9.9.9-$PLAT.zip"
+        ASSET="aether-0.9.9-$PLAT.zip"
         python3 - "$(native_path "$TMP/pkg")" "$(native_path "$TMP/rel/$ASSET")" <<'PY' || fail "could not make the zip"
 import os, sys, zipfile
 src, dst = sys.argv[1], sys.argv[2]
@@ -75,7 +79,7 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
 PY
         ;;
     *)
-        ASSET="aether-9.9.9-$PLAT.tar.gz"
+        ASSET="aether-0.9.9-$PLAT.tar.gz"
         ( cd "$TMP/pkg" && COPYFILE_DISABLE=1 tar -czf "$TMP/rel/$ASSET" . ) || fail "could not make the archive"
         ;;
 esac
@@ -100,16 +104,16 @@ run_install() {   # $1 = case name
     H="$TMP/home_$1"; mkdir -p "$H"
     ( env -u GITHUB_TOKEN -u GH_TOKEN HOME="$H" USERPROFILE="$(native_path "$H")" \
         AE_GITHUB_WEB_BASE="$BASE" AE_GITHUB_API_BASE="$BASE" \
-        "$AE" version install v9.9.9 ) >"$TMP/$1.log" 2>&1
+        "$AE" version install v0.9.9 ) >"$TMP/$1.log" 2>&1
 }
-installed() { [ -d "$TMP/home_$1/.aether/versions/v9.9.9/bin" ]; }
+installed() { [ -d "$TMP/home_$1/.aether/versions/v0.9.9/bin" ]; }
 
 # ae ---------------------------------------------------------------------------
 start_mock web
 run_install ok || fail "ae did not install an archive whose digest matches" "$TMP/ok.log"
 installed ok || fail "ae installed nothing" "$TMP/ok.log"
 grep -q "Verified $ASSET" "$TMP/ok.log" || fail "ae did not say it verified the archive" "$TMP/ok.log"
-grep -q "GET /.*/releases/download/v9.9.9/$ASSET" "$TMP/rel/requests.log" \
+grep -q "GET /.*/releases/download/v0.9.9/$ASSET" "$TMP/rel/requests.log" \
     || fail "the archive did not come from the release URL" "$TMP/rel/requests.log"
 
 start_mock webbaddigest
@@ -132,7 +136,7 @@ installed nodig && fail "an archive with no digest left an install behind" "$TMP
 run_get() {   # $1 = case name
     PFX="$TMP/prefix_$1"
     ( env -u GITHUB_TOKEN -u GH_TOKEN PREFIX="$PFX" AE_GITHUB_WEB_BASE="$BASE" \
-        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" v9.9.9 ) >"$TMP/get_$1.log" 2>&1
+        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" v0.9.9 ) >"$TMP/get_$1.log" 2>&1
 }
 if [ "$WIN" = 0 ] && [ -f "$ROOT/get.sh" ]; then
     start_mock web

@@ -35,6 +35,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
+. "$ROOT/tests/lib/sweep_timeout.sh"
+# Bounds for the diagnostic reruns of a failed dial (section 7).
+sweep_timeout_bound DIAG_TIMEOUT "$ROOT" 60
+sweep_timeout_bound GDB_TIMEOUT "$ROOT" 180
 AE="$ROOT/build/ae"
 
 [ -x "$AE" ] || { echo "  [SKIP] http_ipv6: ae not built"; exit 0; }
@@ -297,9 +301,66 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
         printf 'tcp_listen:*\nenv:TARGET\nenv:LISTEN\ntcp:%s\n' "$1" >"$TMP/grants"
         _listen=v4
         [ "$2" = "::1" ] && _listen=v6
+        _rc=0
         _got=$(LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$TMP/grants" \
-               TARGET="$2" LISTEN="$_listen" "$TMP/dial" 2>&1) || :
-        [ "$_got" = "$3" ] || fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
+               TARGET="$2" LISTEN="$_listen" "$TMP/dial" 2>&1) || _rc=$?
+        if [ "$_got" != "$3" ]; then
+            # Say how the dial ended, and run it again with one thing changed
+            # at a time, to name what the failure depends on. Known so far
+            # (TSan leg): it crashes (139) under the sweep's options whether
+            # stdout is a pipe or a file, runs clean without the preload, and
+            # with handle_segv=1 added once ran clean and once hung past the
+            # sweep's limit, which is what a stack overflow in an interposed
+            # call does to TSan's handler. So gdb goes first, and every rerun
+            # is bounded. (set -e is on: a rerun's own failure must not end
+            # the script.)
+            _rerun() {   # $1 label, $2 TSAN/ASAN options to add, $3 "nopreload", "nogrants" or ""
+                _t="$TSAN_OPTIONS"; _a="$ASAN_OPTIONS"
+                if [ -n "$2" ]; then _t="${TSAN_OPTIONS:+$TSAN_OPTIONS:}$2"; _a="${ASAN_OPTIONS:+$ASAN_OPTIONS:}$2"; fi
+                _pl="$PRELOAD"; [ "$3" = nopreload ] && _pl=""
+                _gr="$TMP/grants"; [ "$3" = nogrants ] && _gr=""
+                _rc2=0
+                # env inside the bound: the preload refuses timeout(1)'s fork.
+                $DIAG_TIMEOUT env TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$_pl" \
+                    AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$_gr" \
+                    TARGET="$_target" LISTEN="$_listen" \
+                    "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
+                printf '    rerun (%s): exit %s\n' "$1" "$_rc2"
+                sed 's/^/      | /' "$TMP/dial.again" | head -60
+            }
+            echo "    first dial exited $_rc"
+            _target="$2"
+            # The faulting frame and the depth of the stack: an overflow shows
+            # as one frame repeated. LD_PRELOAD is set inside gdb, so gdb
+            # itself runs without it.
+            if command -v gdb >/dev/null 2>&1; then
+                echo "    under gdb, sweep options:"
+                $GDB_TIMEOUT gdb -q -batch \
+                    -ex 'set startup-with-shell off' \
+                    -ex "set environment LD_PRELOAD=$PRELOAD" \
+                    -ex 'set environment AETHER_SANDBOX_LOG=none' \
+                    -ex "set environment AETHER_SANDBOX_GRANTS=$TMP/grants" \
+                    -ex "set environment TARGET=$2" -ex "set environment LISTEN=$_listen" \
+                    -ex run -ex 'bt 30' -ex 'bt -10' -ex 'info registers rip rsp' \
+                    -ex 'thread apply all bt 6' \
+                    "$TMP/dial" 2>&1 | grep -vE '^\[New|^\[Thread|^Using host|^warning: ' | head -120 | sed 's/^/      gdb: /' || :
+            else
+                echo "    (no gdb on this runner)"
+            fi
+            _rerun "sweep options, no preload" "" nopreload
+            _rerun "sweep options, preload without grants (policy off)" "" nogrants
+            _rerun "sweep options + handle_segv=1" "handle_segv=1"
+            _rerun "sweep options + log_path=stderr" "log_path=stderr"
+            # The report files the sweep's log_path names, from this dial.
+            case "${TSAN_OPTIONS:-}${ASAN_OPTIONS:-}" in
+                *log_path=*)
+                    _lp=$(printf '%s:%s' "${TSAN_OPTIONS:-}" "${ASAN_OPTIONS:-}" | tr ':' '\n' | sed -n 's/^log_path=//p' | head -1)
+                    for _r in "$_lp".*dial*; do
+                        [ -f "$_r" ] && { echo "    report $_r:"; sed 's/^/      | /' "$_r" | head -60; }
+                    done ;;
+            esac
+            fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
+        fi
     }
     dial "127.0.0.1" "127.0.0.1" allowed
     dial "127.0.0.1" "::ffff:127.0.0.1" allowed

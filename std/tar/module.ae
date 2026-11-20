@@ -643,6 +643,15 @@ read_header(reader_ptr: ptr) -> {
     var kind = KIND_OTHER
     if typeflag == 48 || typeflag == 0 { // '0' or '\0'
         kind = KIND_FILE
+        // A regular-file entry whose name ends in '/' is a directory: the
+        // convention of the tars before typeflag '5', which GNU tar,
+        // libarchive and Python's tarfile keep. extract cleans the name,
+        // and the file it would write at "a/" is "a", the directory's
+        // path, so the reader names the kind extract makes.
+        fn_len = string_length(full_name)
+        if string_char_at_n(full_name, fn_len, fn_len - 1) == 47 {
+            kind = KIND_DIRECTORY
+        }
     } else if typeflag == 53 { // '5'
         kind = KIND_DIRECTORY
     } else if typeflag == 50 { // '2'
@@ -705,6 +714,14 @@ entry_read(reader_ptr: ptr, max_bytes: int) -> {
     }
     reader = reader_ptr as *TarReader
     if reader.is_at_entry == 0 {
+        // An entry read to its end has nothing left, which is its end of
+        // data (length 0), as entry_skip has nothing to skip, not an error:
+        // a loop reading to length 0 got "not positioned on an entry" after
+        // the last chunk of every file (#3749, found by the tar fuzz
+        // target).
+        if reader.reached_eof == 0 && reader.entry_bytes_total > 0 && reader.entry_bytes_read >= reader.entry_bytes_total {
+            return "", 0, ""
+        }
         return "", 0, "not positioned on an entry"
     }
     if reader.entry_bytes_read >= reader.entry_bytes_total {

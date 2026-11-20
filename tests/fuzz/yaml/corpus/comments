@@ -1,0 +1,6 @@
+# head
+a: 1 # trailing
+# middle
+b:
+  # inside
+  - x

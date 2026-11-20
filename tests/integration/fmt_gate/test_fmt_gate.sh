@@ -25,6 +25,14 @@
 # Tier 3 is six processes a file (copy, compile, format, compile, compare,
 # remove), down from thirteen (#2596).
 
+# Bytes, not characters: the C compared holds the string literals of the
+# sources, and some hold bytes that are not UTF-8 on purpose (a fuzz seed
+# generator's overlong sequences). macOS awk in a UTF-8 locale stopped on
+# them ("towc: multibyte conversion failure") and reported two identical
+# compiles as different.
+LC_ALL=C
+export LC_ALL
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/same_bytes.sh"

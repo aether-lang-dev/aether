@@ -1,0 +1,127 @@
+// Writes the seed corpus for the XML fuzz target into the directory named on
+// the command line (corpus/ beside this file, as `make fuzz-corpus` runs it).
+// Edit this file, not the seeds.
+//
+// A seed is a document: the shapes std/xml's tests read (test_xml_*.ae),
+// each well-formedness error the reader checks for, every kind of reference,
+// CDATA, comments, processing instructions and a declaration, and nesting;
+// and the reproducers fuzzing found, kept as regression seeds (crash_*).
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.strbuilder
+
+extern exit(code: int)
+
+fn seed(dir: string, name: string, text: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, text)
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits: a reproducer a fuzzing run found,
+// kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        _a = strbuilder.append_byte(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // Documents the reader accepts.
+    seed(dir, "empty_element", "<a/>")
+    seed(dir, "nested", "<a><b/><c>t</c></a>")
+    seed(dir, "declaration", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root><item id=\"1\">x</item></root>\n")
+    seed(dir, "attributes", "<a x=\"1\" y='two' z=\"&lt;&amp;&gt;&quot;&apos;\"/>")
+    seed(dir, "entities", "<a>&lt;b&gt; &amp; &quot;c&quot; &apos;d&apos;</a>")
+    seed(dir, "char_refs", "<a>&#65;&#x42;&#0000000000067;&#x1F600;&#x10FFFF;&#xD7FF;&#xE000;&#xFFFD;</a>")
+    seed(dir, "char_refs_space", "<a v=\"&#9;&#xA;&#xd;\">&#9;&#xA;&#xd;</a>")
+    seed(dir, "cdata", "<a><![CDATA[<not> &a; tag]]>tail</a>")
+    seed(dir, "comment_pi", "<!-- head --><?pi data?><a><!-- in -->t<?x y?></a><!-- tail -->")
+    seed(dir, "mixed", "<p>one <b>two</b> three <i>four <u>five</u></i>.</p>")
+    seed(dir, "whitespace", "<a>\n  <b>\r\n\t<c/>\n  </b>\n</a>\n")
+    seed(dir, "utf8", "<caf\xc3\xa9 \xc3\xa9t\xc3\xa9=\"\xe2\x82\xac\">\xf0\x9f\x98\x80</caf\xc3\xa9>")
+    seed(dir, "s3_listing", "<?xml version=\"1.0\"?><ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>b</Name><Contents><Key>k&amp;1</Key><Size>3</Size></Contents></ListBucketResult>")
+    seed(dir, "deep", "<a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a>x</a></a></a></a></a></a></a></a></a></a></a></a></a></a></a></a>")
+    seed(dir, "attr_newline", "<a x=\"1\ny\" y=\"a&#10;b\"/>")
+
+    // Documents it refuses.
+    seed(dir, "mismatched", "<a><b></a>")
+    seed(dir, "unclosed", "<root><item>")
+    seed(dir, "stray_end", "</x>")
+    seed(dir, "empty_end", "<a></>")
+    seed(dir, "extra_end", "<a><b/></a></a>")
+    seed(dir, "two_roots", "<a/><b/>")
+    seed(dir, "text_after_root", "<a/>x")
+    seed(dir, "cdata_before_root", "<![CDATA[x]]><a/>")
+    seed(dir, "nul_ref", "<a>x&#0;y</a>")
+    seed(dir, "surrogate_ref", "<a>&#xD800;</a>")
+    seed(dir, "ref_too_big", "<a>&#x110000;</a>")
+    seed(dir, "ref_huge", "<a>&#99999999999999999999;</a>")
+    seed(dir, "ref_control", "<a>&#1;</a>")
+    seed(dir, "ref_fffe", "<a>&#xFFFE;</a>")
+    seed(dir, "ref_empty_hex", "<a>&#x;</a>")
+    seed(dir, "ref_unterminated", "<a>&#65</a>")
+    seed(dir, "ref_upper_x", "<a>&#X41;</a>")
+    seed(dir, "unknown_entity", "<a>x&foo;y</a>")
+    seed(dir, "bare_amp", "<a>x & y</a>")
+    seed(dir, "empty_entity", "<a>&;</a>")
+    seed(dir, "dup_attr", "<a b=\"1\" b=\"2\"/>")
+    seed(dir, "attr_no_space", "<a b=\"1\"c=\"2\"/>")
+    seed(dir, "raw_control", "<a>x\x01y</a>")
+    seed(dir, "unclosed_cdata", "<a><![CDATA[")
+    seed(dir, "unclosed_comment", "<a><!-- x</a>")
+    seed(dir, "lt_in_attr", "<a b=\"<\"/>")
+    seed(dir, "no_root", "<?xml version=\"1.0\"?>")
+    seed(dir, "empty", "")
+
+    // Reproducers fuzzing found, kept as regression seeds: a control byte
+    // inside a start tag was read as part of the element's name.
+    seed(dir, "crash_name_control", "<a><b\x0f><c>t</c></a>")
+    hex_seed(dir, "crash_declaration_nul",
+        "3c2100000000000000115d5d3e3c612f3e")
+    hex_seed(dir, "crash_text_del",
+        "3c613e266c743b622667743b2022616dffffffffffffffffffff7fcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfc7cfcfcfcfcfcfcfcfcfcf286c696e6520cfcfcfcfcfcfcfcfcfcfcf2f3ecfcfcfcfcfcfcfcfcfcf2f613e")
+    hex_seed(dir, "crash_message_quotes_line",
+        "3c6120783d22300a792220286c696e6520200a0d3d22093c792220286c696e6520200a0d3d22093c636f")
+    hex_seed(dir, "crash_empty_cdata",
+        "3c613e3c215b43444154415b5d5d3e3c2f613e")
+    seed(dir, "name_quote_amp", "<a><b\"c/><d&e/></a>")
+}

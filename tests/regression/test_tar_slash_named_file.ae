@@ -1,0 +1,163 @@
+// A regular-file entry (typeflag '0' or NUL) whose name ends in '/' is a
+// directory: the convention of the tars that came before typeflag '5',
+// which GNU tar, libarchive and Python's tarfile keep. The reader called it
+// a file named "d/", and extract, which cleans the name, wrote a file at
+// "d": the reader and extract disagreed about the same entry, and the next
+// entry under "d/" could not be written (the fuzzer found it through a GNU
+// long name with a NUL in it, which ends the name there). Each archive is
+// built byte by byte; before the fix the reader gave KIND_FILE for "d/".
+import std.bytes
+import std.fs
+import std.os
+import std.string
+import std.tar
+
+extern exit(code: int)
+
+check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+put_octal(buf: ptr, at: int, width: int, value: long) {
+    var v = value
+    var i = width - 2
+    while i >= 0 {
+        bytes.set(buf, at + i, 48 + (v % 8) as int)
+        v = v / 8
+        i = i - 1
+    }
+    bytes.set(buf, at + width - 1, 0)
+}
+
+// A 512-byte ustar header at `at`.
+put_header(buf: ptr, at: int, name: string, size: long, typeflag: int) {
+    bytes.copy_from_string(buf, at, name, string.length(name))
+    put_octal(buf, at + 100, 8, 420 as long)
+    put_octal(buf, at + 108, 8, 0 as long)
+    put_octal(buf, at + 116, 8, 0 as long)
+    put_octal(buf, at + 124, 12, size)
+    put_octal(buf, at + 136, 12, 0 as long)
+    bytes.set(buf, at + 156, typeflag)
+    bytes.copy_from_string(buf, at + 257, "ustar", 5)
+    bytes.set(buf, at + 262, 0)
+    bytes.set(buf, at + 263, 48)
+    bytes.set(buf, at + 264, 48)
+    var sum: long = 0
+    var i = 0
+    while i < 512 {
+        if i >= 148 && i < 156 {
+            sum = sum + 32
+        } else {
+            sum = sum + bytes.get(buf, at + i)
+        }
+        i = i + 1
+    }
+    put_octal(buf, at + 148, 7, sum)
+    bytes.set(buf, at + 155, 32)
+}
+
+// An entry (header and payload) at `at`; the offset after it.
+put_entry(buf: ptr, at: int, name: string, typeflag: int, data: string) -> int {
+    n = string.length(data)
+    put_header(buf, at, name, n as long, typeflag)
+    bytes.copy_from_string(buf, at + 512, data, n)
+    return at + 512 + ((n + 511) / 512) * 512
+}
+
+new_archive(size: int) -> ptr {
+    buf = bytes.new(size)
+    var i = 0
+    while i < size {
+        bytes.set(buf, i, 0)
+        i = i + 1
+    }
+    return buf
+}
+
+finish(buf: ptr, at: int, path: string) {
+    s = bytes.to_string(buf, at + 1024)
+    fs.write_binary(path, string.bytes(s)[0..at + 1024])
+    bytes.free(buf)
+}
+
+// "name:kind" for each entry the reader reads, joined by spaces.
+kinds(path: string) -> string {
+    r, err = tar.reader_open(path)
+    if err != "" {
+        return "open: ${err}"
+    }
+    var out = ""
+    var guard = 0
+    while guard < 16 {
+        ok, nerr = tar.reader_next(r)
+        if nerr != "" {
+            out = "${out} next: ${nerr}"
+            guard = 16
+        } else if ok == 0 {
+            guard = 16
+        } else {
+            out = "${out} ${tar.entry_name(r)}:${tar.entry_kind(r)}"
+            guard = guard + 1
+        }
+    }
+    tar.reader_close(r)
+    return out
+}
+
+kind_of(path: string) -> int {
+    kind, _size, _mtime, err = fs.file_stat(path)
+    if err != "" {
+        return 0
+    }
+    return kind
+}
+
+main() {
+    dir = "${os.temp_dir()}/aether_tar_slash_${os.getpid()}"
+    fs.remove_tree(dir)
+    fs.mkdir_p(dir)
+
+    // '0' and NUL, each named "d/", a payload the directory does not keep,
+    // then a file under it; and a plain file, which stays a file.
+    a = new_archive(8192)
+    at = put_entry(a, 0, "d/", 48, "abc")
+    at = put_entry(a, at, "d/f.txt", 48, "hi\n")
+    at = put_entry(a, at, "e/", 0, "")
+    at = put_entry(a, at, "plain.txt", 48, "p")
+    finish(a, at, "${dir}/slash.tar")
+    got = kinds("${dir}/slash.tar")
+    check(got == " d/:2 d/f.txt:1 e/:2 plain.txt:1", "kinds: got '${got}'")
+
+    // GNU's long name ('L'): a NUL ends the name, and what it ends in decides.
+    b = new_archive(8192)
+    lname = "long/name/"
+    nb = string.length(lname) + 6
+    put_header(b, 0, "././@LongLink", nb as long, 76)
+    bytes.copy_from_string(b, 512, lname, string.length(lname))
+    bytes.copy_from_string(b, 512 + string.length(lname) + 1, "junk", 4)
+    at2 = put_entry(b, 1024, "short.txt", 48, "0123456789")
+    finish(b, at2, "${dir}/gnu.tar")
+    gnu = kinds("${dir}/gnu.tar")
+    check(gnu == " long/name/:2", "GNU long name: got '${gnu}'")
+
+    // extract makes what the reader names: directories at d, e and
+    // long/name, the file under d, and the plain file.
+    opts = tar.default_extract_options()
+    xerr = tar.extract("${dir}/slash.tar", "${dir}/out", opts)
+    check(xerr == "", "extract: ${xerr}")
+    check(kind_of("${dir}/out/d") == fs.STAT_KIND_DIR, "out/d is not a directory")
+    check(kind_of("${dir}/out/e") == fs.STAT_KIND_DIR, "out/e is not a directory")
+    check(kind_of("${dir}/out/d/f.txt") == fs.STAT_KIND_FILE, "out/d/f.txt is not a file")
+    check(kind_of("${dir}/out/plain.txt") == fs.STAT_KIND_FILE, "out/plain.txt is not a file")
+    data, len, rerr = fs.read_binary("${dir}/out/d/f.txt")
+    check(rerr == "" && len == 3 && string.substring(data, 0, 3) == "hi\n", "out/d/f.txt: '${rerr}'")
+    gerr = tar.extract("${dir}/gnu.tar", "${dir}/out2", opts)
+    check(gerr == "", "extract GNU: ${gerr}")
+    check(kind_of("${dir}/out2/long/name") == fs.STAT_KIND_DIR, "out2/long/name is not a directory")
+
+    fs.remove_tree(dir)
+    println("ok")
+}

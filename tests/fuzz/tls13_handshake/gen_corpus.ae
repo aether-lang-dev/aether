@@ -1,0 +1,302 @@
+// Writes the seed corpus for the TLS 1.3 handshake fuzz target into the
+// directory named on the command line (corpus/ beside this file, as
+// `make fuzz-corpus` runs it). Edit this file, not the seeds.
+//
+// A seed is a selector byte (see fuzz_tls13_handshake.ae) and a message:
+// ClientHellos and ServerHellos the module's own builders write (one, two
+// and three key shares, with and without a server name, a HelloRetryRequest),
+// EncryptedExtensions, Certificate, CertificateRequest and NewSessionTicket
+// bodies laid out as RFC 8446 4.3 to 4.6 has them, the same with a field cut
+// short or repeated, and material for the builder round trip; and the
+// reproducers fuzzing found, kept as regression seeds (crash_*).
+import std.os
+import std.io
+import std.fs
+import std.bytes
+import std.string
+import std.strbuilder
+import std.cryptography.tls13_hs
+
+extern exit(code: int)
+
+fn write_out(dir: string, name: string, out: ptr, n: int) {
+    err = fs.write_binary("${dir}/${name}", bytes.view(out)[0..n])
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// The selector, then `n` bytes of `msg` (cut to `keep` bytes when keep >= 0).
+fn hs_message(dir: string, name: string, sel: int, msg: ptr, keep: int) {
+    n = 4 + (((bytes.get(msg, 1) & 255) << 16) | ((bytes.get(msg, 2) & 255) << 8) | (bytes.get(msg, 3) & 255))
+    if keep >= 0 && keep < n { n = keep }
+    out = bytes.new(n + 1)
+    bytes.set_length(out, n + 1)
+    bytes.set(out, 0, sel)
+    bytes.copy_from_bytes(out, 1, msg, 0, n)
+    write_out(dir, name, out, n + 1)
+    bytes.free(out)
+}
+
+// Hand-laid bytes: the selector, then the builder's bytes.
+fn laid(dir: string, name: string, sel: int, b: ptr) {
+    body = strbuilder.finish_with_length(b)
+    int n = body.len
+    out = bytes.new(n + 1)
+    bytes.set_length(out, n + 1)
+    bytes.set(out, 0, sel)
+    bytes.copy_from_slice(out, 1, body)
+    write_out(dir, name, out, n + 1)
+    bytes.free(out)
+}
+
+fn bytes_of(n: int, seed: int) -> ptr {
+    b = bytes.new(n)
+    bytes.set_length(b, n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, (i * 13 + seed) & 255)
+        i = i + 1
+    }
+    return b
+}
+
+fn put(b: ptr, v: int) {
+    _a = strbuilder.append_byte(b, v & 255)
+}
+
+fn put16(b: ptr, v: int) {
+    put(b, v >> 8)
+    put(b, v)
+}
+
+fn put24(b: ptr, v: int) {
+    put(b, v >> 16)
+    put(b, v >> 8)
+    put(b, v)
+}
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits, the selector byte first: a
+// reproducer a fuzzing run found, kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        put(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    body = strbuilder.finish_with_length(b)
+    int bn = body.len
+    out = bytes.new(bn + 1)
+    bytes.set_length(out, bn)
+    bytes.copy_from_slice(out, 0, body)
+    write_out(dir, name, out, bn)
+    bytes.free(out)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    random = bytes_of(32, 1)
+    sid = bytes_of(32, 7)
+    x25519 = bytes_of(32, 3)
+    p256 = bytes_of(65, 4)
+    bytes.set(p256, 0, 4)
+
+    // 0: ClientHello
+    ch = tls13_hs.client_hello_full(random, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(x25519)[0..32],
+        0, bytes.view(x25519)[0..0], 0, bytes.view(x25519)[0..0], "example.com")
+    hs_message(dir, "ch_x25519_sni", 0, ch, -1)
+    hs_message(dir, "ch_truncated", 0, ch, 60)
+    bytes.free(ch)
+    ch = tls13_hs.client_hello_full(random, bytes.view(sid)[0..0], tls13_hs.GROUP_SECP256R1, bytes.view(p256)[0..65],
+        tls13_hs.GROUP_X25519, bytes.view(x25519)[0..32], 0, bytes.view(x25519)[0..0], "")
+    hs_message(dir, "ch_p256_x25519_no_sni", 0, ch, -1)
+    bytes.free(ch)
+
+    // 1: ServerHello and HelloRetryRequest
+    sh = tls13_hs.server_hello(random, bytes.view(sid)[0..32], tls13_hs.TLS_AES_128_GCM_SHA256, tls13_hs.GROUP_X25519,
+        bytes.view(x25519)[0..32])
+    hs_message(dir, "sh_x25519", 1, sh, -1)
+    hs_message(dir, "sh_truncated", 1, sh, 50)
+    bytes.free(sh)
+    sh = tls13_hs.server_hello(random, bytes.view(sid)[0..0], tls13_hs.TLS_CHACHA20_POLY1305_SHA256,
+        tls13_hs.GROUP_SECP256R1, bytes.view(p256)[0..65])
+    hs_message(dir, "sh_p256", 1, sh, -1)
+    bytes.free(sh)
+    hrr = tls13_hs.hello_retry_request(bytes.view(sid)[0..32], tls13_hs.TLS_AES_256_GCM_SHA384, tls13_hs.GROUP_SECP256R1)
+    hs_message(dir, "hrr", 1, hrr, -1)
+    bytes.free(hrr)
+
+    // 2: extension blocks (byte 1: the message kind, byte 2: what was offered)
+    b = strbuilder.new(0)
+    put(b, 2)
+    put(b, 255)
+    put16(b, 0) // server_name, empty, as a server echoes it
+    put16(b, 0)
+    put16(b, 16) // ALPN naming "h2"
+    put16(b, 5)
+    put16(b, 3)
+    put(b, 2)
+    put(b, 104)
+    put(b, 50)
+    laid(dir, "ee_sni_alpn", 2, b)
+
+    b = strbuilder.new(0)
+    put(b, 2)
+    put(b, 255)
+    put16(b, 16)
+    put16(b, 5)
+    put16(b, 3)
+    put(b, 2)
+    put(b, 104)
+    put(b, 50)
+    put16(b, 16) // the same extension twice
+    put16(b, 0)
+    laid(dir, "ee_duplicate", 2, b)
+
+    b = strbuilder.new(0)
+    put(b, 4)
+    put(b, 255)
+    put16(b, 42) // early_data in a ticket: max_early_data_size
+    put16(b, 4)
+    put16(b, 0)
+    put16(b, 4096)
+    put16(b, 62) // TLS flags ending in a zero byte
+    put16(b, 2)
+    put(b, 1)
+    put(b, 0)
+    laid(dir, "nst_extensions", 2, b)
+
+    // 3: Certificate body (byte 1: what was offered)
+    b = strbuilder.new(0)
+    put(b, 255)
+    put(b, 0) // certificate_request_context
+    put24(b, 3 + 4 + 2 + 2 + 4 + 5 + 3)
+    put24(b, 4) // cert_data
+    put(b, 48)
+    put(b, 2)
+    put(b, 5)
+    put(b, 0)
+    put16(b, 2 + 2 + 4 + 5) // extensions
+    put16(b, 5) // status_request: one OCSP response
+    put16(b, 4 + 5)
+    put(b, 1)
+    put24(b, 5)
+    put(b, 48)
+    put(b, 3)
+    put(b, 10)
+    put(b, 1)
+    put(b, 0)
+    laid(dir, "certificate_ocsp", 3, b)
+
+    b = strbuilder.new(0)
+    put(b, 0)
+    put(b, 0)
+    put24(b, 0) // no certificate
+    laid(dir, "certificate_empty", 3, b)
+
+    // 4: CertificateRequest body
+    b = strbuilder.new(0)
+    put(b, 0)
+    put16(b, 4 + 2 + 4)
+    put16(b, 13) // signature_algorithms: ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256
+    put16(b, 6)
+    put16(b, 4)
+    put16(b, 0x0403)
+    put16(b, 0x0804)
+    laid(dir, "certificate_request", 4, b)
+
+    b = strbuilder.new(0)
+    put(b, 0)
+    put16(b, 4)
+    put16(b, 47) // certificate_authorities, empty
+    put16(b, 0)
+    laid(dir, "certificate_request_no_sigalgs", 4, b)
+
+    // 5: NewSessionTicket body
+    b = strbuilder.new(0)
+    put16(b, 0)
+    put16(b, 7200) // ticket_lifetime
+    put16(b, 4660)
+    put16(b, 22136) // ticket_age_add
+    put(b, 2)
+    put16(b, 258) // ticket_nonce
+    put16(b, 6)
+    put16(b, 25185)
+    put16(b, 25443)
+    put16(b, 25701) // ticket
+    put16(b, 8)
+    put16(b, 42)
+    put16(b, 4)
+    put16(b, 0)
+    put16(b, 16384) // early_data
+    laid(dir, "nst", 5, b)
+
+    b = strbuilder.new(0)
+    put16(b, 0)
+    put16(b, 60)
+    put16(b, 1)
+    put16(b, 2)
+    put(b, 0)
+    put16(b, 0) // an empty ticket
+    put16(b, 0)
+    laid(dir, "nst_empty_ticket", 5, b)
+
+    // 128+: builder round trips.
+    b = strbuilder.new(0)
+    i = 0
+    while i < 98 {
+        put(b, i * 5 + 3)
+        i = i + 1
+    }
+    put(b, 1)
+    _h = strbuilder.append(b, "www.example.org")
+    laid(dir, "round_trip_sni", 128, b)
+
+    b = strbuilder.new(0)
+    i = 0
+    while i < 98 {
+        put(b, 255 - i)
+        i = i + 1
+    }
+    put(b, 2)
+    _j = strbuilder.append(b, "ignored-host")
+    laid(dir, "round_trip_no_sni", 129, b)
+
+    bytes.free(random)
+    bytes.free(sid)
+    bytes.free(x25519)
+    bytes.free(p256)
+
+    // Reproducers fuzzing found, kept as regression seeds: a ServerHello
+    // naming a suite TLS 1.3 does not define (0x1313), which the parser
+    // reports and the client refuses (selector 1).
+    hex_seed(dir, "crash_sh_unknown_suite",
+        "01020000770303010e1b2835424f5c697683909daab7c4d1deebf805121f2c394653606d7a879400131300004f002b00020304003300450017004104111e2b3845525f6c798693a0ad2835424f5c697683909daab7c463707d8a97a4b1becbd8e5f2ff0c192633404d5a6774818e9ba8b5c2cfdce9f603101d2a3744")
+    hex_seed(dir, "crash_hrr_random",
+        "81cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339cdfdedddcdbcad9d8d7d6d5d4d3d2d1d0cfcecdcc00000000000000000000000000005b00000000000000000000000000000000000000000000b0afaeadacabaaa9a8a7a6a5a4a3a2a172659e65642d686f7374")
+}

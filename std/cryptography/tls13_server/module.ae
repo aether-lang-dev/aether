@@ -52,12 +52,13 @@ extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 extern string_length(s: string) -> int
 extern tcp_socket_adopt_fd(fd: int) -> ptr
+extern os_now_monotonic_ms_raw() -> long
 
 exports(
-    accept, conn_send, conn_recv, close_conn, conn_key_update,
+    accept, accept_due, conn_send, conn_recv, close_conn, conn_key_update,
     ServerConn,
     parse_cert_chain_pem, parse_cert_chain_pem_checked, free_cert_chain, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
-    pure_tls_server_check, pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_pending, pure_tls_server_close
+    pure_tls_server_check, pure_tls_server_accept, pure_tls_server_accept_due, pure_tls_server_set_read_budget, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_pending, pure_tls_server_close
 )
 
 struct ServerConn {
@@ -101,6 +102,18 @@ struct RecordIO {
     // is then the socket's timeout, which the caller set (std.http's wait
     // for a next request), so it is reported, not retried.
     after_hs: int
+    // An absolute deadline on the reads (#3737), in os_now_monotonic_ms_raw's
+    // clock, 0 for none: each read first waits for the socket no longer than
+    // what is left of it. The socket's own timeout bounds one read only, so
+    // a record that arrived a byte at a time, each just inside it, held the
+    // reader (and the server's worker) for as long as the client liked. Set
+    // for the handshake by accept_due, and by std.http for one read at a time
+    // (pure_tls_server_set_read_budget).
+    due_ms: long
+    // Under a deadline, the longest one wait for the next bytes may take, in
+    // ms, 0 for no bound but the deadline: the socket's own receive timeout,
+    // which the wait for readability would otherwise outlast.
+    idle_ms: int
 }
 
 fn recio_new(sock: @keep ptr) -> *RecordIO {
@@ -114,7 +127,33 @@ fn recio_new(sock: @keep ptr) -> *RecordIO {
     r.ccs = 0
     r.hs_seen = 0
     r.after_hs = 0
+    r.due_ms = 0
+    r.idle_ms = 0
     return r
+}
+
+// What a read that ran out of time reports: -2 once the connection is
+// established, which the caller sees as its own timeout (#3405), -1 in the
+// handshake, which ends it (#3703).
+fn recio_timed_out(r: *RecordIO) -> int {
+    if r.after_hs == 1 { return -2 }
+    return -1
+}
+
+// Wait for the socket to be readable no later than r.due_ms (#3737), and no
+// longer than r.idle_ms: 1 when a read will not block, else what recio_fill
+// returns for a read that timed out or failed. 1 at once when there is no
+// deadline.
+fn recio_wait_due(r: *RecordIO) -> int {
+    if r.due_ms <= 0 { return 1 }
+    left = r.due_ms - os_now_monotonic_ms_raw()
+    if left <= 0 { return recio_timed_out(r) }
+    if left > 2000000000 { left = 2000000000 }
+    if r.idle_ms > 0 && (r.idle_ms as long) < left { left = r.idle_ms as long }
+    ready, perr = tcp.poll(r.sock, left as int)
+    if ready { return 1 }
+    if perr == "" { return recio_timed_out(r) }
+    return -1
 }
 
 fn recio_free(r: *RecordIO) {
@@ -148,6 +187,8 @@ fn recio_compact(r: *RecordIO) {
 
 fn recio_fill(r: *RecordIO) -> int {
     recio_compact(r)
+    waited = recio_wait_due(r)
+    if waited != 1 { return waited }
     filling = 1
     result = -1
     while filling == 1 {
@@ -579,14 +620,27 @@ fn hello_retry(sock: ptr, rio: *RecordIO, tr: @frees ptr, p: *ChParsed, ch1: @fr
     return 0, "", tr2, ch2
 }
 
-// Perform the TLS 1.3 server handshake over `sock`.
+// Perform the TLS 1.3 server handshake over `sock`, with no deadline beyond
+// the socket's own timeout on each read.
 accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: ptr) -> (ptr, string) {
+    return accept_due(sock, cert_chain, cert_lens, priv_key, x25519_priv, 0, 0)
+}
+
+// The same, finished by `due_ms` in os_now_monotonic_ms_raw's clock (0 for
+// no deadline), or failed as a read that timed out (#3737), each wait for
+// the client no longer than `idle_ms` (the socket's receive timeout; 0 for
+// no bound but the deadline). The socket's timeout bounds each read only: a
+// client that sent its ClientHello a byte at a time, each just inside it,
+// held the server for as long as it liked.
+accept_due(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: ptr, due_ms: long, idle_ms: int) -> (ptr, string) {
     if sock == null { return null, "socket is null" }
     if cert_chain == null { return null, "certificate chain is null" }
     if priv_key == null { return null, "private key is null" }
     if x25519_priv == null { return null, "x25519_priv is null" }
 
     rio = recio_new(sock)
+    rio.due_ms = due_ms
+    rio.idle_ms = idle_ms
 
     // 1. Read ClientHello
     chrec, chlen, cherr = recio_next_client_hello(rio, 0)
@@ -903,6 +957,9 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     conn.sock = sock
     conn.rio = rio as ptr
     rio.after_hs = 1
+    // The handshake's deadline ends with it; a read after it is bounded by
+    // what its caller sets.
+    rio.due_ms = 0
     conn.app_send = app_send as ptr
     conn.app_recv = app_recv as ptr
     conn.suite = suite
@@ -1839,8 +1896,44 @@ pure_tls_server_free_creds(creds: @frees ptr) {
 // still the server's after.
 @c_callback("aether_pure_tls_server_accept_creds")
 pure_tls_server_accept_creds(fd: int, creds: ptr) -> ptr {
-    // Adopted with the timeouts std.http put on it (#3703): the handshake
-    // waits on the client no longer than the server's receive timeout.
+    return accept_fd(fd, creds, 0, 0)
+}
+
+// The same, with the handshake finished within `budget_ms` of now or failed
+// (#3737); 0 for no bound beyond each read's own timeout. std.http's
+// tls_handshake_timeout. `idle_ms` is the socket's receive timeout, which
+// still bounds each wait for the client.
+@c_callback("aether_pure_tls_server_accept_due")
+pure_tls_server_accept_due(fd: int, creds: ptr, budget_ms: int, idle_ms: int) -> ptr {
+    var due: long = 0
+    if budget_ms > 0 { due = os_now_monotonic_ms_raw() + (budget_ms as long) }
+    return accept_fd(fd, creds, due, idle_ms)
+}
+
+// Bound the reads of the next conn_recv (std.http's, one at a time) to
+// `budget_ms` from now, or lift the bound with 0 (#3737). A record that
+// arrives a byte at a time, each just inside the socket's timeout, is cut
+// off when the budget runs out, and the read reports a timeout (-2). Each
+// wait for the client still takes no longer than `idle_ms`, the socket's
+// receive timeout (0 for no bound but the budget).
+@c_callback("aether_pure_tls_server_set_read_budget")
+pure_tls_server_set_read_budget(sconn: ptr, budget_ms: int, idle_ms: int) {
+    if sconn == null { return }
+    c = sconn as *ServerConn
+    r = c.rio as *RecordIO
+    if budget_ms > 0 {
+        r.due_ms = os_now_monotonic_ms_raw() + (budget_ms as long)
+        r.idle_ms = idle_ms
+    } else {
+        r.due_ms = 0
+        r.idle_ms = 0
+    }
+}
+
+fn accept_fd(fd: int, creds: ptr, due_ms: long, idle_ms: int) -> ptr {
+    // Adopted with the timeouts std.http put on it (#3703): each read of the
+    // handshake waits on the client no longer than the server's receive
+    // timeout, and the whole of it ends by due_ms (#3737).
     sock = tcp_socket_adopt_fd(fd)
     if sock == null { return null }
     if creds == null {
@@ -1857,7 +1950,7 @@ pure_tls_server_accept_creds(fd: int, creds: ptr) -> ptr {
         return null
     }
 
-    sconn, err = accept(sock, c.chain, c.lens, c.key, x25519_priv)
+    sconn, err = accept_due(sock, c.chain, c.lens, c.key, x25519_priv, due_ms, idle_ms)
     bytes.wipe_free(x25519_priv)
 
     if err != "" {
@@ -1942,7 +2035,9 @@ pure_tls_server_recv(sconn: ptr, buf: ptr, len: int) -> int {
 // holds as conn_recv does: a KeyUpdate, an empty record or a warning is
 // handled and is not data (#3405), so a connection with only those left is
 // parked, not read from. A record that ends the connection or fails it
-// answers 1, so the next read reports that at once. Else 0.
+// answers 1, so the next read reports that at once. -1 when what is left
+// is part of a record: a request may be on its way, a record at a time
+// (std.http starts the head's clock then, #3737). Else 0: nothing held.
 @c_callback("aether_pure_tls_server_pending")
 pure_tls_server_pending(sconn: ptr) -> int {
     if sconn == null { return 0 }
@@ -1956,7 +2051,7 @@ pure_tls_server_pending(sconn: ptr) -> int {
     while recio_whole_record(r) == 0 && tcp.available(r.sock) > 0 {
         if recio_fill(r) <= 0 { return 1 }
     }
-    if recio_whole_record(r) == 0 { return 0 }
+    if recio_whole_record(r) == 0 { return recio_part_held(r) }
     c.buffered_only = 1
     p, n, _err = conn_recv(sconn)
     c.buffered_only = 0
@@ -1968,6 +2063,12 @@ pure_tls_server_pending(sconn: ptr) -> int {
     }
     if p != null { bytes.wipe_free(p) }
     if c.closed != 0 { return 1 }
+    return recio_part_held(r)
+}
+
+// -1 when the record reader holds part of a record, else 0.
+fn recio_part_held(r: *RecordIO) -> int {
+    if r.len - r.off > 0 { return -1 }
     return 0
 }
 

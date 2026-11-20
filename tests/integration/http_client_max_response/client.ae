@@ -1,0 +1,171 @@
+// The client for http_client_max_response (#3750): the HTTP client's
+// response limit, against resp_server.c (port in AE_TEST_PORT).
+//
+// The client grew a response's buffer for as long as the server kept
+// sending; a streamed response's head was read the same way, and with no
+// deadline for the whole of it. Now a response holds at most the request's
+// limit (set_max_response), else the client's default (64 MiB unless
+// set_default_max_response says otherwise), and the error names the limit.
+// The reverse proxy, which fetches upstream answers through this client,
+// gives it its own body cap, so a cap past the default keeps working.
+
+import std.http
+import std.http.client
+import std.http.proxy
+import std.os
+import std.string
+
+extern exit(code: int)
+
+const MIB = 1048576
+
+// GET `path` on the server: "<status> len=<n>", or "error <why>".
+get(port: string, path: string, max: long, set: int, stream: int, timeout_s: int) -> string {
+    req = client.request("GET", "http://127.0.0.1:${port}${path}")
+    if set == 1 {
+        e = client.set_max_response(req, max)
+        if e != "" { return "error set_max_response: ${e}" }
+    }
+    if stream == 1 { client.set_stream(req, 1) }
+    if timeout_s > 0 { client.set_timeout(req, timeout_s * 1s) }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" { return "error ${err}" }
+    b = client.response_body_bytes(resp)
+    out = "${client.response_status(resp)} len=${b.len}"
+    perr = client.response_header(resp, "X-Aether-Proxy-Error")
+    if perr != "" { out = "${out} [${perr}]" }
+    client.response_free(resp)
+    return out
+}
+
+expect(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("  FAIL ${label}: got '${got}', expected '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+expect_prefix(label: string, got: string, want: string) -> int {
+    if string.starts_with(got, want) != 1 {
+        println("  FAIL ${label}: got '${got}', expected it to start '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// A gateway proxying "/" to the server with a body cap of `cap` bytes;
+// returns its port. Its server, pool and options stay up to the end.
+gateway(up_port: string, cap: int) -> int {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    // A middleware ahead of the proxy keeps it on the worker path, the one
+    // that fetches through the client, on every platform.
+    http.server_use_middleware(s, mw_pass, 0)
+    pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
+    if pool == 0 {
+        println("FAIL: upstream_pool_new")
+        exit(1)
+    }
+    need("upstream_add", proxy.upstream_add(pool, "http://127.0.0.1:${up_port}", 1))
+    opts = proxy.opts_new()
+    need("opts_set_body_cap", proxy.opts_set_body_cap(opts, cap))
+    need("mount", proxy.mount(s, "/", pool, opts))
+    need("bind", http.server_bind(s, "127.0.0.1", 0))
+    need("start", http.server_start_background(s))
+    return http.server_port(s)
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+main() {
+    port = os_getenv("AE_TEST_PORT")
+    if port == "" {
+        println("FAIL: AE_TEST_PORT not set")
+        exit(1)
+    }
+    bad = 0
+
+    // A request's own limit.
+    bad = bad + expect_prefix("4 MiB past a 1 MiB limit fails, naming it",
+        get(port, "/big/4194304", MIB, 1, 0, 30),
+        "error response is larger than the client's limit of 1048576 bytes")
+    bad = bad + expect("4 MiB under an 8 MiB limit arrives whole",
+        get(port, "/big/4194304", 8 * MIB, 1, 0, 30), "200 len=4194304")
+
+    // The client's default, for requests that set none.
+    need("set_default_max_response", client.set_default_max_response(MIB))
+    bad = bad + expect_prefix("4 MiB past a 1 MiB default fails",
+        get(port, "/big/4194304", 0, 0, 0, 30),
+        "error response is larger than the client's limit of 1048576 bytes")
+    if client.set_default_max_response(-1) == "" {
+        println("  FAIL a negative default was accepted")
+        bad = bad + 1
+    }
+    need("set_default_max_response", client.set_default_max_response(64 * MIB))
+    bad = bad + expect_prefix("70 MB past the 64 MiB default fails",
+        get(port, "/big/70000000", 0, 0, 0, 30),
+        "error response is larger than the client's limit of 67108864 bytes")
+    bad = bad + expect("70 MB with no limit (0) arrives whole",
+        get(port, "/big/70000000", 0, 1, 0, 30), "200 len=70000000")
+
+    // A chunked body counts by its payload, not its framing: 8 MiB in
+    // 512-byte chunks is 8.1 MiB on the wire, which passed a limit of
+    // 8 MiB and room for the head. What the buffer holds of the framing is
+    // bounded too, at twice the limit: one-byte chunks take six bytes each.
+    bad = bad + expect("8 MiB in 512-byte chunks under an 8 MiB + 64 KiB limit arrives whole",
+        get(port, "/chunked/8388608/512", 8 * MIB + 65536, 1, 0, 30), "200 len=8388608")
+    bad = bad + expect_prefix("4 MiB in 512-byte chunks past a 1 MiB limit fails",
+        get(port, "/chunked/4194304/512", MIB, 1, 0, 30),
+        "error response is larger than the client's limit of 1048576 bytes")
+    bad = bad + expect_prefix("600000 bytes in one-byte chunks past twice a 1 MiB limit on the wire fails",
+        get(port, "/chunked/600000/1", MIB, 1, 0, 30),
+        "error response is larger than the client's limit of 1048576 bytes")
+
+    // A streamed response's head: bounded by the limit, and by the timeout
+    // as a whole.
+    bad = bad + expect_prefix("an endless streamed head past 64 KiB fails",
+        get(port, "/endless_head", 65536, 1, 1, 30),
+        "error response is larger than the client's limit of 65536 bytes")
+    t0 = os.now_monotonic_ms()
+    dripped = get(port, "/drip_head", 0, 0, 1, 1)
+    took = os.now_monotonic_ms() - t0
+    println("  the dripped head ended after ${took} ms: ${dripped}")
+    if string.contains(dripped, "timed out") != 1 || took > 2500 {
+        println("  FAIL a streamed head dripped a byte every 100 ms ends at the 1 s timeout")
+        bad = bad + 1
+    } else {
+        println("  PASS a streamed head dripped a byte every 100 ms ends at the 1 s timeout")
+    }
+
+    // The reverse proxy: its cap bounds what it fetches, past the client's
+    // default too.
+    small = gateway(port, MIB)
+    big = gateway(port, 80 * MIB)
+    bad = bad + expect("a proxy with a 1 MiB cap answers a 4 MiB upstream 502",
+        get("${small}", "/big/4194304", 0, 0, 0, 30), "502 len=36 [response_too_large]")
+    bad = bad + expect("a proxy with an 80 MiB cap passes a 70 MB upstream answer",
+        get("${big}", "/big/70000000", 0, 1, 0, 60), "200 len=70000000")
+    mid = gateway(port, 8 * MIB)
+    bad = bad + expect("a proxy with an 8 MiB cap passes 8 MiB in 512-byte chunks",
+        get("${mid}", "/chunked/8388608/512", 0, 1, 0, 30), "200 len=8388608")
+
+    if bad != 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("PASS: client response limits")
+    exit(0)
+}

@@ -14,8 +14,10 @@
 #   - under a policy a raw openat, unlinkat, renameat, sendto, kill of
 #     another process and an unknown number are refused and logged, unless a
 #     native grant names the call; with nothing in force they are forwarded;
-#   - libc's unlink(), which this library has no wrapper for, gets the
-#     kernel's answer whatever the policy.
+#   - libc's unlink() is held to the fs grants like the other path calls
+#     (#3751; it had no wrapper and got the kernel's answer whatever the
+#     policy): allowed where fs_write covers the file, refused with EACCES
+#     under a level that grants nothing.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -50,7 +52,7 @@ printf 'fs_read:%s\nfs_write:%s/*\nnative:syscall:openat\nnative:syscall:unlinka
 printf '*:*\n' > "$TMP/all.grants"
 fail=0
 
-FORWARDED="futex_wait futex_wake sched_getaffinity gettid mmap_six_args raw_kill_self raw_tgkill_self libc_unlink"
+FORWARDED="futex_wait futex_wake sched_getaffinity gettid mmap_six_args raw_kill_self raw_tgkill_self"
 POLICED="raw_openat raw_unlinkat raw_renameat raw_kill_other raw_sendto raw_unknown"
 
 # The probe with no preload: what the kernel answers, the reference for the
@@ -60,7 +62,7 @@ if ! "$TMP/probe" none "$DATA" > "$TMP/base.out" 2> "$TMP/base.err"; then
     cat "$TMP/base.out" "$TMP/base.err"
     exit 1
 fi
-for check in $FORWARDED $POLICED; do
+for check in $FORWARDED $POLICED libc_unlink; do
     if ! grep -qx "$check ok" "$TMP/base.out"; then
         echo "  [FAIL] without the preload, $check did not pass:"
         cat "$TMP/base.out" "$TMP/base.err"
@@ -93,6 +95,15 @@ run_case() {
     done
     [ "$(grep '^membarrier ' "$TMP/out")" = "$(cat "$TMP/base.membarrier")" ] ||
         bad="$bad; $(grep '^membarrier ' "$TMP/out") (without the preload: $(cat "$TMP/base.membarrier"))"
+    # libc's unlink: the fs grants (fs_write on the scratch files beside the
+    # data), which a level granting nothing does not give.
+    if [ "$level" = deny ]; then
+        grep -qx "libc_unlink EACCES" "$TMP/out" ||
+            bad="$bad; $(grep "^libc_unlink " "$TMP/out"), expected EACCES"
+    else
+        grep -qx "libc_unlink ok" "$TMP/out" ||
+            bad="$bad; $(grep "^libc_unlink " "$TMP/out"), expected ok"
+    fi
     for check in $POLICED; do
         case "$allowed" in
             *" $check "*) grep -qx "$check ok" "$TMP/out" ||

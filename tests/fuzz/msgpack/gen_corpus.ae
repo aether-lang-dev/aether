@@ -1,0 +1,164 @@
+// Writes the seed corpus for the MessagePack fuzz target into the directory
+// named on the command line (corpus/ beside this file, as `make fuzz-corpus`
+// runs it). Edit this file, not the seeds.
+//
+// Values std.msgpack packs itself, one for every head width (fixint, uint 8
+// to 64, the negative ints, float, fixstr to str 32, bin, ext, fixarray to
+// array 16, fixmap to map 16), nesting 256 deep (accepted) and 257 deep
+// (refused), and bytes std/msgpack/test_msgpack.ae and the README pin as
+// refusals: trailing bytes, a length past the input, the reserved 0xc1 head,
+// an empty input.
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.strbuilder
+import std.msgpack
+
+extern exit(code: int)
+
+fn put(dir: string, name: string, data: string) {
+    err = fs.write_binary("${dir}/${name}", string.bytes(data))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// A value, packed, and freed.
+fn value(dir: string, name: string, v: ptr) {
+    put(dir, name, msgpack.pack(v))
+    msgpack.free(v)
+}
+
+fn repeat(c: string, n: int) -> string {
+    b = strbuilder.new(0)
+    i = 0
+    while i < n {
+        _a = strbuilder.append(b, c)
+        i = i + 1
+    }
+    return strbuilder.finish(b)
+}
+
+// Bytes given as a list of values 0..255.
+fn raw(dir: string, name: string, b: ptr) {
+    put(dir, name, strbuilder.finish(b))
+}
+
+fn nested(depth: int) -> ptr {
+    v = msgpack.from_int(1 as long)
+    i = 0
+    while i < depth {
+        a = msgpack.arr()
+        _x = msgpack.array_add(a, v)
+        v = a
+        i = i + 1
+    }
+    return v
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    value(dir, "nil", msgpack.nil_value())
+    value(dir, "true", msgpack.boolean(true))
+    value(dir, "fixint", msgpack.from_int(127 as long))
+    value(dir, "uint8", msgpack.from_int(255 as long))
+    value(dir, "uint16", msgpack.from_int(65535 as long))
+    value(dir, "uint32", msgpack.from_int(4294967295 as long))
+    value(dir, "uint64", msgpack.from_int(4294967296 as long))
+    value(dir, "uint64_big", msgpack.from_uint(-1 as long))
+    value(dir, "neg_fixint", msgpack.from_int(-32 as long))
+    value(dir, "int8", msgpack.from_int(-128 as long))
+    value(dir, "int16", msgpack.from_int(-32768 as long))
+    value(dir, "int32", msgpack.from_int(-2147483648 as long))
+    value(dir, "int64", msgpack.from_int(-2147483649 as long))
+    value(dir, "float", msgpack.num(3.25))
+    value(dir, "fixstr", msgpack.str("hello"))
+    value(dir, "str8", msgpack.str(repeat("s", 40)))
+    value(dir, "str16", msgpack.str(repeat("t", 300)))
+    value(dir, "str_utf8", msgpack.str("caf\xc3\xa9 \xe2\x82\xac"))
+    value(dir, "bin", msgpack.bin("\x01\x02\xff"))
+    value(dir, "ext", msgpack.ext(5, "abcd"))
+
+    a = msgpack.arr()
+    _a = msgpack.array_add(a, msgpack.from_int(1 as long))
+    _b = msgpack.array_add(a, msgpack.str("two"))
+    _c = msgpack.array_add(a, msgpack.nil_value())
+    value(dir, "array", a)
+
+    big = msgpack.arr()
+    i = 0
+    while i < 20 {
+        _d = msgpack.array_add(big, msgpack.from_int(i as long))
+        i = i + 1
+    }
+    value(dir, "array16", big)
+
+    m = msgpack.map()
+    _e = msgpack.map_set(m, "a", msgpack.from_int(1 as long))
+    inner = msgpack.map()
+    _f = msgpack.map_set(inner, "x", msgpack.boolean(false))
+    _g = msgpack.map_set(m, "b", inner)
+    value(dir, "map", m)
+
+    m16 = msgpack.map()
+    i = 0
+    while i < 17 {
+        _h = msgpack.map_set(m16, "k${i}", msgpack.from_int(i as long))
+        i = i + 1
+    }
+    value(dir, "map16", m16)
+
+    value(dir, "nested_256", nested(256))
+    value(dir, "nested_257", nested(257))
+
+    // Refusals.
+    b = strbuilder.new(0)
+    _i = strbuilder.append_byte(b, 1)
+    _j = strbuilder.append_byte(b, 2)
+    raw(dir, "trailing", b)
+
+    b = strbuilder.new(0)
+    _k = strbuilder.append_byte(b, 0xd9)
+    _l = strbuilder.append_byte(b, 200)
+    _m = strbuilder.append(b, "short")
+    raw(dir, "str_past_end", b)
+
+    b = strbuilder.new(0)
+    _n = strbuilder.append_byte(b, 0xdd)
+    _o = strbuilder.append_byte(b, 0xff)
+    _p = strbuilder.append_byte(b, 0xff)
+    _q = strbuilder.append_byte(b, 0xff)
+    _r = strbuilder.append_byte(b, 0xff)
+    raw(dir, "array_count_bomb", b)
+
+    b = strbuilder.new(0)
+    _s = strbuilder.append_byte(b, 0xdf)
+    _t = strbuilder.append_byte(b, 0x7f)
+    _u = strbuilder.append_byte(b, 0xff)
+    _v = strbuilder.append_byte(b, 0xff)
+    _w = strbuilder.append_byte(b, 0xff)
+    raw(dir, "map_count_bomb", b)
+
+    b = strbuilder.new(0)
+    _x = strbuilder.append_byte(b, 0xc1)
+    raw(dir, "reserved_c1", b)
+
+    b = strbuilder.new(0)
+    _y = strbuilder.append_byte(b, 0xc7)
+    _z = strbuilder.append_byte(b, 3)
+    raw(dir, "ext_truncated", b)
+
+    put(dir, "empty", "")
+}

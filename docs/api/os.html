@@ -330,7 +330,7 @@
       <h3 class="function-name">execv <span class="kind">extern</span></h3>
       <pre class="usage"><code>execv(prog, argv_list) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv_list: ptr</span></p>
-      <p class="doc">Replace the current process image with `prog`. `argv_list` is a list&lt;ptr&gt; of C strings (element 0 is argv[0] for the new program and does NOT need to match `prog`). On success this call never returns; on failure it returns -1 with the current process still running. `prog` is looked up on PATH if it does not contain a slash. Windows cannot replace a running process: there it runs `prog`, waits, and exits with its status. -1 only when it could not be started.</p>
+      <p class="doc">Replace the current process image with `prog`. `argv_list` is a list&lt;ptr&gt; of C strings (element 0 is argv[0] for the new program and does NOT need to match `prog`). On success this call never returns; on failure it returns -1 with the current process still running. `prog` is looked up on PATH if it does not contain a slash. A file with no #! line runs through /bin/sh, as execvp runs it; inside a sandbox that needs grant_shell() as well as the file's own exec grant (#3762), and without it the call returns -1. Windows cannot replace a running process: there it runs `prog`, waits, and exits with its status. -1 only when it could not be started.</p>
     </div>
     <div class="function" id="now_utc_iso8601_raw" data-name="now_utc_iso8601_raw">
       <h3 class="function-name">now_utc_iso8601_raw <span class="kind">extern</span></h3>

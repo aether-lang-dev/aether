@@ -14,6 +14,23 @@
  *   8. a frame with reserved data opcode 0x3 closes with 1002 (#3759);
  *   9. a frame with reserved control opcode 0xB closes with 1002;
  *  10. an unmasked client frame closes with 1002 (RFC 6455 5.1).
+ *  11-13. a frame with RSV1, RSV2 or RSV3 set closes with 1002, since no
+ *      extension is negotiated (RFC 6455 5.2, #3764);
+ *  14. a continuation with no message in progress closes with 1002 (5.4);
+ *  15. a new data frame inside a fragmented message closes with 1002;
+ *  16. a ping between fragments is answered and the message reassembles.
+ *  17. code points split across fragments reassemble as UTF-8;
+ *  18. a binary message is not checked as UTF-8;
+ *  19-24. text that is not UTF-8 (a byte 0xFF, an overlong form, a
+ *      surrogate, a code point past U+10FFFF, a message ending inside a
+ *      code point) and a close reason that is not UTF-8 close with 1007
+ *      (RFC 6455 8.1).
+ *  25-36. a close frame with a one-byte body, or a code no close frame may
+ *      carry (999, 1004, 1005, 1006, 1015, 1016, 2999, 5000), closes with
+ *      1002, as does one over 125 bytes or fragmented; 1014, 3000 and 4999
+ *      are echoed (RFC 6455 5.5.1, 7.4);
+ *  37. ws_close refuses 1005, 999, 5000 and a reason that is not UTF-8,
+ *      and cuts a long reason at a whole code point (/close).
  *
  * Usage: ws_probe <port>. Prints PASS/FAIL lines; exits 0 when all pass.
  *
@@ -92,13 +109,15 @@ static raw_sock ws_open(const char* path) {
 }
 
 /* A masked client frame whose header declares `declared` payload bytes, of
- * which the first `len` (from `payload`) are sent. */
-static int send_frame(raw_sock s, int fin, int opcode, const unsigned char* payload,
-                      size_t len, unsigned long long declared) {
+ * which the first `len` (from `payload`) are sent, with the reserved bits
+ * `rsv` (0x40 RSV1, 0x20 RSV2, 0x10 RSV3) set in its first byte. */
+static int send_frame_rsv(raw_sock s, int fin, int rsv, int opcode,
+                          const unsigned char* payload, size_t len,
+                          unsigned long long declared) {
     unsigned char hdr[14];
     size_t h = 0;
     static const unsigned char key[4] = { 0x11, 0x22, 0x33, 0x44 };
-    hdr[h++] = (unsigned char)((fin ? 0x80 : 0) | (opcode & 0x0F));
+    hdr[h++] = (unsigned char)((fin ? 0x80 : 0) | (rsv & 0x70) | (opcode & 0x0F));
     if (declared < 126) {
         hdr[h++] = (unsigned char)(0x80 | declared);
     } else if (declared <= 0xFFFF) {
@@ -118,6 +137,13 @@ static int send_frame(raw_sock s, int fin, int opcode, const unsigned char* payl
     int rc = len ? raw_send_all(s, (const char*)m, len) : 0;
     free(m);
     return rc;
+}
+
+/* The same with no reserved bit set: every frame a conforming client sends
+ * when no extension was negotiated. */
+static int send_frame(raw_sock s, int fin, int opcode, const unsigned char* payload,
+                      size_t len, unsigned long long declared) {
+    return send_frame_rsv(s, fin, 0, opcode, payload, len, declared);
 }
 
 /* A frame header with no mask, as a server sends it and a client must not:
@@ -344,6 +370,168 @@ int main(int argc, char** argv) {
     if (s == RAW_SOCK_INVALID) return 1;
     send_unmasked_header(s, 0x1);
     check(close_code(s) == 1002, "an unmasked client frame closes with 1002");
+    raw_socket_close(s);
+
+    /* 11-13. A reserved bit with no extension negotiated: 1002 (RFC 6455
+     * 5.2, #3764). The server negotiates none, so RSV1 (permessage-deflate's
+     * bit) is as reserved as the others, on a data frame and on a control
+     * frame alike. */
+    static const struct { int rsv; int opcode; const char* what; } rsv_cases[] = {
+        { 0x40, 0x1, "a text frame with RSV1 set closes with 1002" },
+        { 0x20, 0x2, "a binary frame with RSV2 set closes with 1002" },
+        { 0x10, 0x9, "a ping with RSV3 set closes with 1002" },
+    };
+    for (size_t i = 0; i < sizeof(rsv_cases) / sizeof(rsv_cases[0]); i++) {
+        s = ws_open("/ws");
+        if (s == RAW_SOCK_INVALID) return 1;
+        send_frame_rsv(s, 1, rsv_cases[i].rsv, rsv_cases[i].opcode, data, 0, 0);
+        check(close_code(s) == 1002, rsv_cases[i].what);
+        raw_socket_close(s);
+    }
+
+    /* 14. A continuation with no message in progress: 1002 (RFC 6455 5.4).
+     * Taken as a message of its own, it was echoed as len=5. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 1, 0x0, data, 5, 5);
+    check(close_code(s) == 1002, "a continuation frame with no message in progress closes with 1002");
+    raw_socket_close(s);
+
+    /* 15. A new data frame in the middle of a fragmented message: 1002. It
+     * restarted the message, dropping the first fragment. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 0, 0x1, data, 5, 5);
+    send_frame(s, 1, 0x1, data, 7, 7);
+    check(close_code(s) == 1002, "a text frame inside a fragmented message closes with 1002");
+    raw_socket_close(s);
+
+    /* 16. A control frame between fragments is allowed (5.4) and the message
+     * still reassembles: the ping is answered, then len=10 comes back. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 0, 0x2, data, 5, 5);
+    send_frame(s, 1, 0x9, data, 3, 3);
+    send_frame(s, 1, 0x0, data + 5, 5, 5);
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    int pong_ok = (n == 3 && op == 0xA);
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    if (n >= 0) buf[n] = '\0';
+    check(pong_ok && n >= 0 && op == 0x1 && strcmp((char*)buf, "len=10") == 0,
+          "a ping between two fragments is answered and the message reassembles");
+    raw_socket_close(s);
+
+    /* 17. A text message is UTF-8 across its fragments (RFC 6455 8.1): "é"
+     * split between two fragments, "€" between the next two, is whole. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 0, 0x1, (const unsigned char*)"caf\xc3", 4, 4);
+    send_frame(s, 0, 0x0, (const unsigned char*)"\xa9 \xe2\x82", 4, 4);
+    send_frame(s, 1, 0x0, (const unsigned char*)"\xac", 1, 1);
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    if (n >= 0) buf[n] = '\0';
+    check(n >= 0 && op == 0x1 && strcmp((char*)buf, "len=9") == 0,
+          "code points split across fragments reassemble as UTF-8 (len=9)");
+
+    /* 18. Binary is not text: bytes that are not UTF-8 are echoed. */
+    send_frame(s, 1, 0x2, (const unsigned char*)"\xff\xfe\xc0", 3, 3);
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    if (n >= 0) buf[n] = '\0';
+    check(n >= 0 && op == 0x1 && strcmp((char*)buf, "len=3") == 0,
+          "a binary message is not checked as UTF-8");
+    raw_socket_close(s);
+
+    /* 19-24. Text that is not UTF-8 closes with 1007: a byte that never
+     * begins a sequence, an overlong form, a surrogate, a code point past
+     * U+10FFFF, a message ending inside a code point, and a close reason
+     * that is not UTF-8. Each was handed to the program as text. */
+    static const struct { const char* bytes; size_t len; int fragments; const char* what; } bad[] = {
+        { "ok \xff", 4, 1, "a text byte 0xFF closes with 1007" },
+        { "\xc0\xaf", 2, 1, "an overlong form closes with 1007" },
+        { "\xed\xa0\x80", 3, 1, "a surrogate (U+D800) closes with 1007" },
+        { "\xf4\x90\x80\x80", 4, 1, "a code point past U+10FFFF closes with 1007" },
+        { "abc\xe2\x82", 5, 2, "a text message ending inside a code point closes with 1007" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        s = ws_open("/ws");
+        if (s == RAW_SOCK_INVALID) return 1;
+        if (bad[i].fragments == 2) {
+            send_frame(s, 0, 0x1, (const unsigned char*)bad[i].bytes, 3, 3);
+            send_frame(s, 1, 0x0, (const unsigned char*)bad[i].bytes + 3, bad[i].len - 3, bad[i].len - 3);
+        } else {
+            send_frame(s, 1, 0x1, (const unsigned char*)bad[i].bytes, bad[i].len, bad[i].len);
+        }
+        check(close_code(s) == 1007, bad[i].what);
+        raw_socket_close(s);
+    }
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 1, 0x8, (const unsigned char*)"\x03\xe8\xc3(", 4, 4);
+    check(close_code(s) == 1007, "a close reason that is not UTF-8 closes with 1007");
+    raw_socket_close(s);
+
+    /* 25-34. Close frames (RFC 6455 5.5.1, 7.4). A body of one byte holds
+     * no code, and a code a close frame may not carry is a protocol error:
+     * both close with 1002. They were echoed back as they came. */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 1, 0x8, (const unsigned char*)"\x03", 1, 1);
+    check(close_code(s) == 1002, "a close frame with a one-byte body closes with 1002");
+    raw_socket_close(s);
+    static const int bad_codes[] = { 999, 1004, 1005, 1006, 1015, 1016, 2999, 5000 };
+    for (size_t i = 0; i < sizeof(bad_codes) / sizeof(bad_codes[0]); i++) {
+        unsigned char cp[2] = { (unsigned char)(bad_codes[i] >> 8), (unsigned char)bad_codes[i] };
+        char what[96];
+        snprintf(what, sizeof what, "a close frame with code %d closes with 1002", bad_codes[i]);
+        s = ws_open("/ws");
+        if (s == RAW_SOCK_INVALID) return 1;
+        send_frame(s, 1, 0x8, cp, 2, 2);
+        check(close_code(s) == 1002, what);
+        raw_socket_close(s);
+    }
+    /* 35. Codes a close frame may carry are echoed: 1014 and the
+     * application range's ends. */
+    static const int good_codes[] = { 1014, 3000, 4999 };
+    for (size_t i = 0; i < sizeof(good_codes) / sizeof(good_codes[0]); i++) {
+        unsigned char cp[2] = { (unsigned char)(good_codes[i] >> 8), (unsigned char)good_codes[i] };
+        char what[96];
+        snprintf(what, sizeof what, "a close frame with code %d is echoed", good_codes[i]);
+        s = ws_open("/ws");
+        if (s == RAW_SOCK_INVALID) return 1;
+        send_frame(s, 1, 0x8, cp, 2, 2);
+        check(close_code(s) == good_codes[i], what);
+        raw_socket_close(s);
+    }
+    /* 36. A close frame over 125 bytes, or fragmented, closes with 1002
+     * (5.5), as a ping does (#3739). */
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    {
+        unsigned char big[126];
+        memset(big, 'x', sizeof big);
+        big[0] = 0x03; big[1] = 0xe8;
+        send_frame(s, 1, 0x8, big, 126, 126);
+    }
+    check(close_code(s) == 1002, "a close frame of 126 bytes closes with 1002");
+    raw_socket_close(s);
+    s = ws_open("/ws");
+    if (s == RAW_SOCK_INVALID) return 1;
+    send_frame(s, 0, 0x8, (const unsigned char*)"\x03\xe8", 2, 2);
+    check(close_code(s) == 1002, "a fragmented close frame closes with 1002");
+    raw_socket_close(s);
+
+    /* 37. ws_close refuses a code it may not send, or a reason that is not
+     * UTF-8, and sends nothing; a long reason is cut at a whole code point
+     * within 123 bytes. */
+    s = ws_open("/close");
+    if (s == RAW_SOCK_INVALID) return 1;
+    n = read_frame(s, &op, buf, sizeof(buf) - 1);
+    if (n >= 0) buf[n] = '\0';
+    check(n >= 0 && op == 0x1 && strcmp((char*)buf, "refused=true,true,true,true") == 0,
+          "ws_close refuses 1005, 999, 5000 and a reason that is not UTF-8");
+    n = read_frame(s, &op, buf, sizeof(buf));
+    check(n == 2 + 122 && op == 0x8 && buf[0] == 0x03 && buf[1] == 0xe8 && buf[n - 1] == 'a',
+          "ws_close cuts a long reason at the last whole code point within 123 bytes");
     raw_socket_close(s);
 
     if (failures) {

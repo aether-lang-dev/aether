@@ -388,11 +388,18 @@ static int push_open(XmlParser* p, const char* name) {
     return 1;
 }
 
-/* XML name chars (lenient): not whitespace, and not one of < > / = ? */
+/* XML name chars (lenient): not whitespace, not one of < > / = ?, and not
+ * a byte no XML Name holds anywhere: a control character, DEL, a quote or
+ * '&'. A control byte inside a tag was read as part of the element's name
+ * (`<b\x0f>` named the element "b\x0f"), which no XML name can hold and
+ * which the pretty printer then wrote back out (#3749, found by the XML fuzz
+ * target). Names otherwise stay as lenient as they were: one starting with
+ * a digit, say, is still read. */
 static int is_name_char(char c) {
-    return !(c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+    unsigned char u = (unsigned char)c;
+    return !(u <= 0x20 || u == 0x7f ||
              c == '<' || c == '>' || c == '/' || c == '=' || c == '?' ||
-             c == '\0');
+             c == '"' || c == '\'' || c == '&');
 }
 
 /* Production [3] S: space, tab, CR, LF. */
@@ -496,6 +503,14 @@ int xml_next(XmlParser* p) {
                     return xml_fail_at(p, k, msg);
                 }
             }
+            /* An empty section holds no character data, so it is no text
+             * event: one with no characters read back from nothing, and a
+             * document and its builder's copy differed by an event (the xml
+             * fuzz target's round trip, #3749). */
+            if (n == 0) {
+                p->pos = (size_t)(end - p->buf) + 3;
+                continue;
+            }
             p->text = (char*)malloc(n + 1);
             if (!p->text) return xml_fail(p, "out of memory in CDATA");
             memcpy(p->text, p->buf + s, n);
@@ -517,6 +532,15 @@ int xml_next(XmlParser* p) {
             int depth = 0;
             while (i < p->len) {
                 char c = p->buf[i];
+                /* A control character (NUL above all) is no more allowed in
+                 * a declaration than in text (#2510): skipped here, it was
+                 * accepted, and xml_pretty's copy then ended at the NUL. */
+                if (is_forbidden_control(c)) {
+                    char msg[96];
+                    snprintf(msg, sizeof(msg), "control character 0x%02X, which XML does not allow",
+                             (unsigned)(unsigned char)c);
+                    return xml_fail_at(p, i, msg);
+                }
                 if (c == '[') depth++;
                 else if (c == ']') { if (depth > 0) depth--; }
                 else if (c == '>' && depth == 0) break;

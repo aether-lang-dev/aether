@@ -21,6 +21,8 @@
 #      even though the handler wrote one.
 #   9. An h2 request carries its connection's metadata: the peer, its
 #      port, the local address and the TLS state (#3175).
+#  10. A response with 300 fields keeps all of them (the glue clamped
+#      them at 256).
 #
 # Skips cleanly when curl is missing or doesn't link libnghttp2.
 
@@ -117,6 +119,27 @@ PEER=$(curl --silent --show-error --max-time 5 \
 PEER_WANT="peer=127.0.0.1 port_set=1 local=127.0.0.1 tls=0 scheme=http version=2"
 [ "$PEER" = "$PEER_WANT" ] || {
     echo "  [FAIL] h2 request metadata: got '$PEER', expected '$PEER_WANT'"; exit 1
+}
+
+# ----------------------------------------------------------------
+# Test 1c: a response with 300 fields keeps all of them. The h2 glue
+# clamped the nghttp2 field array at 256 and dropped the rest without a
+# word, once the response's arrays could grow past 256.
+# ----------------------------------------------------------------
+MANY_HDR="$TMPDIR/many.hdr"
+curl --silent --show-error --max-time 5 \
+     --http2-prior-knowledge \
+     -D "$MANY_HDR" \
+     -o "$TMPDIR/many.body" \
+     "$URL_BASE/many" 2>"$TMPDIR/many.err" || {
+    echo "  [FAIL] curl --http2-prior-knowledge GET /many failed:"; cat "$TMPDIR/many.err"; exit 1
+}
+MANY_N=$(tr -d '\r' <"$MANY_HDR" | grep -c '^x-field-[0-9]*: v[0-9]*$')
+[ "$MANY_N" = 300 ] || {
+    echo "  [FAIL] an h2 response with 300 fields arrived with $MANY_N of them"; exit 1
+}
+tr -d '\r' <"$MANY_HDR" | grep -q '^x-field-299: v299$' || {
+    echo "  [FAIL] the 300th field is missing from the h2 response"; exit 1
 }
 
 # ----------------------------------------------------------------

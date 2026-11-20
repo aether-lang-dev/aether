@@ -118,6 +118,39 @@ int aether_h2_session_drain_ready(AetherH2Session* sess);
  * the process is winding down for a rolling deploy. */
 void aether_h2_session_initiate_goaway(AetherH2Session* sess);
 
+/* What the connection is doing (#3738): 2 a handler is still running for one
+ * of its streams (the server's work), 1 streams are open with none being
+ * handled (waiting on the client), 0 none open (idle). */
+int aether_h2_session_busy(AetherH2Session* sess);
+
+/* When a stream last opened or closed, in aether_h2_now_ms's clock; 0 when
+ * none has. */
+int64_t aether_h2_session_last_active(AetherH2Session* sess);
+
+/* When the session last made progress on its own side, in aether_h2_now_ms's
+ * clock, 0 when it has not: a response submitted, or bytes written to the
+ * client. The connection's idle clock restarts at it, so a response that
+ * waits on the client's flow-control window is not cut off while it is
+ * still going out (#3738). */
+int64_t aether_h2_session_last_progress(AetherH2Session* sess);
+
+/* Reset every stream whose request has not arrived whole (REFUSED_STREAM:
+ * nothing of it was handled, so a client may send it again elsewhere) and
+ * free what it sent. For a stopping server: streams being handled or
+ * answered finish, and none is left waiting on its client (#3738). */
+void aether_h2_session_refuse_incomplete(AetherH2Session* sess);
+
+/* Reset every stream whose request has not arrived whole in time (#3738):
+ * the server's head_timeout_ms and body_timeout_ms from the stream's first
+ * HEADERS, plus a second for each body_min_rate bytes of body it sent.
+ * `now_ms` is in the caller's monotonic clock, the one the session stamps
+ * streams with (aether_h2_now_ms). Returns the earliest deadline still
+ * pending, or 0 for none. */
+int64_t aether_h2_session_expire(AetherH2Session* sess, int64_t now_ms);
+
+/* The monotonic clock the session stamps streams with, in ms. */
+int64_t aether_h2_now_ms(void);
+
 /* h2c (cleartext) upgrade entry point.
  *
  * Called by the HTTP/1.1 parser when it sees a complete request

@@ -1,0 +1,20 @@
+// A host that serves its own HTTP/2 connections (#3738). The work is in
+// shim.c; this links the server.
+
+import std.http
+
+extern http_h2_drain_host_probe() -> int
+
+main() {
+    // Touch std.http so the build links the server.
+    s = http.server_create(0)
+    if s == 0 {
+        println("FAIL: server_create")
+        return
+    }
+    rc = http_h2_drain_host_probe()
+    if rc != 0 {
+        println("FAIL: probe returned ${rc}")
+    }
+    http.server_free(s)
+}

@@ -41,7 +41,11 @@ int http_actor_stop_on_core_probe(void) { return 0; }
 /* Defined in aether_http_server.c; std.http declares it as an extern. */
 int http_server_port(HttpServer* server);
 
-static HttpServer* g_server = NULL;
+/* Atomic: a worker of one round reads it on a scheduler thread (worker_step,
+ * stopper_step) while the next round's main thread sets it. The rounds are
+ * ordered through the client socket (the worker closes it, main sees the
+ * close), which TSan cannot see, so it reported the plain pointer as a race. */
+static HttpServer* _Atomic g_server = NULL;
 
 static void ping_handler(HttpRequest* req, HttpServerResponse* res, void* ud) {
     (void)req; (void)ud;

@@ -15,6 +15,10 @@
 #   3. a digest in the API listing that does not match the bytes is fatal,
 #   4. both ways failing says so, naming both,
 #   5. an asset missing from the listing says so.
+# The release is v0.9.9, below the signing floor (SIGNED_SINCE in get.sh):
+# it has no SHA256SUMS, as a release from before #3752, and is checked by
+# its digest. A release at or above the floor without SHA256SUMS is refused
+# (test_release_sums_verified.sh).
 # HOME is redirected so the real ~/.aether is never touched.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -49,13 +53,13 @@ case "$PLAT" in windows*) echo "  [SKIP] ae_download_api_fallback: zip archives,
 # A release archive that passes ae's post-extract checks: flat layout, a
 # bin/aetherc, lib/aether/libaether.a (an `ar` archive) and enough bulk to be
 # over the 1 KB floor.
-ASSET="aether-9.9.9-$PLAT.tar.gz"
+ASSET="aether-0.9.9-$PLAT.tar.gz"
 mkdir -p "$TMP/pkg/bin" "$TMP/pkg/lib/aether" "$TMP/pkg/share/aether" "$TMP/rel"
-printf '#!/bin/sh\necho aetherc 9.9.9\n' > "$TMP/pkg/bin/aetherc"
+printf '#!/bin/sh\necho aetherc 0.9.9\n' > "$TMP/pkg/bin/aetherc"
 chmod 755 "$TMP/pkg/bin/aetherc"; cp "$TMP/pkg/bin/aetherc" "$TMP/pkg/bin/ae"
 { printf '!<arch>\n'; head_c 70000 /dev/urandom; } > "$TMP/pkg/lib/aether/libaether.a"
 head_c 20000 /dev/urandom > "$TMP/pkg/share/aether/pad.bin"
-echo 9.9.9 > "$TMP/pkg/VERSION"
+echo 0.9.9 > "$TMP/pkg/VERSION"
 ( cd "$TMP/pkg" && COPYFILE_DISABLE=1 tar -czf "$TMP/rel/$ASSET" . )
 
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
@@ -77,14 +81,14 @@ start_mock() {   # $1 = mode
 run_install() {   # $1 = case name; extra env via the caller's environment
     H="$TMP/home_$1"; mkdir -p "$H"
     ( env -u GITHUB_TOKEN -u GH_TOKEN $2 HOME="$H" AE_GITHUB_WEB_BASE="$BASE" AE_GITHUB_API_BASE="$BASE" \
-        "$AE" version install v9.9.9 ) >"$TMP/$1.log" 2>&1
+        "$AE" version install v0.9.9 ) >"$TMP/$1.log" 2>&1
 }
 
 # 1 + 2 ----------------------------------------------------------------------
 start_mock ok
 run_install ok "" || fail "install did not succeed with the download URL 504ing" "$TMP/ok.log"
-[ -x "$TMP/home_ok/.aether/versions/v9.9.9/bin/aetherc" ] || fail "version not installed" "$TMP/ok.log"
-grep -q "GET /.*/releases/download/v9.9.9/$ASSET" "$TMP/rel/requests.log" || fail "primary URL was not tried first"
+[ -x "$TMP/home_ok/.aether/versions/v0.9.9/bin/aetherc" ] || fail "version not installed" "$TMP/ok.log"
+grep -q "GET /.*/releases/download/v0.9.9/$ASSET" "$TMP/rel/requests.log" || fail "primary URL was not tried first"
 grep -q "GET /repos/.*/releases/assets/1000 auth=- accept=application/octet-stream" "$TMP/rel/requests.log" \
     || fail "API asset was not fetched as octet-stream without credentials" "$TMP/rel/requests.log"
 
@@ -99,7 +103,7 @@ grep -q "releases/download/.*auth=-" "$TMP/rel/requests.log" \
 start_mock baddigest
 run_install bad "" && fail "a wrong digest was accepted"
 grep -q "digest" "$TMP/bad.log" || fail "wrong digest not reported" "$TMP/bad.log"
-[ -e "$TMP/home_bad/.aether/versions/v9.9.9/bin" ] && fail "a digest mismatch left an install behind"
+[ -e "$TMP/home_bad/.aether/versions/v0.9.9/bin" ] && fail "a digest mismatch left an install behind"
 
 # 4 ----------------------------------------------------------------------------
 start_mock apidown
@@ -118,7 +122,7 @@ if [ -f "$ROOT/get.sh" ]; then
     start_mock ok
     PFX="$TMP/prefix_get"
     ( env -u GITHUB_TOKEN -u GH_TOKEN GH_TOKEN=ghp_gettoken456 PREFIX="$PFX" AE_GITHUB_WEB_BASE="$BASE" \
-        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" v9.9.9 ) >"$TMP/get.log" 2>&1 \
+        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" v0.9.9 ) >"$TMP/get.log" 2>&1 \
         || fail "get.sh did not succeed with the download URL 504ing" "$TMP/get.log"
     [ -x "$PFX/bin/ae" ] || fail "get.sh installed no bin/ae" "$TMP/get.log"
     grep -q "through the GitHub API" "$TMP/get.log" || fail "get.sh did not report the API path" "$TMP/get.log"
@@ -128,7 +132,7 @@ if [ -f "$ROOT/get.sh" ]; then
     start_mock baddigest
     PFX="$TMP/prefix_get_bad"
     ( env -u GITHUB_TOKEN -u GH_TOKEN PREFIX="$PFX" AE_GITHUB_WEB_BASE="$BASE" \
-        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" v9.9.9 ) >"$TMP/get_bad.log" 2>&1 \
+        AE_GITHUB_API_BASE="$BASE" sh "$ROOT/get.sh" v0.9.9 ) >"$TMP/get_bad.log" 2>&1 \
         && fail "get.sh accepted a wrong digest" "$TMP/get_bad.log"
     grep -q "digest" "$TMP/get_bad.log" || fail "get.sh did not report the wrong digest" "$TMP/get_bad.log"
     grep -q "from source" "$TMP/get_bad.log" && fail "get.sh fell back to a source build after a wrong digest" "$TMP/get_bad.log"

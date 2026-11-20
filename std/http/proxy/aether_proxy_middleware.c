@@ -127,6 +127,61 @@ static int is_hop_by_hop(const char* name) {
     return 0;
 }
 
+/* Put one of the upstream's header fields on `res`. A field the response
+ * object holds once replaces it where it is: Content-Type and Server, which
+ * it is created holding, and Content-Length, which states the body this
+ * proxy sends. Every other field is added, so a repeated one (Set-Cookie
+ * above all, which cannot be folded into one line) reaches the client as
+ * many times as the upstream sent it. Each was set, which kept the last of
+ * them only, while the pass-through forwarded them all (#3749, found by the
+ * proxy-response fuzzer). */
+/* Whether the Content-Length fields among the lines from `p` to `end` (a
+ * head or a header block; a line without a colon, the status line, is
+ * passed over) may be forwarded on an answer to HEAD: each value is digits
+ * only, and every one is the same. A sender does not forward a value that
+ * is not 1*DIGIT (RFC 9110 8.6), and differing values are an invalid
+ * message (RFC 9112 6.3). An answer to HEAD has no body, so its framing
+ * never reads them; neither proxy path forwards them instead, where the
+ * pass-through kept the first ("2") and the copying path the last ("0 OK")
+ * of the same answer (#3749). No Content-Length at all agrees. */
+static int proxy_head_lengths_agree(const char* p, const char* end) {
+    const char* first = NULL;
+    size_t first_len = 0;
+    while (p < end) {
+        const char* nl = memchr(p, '\n', (size_t)(end - p));
+        const char* eol = nl ? nl : end;
+        const char* le = eol;
+        if (le > p && le[-1] == '\r') le--;
+        const char* colon = memchr(p, ':', (size_t)(le - p));
+        if (colon && colon - p == 14 && http_ci_eq(p, "Content-Length", 14)) {
+            const char* v = colon + 1;
+            while (v < le && (*v == ' ' || *v == '\t')) v++;
+            const char* ve = le;
+            while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            if (ve == v) return 0;
+            for (const char* c = v; c < ve; c++)
+                if (*c < '0' || *c > '9') return 0;
+            if (!first) {
+                first = v;
+                first_len = (size_t)(ve - v);
+            } else if ((size_t)(ve - v) != first_len || memcmp(first, v, first_len) != 0) {
+                return 0;
+            }
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return 1;
+}
+
+static void proxy_put_header(HttpServerResponse* res, const char* key, const char* value) {
+    if (strcasecmp(key, "Content-Type") == 0 || strcasecmp(key, "Server") == 0 ||
+        strcasecmp(key, "Content-Length") == 0)
+        http_response_set_header(res, key, value);
+    else
+        http_response_add_header(res, key, value);
+}
+
 static int token_list_contains(const char* csv, const char* needle) {
     if (!csv || !*csv) return 1;
     if (!needle || !*needle) return 0;
@@ -370,7 +425,7 @@ static void serve_from_cache(HttpServerResponse* res, const HttpRequest* req,
     for (int i = 0; i < e->header_count; i++) {
         if (is_hop_by_hop(e->header_keys[i])) continue;
         if (strcasecmp(e->header_keys[i], "X-Cache") == 0) continue;
-        http_response_set_header(res, e->header_keys[i], e->header_values[i]);
+        proxy_put_header(res, e->header_keys[i], e->header_values[i]);
     }
     http_response_set_header(res, "X-Cache", "HIT");
     proxy_set_body(res, req, e->body, (int)e->body_length);
@@ -673,6 +728,15 @@ static int px_build(AetherProxyExchange* px) {
     if (opts->pool->request_timeout_sec > 0) {
         http_request_set_timeout_raw(px->outbound, opts->pool->request_timeout_sec);
     }
+    /* The upstream's answer is buffered whole, and refused past the
+     * proxy's body cap only once it was all in (#3750): the client held
+     * whatever the upstream sent first. Its response limit is the cap,
+     * with room for the head; past it the answer is response_too_large,
+     * as before, without the bytes. A cap past the client's default keeps
+     * working, as the client takes the request's limit over its default. */
+    if (opts->max_body_bytes > 0)
+        http_request_set_max_response_raw(px->outbound,
+                                          (int64_t)opts->max_body_bytes + 64 * 1024);
 
     /* Forward inbound headers minus hop-by-hop, including the ones this
      * particular request named in its own Connection header. */
@@ -799,6 +863,23 @@ static int px_classify(AetherProxyExchange* px, int64_t elapsed_ms) {
     const char* err = http_response_error(px->resp);
     int status = http_response_status(px->resp);
 
+    /* Past the proxy's cap (the client's response limit, set in px_build):
+     * the upstream answered, too much, which is no transport failure to
+     * retry elsewhere or to charge its breaker with. Answered as a body
+     * over the cap always was (#3750). */
+    if (err && strncmp(err, HTTP_CLIENT_TOO_LARGE_PREFIX,
+                       sizeof(HTTP_CLIENT_TOO_LARGE_PREFIX) - 1) == 0) {
+        aether_proxy_breaker_record(opts->pool, px->u, 1);
+        aether_proxy_inflight_dec(px->u);
+        http_response_free(px->resp);
+        px->resp = NULL;
+        http_response_set_status(res, 502);
+        http_response_set_header(res, "X-Aether-Proxy-Error", "response_too_large");
+        http_response_set_header(res, "Content-Type", "text/plain");
+        http_response_set_body(res, "upstream response exceeds proxy cap\n");
+        return 0;
+    }
+
     if (err && *err) {
         int is_timeout = strstr(err, "timeout") != NULL ||
                          strstr(err, "timed out") != NULL;
@@ -894,6 +975,10 @@ static int px_copy(AetherProxyExchange* px) {
     /* Headers — parse the raw block, drop hop-by-hop. */
     const char* headers_block = http_response_headers(px->resp);
     int seen_content_type = 0;
+    /* An answer to HEAD forwards the upstream's Content-Length only when
+     * every one it sent is the same number (proxy_head_lengths_agree). */
+    int head_drop_length = req && req->method && strcmp(req->method, "HEAD") == 0 &&
+        headers_block && !proxy_head_lengths_agree(headers_block, headers_block + strlen(headers_block));
     if (headers_block) {
         const char* p = headers_block;
         while (*p) {
@@ -907,10 +992,14 @@ static int px_copy(AetherProxyExchange* px) {
                 if (kl < sizeof(keybuf)) {
                     memcpy(keybuf, p, kl);
                     keybuf[kl] = '\0';
-                    if (!is_hop_by_hop(keybuf)) {
+                    if (!is_hop_by_hop(keybuf) &&
+                        !(head_drop_length && strcasecmp(keybuf, "Content-Length") == 0)) {
                         const char* v = colon + 1;
                         while (v < eol && (*v == ' ' || *v == '\t')) v++;
                         size_t vl = (size_t)(eol - v);
+                        /* Neither leading nor trailing whitespace is part of a
+                         * value (RFC 9110 5.5); the pass-through trims both too. */
+                        while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
 
                         /* The value only has to be NUL-terminated for the
                          * setter. Doing that with an allocation cost a
@@ -925,7 +1014,7 @@ static int px_copy(AetherProxyExchange* px) {
                         }
                         memcpy(val, v, vl);
                         val[vl] = '\0';
-                        http_response_set_header(res, keybuf, val);
+                        proxy_put_header(res, keybuf, val);
                         if (strcasecmp(keybuf, "Content-Type") == 0) seen_content_type = 1;
                         if (val != stackval) free(val);
                     }
@@ -954,7 +1043,7 @@ static int px_copy(AetherProxyExchange* px) {
     if (body_length > opts->max_body_bytes) {
         http_response_set_status(res, 502);
         http_response_set_header(res, "X-Aether-Proxy-Error", "response_too_large");
-        http_response_set_body(res, "px->resp response exceeds proxy cap\n");
+        http_response_set_body(res, "upstream response exceeds proxy cap\n");
         http_response_free(px->resp);
         return 0;
     }
@@ -995,6 +1084,49 @@ static int dh_put(char** buf, size_t* cap, size_t* len, const char* s, size_t n)
     return 0;
 }
 
+/* A field's value as the copying path reads it: from just past the colon
+ * to the line's end, leading and trailing whitespace off (RFC 9110 5.5).
+ * The one rule for every field the pass-through writes: Content-Type ended
+ * "text/plain h: 3 " here and "text/plain h: 3" there when a bare CR the
+ * framing had turned into a space (#3572) ended it, and Content-Length
+ * "1   " (#3749, the proxy-response fuzzer, both times). */
+static const char* direct_field_value(const char* v, const char* eol, size_t* out_len) {
+    while (v < eol && (*v == ' ' || *v == '\t')) v++;
+    size_t vl = (size_t)(eol - v);
+    while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+    *out_len = vl;
+    return v;
+}
+
+/* Is every line of the head ended by CR LF, with no bare CR, bare LF or NUL
+ * anywhere in it? The copying path reads a head through the client, which
+ * turns each bare CR and NUL into a space (#3572) and ends lines only at
+ * CR LF, so a bare LF stays inside its line; the pass-through ended the
+ * status line at the first LF and stopped reading fields at a bare CR. On
+ * `HTTP/1.1 200 OK\rtimeout\nContent-Length: 20\r\n\r\n` the two answered
+ * differently: the pass-through kept the Content-Length, the copying path
+ * read it as part of the status line (#3749, found by the proxy-response
+ * fuzzer). A head like that is the copying path's to answer, so the two
+ * cannot disagree; a clean one, which is every head a conforming upstream
+ * sends, still goes straight through. */
+static int direct_head_clean(const char* raw, size_t header_bytes) {
+    for (size_t i = 0; i < header_bytes; i++) {
+        char c = raw[i];
+        if (c == '\0') return 0;
+        if (c == '\r' && (i + 1 >= header_bytes || raw[i + 1] != '\n')) return 0;
+        if (c == '\n' && (i == 0 || raw[i - 1] != '\r')) return 0;
+        /* A line that starts with SP or HTAB is an obs-fold, the line before
+         * it continued (RFC 9112 5.2), and the copying path reads it so: a
+         * bare CR the framing turned into a space (#3572) after
+         * "Content-Length: 1" made the next field part of that value there
+         * and a field of its own here, and the two lengths differed (#3749,
+         * the proxy-response fuzzer). Such a head is the copying path's to
+         * answer, as one with a bare CR is. */
+        if (c == '\n' && i + 1 < header_bytes && (raw[i + 1] == ' ' || raw[i + 1] == '\t')) return 0;
+    }
+    return 1;
+}
+
 /* The status a response line carries, or 0 when it does not carry one. Same
  * shape as the copying path's check: exactly three digits after the version. */
 static int direct_status_of(const char* raw, size_t raw_len) {
@@ -1005,7 +1137,10 @@ static int direct_status_of(const char* raw, size_t raw_len) {
     if ((size_t)(d - raw) + 3 > raw_len) return 0;
     if (!isdigit((unsigned char)d[0]) || !isdigit((unsigned char)d[1]) ||
         !isdigit((unsigned char)d[2])) return 0;
-    if ((size_t)(d - raw) + 3 < raw_len && isdigit((unsigned char)d[3])) return 0;
+    /* 100 through 599, then a space or the end of the line, as the copying
+     * path's response_status_of reads it. */
+    if (d[0] < '1' || d[0] > '5') return 0;
+    if ((size_t)(d - raw) + 3 < raw_len && d[3] != ' ' && d[3] != '\r' && d[3] != '\n') return 0;
     return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
 }
 
@@ -1041,9 +1176,17 @@ int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
                              size_t header_bytes, AetherProxyDirect* out) {
     if (!px || !px->opts || !raw || !out) return -1;
     if (header_bytes < 4 || header_bytes > raw_len) return -1;
+    if (!direct_head_clean(raw, header_bytes)) return -1;
 
     int status = direct_status_of(raw, header_bytes);
     if (status == 0) return -1;      /* no status line: not ours to pass on */
+    /* An interim response (1xx) ahead of the final one: the framing's
+     * header_bytes ends after the final head, but this path reads the head
+     * from the start of the bytes, so it answered with the interim status
+     * and the interim's fields in front of the final ones (#3749, found by
+     * the proxy-response fuzzer). The copying path's reader skips interim
+     * responses; it answers these. */
+    if (status < 200) return -1;
 
     /* Everything that can decline is decided before anything is recorded.
      * A decline sends the caller down the copying path, which does its own
@@ -1129,12 +1272,12 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
         const char* colon = memchr(p, ':', (size_t)(cr - p));
         if (colon) {
             size_t kl = (size_t)(colon - p);
-            const char* v = colon + 1;
-            while (v < cr && (*v == ' ' || *v == '\t')) v++;
+            size_t vl = 0;
+            const char* v = direct_field_value(colon + 1, cr, &vl);
             if (kl == 12 && http_ci_eq(p, "Content-Type", 12)) {
-                ct = v; ct_len = (size_t)(cr - v);
+                ct = v; ct_len = vl;
             } else if (kl == 6 && http_ci_eq(p, "Server", 6)) {
-                sv = v; sv_len = (size_t)(cr - v);
+                sv = v; sv_len = vl;
             }
         }
         p = cr + 2;
@@ -1156,6 +1299,9 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
      * already emitted and minus the hop-by-hop headers, which belong to the
      * connection this proxy terminated and not to the message. */
     int saw_content_length = 0;
+    /* An answer to HEAD forwards the upstream's Content-Length only when
+     * every one it sent is the same number, as the copying path does. */
+    int head_drop_length = d->head_only && !proxy_head_lengths_agree(hstart, hend);
     for (const char* p = hstart; p < hend; ) {
         const char* cr = memchr(p, '\r', (size_t)(hend - p));
         if (!cr || cr + 1 >= raw + header_bytes || cr[1] != '\n') break;
@@ -1180,10 +1326,23 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
          * in the upstream's position so the header order matches. */
         /* An answer to HEAD keeps the upstream's, which states the GET's
          * length (RFC 9110 9.3.2), and is copied below like any field. */
+        /* Once: an upstream may repeat the field with one value (RFC 9112
+         * 6.3), and the copying path holds it in one slot, at the first
+         * one's position (#3749). */
+        if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && (saw_content_length || head_drop_length)) {
+            p = cr + 2;
+            continue;
+        }
+        if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && d->head_only) saw_content_length = 1;
         if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && !d->head_only) {
+            /* The upstream's spelling of the name, as the copying path keeps
+             * it (it sets the value on the field the upstream sent): only
+             * the value is this proxy's ("content-Length" came back as
+             * "Content-Length" here and as sent there, #3749). */
             char cl[48];
             size_t cn = 16;
-            memcpy(cl, "Content-Length: ", 16);
+            memcpy(cl, p, 14);
+            memcpy(cl + 14, ": ", 2);
             cn += http_write_dec(cl + cn, (unsigned long long)d->body_len);
             cl[cn++] = '\r';
             cl[cn++] = '\n';
@@ -1193,9 +1352,8 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
             continue;
         }
 
-        const char* v = colon + 1;
-        while (v < cr && (*v == ' ' || *v == '\t')) v++;
-        size_t vl = (size_t)(cr - v);
+        size_t vl = 0;
+        const char* v = direct_field_value(colon + 1, cr, &vl);
 
         /* A name or value carrying a line ending would end the head early and
          * let the rest be read as a second response (CWE-113). The copying
