@@ -105,7 +105,12 @@ static int extra_fields(int k) { return k == MAX_STREAMS - 1 ? 300 : k; }
 /* The server's only middleware: G1 for each request, then the echo. */
 static int record_and_echo(HttpRequest* req, HttpServerResponse* res, void* ud) {
     (void)ud;
-    if (g_scripted) {
+    /* Raw bytes in the script can carry frames the model never saw: a DATA
+     * with END_STREAM that ends a stream the model holds open, a HEADERS of
+     * their own on another id with the same path. So the model says nothing
+     * about a request then, as G2 and G3 already say nothing about the
+     * output; such inputs still run under the sanitizers. */
+    if (g_scripted && !g_any_raw) {
         /* Which stream: the path carries its index as "/s<k>". */
         int k = -1;
         CHECK(req->path && sscanf(req->path, "/s%d/", &k) == 1 && k >= 0 && k < MAX_STREAMS,
