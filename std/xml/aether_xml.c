@@ -524,6 +524,15 @@ int xml_next(XmlParser* p) {
             int depth = 0;
             while (i < p->len) {
                 char c = p->buf[i];
+                /* A control character (NUL above all) is no more allowed in
+                 * a declaration than in text (#2510): skipped here, it was
+                 * accepted, and xml_pretty's copy then ended at the NUL. */
+                if (is_forbidden_control(c)) {
+                    char msg[96];
+                    snprintf(msg, sizeof(msg), "control character 0x%02X, which XML does not allow",
+                             (unsigned)(unsigned char)c);
+                    return xml_fail_at(p, i, msg);
+                }
                 if (c == '[') depth++;
                 else if (c == ']') { if (depth > 0) depth--; }
                 else if (c == '>' && depth == 0) break;
