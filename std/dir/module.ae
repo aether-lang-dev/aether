@@ -12,6 +12,7 @@ extern dir_exists(path: string) -> int
 extern dir_create_raw(path: string) -> int
 extern dir_delete_raw(path: string) -> int
 extern dir_list_raw(path: string) -> ptr
+extern dir_list_error(path: string) -> string
 extern dir_list_count(list: ptr) -> int
 extern dir_list_get(list: ptr, index: int) -> string
 extern dir_list_kind(list: ptr, index: int) -> int
@@ -36,12 +37,17 @@ delete(path: string) -> {
 }
 
 // List directory contents.
-// Returns (DirList ptr, "") on success, (null, error) on failure.
+// Returns (DirList ptr, "") on success, (null, error) on failure. The error
+// names the path and the cause: "<path>: No such file or directory",
+// "<path>: Not a directory", "<path>: Permission denied", or a sandbox
+// refusal. (Through 0.926.0 a directory that could not be opened was an
+// empty listing with no error.) The error is borrowed, valid until this
+// thread's next failed read or listing.
 // Caller must free the returned ptr with dir.list_free.
-list(path: string) -> {
+list(path: string) -> (ptr, string) {
     result = dir_list_raw(path)
     if result == null {
-        return null, "cannot list directory"
+        return null, dir_list_error(path)
     }
     return result, ""
 }

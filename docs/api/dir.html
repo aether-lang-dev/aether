@@ -172,7 +172,7 @@
       <h3 class="function-name">list <span class="kind">fn</span></h3>
       <pre class="usage"><code>list(path) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string</span></p>
-      <p class="doc">List directory contents. Returns (DirList ptr, &quot;&quot;) on success, (null, error) on failure. Caller must free the returned ptr with dir.list_free.</p>
+      <p class="doc">List directory contents. Returns (DirList ptr, &quot;&quot;) on success, (null, error) on failure. The error names the path and the cause: &quot;&lt;path&gt;: No such file or directory&quot;, &quot;&lt;path&gt;: Not a directory&quot;, &quot;&lt;path&gt;: Permission denied&quot;, or a sandbox refusal. (Through 0.926.0 a directory that could not be opened was an empty listing with no error.) The error is borrowed, valid until this thread's next failed read or listing. Caller must free the returned ptr with dir.list_free.</p>
     </div>
     <div class="function" id="list_count" data-name="list_count">
       <h3 class="function-name">list_count <span class="kind">fn</span></h3>

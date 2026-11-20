@@ -1,0 +1,89 @@
+// Regression: a directory that cannot be listed is an error, not an empty
+// listing. dir_list_raw returned an empty DirList when opendir failed, so
+// `dir.list("/nonexistent")` and `fs.list_dir` gave err="" and a count of 0
+// for a missing path, a regular file and an unreadable directory alike, the
+// same as for an empty directory. Each now returns (null, "<path>: <cause>"),
+// and remove_tree / copy_tree say why they could not list one.
+//
+// Self-asserting: FAIL + exit 1 on a mismatch, PASS at the end. Cleans up.
+
+import std.fs
+import std.dir
+import std.os
+import std.string
+
+extern exit(code: int)
+
+// 1 when `err` is an error naming `cause`, else 0 with a FAIL line.
+expect_err(what: string, err: string, cause: string) -> int {
+    if err == "" {
+        println("FAIL ${what}: no error")
+        return 0
+    }
+    if string.contains(err, cause) == 0 {
+        println("FAIL ${what}: error '${err}' does not say '${cause}'")
+        return 0
+    }
+    return 1
+}
+
+main() {
+    fails = 0
+    base = "${os.temp_dir()}/ae_dir_list_errors_${os.getpid()}"
+    _cd = fs.create_dir(base)
+    _ce = fs.create_dir("${base}/empty")
+    werr = fs.write("${base}/file.txt", "hi")
+    if werr != "" {
+        println("SKIP dir list errors: cannot write probe (${werr})")
+        _rt = fs.remove_tree(base)
+        return
+    }
+
+    // An empty directory still lists, with no error.
+    el, eerr = dir.list("${base}/empty")
+    if eerr != "" || el == null || dir.list_count(el) != 0 {
+        println("FAIL empty directory: err='${eerr}'")
+        fails = fails + 1
+    }
+    if el != null { dir.list_free(el) }
+
+    missing = "${base}/no_such_dir"
+    ml, merr = dir.list(missing)
+    fails = fails + 1 - expect_err("dir.list of a missing directory", merr, "no_such_dir")
+    fails = fails + 1 - expect_err("dir.list of a missing directory", merr, "No such file")
+    if ml != null { println("FAIL missing: a listing came back"); fails = fails + 1 }
+
+    // Windows may say the path is not found for a file listed as a
+    // directory; either way it is an error that names the path.
+    fl, ferr = fs.list_dir("${base}/file.txt")
+    not_dir = "Not a directory"
+    if os.platform() == "windows" { not_dir = "file.txt" }
+    fails = fails + 1 - expect_err("fs.list_dir of a regular file", ferr, not_dir)
+    if fl != null { println("FAIL file: a listing came back"); fails = fails + 1 }
+
+    // Unreadable: a directory with no permissions. Root reads it anyway, so
+    // the case only counts where the probe file under it is unreadable too.
+    locked = "${base}/locked"
+    _cl = fs.create_dir(locked)
+    _wl = fs.write("${locked}/inside.txt", "x")
+    _ok, _k, chmsg = fs.chmod(locked, 0)
+    _t, rerr = fs.read("${locked}/inside.txt")
+    if chmsg == "" && rerr != "" {
+        ll, lerr = dir.list(locked)
+        fails = fails + 1 - expect_err("dir.list of an unreadable directory", lerr, "Permission denied")
+        if ll != null { dir.list_free(ll) }
+        cerr = fs.copy_tree(locked, "${base}/copy")
+        fails = fails + 1 - expect_err("copy_tree of an unreadable directory", cerr, "Permission denied")
+        terr = fs.remove_tree(locked)
+        fails = fails + 1 - expect_err("remove_tree of an unreadable directory", terr, "Permission denied")
+    } else {
+        println("SKIP unreadable directory: permissions are not enforced here")
+    }
+    _ok2, _k2, _m2 = fs.chmod(locked, 448)
+
+    _rt = fs.remove_tree(base)
+    if fails > 0 {
+        exit(1)
+    }
+    println("PASS dir list errors")
+}

@@ -1185,7 +1185,7 @@ main() {
 **Functions:**
 - `dir.create(path)` → `string` - Create directory, return error string
 - `dir.delete(path)` → `string` - Delete empty directory, return error string
-- `dir.list(path)` → `(ptr, string)` - List contents (caller must `dir.list_free`)
+- `dir.list(path)` → `(ptr, string)` - List contents (caller must `dir.list_free`). A directory that cannot be opened is `(null, "<path>: <cause>")`: missing, not a directory, permission denied, or refused by the sandbox (through 0.926.0 it was an empty listing with no error). `fs.list_dir` is the same call.
 - `dir.list_count(list)` → `int` - Number of entries
 - `dir.list_get(list, index)` → `string` - Entry name at `index`
 - `dir.list_kind(list, index)` → `int` - Entry's file kind from readdir's `d_type`, avoiding a `stat(2)` per entry: 1 = file, 2 = directory, 3 = symlink (target not followed), 4 = other, 5 = socket, 6 = FIFO, 7 = device; 0 = unknown (the filesystem didn't report a type, stat that entry to resolve it). Same encoding as `file_stat`'s kind. Kinds 5-7 are POSIX-only: Windows reports those nodes as 4. The named constants `fs.STAT_KIND_FILE`, `STAT_KIND_DIR`, `STAT_KIND_SYMLINK`, `STAT_KIND_OTHER`, `STAT_KIND_SOCKET`, `STAT_KIND_FIFO` and `STAT_KIND_DEVICE` are exported from `std.fs`, prefer them over the bare numbers.

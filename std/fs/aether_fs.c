@@ -158,6 +158,7 @@ void fs_release_pread(void) {}
 const char* fs_ftruncate_raw(File* f, int64_t l) { (void)f; (void)l; return "fs unavailable"; }
 const char* fs_fsync_raw(File* f) { (void)f; return "fs unavailable"; }
 DirList* dir_list_raw(const char* p) { (void)p; return NULL; }
+const char* dir_list_error(const char* p) { (void)p; return "cannot list directory: built without filesystem support"; }
 int dir_list_count(DirList* l) { (void)l; return 0; }
 const char* dir_list_get(DirList* l, int i) { (void)l; (void)i; return NULL; }
 int dir_list_kind(DirList* l, int i) { (void)l; (void)i; return 0; }
@@ -3443,18 +3444,31 @@ static int fs_winattr_to_kind(DWORD attr) {
 #endif
 
 // Directory listing
+/* Every failure is NULL, with its cause recorded as a failed read's is
+ * (aether_fs_read_fail_set), so dir_list_error() can say what it was. A
+ * directory that could not be opened (missing, not a directory, permission
+ * denied, refused by the sandbox) used to be an empty list with no error. */
 DirList* dir_list_raw(const char* path) {
-    if (!path) return NULL;
+    aether_fs_read_fail_reset();
+    if (!path) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_INVALID, 0);
+        return NULL;
+    }
     /* Listing reads the directory: fs_read on it, as fs.walk checks its
-     * root (#3743). A refusal is NULL, which the wrappers report as
-     * "cannot list directory". */
-    if (!aether_sandbox_check("fs_read", path)) return NULL;
+     * root (#3743). */
+    if (!aether_sandbox_check("fs_read", path)) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SANDBOX, 0);
+        return NULL;
+    }
 
     /* #462: a directory with many entries is an unbounded surface — a
      * sandboxed plugin can list a huge tree. Gate the DirList struct,
      * the entries array, and every entry name through the cap. */
     DirList* list = (DirList*)aether_caps_malloc(sizeof(DirList));
-    if (!list) return NULL;
+    if (!list) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_ALLOC, 0);
+        return NULL;
+    }
     list->entries = NULL;
     list->count = 0;
     list->capacity = 0;
@@ -3467,7 +3481,20 @@ DirList* dir_list_raw(const char* path) {
 
     HANDLE hFind = FindFirstFileA(search_path, &find_data);
     if (hFind == INVALID_HANDLE_VALUE) {
-        return list;
+        DWORD werr = GetLastError();
+        /* No entry at all: an empty drive root, which has no "." either. */
+        if (werr == ERROR_FILE_NOT_FOUND || werr == ERROR_NO_MORE_FILES) return list;
+        int err;
+        switch (werr) {
+            case ERROR_PATH_NOT_FOUND: case ERROR_INVALID_DRIVE: err = ENOENT; break;
+            case ERROR_DIRECTORY: err = ENOTDIR; break;
+            case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: err = EACCES; break;
+            case ERROR_FILENAME_EXCED_RANGE: err = ENAMETOOLONG; break;
+            default: err = EIO; break;
+        }
+        aether_caps_free(list, sizeof(DirList));
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, err);
+        return NULL;
     }
 
     // Capacity-doubling growth for the entries array. Without it every
@@ -3503,8 +3530,14 @@ DirList* dir_list_raw(const char* path) {
 
     FindClose(hFind);
     #else
+    errno = 0;
     DIR* dir = opendir(path);
-    if (!dir) return list;
+    if (!dir) {
+        int err = errno ? errno : EIO;
+        aether_caps_free(list, sizeof(DirList));
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, err);
+        return NULL;
+    }
 
     int cap = 0;
     struct dirent* entry;
@@ -3554,6 +3587,17 @@ const char* dir_list_get(DirList* list, int index) {
 int dir_list_kind(DirList* list, int index) {
     if (!list || !list->kinds || index < 0 || index >= list->count) return 0;
     return list->kinds[index];
+}
+
+/* Why this thread's last dir_list_raw returned NULL, as "<path>: <reason>"
+ * ("No such file or directory", "Not a directory", "Permission denied",
+ * "blocked by sandbox policy ..."). Borrowed from thread-local storage, valid
+ * until this thread's next failed read or listing. */
+const char* dir_list_error(const char* path) {
+    if (s_read_fail_why == AETHER_FS_READ_FAIL_NONE)
+        return "cannot list directory";
+    if (s_read_fail_why == AETHER_FS_READ_FAIL_INVALID) return "cannot list directory: null path";
+    return aether_fs_read_fail_message(path);
 }
 
 void dir_list_free(DirList* list) {

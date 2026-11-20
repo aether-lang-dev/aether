@@ -151,6 +151,9 @@ extern dir_create_raw(path: string) -> int
 extern dir_create_mode_raw(path: string, mode: int) -> (int, int, string)
 extern dir_delete_raw(path: string) -> int
 extern dir_list_raw(path: string) -> ptr
+// Why this thread's last dir_list_raw returned null: "<path>: <reason>".
+// Borrowed, valid until this thread's next failed read or listing.
+extern dir_list_error(path: string) -> string
 
 // `mkdir -p` semantics: create `path` and any missing parent directories.
 // Treats already-existing directories as success. Raw extern — use the
@@ -711,12 +714,17 @@ unlink(path: string) -> {
 }
 
 // List directory contents.
-// Returns (DirList ptr, "") on success, (null, error) on failure.
+// Returns (DirList ptr, "") on success, (null, error) on failure. The error
+// names the path and the cause, as fs.read's does: "<path>: No such file or
+// directory", "<path>: Not a directory", "<path>: Permission denied", or a
+// sandbox refusal. (Through 0.926.0 a directory that could not be opened was
+// an empty listing with no error.) The error is borrowed, valid until this
+// thread's next failed read or listing.
 // Caller must free the returned ptr with dir_list_free.
-list_dir(path: string) -> {
+list_dir(path: string) -> (ptr, string) {
     list = dir_list_raw(path)
     if list == null {
-        return null, "cannot list directory"
+        return null, dir_list_error(path)
     }
     return list, ""
 }
@@ -1573,8 +1581,10 @@ remove_tree(path: string) -> string {
             return delete(path)
         }
     }
-    // Directory: remove each child first, then the (now-empty) dir.
+    // Directory: remove each child first, then the (now-empty) dir. One that
+    // cannot be listed cannot be emptied: say why, not that it is not empty.
     lst = dir_list_raw(path)
+    if lst == null { return dir_list_error(path) }
     if lst != null {
         cnt = dir_list_count(lst)
         i = 0
@@ -1612,7 +1622,7 @@ copy_tree(src: string, dst: string) -> string {
     merr = mkdir_p(dst)
     if string_length(merr) > 0 { return merr }
     lst = dir_list_raw(src)
-    if lst == null { return "cannot list directory" }
+    if lst == null { return dir_list_error(src) }
     cnt = dir_list_count(lst)
     i = 0
     out_err = ""
