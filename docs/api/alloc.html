@@ -161,7 +161,7 @@
       <h3 class="function-name">raw_aligned <span class="kind">fn</span></h3>
       <pre class="usage"><code>raw_aligned(a, size, alignment) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">a: ptr, size: int, alignment: int</span></p>
-      <p class="doc">#3778: `size` bytes at an address that is a multiple of `alignment` (a power of two, at least the size of a pointer: 16, 64 for a record that is to own a cache line, 4096 for a page). Null for another alignment, or when the memory cannot be had. Give it back with release_aligned and the same size and alignment, never with release.</p>
+      <p class="doc">#3778: `size` bytes at an address that is a multiple of `alignment` (a power of two, at least the size of a pointer: 16, 64 for a record that is to own a cache line, 4096 for a page). Null for another alignment, or when the memory cannot be had. Give it back with release_aligned and the same size and alignment, never with release: the block starts inside what the allocator gave.</p>
     </div>
     <div class="function" id="release_aligned" data-name="release_aligned">
       <h3 class="function-name">release_aligned <span class="kind">fn</span></h3>
