@@ -163,7 +163,15 @@ static char* dup_s(const char* s) {
 static void round_trip(void* doc) {
     const char* what = "emit_document";
     const char* text = yaml_emit_document_raw(doc);
-    CHECK(text != NULL, "%s: an accepted document did not emit", what);
+    /* A document libfyaml cannot write so that it reads back is refused,
+     * with the reason, never handed back as text that does not parse. */
+    if (text == NULL) {
+        const char* why = yaml_last_error();
+        CHECK(why && strstr(why, "does not parse back"),
+              "%s: an accepted document did not emit, and not for a text that would not read back (%s)",
+              what, why ? why : "(no message)");
+        return;
+    }
     /* The emit buffer is reused by the next emit: keep a copy. */
     char* copy = dup_s(text);
     void* again = yaml_parse_raw(copy);

@@ -285,7 +285,43 @@ const char* yaml_emit_node_raw(void* node) {
     return store_emit_string(str);
 }
 
+/* Whether `text` parses as yaml_parse_raw parses it: the same flags, no
+ * diagnostics printed, and a stream with no document in it read as the empty
+ * document it is. When it does not, what the parser said goes to `why`. */
+static int yaml_text_reads_back(const char* text, char* why, size_t why_cap) {
+    if (why_cap) why[0] = '\0';
+    struct fy_parse_cfg cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = FYPCF_ALLOW_DUPLICATE_KEYS;
+    struct fy_diag_cfg dcfg;
+    fy_diag_cfg_default(&dcfg);
+    dcfg.level = FYET_MAX;
+    struct fy_diag* diag = fy_diag_create(&dcfg);
+    if (diag) {
+        fy_diag_set_collect_errors(diag, true);
+        cfg.diag = diag;
+    }
+    struct fy_document* d = fy_document_build_from_string(&cfg, text, strlen(text));
+    int ok = d != NULL;
+    if (d) {
+        fy_document_destroy(d);
+    } else if (diag) {
+        void* prev = NULL;
+        struct fy_diag_error* err = fy_diag_errors_iterate(diag, &prev);
+        ok = err == NULL;
+        if (err && why_cap)
+            snprintf(why, why_cap, "%s at %d:%d", err->msg ? err->msg : "parse error", err->line, err->column);
+    }
+    if (diag) {
+        fy_diag_reset_error(diag);   /* collected errors are not freed by unref */
+        fy_diag_unref(diag);
+    }
+    return ok;
+}
+
 const char* yaml_emit_document_raw(void* doc) {
+    g_yaml_err_set = 0;   /* a refusal below says why; an earlier parse's error is not it */
+    g_yaml_err_buf[0] = '\0';
     if (!doc) return NULL;
     /* A document with no root (what an empty stream parses to) is the empty
      * text, which parses back to it; libfyaml emits nothing for it. */
@@ -308,6 +344,23 @@ const char* yaml_emit_document_raw(void* doc) {
                                             FYECF_DOC_START_MARK_ON);
     }
     char* str = fy_emit_document_to_string(yaml_fyd(doc), flags);
+    /* What this returns reads back, or it is not returned. libfyaml's block
+     * emitter writes some documents in a shape its own parser refuses: an
+     * empty entry of a sequence under a key comes out as `b:` then `- ` at
+     * the key's column ("did not find expected node content"), and no mode
+     * of the emitter writes it otherwise (flow style drops the entry; #3749,
+     * the yaml fuzz target). The vendored copy takes no patches, so such a
+     * document is refused with the reason, rather than handed back as text
+     * that does not parse. */
+    char why[200];
+    if (str && !yaml_text_reads_back(str, why, sizeof why)) {
+        free(str);
+        snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf),
+                 "the emitter's text for this document does not parse back (%s), a libfyaml limitation",
+                 why);
+        g_yaml_err_set = 1;
+        return NULL;
+    }
     return store_emit_string(str);
 }
 

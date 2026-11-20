@@ -129,6 +129,12 @@ emit_document(doc: ptr) -> string! {
     ok = ""
     raw = yaml_emit_document_raw(doc)
     if raw == null {
+        // Why, when the emitter said (a document whose text would not parse
+        // back is refused rather than returned).
+        why = yaml_last_error()
+        if why != "" {
+            return string_concat("", ""), string_concat(why, "")
+        }
         return string_concat("", ""), string_concat("emission failed", "")
     }
     return string_concat(raw, ""), ok
