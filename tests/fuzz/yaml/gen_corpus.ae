@@ -111,4 +111,6 @@ main() {
     // Reproducers fuzzing found, kept as regression seeds.
     hex_seed(dir, "crash_block_at_eof",
         "735c22203a7834315c75303034325e746578743a203e0a2020665530303030303034335c305c615c6f6c625c655c6655725c765c2f5c4e5c5f5c4c645c")
+    hex_seed(dir, "crash_cr_block_scalar",
+        "26610a21213f0d7c2d0d6e3f24")
 }

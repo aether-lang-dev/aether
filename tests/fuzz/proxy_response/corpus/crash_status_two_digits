@@ -1,0 +1,14 @@
+HTTP/0 011.2 OK
+Connective: timeout=4
+Prox keep-alive
+TE: trailers
+Trailer: Xion: close, X-Drop
+Keep-Alive: timeout=8
+Proxy-Connection: keep-alEive
+TE: trailers
+Trailer: X-T
+Upgrade: h2c
+Proxy-Authenticate: Basic
+X-Kept: yes
+Content-Length: 0
+

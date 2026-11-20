@@ -13,6 +13,7 @@ import std.os
 import std.io
 import std.fs
 import std.strbuilder
+import std.string
 
 extern exit(code: int)
 
@@ -31,6 +32,35 @@ fn seed(dir: string, name: string, method: int, text: string) {
 fn both(dir: string, name: string, text: string) {
     seed(dir, "${name}_get", 0, text)
     seed(dir, "${name}_head", 1, text)
+}
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits: a reproducer a fuzzing run found,
+// kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        _a = strbuilder.append_byte(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
 }
 
 main() {
@@ -92,5 +122,7 @@ main() {
     // bare LF in the status line, which the pass-through and the copying
     // path read differently; and a bare CR inside a field.
     both(dir, "crash_bare_lf_status", "HTTP/1.1 200 OK\rtimeout\nContent-Length: 20\r\n\r\nshort")
+    hex_seed(dir, "crash_status_two_digits",
+        "01485454502f30203031312e32204f4b0d0a436f6e6e6563746976653a2074696d656f75743d340d0a50726f78206b6565702d616c6976650d0a54453a20747261696c6572730d0a547261696c65723a2058696f6e3a20636c6f73652c20582d44726f700d0a4b6565702d416c6976653a2074696d656f75743d380d0a50726f78792d436f6e6e656374696f6e3a206b6565702d616c456976650d0a54453a20747261696c6572730d0a547261696c65723a20582d540d0a557067726164653a206832630d0a50726f78792d41757468656e7469636174653a2042617369630d0a582d4b6570743a207965730d0a436f6e74656e742d4c656e6774683a20300d0a0d0a")
     both(dir, "bare_cr_field", "HTTP/1.1 200 OK\r\nX-Bad: a\rb\r\nContent-Length: 2\r\n\r\nok")
 }

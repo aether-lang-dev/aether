@@ -234,4 +234,6 @@ main() {
     // client in the same read; the harness owed it a response (fuzz_h2.c, G3).
     hex_seed(dir, "crash_rst_after_end",
         "0000000001010000010102100f0102000003010000000101000000256c61746520ffffff626f647904000241000007")
+    hex_seed(dir, "crash_raw_end_stream",
+        "0000000000ebebebebebebeb18ebebebebebebebebebebebebebff6e656e000000000100000001")
 }

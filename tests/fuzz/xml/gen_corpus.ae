@@ -24,6 +24,35 @@ fn seed(dir: string, name: string, text: string) {
     }
 }
 
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits: a reproducer a fuzzing run found,
+// kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        _a = strbuilder.append_byte(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
 main() {
     if os.args_count() < 2 {
         _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
@@ -86,5 +115,7 @@ main() {
     // Reproducers fuzzing found, kept as regression seeds: a control byte
     // inside a start tag was read as part of the element's name.
     seed(dir, "crash_name_control", "<a><b\x0f><c>t</c></a>")
+    hex_seed(dir, "crash_declaration_nul",
+        "3c2100000000000000115d5d3e3c612f3e")
     seed(dir, "name_quote_amp", "<a><b\"c/><d&e/></a>")
 }
