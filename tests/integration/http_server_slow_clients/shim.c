@@ -18,6 +18,11 @@
  *               carries a whole head, a byte at a time)
  *   h2 probe    the same on a server with HTTP/2 on, where the first 24
  *               bytes were read before the head's clock started
+ *   sparse head over TLS, a silence that parks the connection, then the
+ *               head's record a byte every 1.5 idle timeouts: each byte
+ *               wakes it from the lot, and the deadline still runs from the
+ *               first (408), where it was closed with no answer, or parked
+ *               afresh at every byte and never cut off
  *   body        a 100-byte body the server reads before the handler runs
  *   stream      a 100000-byte body the handler reads with request_body
  *   read        the same read with request_body_read
@@ -405,6 +410,49 @@ static void round_head(int backend, int h2) {
     client_close(s);
     http_server_free(server);
     expect_cut(label, elapsed, status, 408);
+}
+
+/* The record of a whole head over TLS, after a silence past the idle
+ * timeout (the connection is parked), a byte every 1.5 idle timeouts: the
+ * first wakes the connection from the lot and begins the request. The gap
+ * is past the per-read idle timeout, so the client is cut off at the next
+ * wait, closed as a plain head stalled part-way is (a 408 is as good): within
+ * LIMIT_MS of the first byte. It was parked afresh at every byte and never
+ * cut off (4 to 5 s, past the trickle), or closed only at the lot's idle
+ * expiry with nothing said. */
+static void round_sparse_head(int backend) {
+    char label[64];
+    snprintf(label, sizeof(label), "sparse head %s", backend_name[backend]);
+    HttpServer* server = start_server(backend, 0, label);
+    if (!server) return;
+    client_sock s = client_connect(http_server_port(server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "connect"); http_server_free(server); return; }
+    void* tls = slow_tls_connect((int)s);
+    if (!tls) {
+        printf("round[%s]: skipped, %s\n", label,
+               slow_tls_available() ? "the TLS handshake failed" : "no TLS client in this build");
+        if (slow_tls_available()) g_fail++;
+        client_close(s);
+        http_server_free(server);
+        return;
+    }
+    static const char head[] = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    unsigned char rec[512];
+    int n = slow_tls_record(tls, head, (int)sizeof(head) - 1, rec, (int)sizeof(rec));
+    sleep_ms(IDLE_MS + 200);   /* past the first wait: the connection is parked */
+    int64_t t0 = now_ms();
+    int64_t elapsed = -1;
+    for (int i = 0; n > 0 && i < n && now_ms() - t0 < TRICKLE_MS; i++) {
+        if (send(s, (const char*)rec + i, 1, 0) != 1) { elapsed = now_ms() - t0; break; }
+        if (readable(s, IDLE_MS * 3 / 2)) { elapsed = now_ms() - t0; break; }
+    }
+    if (elapsed < 0 && n > 0 && readable(s, CLIENT_WAIT_MS)) elapsed = now_ms() - t0;
+    int status = elapsed >= 0 ? read_status(s, tls, NULL, 0) : -1;
+    slow_tls_free(tls);
+    client_close(s);
+    http_server_free(server);
+    int ok = elapsed >= 0 && elapsed < LIMIT_MS && (status == 408 || status <= 0);
+    report(label, ok, elapsed, status, NULL);
 }
 
 /* A body sent slowly, after a head sent whole: `kind` "body" (100 bytes the
@@ -1531,6 +1579,7 @@ int http_slow_clients_probe(void) {
     if (WANT("handshake")) for (int b = OPENSSL; b <= AETHER; b++) round_handshake(b);
     if (WANT("head")) for (int b = PLAIN; b <= AETHER; b++) round_head(b, 0);
     if (WANT("h2")) round_head(PLAIN, 1);
+    if (WANT("sparse")) for (int b = OPENSSL; b <= AETHER; b++) round_sparse_head(b);
     if (WANT("body")) for (int b = PLAIN; b <= AETHER; b++) round_body(b, "body");
     if (WANT("stream")) round_body(PLAIN, "stream");
     if (WANT("read")) round_body(PLAIN, "read");

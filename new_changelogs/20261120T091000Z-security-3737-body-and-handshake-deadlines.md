@@ -35,3 +35,9 @@
   way, a byte at a time) is served, as the wait for a request's first
   bytes already treated it; it went back to the lot at every byte until
   its idle time ran out and was closed with no 408.
+  The head's clock starts at once when the TLS library already holds part
+  of a record (taken off the socket by the check that woke the connection),
+  a connection back from the lot keeps the idle time it began there, and a
+  per-read timeout after the head's clock started closes the connection as
+  a stalled request rather than parking it: a client sending a byte now
+  and then could otherwise be parked afresh each time and never cut off.

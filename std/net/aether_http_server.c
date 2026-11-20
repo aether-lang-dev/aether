@@ -801,18 +801,25 @@ static void conn_set_timeout_error(void) {
 #endif
 }
 
+/* No socket error, before a read whose own error conn_recv_timed_out will
+ * read: an older EAGAIN left behind (a TLS layer's retry) is not this
+ * read's timeout. */
+static void conn_clear_sock_error(void) {
+#if defined(_WIN32)
+    WSASetLastError(0);
+#endif
+    errno = 0;
+}
+
 /* Wait up to `ms` (negative: no bound) for `fd` to be ready for `events`
  * (POLLIN or POLLOUT): 1 ready, or an error or a hangup the next call
  * reports; 0 the time ran out; -1 the wait failed. */
 static int conn_poll_fd(int fd, short events, int ms) {
-#ifdef _WIN32
-    WSAPOLLFD p;
-    p.fd = (SOCKET)fd;
-    p.events = events;
-    p.revents = 0;
-    int r = WSAPoll(&p, 1, ms);
-    return r > 0 ? 1 : (r == 0 ? 0 : -1);
-#else
+    /* Until `due` by this server's clock, not by poll's: poll may return a
+     * fraction of a millisecond early (macOS), and a caller that then read
+     * the clock found its deadline not yet reached, so a head cut there was
+     * taken for an idle connection (#3737). A timeout before `due` waits
+     * again for what is left. */
     int64_t due = ms >= 0 ? conn_now_ms() + ms : 0;
     for (;;) {
         int wait = -1;
@@ -820,13 +827,25 @@ static int conn_poll_fd(int fd, short events, int ms) {
             int64_t left = due - conn_now_ms();
             wait = left > 0 ? (int)left : 0;
         }
+#ifdef _WIN32
+        WSAPOLLFD p;
+        p.fd = (SOCKET)fd;
+        p.events = events;
+        p.revents = 0;
+        int r = WSAPoll(&p, 1, wait);
+        if (r > 0) return 1;
+        if (r < 0) return -1;
+#else
         struct pollfd p = { fd, events, 0 };
         int r = poll(&p, 1, wait);
         if (r > 0) return 1;
-        if (r == 0) return 0;
-        if (errno != EINTR) return -1;
-    }
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
 #endif
+        if (ms < 0 || wait == 0 || conn_now_ms() >= due) return 0;
+    }
 }
 
 /* The socket non-blocking or back to blocking, on every platform: a read
@@ -966,6 +985,7 @@ static int conn_recv_due(HttpConn* c, void* buf, int len) {
             conn_set_recv_timeout(c, wait);
             pt_server_set_read_budget(c->pure_tls, left > INT_MAX ? INT_MAX : (int)left,
                                       c->read_due_base_ms);
+            conn_clear_sock_error();   /* the timeout test below reads only this read's */
             n = pt_server_recv(c->pure_tls, buf, len);
             pt_server_set_read_budget(c->pure_tls, 0, 0);
         }
@@ -983,6 +1003,7 @@ static int conn_recv_due(HttpConn* c, void* buf, int len) {
         /* A plain recv returns at its first byte, so the receive timeout cut
          * to the deadline bounds it. */
         conn_set_recv_timeout(c, wait);
+        conn_clear_sock_error();
         n = (int)recv(c->fd, buf, len, 0);
         if (n < 0 && wait_is_due && conn_recv_timed_out()) c->read_due_hit = 1;
     }
@@ -6646,6 +6667,7 @@ static void conn_live_remove(HttpServer* server, int fd) {
  * connection whose client updated its keys was answered 408. */
 static int conn_tls_buffered(HttpConn* conn);
 static int conn_tls_idle_probe(HttpConn* conn);
+static int conn_tls_record_begun(HttpConn* conn);
 static int conn_recv_request_start(HttpServer* server, HttpConn* conn,
                                    void* buf, int len, int64_t* started) {
     int fd = conn->fd;
@@ -6653,7 +6675,18 @@ static int conn_recv_request_start(HttpServer* server, HttpConn* conn,
     int n = 0;
     if (!atomic_load(&server->stopping)) {
         int head_ms = server->limits.head_timeout_ms;
-        if (head_ms > 0 && (conn->ssl || conn->pure_tls) && !conn_tls_buffered(conn)) {
+        if (head_ms > 0 && (conn->ssl || conn->pure_tls) && !conn_tls_buffered(conn) &&
+            conn_tls_record_begun(conn)) {
+            /* Part of a record is already in the TLS library, taken off the
+             * socket by the check that woke this connection from the lot
+             * (conn_readable_has_request): the request has begun, so its
+             * clock starts now. Waiting on the empty socket for the next
+             * byte instead let a client that sent one byte per idle timeout
+             * be parked afresh each time, never cut off. */
+            *started = conn_now_ms();
+            conn_read_due_set(conn, *started + head_ms);
+            n = conn_recv(conn, buf, len);
+        } else if (head_ms > 0 && (conn->ssl || conn->pure_tls) && !conn_tls_buffered(conn)) {
             int idle = conn->applied_recv_timeout_ms > 0 ? conn->applied_recv_timeout_ms : -1;
             int64_t idle_end = idle > 0 ? conn_now_ms() + idle : 0;
             for (;;) {
@@ -6721,6 +6754,20 @@ static int conn_tls_idle_probe(HttpConn* conn) {
         return conn_poll_fd(conn->fd, POLLIN, 0) > 0 ? -1 : 0;
     }
     return 1;
+}
+
+/* Part of a record a TLS backend already holds, nothing of it decrypted:
+ * the bytes have left the socket, so poll(2) does not see them, and the
+ * request they begin has begun. */
+static int conn_tls_record_begun(HttpConn* conn) {
+#ifdef AETHER_HAS_OPENSSL
+    if (conn->ssl) {
+        SSL* ssl = (SSL*)conn->ssl;
+        return SSL_pending(ssl) <= 0 && SSL_has_pending(ssl);
+    }
+#endif
+    if (conn->pure_tls) return pt_server_pending(conn->pure_tls) < 0;
+    return 0;
 }
 
 /* Plaintext a TLS backend already holds, which a read returns without
@@ -7353,8 +7400,12 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
              * different worker without carrying parse state with it. Not when
              * the head's deadline passed: over TLS a head can be on its way,
              * a record not yet whole, with nothing of it decrypted. */
+            /* Nor once the head's clock started (head_started_ms): over TLS
+             * that is part of a record taken, a request begun with nothing
+             * of it decrypted, and a per-read timeout there is a request
+             * stalled part-way, closed as one on a plain connection is. */
             if (n < 0 && conn->write_pos == conn->read_pos && conn_recv_timed_out() &&
-                !conn->read_due_hit) {
+                !conn->read_due_hit && head_started_ms == 0) {
                 conn_read_due_clear(conn);
                 return HTTP_REQUEST_IDLE;
             }
@@ -8361,7 +8412,11 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
 #endif
 
     int max_requests = server->keep_alive_max;
-    int64_t idle_since_ms = 0;
+    /* A connection back from the lot keeps the idle time it began there
+     * (0 for a new one, which is calloc'd): a wake that brings no request
+     * must not earn it a whole new idle timeout, or a client that sends a
+     * byte now and then keeps it open for as long as it likes. */
+    int64_t idle_since_ms = conn->parked_since_ms;
     for (;;) {
         int rc = handle_one_request(server, conn, conn->requests_served, max_requests);
         if (rc == 0) break;

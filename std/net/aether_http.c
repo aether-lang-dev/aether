@@ -3166,6 +3166,9 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
         /* The final response's head, past any interim ones. */
         size_t interim_replaced = 0;
         size_t skip = http_interim_prefix(buf, len, &interim_replaced);
+        /* Sticky: an interim head repaired on an earlier call, before the
+         * final head was whole, is repaired all the same. */
+        if (interim_replaced) f->repaired = 1;
         char* hend = (char*)http_find_header_end(buf + skip, len - skip);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
@@ -3175,8 +3178,7 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
          * no longer the upstream's bytes, and a reader that would relay
          * them as they came (the proxy's pass-through) cannot see where a
          * bare CR stood, so it is told. */
-        f->repaired = interim_replaced +
-            http_head_section_repair(buf + skip, f->header_bytes - skip) > 0;
+        if (http_head_section_repair(buf + skip, f->header_bytes - skip) > 0) f->repaired = 1;
         const char* head = buf + skip;
 
         /* Read Transfer-Encoding where it lies, every field of it as one
