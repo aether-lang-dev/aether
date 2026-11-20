@@ -44,9 +44,9 @@ released
 multiple of `alignment`, a power of two at least the size of a pointer: 64
 lets a record own a cache line, which malloc's 16 bytes do not promise. It is
 given back with `release_aligned` and the same size and alignment, never with
-`release`: on Windows the system allocator's aligned blocks have a free of
-their own. Any allocator can do it; one without an aligned allocation of its
-own (an arena, a tracking wrapper) is asked for `alignment` bytes more.
+`release`: the block starts inside what the allocator gave. Any allocator can
+do it, the same way: it is asked for `alignment - 1` bytes and a pointer's
+more, and the block is the first aligned address in that.
 
 ```aether,run
 import std.alloc

@@ -1,6 +1,6 @@
 // #3778: alloc.raw_aligned gives a block at its alignment through every
-// allocator: the system one (the platform's aligned allocator), an arena and
-// a tracking wrapper (asked for the alignment more). An alignment that is not
+// allocator, the same way: the system one, an arena and a tracking wrapper,
+// each asked for the alignment and a pointer more. An alignment that is not
 // a power of two, or is smaller than a pointer, is refused. Every block is
 // written end to end and given back, and the tracker sees nothing left.
 

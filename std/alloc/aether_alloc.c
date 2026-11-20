@@ -5,8 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../runtime/utils/aether_aligned.h"
-
 static void* sys_alloc(void* data, size_t size) {
     (void)data;
     if (size == 0) size = 1;
@@ -52,11 +50,14 @@ void aether_allocator_free(AetherAllocator* a, void* ptr, size_t size) {
 }
 
 /* #3778: a block at `align`, a power of two and a multiple of
- * sizeof(void*). The system allocator has the platform's aligned
- * allocator; any other (an arena, a tracking wrapper, a host's) is asked
- * for `size + align - 1 + sizeof(void*)` bytes, the block is the first
- * aligned address past a pointer's room, and the pointer before it holds
- * what the allocator gave, for the release. */
+ * sizeof(void*), through any allocator alike, the system one included: it
+ * is asked for `size + align - 1 + sizeof(void*)` bytes, the block is the
+ * first aligned address past a pointer's room, and the pointer before it
+ * holds what the allocator gave, for the release. No allocator is told
+ * apart from the others: a self-contained library carries a system
+ * allocator of its own, so a handle one copy made can reach another copy's
+ * release, and a test of which allocator it is (the platform's aligned
+ * allocator for the system one) freed a block through the wrong free. */
 static int align_ok(size_t align) {
     return align >= sizeof(void*) && (align & (align - 1)) == 0;
 }
@@ -67,7 +68,6 @@ static size_t aligned_extra(size_t align) {
 
 void* aether_allocator_alloc_aligned(AetherAllocator* a, size_t size, size_t align) {
     if (!a || !align_ok(align)) return NULL;
-    if (a == &g_system) return aether_aligned_heap_alloc(size, align);
     if (!a->alloc_fn || size > SIZE_MAX - aligned_extra(align)) return NULL;
     char* got = (char*)a->alloc_fn(a->data, size + aligned_extra(align));
     if (!got) return NULL;
@@ -77,12 +77,7 @@ void* aether_allocator_alloc_aligned(AetherAllocator* a, size_t size, size_t ali
 }
 
 void aether_allocator_free_aligned(AetherAllocator* a, void* block, size_t size, size_t align) {
-    if (!a || !block || !align_ok(align)) return;
-    if (a == &g_system) {
-        aether_aligned_heap_free(block);
-        return;
-    }
-    if (!a->free_fn) return;
+    if (!a || !block || !align_ok(align) || !a->free_fn) return;
     a->free_fn(a->data, ((void**)block)[-1], size + aligned_extra(align));
 }
 

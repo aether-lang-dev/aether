@@ -1,4 +1,4 @@
-/* Heap memory at an alignment malloc does not promise (#3774, #3778).
+/* Heap memory at an alignment malloc does not promise (#3774).
  *
  * malloc gives 16 bytes (8 on some 32-bit targets), too little for a type
  * declared aligned(64) and for a record that is to own a cache line. Each
@@ -6,9 +6,9 @@
  * Windows, plain free after posix_memalign elsewhere, so a block from here
  * goes back through aether_aligned_heap_free and nothing else.
  *
- * Inline, so the runtime (aether_numa.c), std.alloc and std.net use the one
- * definition without a symbol to link: std.alloc's file is linked into the
- * compiler too, which carries no runtime. */
+ * Inline, so the runtime (aether_numa.c) and std.net use the one definition
+ * without a symbol to link. std.alloc does not: its aligned blocks come from
+ * the allocator a program hands it, whichever that is (#3778). */
 #ifndef AETHER_ALIGNED_HEAP_H
 #define AETHER_ALIGNED_HEAP_H
 

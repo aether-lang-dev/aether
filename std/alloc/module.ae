@@ -42,7 +42,8 @@ release(a: ptr, block: ptr, size: int) {
 // power of two, at least the size of a pointer: 16, 64 for a record that is
 // to own a cache line, 4096 for a page). Null for another alignment, or
 // when the memory cannot be had. Give it back with release_aligned and the
-// same size and alignment, never with release.
+// same size and alignment, never with release: the block starts inside what
+// the allocator gave.
 raw_aligned(a: ptr, size: int, alignment: int) -> ptr {
     return aether_allocator_alloc_aligned(a, size, alignment)
 }
