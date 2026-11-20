@@ -1,4 +1,5 @@
-// HEAD and GET through a cache keyed without the method (#3719, #3720).
+// HEAD and GET through a cache keyed without the method (#3719, #3720),
+// and an answer to HEAD through one keyed with it (#3782).
 //
 // The proxy cache's "url" key leaves the method out, so a HEAD and a GET of
 // one URL share an entry.
@@ -98,10 +99,10 @@ probe(port: int, method: string) -> string {
     return "${status} length ${cl} body ${body}"
 }
 
-// A proxy on its own port with a "url"-keyed cache in front of an upstream
+// A proxy on its own port with a cache keyed by `key` in front of an upstream
 // that serves `conns` connections. Returns the server, the pool, the opts,
 // the cache and the upstream listener, for teardown.
-start(get_answer: string, head_answer: string, conns: int) -> (ptr, ptr, ptr, ptr, ptr) {
+start(get_answer: string, head_answer: string, conns: int, key: string) -> (ptr, ptr, ptr, ptr, ptr) {
     srv, lerr = tcp.listen_on("127.0.0.1", 0)
     if lerr != "" {
         println("FAIL: listen: ${lerr}")
@@ -111,7 +112,7 @@ start(get_answer: string, head_answer: string, conns: int) -> (ptr, ptr, ptr, pt
     up ! Serve { srv: srv, get_answer: get_answer, head_answer: head_answer, conns: conns }
     pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
     proxy.upstream_add(pool, "http://127.0.0.1:${tcp.server_port(srv)}", 1)
-    cache = proxy.cache_new(16, 65536, 60, "url")
+    cache = proxy.cache_new(16, 65536, 60, key)
     opts = proxy.opts_new()
     proxy.opts_bind_cache(opts, cache)
     s = http.server_create(0)
@@ -153,14 +154,14 @@ check(label: string, got: string, want: string) -> int {
 }
 
 main() {
-    println("=== HEAD and GET through a cache keyed by url (#3719, #3720) ===")
+    println("=== HEAD and GET through a proxy cache (#3719, #3720, #3782) ===")
     bad = 0
 
     // #3720: a HEAD first, then a GET. The GET must reach the upstream and
     // get its body, not the stored HEAD's empty answer.
     framed_get = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nCache-Control: max-age=60\r\n\r\nok"
     framed_head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nCache-Control: max-age=60\r\n\r\n"
-    s, pool, opts, cache, srv = start(framed_get, framed_head, 2)
+    s, pool, opts, cache, srv = start(framed_get, framed_head, 2, "url")
     bad = bad + check("HEAD first", probe(http.server_port(s), "HEAD"), "200 length 2 body 0")
     bad = bad + check("then GET (#3720)", probe(http.server_port(s), "GET"), "200 length 2 body 2")
     stop(s, pool, opts, cache, srv)
@@ -168,10 +169,26 @@ main() {
     // #3719: a GET the upstream sends chunked, then a HEAD answered from
     // the stored GET: it states the body's length and sends none.
     chunked_get = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nCache-Control: max-age=60\r\n\r\n2\r\nok\r\n0\r\n\r\n"
-    s2, pool2, opts2, cache2, srv2 = start(chunked_get, framed_head, 1)
+    s2, pool2, opts2, cache2, srv2 = start(chunked_get, framed_head, 1, "url")
     bad = bad + check("chunked GET first", probe(http.server_port(s2), "GET"), "200 length 2 body 2")
     bad = bad + check("then HEAD from the cache (#3719)", probe(http.server_port(s2), "HEAD"), "200 length 2 body 0")
     stop(s2, pool2, opts2, cache2, srv2)
+
+    // #3782: a cache keyed by method, so an answer to HEAD is stored, with
+    // two Content-Length fields that disagree. A hit answers as the miss
+    // did. The event loop (Linux, macOS) forwards no length on the miss
+    // and stored the upstream's block as it came, so its hit said "0 OK";
+    // the worker path's client refuses the answer (502) and stores nothing.
+    bad_head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nContent-Length: 0 OK\r\nCache-Control: max-age=60\r\n\r\n"
+    s3, pool3, opts3, cache3, srv3 = start(framed_get, bad_head, 2, "method_url")
+    miss = probe(http.server_port(s3), "HEAD")
+    hit = probe(http.server_port(s3), "HEAD")
+    stop(s3, pool3, opts3, cache3, srv3)
+    bad = bad + check("HEAD with disagreeing lengths: the hit answers as the miss (#3782)", hit, miss)
+    if string.index_of(miss, "0 OK") >= 0 || string.index_of(hit, "0 OK") >= 0 {
+        println("  FAIL a length the upstream stated badly went out: '${miss}' / '${hit}'")
+        bad = bad + 1
+    }
 
     if bad > 0 {
         println("FAIL: ${bad} case(s)")

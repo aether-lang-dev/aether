@@ -15,3 +15,8 @@
   upstream stated badly: each value must be digits only and every one the
   same (RFC 9110 8.6, RFC 9112 6.3). The pass-through kept the first of
   "2" and "0 OK", the copying path the last.
+  The proxy cache stores an answer's fields under the same rules (#3782):
+  a hit sends what the miss sent, where it replayed a length the miss had
+  dropped and a value's trailing whitespace. And an answer to HEAD whose
+  lengths were dropped ends the client's connection after its head on the
+  pass-through, as one whose upstream stated no length does (#3710).

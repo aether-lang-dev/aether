@@ -16,7 +16,9 @@
 // behind a program's middleware (the worker path everywhere): nothing may
 // follow the head, and every path keeps the upstream's Content-Length, 4 or
 // none (the worker path said 0, #3713). On the event loop the framed answer
-// keeps the connection, and the unframed one ends it.
+// keeps the connection, and the unframed one ends it. A third answer states
+// two lengths that disagree (#3782): the loop forwards neither and ends the
+// connection as for no length; the worker path refuses it (502).
 
 import std.http
 import std.http.proxy
@@ -111,9 +113,11 @@ probe(port: int) -> string {
 main() {
     println("=== a HEAD through the proxy gets the upstream's head only (#3710) ===")
     labels = ["an upstream answer framed by Content-Length",
-        "an upstream answer ended by its close"]
+        "an upstream answer ended by its close",
+        "an upstream answer whose lengths disagree"]
     answers = ["HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nBODY",
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nBODY"]
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nBODY",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nContent-Length: 0 OK\r\n\r\nBODY"]
     // The event loop: the upstream's length kept, and the connection kept,
     // or closed when the upstream stated no length.
     loop_wants = ["200 length 4 head only kept", "200 length none head only closed"]
@@ -124,7 +128,7 @@ main() {
 
     bad = 0
     i = 0
-    while i < 2 {
+    while i < 3 {
         g = 0
         while g < 2 {
             srv, lerr = tcp.listen_on("127.0.0.1", 0)
@@ -156,9 +160,22 @@ main() {
             }
             sleep(100)
             got = probe(port)
-            ok = string.index_of(got, " head only ") >= 0 && string.starts_with(got, "200 length ${lengths[i]} ") == 1
-            if ok && on_loop && g == 0 {
-                ok = got == loop_wants[i]
+            ok = false
+            if i < 2 {
+                ok = string.index_of(got, " head only ") >= 0 && string.starts_with(got, "200 length ${lengths[i]} ") == 1
+                if ok && on_loop && g == 0 {
+                    ok = got == loop_wants[i]
+                }
+            } else if on_loop && g == 0 {
+                // #3782: the loop forwards no length (RFC 9110 8.6, the two
+                // disagree), so the GET's length is unknown and the
+                // connection ends after the head, as for an upstream that
+                // stated none. It forwarded none and kept the connection.
+                ok = got == "200 length none head only closed"
+            } else {
+                // The worker path's client refuses the answer as framed
+                // ambiguously: a 502, its head only.
+                ok = string.index_of(got, " head only ") >= 0 && string.starts_with(got, "502 ") == 1
             }
             if ok {
                 println("  PASS ${labels[i]} (${names[g]}): ${got}")

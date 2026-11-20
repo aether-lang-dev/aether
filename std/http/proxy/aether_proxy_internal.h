@@ -452,4 +452,44 @@ static inline const char* aether_proxy_block_line(const char* p, const char** eo
     return p + strlen(p);
 }
 
+/* Whether the Content-Length fields among the lines from `p` to `end` (a
+ * head or a header block; a line without a colon, the status line, is
+ * passed over) may be forwarded on an answer to HEAD: each value is digits
+ * only, and every one is the same. A sender does not forward a value that
+ * is not 1*DIGIT (RFC 9110 8.6), and differing values are an invalid
+ * message (RFC 9112 6.3). An answer to HEAD has no body, so its framing
+ * never reads them; neither proxy path forwards them instead, where the
+ * pass-through kept the first ("2") and the copying path the last ("0 OK")
+ * of the same answer (#3749); the cache, which stores the upstream's
+ * block, holds the same rule (#3782). No Content-Length at all agrees. */
+static inline int aether_proxy_head_lengths_agree(const char* p, const char* end) {
+    const char* first = NULL;
+    size_t first_len = 0;
+    while (p < end) {
+        const char* nl = memchr(p, '\n', (size_t)(end - p));
+        const char* eol = nl ? nl : end;
+        const char* le = eol;
+        if (le > p && le[-1] == '\r') le--;
+        const char* colon = memchr(p, ':', (size_t)(le - p));
+        if (colon && colon - p == 14 && http_ci_eq(p, "Content-Length", 14)) {
+            const char* v = colon + 1;
+            while (v < le && (*v == ' ' || *v == '\t')) v++;
+            const char* ve = le;
+            while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            if (ve == v) return 0;
+            for (const char* c = v; c < ve; c++)
+                if (*c < '0' || *c > '9') return 0;
+            if (!first) {
+                first = v;
+                first_len = (size_t)(ve - v);
+            } else if ((size_t)(ve - v) != first_len || memcmp(first, v, first_len) != 0) {
+                return 0;
+            }
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return 1;
+}
+
 #endif  /* AETHER_PROXY_INTERNAL_H */
