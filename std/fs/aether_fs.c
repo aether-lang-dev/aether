@@ -3400,12 +3400,83 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
  * grants (see fs_win_apply_mode_acl). The execute and the remaining
  * owner bits mean nothing there. Returns (1, KIND_OK, "") on success
  * or (0, KIND_*, msg) on failure. */
+#ifdef _WIN32
+/* chmod by name, with no enforce block in force: nothing a check saw can be
+ * swapped out from under it then, so it is the call it always was. Through a
+ * handle it asked for rights some file systems refuse where the by-name calls
+ * work (Wine refused WRITE_DAC on a plain file). */
+static _tuple_int_int_string fs_chmod_win_by_name(const char* path, int mode) {
+    if (!aether_sandbox_check("fs_write", path)) {
+        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
+                                 "sandbox: cannot chmod path");
+    }
+    int wpath_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (wpath_len <= 0) {
+        return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "path UTF-8 invalid");
+    }
+    size_t wpath_bytes = (size_t)wpath_len * sizeof(wchar_t);
+    wchar_t* wpath = (wchar_t*)aether_caps_malloc(wpath_bytes);
+    if (!wpath) {
+        return aether_fs_iks_err(AETHER_FS_KIND_IO, "allocation failed");
+    }
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wpath_len);
+    DWORD attrs = GetFileAttributesW(wpath);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        aether_caps_free(wpath, wpath_bytes);
+        DWORD win_err = GetLastError();
+        aether_fs_note_os_error((int)win_err);
+        int kind = AETHER_FS_KIND_IO;
+        const char* msg = "chmod failed";
+        switch (win_err) {
+            case ERROR_FILE_NOT_FOUND:
+            case ERROR_PATH_NOT_FOUND:
+                kind = AETHER_FS_KIND_NOT_FOUND; msg = "path not found"; break;
+            case ERROR_ACCESS_DENIED:
+                kind = AETHER_FS_KIND_PERMISSION_DENIED; msg = "access denied"; break;
+        }
+        return aether_fs_iks_err(kind, msg);
+    }
+    DWORD acl_err = fs_win_apply_mode_acl(wpath, mode, (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+    if (acl_err != ERROR_SUCCESS) {
+        int unsupported = acl_err == ERROR_NOT_SUPPORTED || acl_err == ERROR_INVALID_FUNCTION;
+        if (!unsupported || (mode & 077) == 0) {
+            aether_caps_free(wpath, wpath_bytes);
+            aether_fs_note_os_error((int)acl_err);
+            if (acl_err == ERROR_ACCESS_DENIED) {
+                return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "access denied");
+            }
+            return aether_fs_iks_err(AETHER_FS_KIND_IO,
+                                     unsupported ? "owner-only permissions not supported on this volume"
+                                                 : "chmod failed");
+        }
+    }
+    if (mode & 0200) {
+        attrs &= ~FILE_ATTRIBUTE_READONLY;
+    } else {
+        attrs |= FILE_ATTRIBUTE_READONLY;
+    }
+    BOOL ok = SetFileAttributesW(wpath, attrs);
+    aether_caps_free(wpath, wpath_bytes);
+    if (!ok) {
+        DWORD win_err = GetLastError();
+        aether_fs_note_os_error((int)win_err);
+        if (win_err == ERROR_ACCESS_DENIED) {
+            return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "access denied");
+        }
+        return aether_fs_iks_err(AETHER_FS_KIND_IO, "chmod failed");
+    }
+    _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
+    return out;
+}
+#endif
+
 _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     s_last_os_error = 0;   /* #1378: report only this call's code */
     if (!path) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
     }
 #ifdef _WIN32
+    if (aether_sandbox_levels_here() == 0) return fs_chmod_win_by_name(path, mode);
     /* The file is opened once (following a link, as POSIX chmod does) and
      * verified, and both the DACL and the read-only attribute are changed
      * through that handle: changed by name, a junction swapped in after the
@@ -4094,7 +4165,10 @@ static void walk_recursive_verified(const char* dir, void* d, const char* suffix
 // Without this, patterns like "**/.build.ae" or "**/.*.ae" would never find
 // dot-prefixed config files.
 static void walk_recursive(const char* dir, const char* suffix_pattern, DirList* result) {
-    DIR* d = opendir(dir);
+    /* Inside an enforce block each directory is opened as checked, its path
+     * walked with no link followed, so a symlink swapped in at any level is
+     * refused there instead of listed (#3751). */
+    DIR* d = aether_sandbox_levels_here() > 0 ? (DIR*)aether_sandbox_opendir(dir) : opendir(dir);
     if (!d) return;
 
     struct dirent* entry;
@@ -4130,6 +4204,122 @@ static void walk_recursive(const char* dir, const char* suffix_pattern, DirList*
         }
     }
     closedir(d);
+}
+
+/* A glob inside an enforce block (#3751), POSIX: what glob(3) with no flags
+ * answers, but every directory it reads opened as checked (its path walked
+ * with no link followed), so a symlink swapped in after the check is
+ * refused rather than listed. One component of the pattern at a time: a
+ * literal one is joined on, a wildcard one matched (fnmatch, FNM_PERIOD:
+ * a leading dot only by a pattern that names it) against the directory's
+ * entries. Sorted, as glob(3) sorts. */
+typedef struct { char** v; size_t n, cap; } GlobAcc;   /* #462: cap-accounted */
+
+static void glob_acc_add(GlobAcc* a, const char* p, size_t len, int slash) {
+    if (a->n == a->cap) {
+        size_t nc = a->cap ? a->cap * 2 : 16;
+        char** nv = (char**)aether_caps_realloc(a->v, a->cap * sizeof(char*), nc * sizeof(char*));
+        if (!nv) return;
+        a->v = nv;
+        a->cap = nc;
+    }
+    char* s = (char*)aether_caps_malloc(len + (slash ? 2 : 1));
+    if (!s) return;
+    memcpy(s, p, len);
+    if (slash) s[len++] = '/';
+    s[len] = '\0';
+    a->v[a->n++] = s;
+}
+
+static int glob_meta(const char* s) {
+    for (; *s; s++) {
+        if (*s == '*' || *s == '?' || *s == '[') return 1;
+        if (*s == '\\' && s[1]) s++;
+    }
+    return 0;
+}
+
+static int glob_is_dir_checked(const char* path) {
+    AetherSandboxStat st;
+    return aether_sandbox_stat(path, 0, &st) == 0 && st.kind == AETHER_SANDBOX_KIND_DIR;
+}
+
+/* `base` is the directory reached so far ("" for the current one, "/" for
+ * the root), `rest` the pattern still to match. */
+static void glob_checked_rec(const char* base, const char* rest, GlobAcc* acc) {
+    while (*rest == '/') rest++;
+    if (!*rest) return;
+    const char* end = strchr(rest, '/');
+    size_t clen = end ? (size_t)(end - rest) : strlen(rest);
+    if (clen > 255) return;
+    char comp[256];
+    memcpy(comp, rest, clen);
+    comp[clen] = '\0';
+    const char* tail = NULL;
+    if (end) {
+        tail = end;
+        while (*tail == '/') tail++;
+    }
+    size_t blen = strlen(base);
+    char path[4096];
+    if (!glob_meta(comp)) {
+        /* A literal component, with its escapes taken off as glob(3) does. */
+        char lit[256];
+        size_t k = 0;
+        for (size_t i = 0; i < clen; i++) {
+            if (comp[i] == '\\' && i + 1 < clen) i++;
+            lit[k++] = comp[i];
+        }
+        lit[k] = '\0';
+        int n = blen == 0 ? snprintf(path, sizeof path, "%s", lit)
+              : base[blen - 1] == '/' ? snprintf(path, sizeof path, "%s%s", base, lit)
+              : snprintf(path, sizeof path, "%s/%s", base, lit);
+        if (n < 0 || (size_t)n >= sizeof path) return;
+        if (!tail) {
+            AetherSandboxStat st;
+            if (aether_sandbox_stat(path, 1, &st) == 0) glob_acc_add(acc, path, (size_t)n, 0);
+        } else if (!*tail) {
+            if (glob_is_dir_checked(path)) glob_acc_add(acc, path, (size_t)n, 1);
+        } else {
+            glob_checked_rec(path, tail, acc);
+        }
+        return;
+    }
+    DIR* d = (DIR*)aether_sandbox_opendir(blen ? base : ".");
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        const char* name = e->d_name;
+        if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) continue;
+        if (fnmatch(comp, name, FNM_PERIOD) != 0) continue;
+        int n = blen == 0 ? snprintf(path, sizeof path, "%s", name)
+              : base[blen - 1] == '/' ? snprintf(path, sizeof path, "%s%s", base, name)
+              : snprintf(path, sizeof path, "%s/%s", base, name);
+        if (n < 0 || (size_t)n >= sizeof path) continue;
+        if (!tail) {
+            glob_acc_add(acc, path, (size_t)n, 0);
+        } else if (!*tail) {
+            if (glob_is_dir_checked(path)) glob_acc_add(acc, path, (size_t)n, 1);
+        } else {
+            glob_checked_rec(path, tail, acc);
+        }
+    }
+    closedir(d);
+}
+
+static int glob_cmp(const void* a, const void* b) {
+    return strcmp(*(char* const*)a, *(char* const*)b);
+}
+
+static void glob_checked_posix(const char* pattern, DirList* result) {
+    GlobAcc acc = { NULL, 0, 0 };
+    glob_checked_rec(pattern[0] == '/' ? "/" : "", pattern, &acc);
+    if (acc.n > 1) qsort(acc.v, acc.n, sizeof(char*), glob_cmp);
+    for (size_t i = 0; i < acc.n; i++) {
+        dirlist_add(result, acc.v[i]);
+        aether_caps_free(acc.v[i], strlen(acc.v[i]) + 1);
+    }
+    if (acc.v) aether_caps_free(acc.v, acc.cap * sizeof(char*));
 }
 #endif
 
@@ -4294,6 +4484,11 @@ DirList* fs_glob_raw(const char* pattern) {
         // here would re-emit every root-level match (issue #1279), so we
         // rely solely on the walk.
         walk_recursive(dir, suffix, result);
+    } else if (aether_sandbox_levels_here() > 0) {
+        /* glob(3) reads each directory by name, so inside an enforce block
+         * it is expanded here a component at a time, each directory opened
+         * as checked (#3751); what glob(3) returns, in its order. */
+        glob_checked_posix(pattern, result);
     } else {
         // Simple glob (no **)
         glob_t g;
