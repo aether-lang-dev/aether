@@ -108,13 +108,24 @@ regex_literal() {
 }
 idre="^https://github\\.com/$(regex_literal "$repo")/\\.github/workflows/release\\.yml@refs/(heads/main|tags/$(regex_literal "$tag"))\$"
 
+# Git Bash and MSYS2 rewrite the arguments they hand a native Windows
+# program when those look like paths, and that takes in every backslash of
+# a regex: "release\.yml" reached gh.exe as "release/.yml", so release.yml's
+# Windows leg refused 0.927.0's provenance and 0.928.0 to 0.930.0 were not
+# published. cosign and gh are run with the rewriting off (MSYS_NO_PATHCONV
+# for Git Bash, MSYS2_ARG_CONV_EXCL for MSYS2) and given their files as
+# Windows paths, which the rewriting no longer makes for them. Elsewhere both
+# are no-ops. ci.yml's ci-windows-release-verify runs this from Git Bash.
+unconverted() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$@"; }
+native_path() { if have cygpath; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
+
 if have cosign; then
     [ -s "$work/SHA256SUMS.sigstore.json" ] ||
         die "the $tag release has no SHA256SUMS.sigstore.json for cosign to check"
-    cosign verify-blob --bundle "$work/SHA256SUMS.sigstore.json" \
+    unconverted cosign verify-blob --bundle "$(native_path "$work/SHA256SUMS.sigstore.json")" \
         --certificate-identity-regexp "$idre" \
         --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-        "$work/SHA256SUMS" || die "the signature of SHA256SUMS of $tag does not verify"
+        "$(native_path "$work/SHA256SUMS")" || die "the signature of SHA256SUMS of $tag does not verify"
     say "the signature of SHA256SUMS verified with cosign"
 else
     say "the signature of SHA256SUMS was not checked: cosign is not installed"
@@ -124,7 +135,7 @@ fi
 # workflow run from any branch or tag. gh's own report is kept and shown on
 # a failure: its one-line error is the same for a certificate that names
 # another identity as for one it cannot check at all.
-if ! gh attestation verify "$file" --repo "$repo" --cert-identity-regex "$idre" \
+if ! unconverted gh attestation verify "$(native_path "$file")" --repo "$repo" --cert-identity-regex "$idre" \
     --cert-oidc-issuer https://token.actions.githubusercontent.com >"$work/gh-verify.log" 2>&1; then
     {
         printf 'verify-release-asset: gh attestation verify said:\n'

@@ -1430,6 +1430,11 @@ jobs:
         git rev-parse --sq-quote \
           '^https://github\.com/o/r/\.github/workflows/release\.yml@refs/(heads/main|tags/v1\.2\.3)$' \
           "$tmp/aether-x.zip"
+        # As verify-release-asset.sh calls gh: the rewriting off, the file
+        # given as a Windows path. Each argument should arrive as written.
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' git rev-parse --sq-quote \
+          '^https://github\.com/o/r/\.github/workflows/release\.yml@refs/(heads/main|tags/v1\.2\.3)$' \
+          "$(cygpath -m "$tmp/aether-x.zip")"
         gh --version | head -n 1
 
     - name: Download and verify the latest release (Windows)
