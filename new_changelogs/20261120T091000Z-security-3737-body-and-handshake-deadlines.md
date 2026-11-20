@@ -27,3 +27,7 @@
   A body that stopped arriving for the idle timeout while the handler read
   it used to end short with no sign: the handler answered the cut body as if
   it were whole, 200 included. It is now answered 408 too.
+  A wait the deadline bounds that runs out is the deadline passing, read
+  so whatever the millisecond clock says a moment later: a poll may return
+  a fraction of a millisecond early (macOS), and a TLS head cut there was
+  taken for an idle connection and closed with no 408.

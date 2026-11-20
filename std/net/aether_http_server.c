@@ -790,6 +790,7 @@ static void conn_set_nonblocking(HttpConn* c, int on) {
 static int64_t conn_now_ms(void);
 static void conn_set_recv_timeout(HttpConn* c, int ms);
 static int conn_recv_due(HttpConn* c, void* buf, int len);
+static int conn_recv_timed_out(void);
 
 /* A read gave up for want of time: leave the error code a receive timeout
  * leaves, which conn_recv_timed_out reads. */
@@ -909,9 +910,18 @@ static int conn_ssl_read_due(HttpConn* c, void* buf, int len) {
         else if (e == SSL_ERROR_WANT_WRITE) ev = POLLOUT;
         else { n = -1; break; }
         int64_t left = c->read_due_ms - conn_now_ms();
-        int r = left > 0 ? conn_poll_fd(c->fd, ev, conn_due_wait_ms(c, left)) : 0;
+        int wait = left > 0 ? conn_due_wait_ms(c, left) : 0;
+        int r = left > 0 ? conn_poll_fd(c->fd, ev, wait) : 0;
         if (r <= 0) {
-            if (r == 0) conn_set_timeout_error();
+            if (r == 0) {
+                conn_set_timeout_error();
+                /* A wait the deadline bounded that ran out is the deadline,
+                 * whatever the clock reads a moment later: a poll may return
+                 * a fraction of a millisecond early (macOS), and read by the
+                 * millisecond clock the head looked idle, so it was closed
+                 * with no 408 (http_server_slow_clients, macOS). */
+                if ((int64_t)wait >= left) c->read_due_hit = 1;
+            }
             n = -1;
             break;
         }
@@ -935,6 +945,10 @@ static int conn_recv_due(HttpConn* c, void* buf, int len) {
         return -1;
     }
     int wait = conn_due_wait_ms(c, left);
+    /* The wait ends at the deadline, not at the per-read timeout before it:
+     * a timeout of it is the deadline passing (conn_ssl_read_due says why
+     * the clock alone does not settle that). */
+    int wait_is_due = (int64_t)wait >= left;
     int n;
     if (c->pure_tls) {
         /* The pure server reads a record in as many reads as it takes, each
@@ -956,6 +970,7 @@ static int conn_recv_due(HttpConn* c, void* buf, int len) {
             n = pt_server_recv(c->pure_tls, buf, len);
             pt_server_set_read_budget(c->pure_tls, 0, 0);
         }
+        if (n < 0 && wait_is_due && conn_recv_timed_out()) c->read_due_hit = 1;
     }
 #ifdef AETHER_HAS_OPENSSL
     else if (c->ssl) {
@@ -970,15 +985,18 @@ static int conn_recv_due(HttpConn* c, void* buf, int len) {
          * to the deadline bounds it. */
         conn_set_recv_timeout(c, wait);
         n = (int)recv(c->fd, buf, len, 0);
+        if (n < 0 && wait_is_due && conn_recv_timed_out()) c->read_due_hit = 1;
     }
-    if (n < 0 && conn_now_ms() >= c->read_due_ms) {
+    /* Each branch set read_due_hit where its own wait at the deadline ran
+     * out (errno read right after that read, not here, where a TLS error
+     * may have left an older EAGAIN); past the deadline by the clock
+     * counts too. */
+    if (n < 0 && (c->read_due_hit || conn_now_ms() >= c->read_due_ms)) {
         c->read_due_hit = 1;
         conn_set_timeout_error();
     }
     return n;
 }
-
-static int conn_recv_timed_out(void);
 
 /* Start the body budget of the request whose head was just read (#3737),
  * from the server's limits. */
