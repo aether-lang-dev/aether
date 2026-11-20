@@ -301,30 +301,35 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
         _got=$(LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$TMP/grants" \
                TARGET="$2" LISTEN="$_listen" "$TMP/dial" 2>&1) || _rc=$?
         if [ "$_got" != "$3" ]; then
-            # Say how the dial ended, and run it once more with the sandbox's
-            # log on, so a failure names its cause instead of an empty string.
-            # (set -e is on: the rerun's own failure must not end the script.)
-            # The same run again, then with the sandbox's log on, each under a
-            # sanitizer's own fault report with its stack (the sweep turns
-            # handle_segv off), output kept whole between markers.
-            for _log in none stderr; do
+            # Say how the dial ended, and run it again four ways, one thing
+            # changed at a time, to name what the failure depends on: stdout
+            # a pipe (as above) or a file, and the sanitizer's own fault
+            # report on (with its stack, on stderr) or as the sweep set it.
+            # (set -e is on: a rerun's own failure must not end the script.)
+            _san="handle_segv=1:log_path=stderr"
+            for _how in pipe:sweep pipe:report file:sweep file:report; do
+                _out="${_how%%:*}"; _opts="${_how##*:}"
+                _t="$TSAN_OPTIONS"; _a="$ASAN_OPTIONS"
+                if [ "$_opts" = report ]; then
+                    _t="${TSAN_OPTIONS:+$TSAN_OPTIONS:}$_san"; _a="${ASAN_OPTIONS:+$ASAN_OPTIONS:}$_san"
+                fi
                 _rc2=0
-                TSAN_OPTIONS="${TSAN_OPTIONS:+$TSAN_OPTIONS:}handle_segv=1:log_path=stderr" \
-                ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}handle_segv=1:log_path=stderr" \
-                LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG="$_log" AETHER_SANDBOX_GRANTS="$TMP/grants" \
-                    TARGET="$2" LISTEN="$_listen" "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
-                printf '    dial exited %s; again with AETHER_SANDBOX_LOG=%s: exit %s, %s bytes of output\n' \
-                    "$_rc" "$_log" "$_rc2" "$(wc -c < "$TMP/dial.again" | tr -d ' ')"
+                if [ "$_out" = pipe ]; then
+                    # The dial's own status, out of the pipeline through a file.
+                    { TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none \
+                        AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$2" LISTEN="$_listen" \
+                        "$TMP/dial" 2>&1; echo "$?" >"$TMP/dial.rc"; } | cat >"$TMP/dial.again" || :
+                    _rc2=$(cat "$TMP/dial.rc" 2>/dev/null)
+                else
+                    TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none \
+                        AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$2" LISTEN="$_listen" \
+                        "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
+                fi
+                printf '    first dial exited %s; again (stdout a %s, sanitizer options %s): exit %s\n' \
+                    "$_rc" "$_out" "$_opts" "${_rc2:-?}"
                 echo "      ---- output ----"
                 sed 's/^/      | /' "$TMP/dial.again" | head -80
                 echo "      ---- end ----"
-                # A crash (a signal: exit above 128) gets a backtrace where gdb is.
-                if [ "$_rc2" -gt 128 ] && command -v gdb >/dev/null 2>&1; then
-                    gdb -q -batch -ex run -ex bt \
-                        --args env LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG="$_log" \
-                        AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$2" LISTEN="$_listen" \
-                        "$TMP/dial" 2>&1 | grep -E '^#|signal|Program' | head -40 | sed 's/^/      gdb: /' || :
-                fi
             done
             fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
         fi
