@@ -28,6 +28,7 @@
 #include "analysis/derive.h"
 #include "codegen/optimizer.h"
 #include "codegen/codegen.h"
+#include "codegen/codegen_layout.h"
 #include "aether_defines.h"
 #include "aether_compile_stack.h"
 #include "aether_error.h"
@@ -282,6 +283,20 @@ static bool emit_inspect_mode = false;
 // `ns.x` reaches the same declaration, one `LINE:COLUMN:ns_x:x` line each,
 // then exit. No codegen. Drives `ae fmt --short-names` (#2976).
 static bool emit_short_names_mode = false;
+// --emit=layout (#3775): the size, alignment, offsets and padding of every
+// struct, message and actor the file declares, with the tighter field order
+// and whether `ae pad --fix` may move them, to stdout. It runs after codegen,
+// because the actor state widened to pointers and the functions an
+// --emit=lib build exports are codegen's decisions; the generated C goes to
+// the output path as usual (the null device when none is given), which is
+// what `ae pad --verify` compiles the --layout-asserts output against.
+// --json, --layout-plan and --layout-asserts pick the form, --ptr=4|8 and
+// --target=<triple> the table. Drives `ae pad`.
+static bool emit_layout_mode = false;
+static LayoutReportFormat layout_format = LAYOUT_REPORT_TEXT;
+static bool layout_format_set = false;
+static LayoutTarget layout_target;
+static const char* layout_target_name = NULL;
 // --emit=effects: derived per-function effect/purity analysis as JSON to
 // stdout, then exit. No codegen. Peer of --emit=ast / inspect. Whole-program
 // transitive capability reachability (fs/net/os) + purity per function,
@@ -2108,6 +2123,16 @@ int compile_source(const char* input_path, const char* output_path) {
         return 0;
     }
 
+    /* --emit=layout: the report reads the generator's decisions, so it is
+     * written here, after the C, from the same generator. Its output stream
+     * is closed by now; the report writes only to stdout. */
+    if (emit_layout_mode) {
+        codegen->output = NULL;
+        codegen_layout_report(codegen, program, input_path, &layout_target,
+                              layout_target_name, layout_format, stdout);
+        fflush(stdout);
+    }
+
     if (verbose_mode) {
         printf("Code generation successful\n");
         // Print all optimization stats here — series/linear loop collapse happens during codegen,
@@ -2435,6 +2460,12 @@ void print_help(const char* program_name) {
     printf("                                   Filter set: import_statement, extern_function, function_call.\n");
     printf("                                   Used by aeb's supply-chain veto. Compiler holds no policy.\n");
     printf("  --emit=short-names               Print the calls written `ns.ns_x(...)` that `ns.x` reaches the same, as LINE:COLUMN:ns_x:x, and exit (drives `ae fmt --short-names`).\n");
+    printf("  --emit=layout                    Print the size, offsets and padding of each struct, message and actor, the\n");
+    printf("                                   tighter field order and whether it may be rewritten (drives `ae pad`).\n");
+    printf("                                   The C still goes to the output path (the null device when omitted).\n");
+    printf("    --json | --layout-plan | --layout-asserts   The report as JSON, as `ae pad --fix` lines, or as C\n");
+    printf("                                   _Static_asserts of every number (`ae pad --verify`).\n");
+    printf("    --ptr=4|8, --target=<triple>   The layout table: 64-bit by default, --ptr=4 for i386 SysV.\n");
     printf("  --help, -h                       Show this help message\n");
     printf("\n");
     printf("Examples:\n");
@@ -2629,6 +2660,45 @@ static int aetherc_main(int argc, char *argv[]) {
         } else if (strcmp(argv[arg_offset], "--audit-mem") == 0) {
             audit_mem_mode = true;
             arg_offset++;
+        } else if (strcmp(argv[arg_offset], "--json") == 0 ||
+                   strcmp(argv[arg_offset], "--layout-plan") == 0 ||
+                   strcmp(argv[arg_offset], "--layout-asserts") == 0) {
+            // The form of the --emit=layout report (#3775).
+            const char* a = argv[arg_offset];
+            layout_format = !strcmp(a, "--json") ? LAYOUT_REPORT_JSON
+                          : !strcmp(a, "--layout-plan") ? LAYOUT_REPORT_PLAN
+                                                        : LAYOUT_REPORT_ASSERTS;
+            layout_format_set = true;
+            arg_offset++;
+        } else if (strncmp(argv[arg_offset], "--ptr=", 6) == 0 ||
+                   strncmp(argv[arg_offset], "--target=", 9) == 0) {
+            // The layout table --emit=layout reports with (#3775). Only the
+            // layout report reads it: aetherc's C is the same for every
+            // target, which the C compiler then places.
+            const char* a = argv[arg_offset];
+            if (a[2] == 'p') {
+                if (strcmp(a + 6, "8") == 0) {
+                    layout_target_default(&layout_target);
+                    layout_target_name = "64-bit";
+                } else if (strcmp(a + 6, "4") == 0) {
+                    layout_target_ptr4(&layout_target);
+                    layout_target_name = "32-bit (i386 SysV)";
+                } else {
+                    fprintf(stderr, "Error: --ptr= takes 4 or 8 (got '%s')\n", a + 6);
+                    return 1;
+                }
+            } else if (!layout_target_for_triple(a + 9, &layout_target)) {
+                fprintf(stderr, "Error: --target=%s: no layout table for that target. Known: "
+                                "x86_64-linux, x86_64-windows, x86_64-macos, x86_64-freebsd, "
+                                "aarch64-linux, aarch64-macos, aarch64-windows, aarch64-freebsd, "
+                                "riscv64-linux, loongarch64-linux, i386-linux, i686-linux, "
+                                "i386-windows, i686-windows, arm-linux-gnueabihf, armv7-linux, "
+                                "wasm32-wasi (a zig ABI suffix may follow)\n", a + 9);
+                return 1;
+            } else {
+                layout_target_name = a + 9;
+            }
+            arg_offset++;
         } else if (strcmp(argv[arg_offset], "--emit-header") == 0) {
             // Check for optional explicit path argument (must end in .h)
             if (arg_offset + 1 < argc && argv[arg_offset + 1][0] != '-') {
@@ -2710,8 +2780,11 @@ static int aetherc_main(int argc, char *argv[]) {
                 emit_short_names_mode = true;
             } else if (strcmp(val, "aea") == 0) {
                 emit_aea_mode = true;
+            } else if (strcmp(val, "layout") == 0) {
+                // --emit=layout: the layout report (#3775), after codegen.
+                emit_layout_mode = true;
             } else {
-                fprintf(stderr, "Error: --emit must be one of: exe, lib, both, ast, inspect, effects, aea, short-names (got '%s')\n", val);
+                fprintf(stderr, "Error: --emit must be one of: exe, lib, both, ast, inspect, effects, aea, short-names, layout (got '%s')\n", val);
                 return 1;
             }
             arg_offset++;
@@ -2816,6 +2889,16 @@ static int aetherc_main(int argc, char *argv[]) {
         }
     }
     
+    if ((layout_format_set || layout_target_name) && !emit_layout_mode) {
+        fprintf(stderr, "Error: --json, --layout-plan, --layout-asserts, --ptr= and --target= "
+                        "go with --emit=layout\n");
+        return 1;
+    }
+    if (emit_layout_mode && !layout_target_name) {
+        layout_target_default(&layout_target);
+        layout_target_name = "64-bit";
+    }
+
     if (argc - arg_offset < 1) {
         print_help(argv[0]);
         return 1;
@@ -2958,6 +3041,21 @@ static int aetherc_main(int argc, char *argv[]) {
     // --emit=short-names (#2976): input-only too.
     if (emit_short_names_mode) {
         if (!compile_source(argv[arg_offset], "/dev/null")) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // --emit=layout (#3775): the report goes to stdout and the C to the
+    // output path, or to the null device when none is given.
+    if (emit_layout_mode) {
+#ifdef _WIN32
+        const char* null_out = "NUL";
+#else
+        const char* null_out = "/dev/null";
+#endif
+        const char* out = argc - arg_offset >= 2 ? argv[arg_offset + 1] : null_out;
+        if (!compile_source(argv[arg_offset], out)) {
             return 1;
         }
         return 0;

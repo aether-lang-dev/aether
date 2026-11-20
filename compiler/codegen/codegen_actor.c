@@ -354,6 +354,18 @@ static int state_decl_is_atomic(CodeGenerator* gen, ASTNode* actor, ASTNode* dec
     return 0;
 }
 
+/* #3775: for the layout report (codegen_layout.c), the two facts of the
+ * actor struct generate_actor_definition decides beyond each field's type:
+ * a state field it widens to `void*`, and the inline payload copy it puts
+ * last when the actor has receive arms. */
+int actor_state_decl_is_void_ptr(CodeGenerator* gen, ASTNode* actor, ASTNode* decl) {
+    return gen && actor && decl && decl->value && state_field_is_ptr(gen, actor, decl->value);
+}
+
+int actor_has_step_inline(ASTNode* actor) {
+    return actor && actor_has_receive_arms(actor);
+}
+
 int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
                                 const char* field) {
     if (!gen || !gen->program || !actor_name || !field) return 0;

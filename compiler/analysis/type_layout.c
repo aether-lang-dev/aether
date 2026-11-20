@@ -19,6 +19,52 @@ void layout_target_default(LayoutTarget* t) {
     t->ldbl_align = 16;
 }
 
+void layout_target_ptr4(LayoutTarget* t) {
+    t->ptr_size = 4;
+    t->i64_align = 4;
+    t->ldbl_size = 12;
+    t->ldbl_align = 4;
+}
+
+/* Each row is what the C compiler for that target gives: i386 SysV keeps
+ * int64_t and double 4-aligned inside a struct, the Microsoft x86 ABI and
+ * ARM EABI align them to 8; long double is 80-bit x87 padded to 16 on
+ * x86_64, binary128 on aarch64 Linux and FreeBSD, a plain double on Apple
+ * aarch64 and ARM EABI. The prefix is matched, so a zig triple with an
+ * ABI or OS version suffix still finds its row. */
+int layout_target_for_triple(const char* triple, LayoutTarget* t) {
+    static const struct {
+        const char* prefix;
+        int ptr, i64, ldbl, ldbl_align;
+    } rows[] = {
+        { "x86_64-linux", 8, 8, 16, 16 },   { "x86_64-windows", 8, 8, 16, 16 },
+        { "x86_64-macos", 8, 8, 16, 16 },   { "x86_64-freebsd", 8, 8, 16, 16 },
+        { "amd64-linux", 8, 8, 16, 16 },    { "amd64-windows", 8, 8, 16, 16 },
+        { "aarch64-linux", 8, 8, 16, 16 },  { "arm64-linux", 8, 8, 16, 16 },
+        { "aarch64-freebsd", 8, 8, 16, 16 },
+        { "aarch64-macos", 8, 8, 8, 8 },    { "arm64-macos", 8, 8, 8, 8 },
+        { "aarch64-windows", 8, 8, 8, 8 },  { "arm64-windows", 8, 8, 8, 8 },
+        { "riscv64-linux", 8, 8, 16, 16 },  { "loongarch64-linux", 8, 8, 16, 16 },
+        { "i386-linux", 4, 4, 12, 4 },      { "i686-linux", 4, 4, 12, 4 },
+        { "i386-windows", 4, 8, 12, 4 },    { "i686-windows", 4, 8, 12, 4 },
+        { "arm-linux-gnueabihf", 4, 8, 8, 8 }, { "armv7-linux", 4, 8, 8, 8 },
+        { "wasm32-wasi", 4, 8, 16, 16 },    { "wasm32-freestanding", 4, 8, 16, 16 },
+    };
+    if (!triple) return 0;
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        size_t n = strlen(rows[i].prefix);
+        if (strncmp(triple, rows[i].prefix, n) == 0 &&
+            (triple[n] == '\0' || triple[n] == '-' || triple[n] == '.')) {
+            t->ptr_size = rows[i].ptr;
+            t->i64_align = rows[i].i64;
+            t->ldbl_size = rows[i].ldbl;
+            t->ldbl_align = rows[i].ldbl_align;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static long long align_up(long long n, int a) {
     return a > 1 ? (n + a - 1) / a * a : n;
 }
@@ -73,14 +119,18 @@ static int scalar(TypeLayout* out, int size, const LayoutTarget* tgt) {
     return set(out, size, size == 8 ? tgt->i64_align : size);
 }
 
-static ASTNode* struct_def_named(ASTNode* program, const char* name) {
+static ASTNode* def_named(ASTNode* program, ASTNodeType kind, const char* name) {
     if (!program || !name) return NULL;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_STRUCT_DEFINITION && c->value && strcmp(c->value, name) == 0)
+        if (c && c->type == kind && c->value && strcmp(c->value, name) == 0)
             return c;
     }
     return NULL;
+}
+
+static ASTNode* struct_def_named(ASTNode* program, const char* name) {
+    return def_named(program, AST_STRUCT_DEFINITION, name);
 }
 
 static int members_layout(ASTNode* parent, int is_extern, int is_union, int packed,
@@ -152,6 +202,18 @@ int struct_layout_of(ASTNode* sd, ASTNode* program, const LayoutTarget* tgt,
     return struct_layout_at(sd, program, tgt, out, offsets, 0);
 }
 
+int struct_member_layout_of(ASTNode* sd, int index, ASTNode* program, const LayoutTarget* tgt,
+                            TypeLayout* out) {
+    if (!sd || sd->type != AST_STRUCT_DEFINITION || index < 0 || index >= sd->child_count)
+        return 0;
+    ASTNode* f = sd->children[index];
+    if (!f || (f->type != AST_STRUCT_FIELD && f->type != AST_STRUCT_FIELD_UNION &&
+               f->type != AST_STRUCT_FIELD_NESTED)) return 0;
+    const char* ann = sd->annotation;
+    int is_extern = ann && (!strcmp(ann, "extern") || !strcmp(ann, "extern_packed"));
+    return field_layout(f, is_extern, index == sd->child_count - 1, program, tgt, out, 0);
+}
+
 static int layout_of(const Type* t, ASTNode* program, const LayoutTarget* tgt,
                      TypeLayout* out, int depth) {
     if (!t || depth > LAYOUT_MAX_DEPTH) return 0;
@@ -218,7 +280,33 @@ static int layout_of(const Type* t, ASTNode* program, const LayoutTarget* tgt,
         case TYPE_STRUCT:
             return struct_layout_at(struct_def_named(program, t->struct_name), program, tgt,
                                     out, NULL, depth + 1);
-        default:                                 /* sums, messages, unknown: not modelled */
+        case TYPE_SUM: {
+            /* emit_sum_typedef (codegen.c): `struct { Name_tag tag; union {
+             * V1 V1_; V2 V2_; ... } data; }`, the tag a C enum (an int on
+             * every target aetherc builds for), the union as large as its
+             * largest variant and as aligned as its most aligned one. */
+            ASTNode* def = def_named(program, AST_SUM_TYPE_DEF, t->struct_name);
+            if (!def) return 0;
+            TypeLayout tag = { 4, 4 }, u = { 0, 1 };
+            int variants = 0;
+            for (int i = 0; i < def->child_count; i++) {
+                ASTNode* v = def->children[i];
+                if (!v || v->type != AST_IDENTIFIER || !v->value) continue;
+                TypeLayout vl;
+                if (!struct_layout_at(struct_def_named(program, v->value), program, tgt, &vl,
+                                      NULL, depth + 1)) return 0;
+                if (vl.size > u.size) u.size = vl.size;
+                if (vl.align > u.align) u.align = vl.align;
+                variants++;
+            }
+            if (variants == 0) return 0;
+            u.size = align_up(u.size, u.align);
+            StructAcc a = { 0, 1, 0 };
+            acc_add(&a, &tag); acc_add(&a, &u);
+            acc_close(&a, out);
+            return 1;
+        }
+        default:                                 /* messages, unknown: not modelled */
             return 0;
     }
 }

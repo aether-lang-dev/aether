@@ -5,11 +5,10 @@
  * (#3773, #3775). aetherc names C types and the C compiler places them;
  * this is the one table of what that placement is, per target, for the
  * types codegen emits: the primitive C types (codegen.c get_c_type), slices,
- * closures, optionals, tuples and Aether structs, recursively. Message field
- * order (codegen.c message_struct_fields) and `ae pad` read it. A type whose
- * layout comes from somewhere this does not model (a @c_import struct, an
- * opaque type, a bitfield, a sum's payload) is reported as unknown, never
- * guessed. */
+ * closures, optionals, tuples, sums and Aether structs, recursively. Message
+ * field order (codegen.c message_struct_fields) and `ae pad` read it. A type
+ * whose layout comes from somewhere this does not model (a @c_import struct,
+ * an opaque type, a bitfield) is reported as unknown, never guessed. */
 
 #include "../ast.h"
 
@@ -29,6 +28,14 @@ typedef struct {
  * Linux): what aetherc assumes when no target is named. */
 void layout_target_default(LayoutTarget* t);
 
+/* A 32-bit target with i386 SysV placement: 4-byte pointers, int64_t and
+ * double 4-aligned inside a struct, a 12-byte long double (`ae pad --ptr=4`). */
+void layout_target_ptr4(LayoutTarget* t);
+
+/* The table for a target triple (`x86_64-linux-gnu`, `i386-linux`,
+ * `arm-linux-gnueabihf`, ...): 1, or 0 for a triple it has no row for. */
+int layout_target_for_triple(const char* triple, LayoutTarget* t);
+
 /* 1 and the layout in *out when it is known, 0 when it is not. `program`
  * resolves struct names; it may be NULL, and then a struct is unknown. */
 int type_layout_of(const Type* t, ASTNode* program, const LayoutTarget* tgt, TypeLayout* out);
@@ -41,5 +48,11 @@ int type_layout_of(const Type* t, ASTNode* program, const LayoutTarget* tgt, Typ
  * is opaque or imported from a C header. */
 int struct_layout_of(ASTNode* struct_def, ASTNode* program, const LayoutTarget* tgt,
                      TypeLayout* out, long long* offsets);
+
+/* The size and alignment of child `index` of a struct definition as
+ * struct_layout_of places it (a union or nested struct member included). 0
+ * when the child is not a field or its layout is unknown. */
+int struct_member_layout_of(ASTNode* struct_def, int index, ASTNode* program,
+                            const LayoutTarget* tgt, TypeLayout* out);
 
 #endif

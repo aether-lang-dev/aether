@@ -423,6 +423,7 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 - [Closures and Environment Lifetimes](docs/closures-and-lifetimes.md) - Where a closure's environment is held and released
 - [Named Arguments and select()](docs/named-args-and-select.md) - `f(b: 1, a: 2)`, default parameters, platform selection
 - [Formatter](docs/formatter.md) - `ae fmt`, `--check`, `--short-names`
+- [Struct layout](docs/ae-pad.md) - `ae pad`, the offsets, holes and padding of structs, messages and actor state; `--min-waste`, `--verify`, `--fix`
 - [Structured Concurrency](docs/structured-concurrency.md) - Proposal: supervision trees + capability-scoped spawn/send (not yet shipped)
 - [Runtime Optimizations](docs/runtime-optimizations.md) - Performance techniques
 - [Message Tracing](docs/message-tracing.md) - `ae build --trace`, per-message delivery trace as JSONL; compiled out entirely by default

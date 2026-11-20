@@ -1,0 +1,98 @@
+layout: pad_fixture.ae  target 64-bit (pointers 8, int64 align 8, long double 16/16)
+
+struct Rec  pad_fixture.ae:7  size 40  align 8  holes 14 (2 x 7)  tail 4  lines 1 (64-aligned) / 2 (16-aligned)
+     0  a  byte  1
+     1  (hole 7)
+     8  b  long  8
+    16  c  byte  1
+    17  (hole 7)
+    24  d  long  8
+    32  e  int   4
+    36  (tail 4)
+  suggested: b, d, e, a, c  -> size 24 (-16, -40%)  reorderable: yes
+
+struct Inner  pad_fixture.ae:15  size 16  align 8  holes 7 (1 x 7)  tail 0  lines 1 (64-aligned) / 1 (16-aligned)
+     0  flag   byte   1
+     1  (hole 7)
+     8  value  float  8
+  suggested: keep this order (none is smaller)  reorderable: yes
+
+struct Outer  pad_fixture.ae:20  size 32  align 8  holes 7 (1 x 7)  tail 4  lines 1 (64-aligned) / 2 (16-aligned)
+     0  tag    byte   1
+     1  (hole 7)
+     8  inner  Inner  16
+    24  count  int    4
+    28  (tail 4)
+  suggested: inner, count, tag  -> size 24 (-8, -25%)  reorderable: yes
+
+struct Arr  pad_fixture.ae:27  size 32  align 8  holes 7 (1 x 7)  tail 7  lines 1 (64-aligned) / 2 (16-aligned)
+     0  k     byte     1
+     1  (hole 7)
+     8  vals  long[2]  16
+    24  m     byte     1
+    25  (tail 7)
+  suggested: vals, k, m  -> size 24 (-8, -25%)  reorderable: yes
+
+struct Maybe  pad_fixture.ae:33  size 40  align 8  holes 10 (7 + 3)  tail 4  lines 1 (64-aligned) / 2 (16-aligned)
+     0  ok  byte   1
+     1  (hole 7)
+     8  v   long?  16
+    24  z   byte   1
+    25  (hole 3)
+    28  w   int?   8
+    36  (tail 4)
+  suggested: v, w, ok, z  -> size 32 (-8, -20%)  reorderable: yes
+
+struct Tight  pad_fixture.ae:36  size 16  align 8  holes 0  tail 3  lines 1 (64-aligned) / 1 (16-aligned)
+     0  x  long  8
+     8  y  int   4
+    12  z  byte  1
+    13  (tail 3)
+  suggested: keep this order (none is smaller)  reorderable: yes
+
+struct Circle  pad_fixture.ae:42  size 8  align 8  holes 0  tail 0  lines 1 (64-aligned) / 1 (16-aligned)
+     0  r  float  8
+  suggested: keep this order (none is smaller)  reorderable: yes
+
+struct Square  pad_fixture.ae:43  size 4  align 4  holes 0  tail 0  lines 1 (64-aligned) / 1 (16-aligned)
+     0  side  int  4
+  suggested: keep this order (none is smaller)  reorderable: yes
+
+struct Holder  pad_fixture.ae:46  size 24  align 8  holes 7 (1 x 7)  tail 0  lines 1 (64-aligned) / 2 (16-aligned)
+     0  pad    byte   1
+     1  (hole 7)
+     8  shape  Shape  16
+  suggested: keep this order (none is smaller)  reorderable: yes
+
+struct CPair  pad_fixture.ae:51  size 16  align 8  holes 7 (1 x 7)  tail 0  lines 1 (64-aligned) / 1 (16-aligned)
+     0  a  byte  1
+     1  (hole 7)
+     8  b  long  8
+  suggested: keep this order (none is smaller)  reorderable: no (extern struct: the C side declares this order)
+
+struct Packed  pad_fixture.ae:56  size 11  align 1  holes 0  tail 0  lines 1 (64-aligned) / 1 (16-aligned)
+     0  a  byte    1
+     1  b  long    8
+     9  c  uint16  2
+  suggested: keep this order (none is smaller)  reorderable: no (@packed: a packed C overlay, the C side declares this order)
+
+message Sample  pad_fixture.ae:62  size 24  align 8  holes 3 (1 x 3)  tail 0  lines 1 (64-aligned) / 2 (16-aligned)
+     0  _message_id  int   4
+     4  b            byte  1
+     5  (hole 3)
+     8  a            long  8
+    16  c            long  8
+  suggested: keep this order (none is smaller)  reorderable: no (a message: codegen orders its fields by alignment (#3773), the source is not rewritten)
+
+actor Counter  pad_fixture.ae:68  size 1792  align 64  holes 8 (2 x 4)  tail 16  lines 28 (64-aligned)
+     0  _aether_base         ActorBase        1720
+  1720  hits                 int              4
+  1724  (hole 4)
+  1728  last                 long             8
+  1736  seen                 bool             4
+  1740  (hole 4)
+  1744  _aether_step_inline  AetherMsgInline  32
+  1776  (tail 16)
+  suggested: keep this order (none is smaller)  reorderable: no (actor state: codegen lays it out after ActorBase in declaration order, the source is not rewritten)
+
+summary: 11 structs, 1 message, 1 actor; holes 70, tail 38; reorderable saving 40 (largest 16 in Rec); all saving 40
