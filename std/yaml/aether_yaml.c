@@ -285,10 +285,71 @@ const char* yaml_emit_node_raw(void* node) {
     return store_emit_string(str);
 }
 
-/* Whether `text` parses as yaml_parse_raw parses it: the same flags, no
- * diagnostics printed, and a stream with no document in it read as the empty
- * document it is. When it does not, what the parser said goes to `why`. */
-static int yaml_text_reads_back(const char* text, char* why, size_t why_cap) {
+/* Whether two nodes are the same tree, as a reader of std.yaml sees it: the
+ * same kind, a scalar's bytes (its length too: a key may hold NUL), a
+ * collection's size and each item in order, a mapping's keys and values.
+ * Two absent nodes (an empty value) are the same. Iterative, with its own
+ * stack, so a deeply nested document cannot run the C stack out. */
+static int yaml_same_tree(struct fy_node* a, struct fy_node* b) {
+    size_t cap = 64, n = 0;
+    struct fy_node** st = (struct fy_node**)malloc(cap * 2 * sizeof(*st));
+    if (!st) return 0;
+    st[n * 2] = a; st[n * 2 + 1] = b; n++;
+    int same = 1;
+    while (same && n > 0) {
+        n--;
+        struct fy_node* x = st[n * 2];
+        struct fy_node* y = st[n * 2 + 1];
+        if (!x || !y) { same = x == y; continue; }
+        enum fy_node_type t = fy_node_get_type(x);
+        if (t != fy_node_get_type(y)) { same = 0; break; }
+        int items = 0;
+        if (t == FYNT_SCALAR) {
+            size_t xl = 0, yl = 0;
+            const char* xs = fy_node_get_scalar(x, &xl);
+            const char* ys = fy_node_get_scalar(y, &yl);
+            same = xl == yl && (xl == 0 || (xs && ys && memcmp(xs, ys, xl) == 0));
+            continue;
+        } else if (t == FYNT_SEQUENCE) {
+            items = fy_node_sequence_item_count(x);
+            if (items != fy_node_sequence_item_count(y)) { same = 0; break; }
+        } else {
+            items = fy_node_mapping_item_count(x);
+            if (items != fy_node_mapping_item_count(y)) { same = 0; break; }
+        }
+        size_t need = n + (size_t)items * 2;
+        if (need > cap) {
+            while (cap < need) cap *= 2;
+            struct fy_node** grown = (struct fy_node**)realloc(st, cap * 2 * sizeof(*st));
+            if (!grown) { same = 0; break; }
+            st = grown;
+        }
+        for (int i = 0; i < items; i++) {
+            if (t == FYNT_SEQUENCE) {
+                st[n * 2] = fy_node_sequence_get_by_index(x, i);
+                st[n * 2 + 1] = fy_node_sequence_get_by_index(y, i);
+                n++;
+            } else {
+                struct fy_node_pair* px = fy_node_mapping_get_by_index(x, i);
+                struct fy_node_pair* py = fy_node_mapping_get_by_index(y, i);
+                st[n * 2] = px ? fy_node_pair_key(px) : NULL;
+                st[n * 2 + 1] = py ? fy_node_pair_key(py) : NULL;
+                n++;
+                st[n * 2] = px ? fy_node_pair_value(px) : NULL;
+                st[n * 2 + 1] = py ? fy_node_pair_value(py) : NULL;
+                n++;
+            }
+        }
+    }
+    free(st);
+    return same;
+}
+
+/* Whether `text` reads back as `root`: it parses as yaml_parse_raw parses it
+ * (the same flags, no diagnostics printed; a stream with no document in it is
+ * the empty document it is) to the same tree. When it does not, why goes to
+ * `why`. */
+static int yaml_text_reads_back(const char* text, struct fy_node* root, char* why, size_t why_cap) {
     if (why_cap) why[0] = '\0';
     struct fy_parse_cfg cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -304,13 +365,21 @@ static int yaml_text_reads_back(const char* text, char* why, size_t why_cap) {
     struct fy_document* d = fy_document_build_from_string(&cfg, text, strlen(text));
     int ok = d != NULL;
     if (d) {
+        if (!yaml_same_tree(root, fy_document_root(d))) {
+            ok = 0;
+            if (why_cap) snprintf(why, why_cap, "it reads back as another document");
+        }
         fy_document_destroy(d);
     } else if (diag) {
         void* prev = NULL;
         struct fy_diag_error* err = fy_diag_errors_iterate(diag, &prev);
-        ok = err == NULL;
+        /* No document and no error is an empty stream: the same only as a
+         * document with no root. */
+        ok = err == NULL && root == NULL;
         if (err && why_cap)
             snprintf(why, why_cap, "%s at %d:%d", err->msg ? err->msg : "parse error", err->line, err->column);
+        else if (!ok && why_cap)
+            snprintf(why, why_cap, "it reads back as an empty document");
     }
     if (diag) {
         fy_diag_reset_error(diag);   /* collected errors are not freed by unref */
@@ -344,16 +413,17 @@ const char* yaml_emit_document_raw(void* doc) {
                                             FYECF_DOC_START_MARK_ON);
     }
     char* str = fy_emit_document_to_string(yaml_fyd(doc), flags);
-    /* What this returns reads back, or it is not returned. libfyaml's block
-     * emitter writes some documents in a shape its own parser refuses: an
-     * empty entry of a sequence under a key comes out as `b:` then `- ` at
-     * the key's column ("did not find expected node content"), and no mode
-     * of the emitter writes it otherwise (flow style drops the entry; #3749,
-     * the yaml fuzz target). The vendored copy takes no patches, so such a
-     * document is refused with the reason, rather than handed back as text
-     * that does not parse. */
+    /* What this returns reads back as this document, or it is not returned.
+     * libfyaml's emitter writes some documents in a shape its own parser
+     * refuses or reads as something else: an empty entry of a sequence under
+     * a key comes out as `b:` then `- ` at the key's column ("did not find
+     * expected node content", and flow style drops the entry), and a plain
+     * scalar `?` in a flow sequence comes out unquoted, where it starts a
+     * mapping (#3749, the yaml fuzz target, both). The vendored copy takes
+     * no patches, so such a document is refused with the reason, rather than
+     * handed back as text that does not mean it. */
     char why[200];
-    if (str && !yaml_text_reads_back(str, why, sizeof why)) {
+    if (str && !yaml_text_reads_back(str, root, why, sizeof why)) {
         free(str);
         snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf),
                  "the emitter's text for this document does not parse back (%s), a libfyaml limitation",
