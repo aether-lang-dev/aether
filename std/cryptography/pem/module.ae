@@ -206,7 +206,7 @@ parse_at(text: string, from: int) -> (ptr, string, string) {
     // no key. It was answered as a success with zero bytes, which a caller
     // then read as one (#3749, the x509 fuzz target).
     if der == null || bytes.length(der) == 0 {
-        if der != null { bytes.free(der) }
+        if der != null { bytes.wipe_free(der) }
         return null, "", "pem: the block holds no data"
     }
     return der, begin_label, ""
