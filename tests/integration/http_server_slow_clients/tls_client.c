@@ -6,6 +6,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/bio.h>
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <errno.h>
 
@@ -83,6 +84,16 @@ int slow_tls_record(void* t, const void* buf, int len, unsigned char* out, int c
     SSL_set0_wbio(ssl, mem);          /* gives back the connection's ref */
     int n = SSL_write(ssl, buf, len);
     int got = n > 0 ? BIO_read(mem, out, cap) : -1;
+    if (n <= 0 || got <= 0) {
+        /* Why, so a round that fails here says so in the run log (the
+         * UCRT64 leg fails every TLS round here and nowhere else). */
+        char why[256] = "";
+        unsigned long e = ERR_peek_last_error();
+        if (e) ERR_error_string_n(e, why, sizeof why);
+        fprintf(stderr, "    tls client: no record (SSL_write %d, SSL_get_error %d, BIO_read %d, %s): %s\n",
+                n, n <= 0 ? SSL_get_error(ssl, n) : 0, got, OpenSSL_version(OPENSSL_VERSION),
+                why[0] ? why : "no OpenSSL error");
+    }
     SSL_set0_wbio(ssl, sock);         /* frees mem, takes our ref */
     if (n <= 0) ERR_clear_error();
     return got;
