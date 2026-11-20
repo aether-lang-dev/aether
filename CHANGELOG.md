@@ -14,6 +14,32 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.932.0]
+
+### Fixed
+
+- **`get.sh` gives `cosign` and `gh` the identity regex unchanged on Git Bash
+  and MSYS2.** Those shells rewrite an argument that looks like a path before
+  a native Windows program receives it, which turned the backslashes of
+  `release\.yml` in the certificate-identity regex into slashes, as #3791 found
+  in `scripts/verify-release-asset.sh`. `get.sh` built the same regex and ran
+  the same programs the same way. `gh_release_download` now runs `cosign` and
+  `gh` with the rewriting off and gives them their files as Windows paths. `get.sh`
+  installs no prebuilt on Windows yet, so this is not reached there today. A new
+  test, `test_getsh_native_args.sh`, runs its download check against native
+  stand-ins for the two tools, and the Windows CI job runs it and then the same
+  check on the latest release.
+
+- **A release `ae` links `std.casper` programs on FreeBSD and GhostBSD.** The
+  Casper libraries came from a list the Makefile built by globbing `/lib` of
+  the machine that built `ae`, and the release's FreeBSD `ae` is built on a
+  Linux runner, so its list was empty and a program importing `std.casper`
+  failed to link on `cap_init`, `cap_getaddrinfo` and the rest unless
+  `AETHER_LDFLAGS_EXTRA` named the library files. `ae` now finds `libcasper`
+  and the `cap_pwd`, `cap_sysctl` and `cap_net` (else `cap_dns`) libraries
+  itself when it links: `-l<name>` where the unversioned `.so` exists, else the
+  versioned file, which is all GhostBSD has. `AETHER_CASPER_LIBS` is removed.
+
 ## [0.931.0]
 
 ### Fixed
