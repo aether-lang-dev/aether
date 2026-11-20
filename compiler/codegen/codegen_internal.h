@@ -481,6 +481,8 @@ int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
 /* #3772: the current actor's state field `name`: 32 or 64 when it is
    atomic, read and written relaxed in its handlers; 0 otherwise. */
 int actor_state_atomic_bits(CodeGenerator* gen, const char* name);
+/* #3772: `aether_state_storeN(&self->name, `, for the value and `)`. */
+void emit_state_store_open(CodeGenerator* gen, const char* name);
 /* #3775: whether state `decl` of `actor` is declared `void*`, and whether the
    actor struct ends with `AetherMsgInline _aether_step_inline`. */
 int actor_state_decl_is_void_ptr(CodeGenerator* gen, ASTNode* actor, ASTNode* decl);

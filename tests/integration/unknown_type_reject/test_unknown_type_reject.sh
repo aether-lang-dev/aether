@@ -132,6 +132,23 @@ if grep -q "Type mismatch in state initialization" "$TMP/state_field.log"; then
     fail=1
 fi
 
+cat > "$TMP/state_no_value.ae" <<'AE'
+message Go {}
+
+actor Painter {
+    state d: Shade
+    receive {
+        Go() -> { println("go") }
+    }
+}
+
+main() {
+    p = spawn(Painter())
+    p ! Go {}
+}
+AE
+refused state_no_value "Unknown type 'Shade': the state field 'd'" "declare the struct, enum or sum"
+
 cat > "$TMP/array_param.ae" <<'AE'
 total(xs: Shape[2]) -> int {
     return 2

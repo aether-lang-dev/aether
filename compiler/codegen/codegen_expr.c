@@ -11655,7 +11655,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 break;
             }
             /* #3772: `++` / `--` on an atomic state field, a relaxed load
-             * and store; postfix yields the old value, prefix the new. */
+             * and a release store; postfix yields the old value, prefix the
+             * new. `&` takes the field's address, as before: the field is a
+             * place there, not the value AETHER_STATE_LOAD reads. */
+            if (expr->child_count >= 1 && expr->value && expr->children[0] &&
+                expr->children[0]->type == AST_IDENTIFIER &&
+                !strcmp(expr->value, "&") && actor_state_atomic_bits(gen, expr->children[0]->value)) {
+                fprintf(gen->output, "(&%s->%s)",
+                        gen->state_self_alias ? gen->state_self_alias : "self",
+                        expr->children[0]->value);
+                break;
+            }
             if (expr->child_count >= 1 && expr->value && expr->children[0] &&
                 expr->children[0]->type == AST_IDENTIFIER &&
                 (!strcmp(expr->value, "++") || !strcmp(expr->value, "--"))) {

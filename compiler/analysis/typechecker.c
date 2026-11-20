@@ -8632,6 +8632,12 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                                 child->line, child->column);
             }
             int checked = 0;
+            /* A written type with no value (`state d: florp`): refused as
+             * one with a value is below (#3785). */
+            if (child->node_type && child->node_type->kind != TYPE_UNKNOWN &&
+                (child->child_count == 0 || !child->children[0]))
+                refuse_unknown_type("the state field", child->value, child->node_type,
+                                    actor_table, child->line, child->column);
             if ((!child->node_type || child->node_type->kind == TYPE_UNKNOWN)
                 && child->child_count > 0 && child->children[0]) {
                 ASTNode* init = child->children[0];

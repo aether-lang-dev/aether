@@ -10600,23 +10600,34 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#include \"aether_runtime_types.h\"");
         print_line(gen, "#include \"aether_compiler.h\"");
         print_line(gen, "");
-        /* #3772: an actor's handlers read and write its atomic state
-         * fields relaxed (actor_state_atomic_bits in codegen_actor.c). `++`
+        /* #3772: an actor's handlers read its atomic state fields relaxed
+         * and write them with a release store (actor_state_atomic_bits in
+         * codegen_actor.c), never a seq_cst one, which on x86 was a locked
+         * exchange. Release, not relaxed: a thread outside the actor that
+         * reads a field (`w.done`, an acquire) then sees every write the
+         * handler made before it, as it did when each store was seq_cst. On
+         * x86 a release store is a plain store; on ARM64 it is stlr. `++`
          * and `--` load and store, with no read-modify-write: the actor's
          * step is the field's one writer. The step wraps, as the atomic
-         * increment it replaces did. */
+         * increment it replaces did. The stores are functions, not macros:
+         * a generated value may hold commas and preprocessor lines. */
         print_line(gen, "#define AETHER_STATE_LOAD(f) atomic_load_explicit(&(f), memory_order_relaxed)");
-        print_line(gen, "#define AETHER_STATE_STORE(f, v) atomic_store_explicit(&(f), (v), memory_order_relaxed)");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED void aether_state_store32(atomic_int* f, int v) {");
+        print_line(gen, "    atomic_store_explicit(f, v, memory_order_release);");
+        print_line(gen, "}");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED void aether_state_store64(_Atomic int64_t* f, int64_t v) {");
+        print_line(gen, "    atomic_store_explicit(f, v, memory_order_release);");
+        print_line(gen, "}");
         print_line(gen, "static inline AETHER_MAYBE_UNUSED int aether_state_step32(atomic_int* f, int d, int post) {");
         print_line(gen, "    int o = atomic_load_explicit(f, memory_order_relaxed);");
         print_line(gen, "    int n = (int)((unsigned int)o + (unsigned int)d);");
-        print_line(gen, "    atomic_store_explicit(f, n, memory_order_relaxed);");
+        print_line(gen, "    atomic_store_explicit(f, n, memory_order_release);");
         print_line(gen, "    return post ? o : n;");
         print_line(gen, "}");
         print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t aether_state_step64(_Atomic int64_t* f, int64_t d, int post) {");
         print_line(gen, "    int64_t o = atomic_load_explicit(f, memory_order_relaxed);");
         print_line(gen, "    int64_t n = (int64_t)((uint64_t)o + (uint64_t)d);");
-        print_line(gen, "    atomic_store_explicit(f, n, memory_order_relaxed);");
+        print_line(gen, "    atomic_store_explicit(f, n, memory_order_release);");
         print_line(gen, "    return post ? o : n;");
         print_line(gen, "}");
         print_line(gen, "");

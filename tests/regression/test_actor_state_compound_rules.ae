@@ -1,0 +1,79 @@
+// Regression (#3772 review): `x op= y` on an int, long or Duration state
+// field follows every rule `op=` has on a local, and `&x` is the field's
+// address.
+//
+// The fields are atomic, and their handlers read them relaxed and store
+// them with a release. The first form of `op=` stored `x op y` built as a
+// plain binary expression of the field's type, which skipped the rules the
+// statement has for a float right side: `n %= 2.5` did not compile (C has no
+// `%` on a double) and `n *= 2.5` past the int range was a plain, undefined
+// conversion where a local saturates (#3524). And `&count` took the address
+// of the relaxed load, which C refused. Each result here is compared with
+// the same statement on a local.
+
+extern exit(code: int)
+
+message Go {}
+message Done {}
+
+actor A {
+    state rem: int = 17
+    state big: int = 2000000000
+    state neg: int = -2000000000
+    state div: int = 7
+    state shl: int = 1
+    state wide: long = 4000000000000000000
+    state frac: int = 10
+    state addr_ok = 0
+    receive {
+        Go() -> {
+            rem %= 2.5
+            big *= 2.5
+            neg *= 2.5
+            div /= 2
+            shl <<= 4
+            wide *= 3.5
+            frac -= 0.75
+            p = &rem
+            if p != null { addr_ok = 1 }
+        }
+        Done() -> {}
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    int rem = 17
+    rem %= 2.5
+    int big = 2000000000
+    big *= 2.5
+    int neg = -2000000000
+    neg *= 2.5
+    int div = 7
+    div /= 2
+    int shl = 1
+    shl <<= 4
+    long wide = 4000000000000000000
+    wide *= 3.5
+    int frac = 10
+    frac -= 0.75
+
+    a = spawn(A())
+    a ! Go {}
+    wait_for_idle()
+    check(a.rem == rem, "rem %= 2.5: state ${a.rem}, local ${rem}")
+    check(a.big == big && big == 2147483647, "big *= 2.5 saturates: state ${a.big}, local ${big}")
+    check(a.neg == neg && neg == -2147483648, "neg *= 2.5 saturates: state ${a.neg}, local ${neg}")
+    check(a.div == div, "div /= 2: state ${a.div}, local ${div}")
+    check(a.shl == shl, "shl <<= 4: state ${a.shl}, local ${shl}")
+    check(a.wide == wide, "wide *= 3.5: state ${a.wide}, local ${wide}")
+    check(a.frac == frac, "frac -= 0.75: state ${a.frac}, local ${frac}")
+    check(a.addr_ok == 1, "&rem is the field's address")
+    println("PASS: state op= follows the rules of a local's")
+}

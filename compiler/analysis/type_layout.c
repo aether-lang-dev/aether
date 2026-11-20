@@ -168,7 +168,11 @@ static int members_layout(ASTNode* parent, int is_extern, int is_union, int pack
         if (!f || (f->type != AST_STRUCT_FIELD && f->type != AST_STRUCT_FIELD_UNION &&
                    f->type != AST_STRUCT_FIELD_NESTED)) continue;
         TypeLayout m;
-        if (!field_layout(f, is_extern, i == parent->child_count - 1, program, tgt, &m, depth))
+        /* Only a struct's own last member can be a flexible array: inside a
+         * nested union or struct, codegen emits a trailing `T[]` as `T*`
+         * (generate_extern_struct_field is given is_last 0 there). */
+        int last = parent->type == AST_STRUCT_DEFINITION && i == parent->child_count - 1;
+        if (!field_layout(f, is_extern, last, program, tgt, &m, depth))
             return 0;
         if (is_union) {
             if (m.size > union_size) union_size = m.size;

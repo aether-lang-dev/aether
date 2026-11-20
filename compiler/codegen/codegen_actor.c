@@ -387,15 +387,24 @@ int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
 
 /* #3772: the width of the current actor's state field `name` when it is
  * atomic (32 or 64), else 0. The actor's handlers read it with
- * AETHER_STATE_LOAD and write it with AETHER_STATE_STORE, both relaxed: an
- * actor runs one step at a time, and what a step wrote reaches its next
- * step through the mailbox's release and acquire, so the order a seq_cst
- * access adds buys nothing. On x86 each seq_cst store was a locked
- * exchange, 6 ns where a plain store is 1. Still atomic, so a read from
- * another thread is never torn. */
+ * AETHER_STATE_LOAD, relaxed, and write it with aether_state_store32/64, a
+ * release store: an actor runs one step at a time, and what a step wrote
+ * reaches its next step through the mailbox's release and acquire, so the
+ * total order a seq_cst access adds buys nothing, and the release keeps a
+ * reader outside the actor seeing the writes before the one it reads. On x86
+ * each seq_cst store was a locked exchange, 6 ns where a plain store is 1.
+ * Still atomic, so a read from another thread is never torn. */
 int actor_state_atomic_bits(CodeGenerator* gen, const char* name) {
     if (!gen || !gen->current_actor || !name || !is_actor_state_var(gen, name)) return 0;
     return actor_state_field_is_atomic(gen, gen->current_actor, name);
+}
+
+/* The start of a store of the current actor's atomic state field `name`,
+ * `aether_state_storeN(&self->name, `: the caller writes the value and the
+ * closing `)`. */
+void emit_state_store_open(CodeGenerator* gen, const char* name) {
+    fprintf(gen->output, "aether_state_store%d(&%s->%s, ", actor_state_atomic_bits(gen, name),
+            gen->state_self_alias ? gen->state_self_alias : "self", name);
 }
 
 /* #2528: a `string` state field owns what it holds (a `ptr`-widened field

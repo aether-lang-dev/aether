@@ -1500,6 +1500,20 @@ static int close_generated_file(FILE* f, const char* path) {
     return 1;
 }
 
+/* A partial output, removed so a later step does not take an incomplete
+ * file for a finished one. Not when the output is the null device: that is
+ * where `--emit=layout` writes when given no path, and as root removing it
+ * deleted /dev/null (#3775 review). */
+static void remove_partial_output(const char* path) {
+    if (!path) return;
+#ifdef _WIN32
+    if (_stricmp(path, "NUL") == 0 || _stricmp(path, "\\\\.\\NUL") == 0) return;
+#else
+    if (strcmp(path, "/dev/null") == 0) return;
+#endif
+    remove(path);
+}
+
 int compile_source(const char* input_path, const char* output_path) {
     if (print_string_release_mode) {
         printf("%s\n", lib_string_release_symbol_for(g_lib_id, module_lib_package(), input_path));
@@ -1646,7 +1660,7 @@ int compile_source(const char* input_path, const char* output_path) {
         }
         int emitted = emit_describe_c(out, program);
         fclose(out);
-        if (!emitted) remove(output_path);   /* #2888: nothing half written */
+        if (!emitted) remove_partial_output(output_path);   /* #2888: nothing half written */
         free_ast_node(program);
         free_tokens(tokens, token_count);
         free_parser(parser);
@@ -2113,7 +2127,7 @@ int compile_source(const char* input_path, const char* output_path) {
         report_compilation_failure(input_path);
         // Remove the partial output to avoid downstream build steps
         // picking up an incomplete file.
-        remove(output_path);
+        remove_partial_output(output_path);
         module_registry_shutdown();
         free_ast_node(program);
         free_tokens(tokens, token_count);
