@@ -314,14 +314,17 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
             # call does to TSan's handler. So gdb goes first, and every rerun
             # is bounded. (set -e is on: a rerun's own failure must not end
             # the script.)
-            _rerun() {   # $1 label, $2 TSAN/ASAN options to add, $3 "nopreload" or ""
+            _rerun() {   # $1 label, $2 TSAN/ASAN options to add, $3 "nopreload", "nogrants" or ""
                 _t="$TSAN_OPTIONS"; _a="$ASAN_OPTIONS"
                 if [ -n "$2" ]; then _t="${TSAN_OPTIONS:+$TSAN_OPTIONS:}$2"; _a="${ASAN_OPTIONS:+$ASAN_OPTIONS:}$2"; fi
                 _pl="$PRELOAD"; [ "$3" = nopreload ] && _pl=""
+                _gr="$TMP/grants"; [ "$3" = nogrants ] && _gr=""
                 _rc2=0
-                TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$_pl" AETHER_SANDBOX_LOG=none \
-                    AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$_target" LISTEN="$_listen" \
-                    $DIAG_TIMEOUT "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
+                # env inside the bound: the preload refuses timeout(1)'s fork.
+                $DIAG_TIMEOUT env TSAN_OPTIONS="$_t" ASAN_OPTIONS="$_a" LD_PRELOAD="$_pl" \
+                    AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$_gr" \
+                    TARGET="$_target" LISTEN="$_listen" \
+                    "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
                 printf '    rerun (%s): exit %s\n' "$1" "$_rc2"
                 sed 's/^/      | /' "$TMP/dial.again" | head -60
             }
@@ -333,6 +336,7 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
             if command -v gdb >/dev/null 2>&1; then
                 echo "    under gdb, sweep options:"
                 $GDB_TIMEOUT gdb -q -batch \
+                    -ex 'set startup-with-shell off' \
                     -ex "set environment LD_PRELOAD=$PRELOAD" \
                     -ex 'set environment AETHER_SANDBOX_LOG=none' \
                     -ex "set environment AETHER_SANDBOX_GRANTS=$TMP/grants" \
@@ -344,6 +348,7 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
                 echo "    (no gdb on this runner)"
             fi
             _rerun "sweep options, no preload" "" nopreload
+            _rerun "sweep options, preload without grants (policy off)" "" nogrants
             _rerun "sweep options + handle_segv=1" "handle_segv=1"
             _rerun "sweep options + log_path=stderr" "log_path=stderr"
             # The report files the sweep's log_path names, from this dial.
