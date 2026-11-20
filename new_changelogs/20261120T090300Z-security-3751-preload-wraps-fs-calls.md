@@ -13,3 +13,7 @@
   the C library and fails on one that is neither wrapped nor named as a
   lookup. The lookups (`stat`, `access`, `readlink`, `realpath`) stay
   unwrapped, as documented.
+  The preload asks the program nothing (its in-process policy, a staged
+  file) before its own constructor has finished: a sanitizer's runtime
+  calls libc before any constructor (TSan's mkdir of its log_path), and the
+  program's instrumented code faulted there, inside TSan's start.

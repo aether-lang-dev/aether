@@ -103,6 +103,17 @@ extern int aether_sandbox_levels_here(void) __attribute__((weak));
 // thread (aether_sandbox.h, aether_sandbox_stage); NULL for any other name.
 extern const char* aether_sandbox_staged_for(const char* tmp) __attribute__((weak));
 
+// 1 once the constructor (sandbox_init) has finished. Until then the host
+// program is not asked anything: its code may not be able to run yet. A
+// sanitizer's runtime starts before every constructor and calls libc as it
+// does (TSan's makes the directory of its log_path with mkdir), which lands
+// in these wrappers; a call into the program's instrumented code there
+// faulted inside TSan's own start (TraceSwitchPart, http_ipv6). Nothing is
+// lost by not asking: no grant is loaded before the constructor, and no
+// enforce block can be entered before the program's own constructors,
+// which run after this library's.
+static int g_preload_ready = 0;
+
 static void log_deny(const char* category, const char* resource) {
     if (log_mode == LOG_NONE) return;
     if (log_mode == LOG_STDERR) {
@@ -125,7 +136,7 @@ static void log_deny(const char* category, const char* resource) {
 static int check_resolved(const char* category, const char* resource) {
     // An embedded policy and preload grants are independent boundaries.
     // When both are active, the operation must satisfy both policies.
-    if (aether_sandbox_check_resolved) {
+    if (g_preload_ready && aether_sandbox_check_resolved) {
         int result = aether_sandbox_check_resolved(category, resource);
         if (result == 0) {
             log_deny(category, resource);
@@ -148,7 +159,8 @@ static int check_resolved(const char* category, const char* resource) {
 // see what a hard link's new name would reach, so a no is not logged. The
 // in-process levels answer through their audit, as for any check.
 static int grant_covers(const char* category, const char* resource) {
-    if (aether_sandbox_check_resolved && aether_sandbox_check_resolved(category, resource) == 0)
+    if (g_preload_ready && aether_sandbox_check_resolved &&
+        aether_sandbox_check_resolved(category, resource) == 0)
         return 0;
     if (!sandbox_active) return 1;
     for (int i = 0; i < grant_count; i++) {
@@ -484,10 +496,8 @@ static void install_no_exec_filter(void) {
 #endif
 
 // Load grants from shared memory or file
-static int g_preload_constructing = 0;
 
 static void __attribute__((constructor)) sandbox_init(void) {
-    g_preload_constructing = 1;
     // Resolve real libc functions FIRST, before we intercept getenv
     real_open = dlsym(RTLD_NEXT, "open");
     real_connect = dlsym(RTLD_NEXT, "connect");
@@ -604,7 +614,7 @@ static void __attribute__((constructor)) sandbox_init(void) {
     if (source_loaded) landlock_backstop();
 #endif
     sandbox_active = source_requested;
-    g_preload_constructing = 0;
+    g_preload_ready = 1;   // the host program may be asked from now on
 
     if (log_mode == LOG_STDERR && sandbox_active) {
         fprintf(stderr, "AETHER_SANDBOX: active with %d grants\n", grant_count);
@@ -642,7 +652,8 @@ char* getenv(const char* name) {
 // other name. The rename of it onto that file and its removal are checked
 // as writes of the file (#3751), as the open that creates it is.
 static const char* staged_sibling_target(const char* path) {
-    const char* target = aether_sandbox_staged_for && path ? aether_sandbox_staged_for(path) : NULL;
+    const char* target = g_preload_ready && aether_sandbox_staged_for && path
+                             ? aether_sandbox_staged_for(path) : NULL;
     if (!target) return NULL;
     size_t n = strlen(target);
     if (strncmp(path, target, n) != 0 || strncmp(path + n, ".tmp.", 5) != 0) return NULL;
@@ -2873,8 +2884,9 @@ static int fd_path(int fd, char out[PATH_MAX], char run[PATH_MAX]) {
 // levels (an enforce block, a host bridge's sandboxed run)?
 static int policy_in_force(void) {
     // The constructor's own calls (the Landlock rules it makes) are not
-    // held, and the runtime is not asked before its own constructors ran.
-    if (g_preload_constructing) return 0;
+    // held, and the program is not asked before the constructor finished
+    // (g_preload_ready): a sanitizer's start calls through here first.
+    if (!g_preload_ready) return 0;
     int in_process = aether_sandbox_levels_here ? aether_sandbox_levels_here() : 0;
     return sandbox_active || in_process > 0;
 }
