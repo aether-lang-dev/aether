@@ -303,10 +303,23 @@ if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
         if [ "$_got" != "$3" ]; then
             # Say how the dial ended, and run it once more with the sandbox's
             # log on, so a failure names its cause instead of an empty string.
+            # (set -e is on: the rerun's own failure must not end the script.)
+            _rc2=0
+            # Under a sanitizer, its own report of a fault, with the stack
+            # (the sweep turns handle_segv off), on stderr.
+            TSAN_OPTIONS="${TSAN_OPTIONS:+$TSAN_OPTIONS:}handle_segv=1:log_path=stderr" \
+            ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}handle_segv=1:log_path=stderr" \
             LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=stderr AETHER_SANDBOX_GRANTS="$TMP/grants" \
-                TARGET="$2" LISTEN="$_listen" "$TMP/dial" >"$TMP/dial.again" 2>&1
-            printf '    dial exited %s; again with the sandbox log (exit %s):\n' "$_rc" "$?"
-            sed 's/^/      /' "$TMP/dial.again" | head -40
+                TARGET="$2" LISTEN="$_listen" "$TMP/dial" >"$TMP/dial.again" 2>&1 || _rc2=$?
+            printf '    dial exited %s; again with the sandbox log (exit %s):\n' "$_rc" "$_rc2"
+            sed 's/^/      /' "$TMP/dial.again" | head -80
+            # A crash (a signal: exit above 128) gets a backtrace where gdb is.
+            if [ "$_rc2" -gt 128 ] && command -v gdb >/dev/null 2>&1; then
+                gdb -q -batch -ex run -ex bt \
+                    --args env LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=stderr \
+                    AETHER_SANDBOX_GRANTS="$TMP/grants" TARGET="$2" LISTEN="$_listen" \
+                    "$TMP/dial" 2>&1 | grep -E '^#|signal|Program' | head -40 | sed 's/^/      gdb: /' || :
+            fi
             fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
         fi
     }
