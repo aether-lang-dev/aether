@@ -3417,6 +3417,44 @@ static void reject_scalar_for_ptr_argument(ASTNode* call, ASTNode* arg, Type* ar
         type_error(emsg, arg->line, arg->column);
 }
 
+/* A string passed to a number parameter (an int of any width, a byte, a
+ * float, a bool). Argument checking is lenient, so `string.pad_start(s, 8,
+ * "0")`, whose pad is a character code (`int`), passed `ae check` and only
+ * the C compiler refused it ("incompatible pointer to integer conversion");
+ * the same for an Aether function's own `int` parameter. A `ptr` is not
+ * refused here: an int goes to one on purpose, and the reverse is the
+ * universal pointer. A one-character string literal gets its character code
+ * in the hint, which is what such a parameter takes. */
+static void reject_string_for_scalar_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                              Type* param_type, int index,
+                                              const char* param_name) {
+    if (!arg_type || !param_type || arg_type->kind != TYPE_STRING) return;
+    if (arg->type == AST_NULL_LITERAL || param_type->distinct_name) return;
+    switch (param_type->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT32: case TYPE_UINT64:
+        case TYPE_BYTE: case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_LONGDOUBLE:
+        case TYPE_BOOL:
+            break;
+        default:
+            return;
+    }
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg), "Argument %d '%s' of '%s': expected %s, got string",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_name(param_type));
+    if (arg->type == AST_LITERAL && arg->value && strlen(arg->value) == 1 &&
+        param_type->kind != TYPE_BOOL && param_type->kind != TYPE_FLOAT &&
+        param_type->kind != TYPE_FLOAT32 && param_type->kind != TYPE_LONGDOUBLE) {
+        const char* hint = aether_internf(
+            "a one-character string is not a character: if '%s' takes a character code, "
+            "pass %d for \"%s\"",
+            param_name ? param_name : "?", (unsigned char)arg->value[0], arg->value);
+        type_error_hint(emsg, hint, arg->line, arg->column);
+    } else {
+        type_error(emsg, arg->line, arg->column);
+    }
+}
+
 /* An optional is never unwrapped implicitly (is_type_compatible's #340
  * rule): a binding or a `return` of a `T?` where a `T` goes is refused, and
  * so is an argument. Lenient, argument checking passed a `string?` to a
@@ -22745,6 +22783,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_string_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_scalar_for_ptr_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_string_for_scalar_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_ptr_for_string_argument(symbol->node, call, darg, da, param_type,
                                                    arg_slot + 1, param->value);
                     reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);

@@ -937,7 +937,7 @@ For a `split_once`-style operation (find the first `sep` in `s`, return the halv
 - `string.to_long(s)` → `(long, string)` - Parse 64-bit integer
 - `string.to_int_radix(s, radix)` → `(long, string)` - Parse base-N integer; `radix` in `[2, 36]`. Accepts exactly an optional `'-'`, one or more digits of the radix, and optional trailing whitespace: no `"0x"`/`"0b"` prefix, no `'+'`, no leading whitespace. Returns `long` so 32-bit-wide hex (ARGB colors, file offsets) survives. Errors on invalid radix, invalid digit, empty input, overflow, or trailing garbage.
 - `string.from_int_radix(value, radix)` → `string` - Inverse of `to_int_radix`. Render `value` in base `radix` (`[2, 36]`); empty string on invalid radix; `'-'` prefix for negatives. Pair with `pad_start` for fixed-width hex bytes.
-- `string.pad_start(s, total_width, pad_char)` → `string` - Prepend `pad_char` (single-byte char code, e.g. `48` for `'0'`, `32` for `' '`) until `s` reaches `total_width`. Returns a fresh copy if `s` is already long enough (no truncation).
+- `string.pad_start(s, total_width, pad_char)` → `string` - Prepend `pad_char` (single-byte char code, e.g. `48` for `'0'`, `32` for `' '`) until `s` reaches `total_width`. Returns a fresh copy if `s` is already long enough (no truncation). The pad is a number: `string.pad_start(s, 8, "0")` is refused by the checker (E0200), with the code to pass in the hint (`48`).
 - `string.pad_end(s, total_width, pad_char)` → `string` - Append-side variant of `pad_start`. Useful for columnar text output.
 - `string.to_float(s)` → `(float, string)` - Parse float
 - `string.to_double(s)` → `(float, string)` - Parse double
