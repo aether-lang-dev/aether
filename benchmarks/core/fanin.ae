@@ -1,0 +1,53 @@
+// Fan-in: many senders to one actor (#3776). Eight producer actors each send
+// a run of messages to one sink as fast as they can, so the sink's mailbox
+// sees bursts: what a smaller mailbox ring (-DMAILBOX_SIZE) would move to
+// the actor's overflow inbox. And the same from main alone, one sender.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+
+message Item { n: int }
+message Produce { sink: ptr, count: int }
+
+actor Sink {
+    state got = 0
+    receive {
+        Item(n) -> { got = got + 1 }
+    }
+}
+
+actor Producer {
+    receive {
+        Produce(sink, count) -> {
+            for i in 0..count {
+                sink ! Item { n: i }
+            }
+        }
+    }
+}
+
+fanin(producers: int, each: int) -> float {
+    sink = spawn(Sink())
+    t0 = os.now_monotonic_ns()
+    if producers == 0 {
+        for i in 0..each {
+            sink ! Item { n: i }
+        }
+    } else {
+        for p in 0..producers {
+            pr = spawn(Producer())
+            pr ! Produce { sink: sink, count: each }
+        }
+    }
+    wait_for_idle()
+    t1 = os.now_monotonic_ns()
+    total = if producers == 0 { each } else { producers * each }
+    if sink.got != total { println("unexpected count ${sink.got} of ${total}") }
+    return (t1 - t0) as float / total as float
+}
+
+main() {
+    println("row fanin_main_burst ${fanin(0, 400000)} ns/msg")
+    println("row fanin_8_actors ${fanin(8, 100000)} ns/msg")
+}

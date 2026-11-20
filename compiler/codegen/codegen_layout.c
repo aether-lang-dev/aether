@@ -28,12 +28,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* sizeof(ActorBase) on a 64-bit target with the default 32-slot mailbox,
+/* sizeof(ActorBase) on a 64-bit target with the default 16-slot mailbox,
  * which runtime/scheduler/multicore_scheduler.h asserts, and its alignment
  * (its widest members are pointers and 64-bit atomics). AetherMsgInline is
  * AETHER_MSG_INLINE_BYTES (28 there) rounded up to its 8-byte members.
  * Other targets lay ActorBase out differently and are not modelled. */
-#define LAYOUT_ACTOR_BASE_SIZE 1720
+#define LAYOUT_ACTOR_BASE_SIZE 952
 #define LAYOUT_ACTOR_BASE_ALIGN 8
 #define LAYOUT_MSG_INLINE_SIZE 32
 #define LAYOUT_MSG_INLINE_ALIGN 8

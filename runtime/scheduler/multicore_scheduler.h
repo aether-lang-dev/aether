@@ -155,7 +155,9 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
  * Senders' reads of assigned_core and dead used to share the lines the
  * stepping core writes at every step (the mailbox count's, step_lock's), so
  * each send from another core cost the next step transfers of those lines
- * back to its core. sizeof(ActorBase) is 1720: the table slot (#3540) took
+ * back to its core. sizeof(ActorBase) is 952 (1720 with the 32-slot ring it
+ * had before #3776, which shrank by twelve whole lines, so the groups after
+ * it keep their lines): the table slot (#3540) took
  * the last line's free bytes. On a target with 4-byte pointers the groups
  * fall elsewhere on their lines; nothing reads a field by its offset. */
 #define AETHER_ACTOR_BASE_FIELDS \
@@ -305,10 +307,10 @@ typedef struct {
 } ActorBase;
 
 /* #3776: the size the notes above give, checked so the number cannot drift:
- * on a 64-bit target with the default 32-slot mailbox, 1552 of its bytes. */
+ * on a 64-bit target with the default 16-slot mailbox, 784 of its bytes. */
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && \
-    UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu && MAILBOX_SIZE == 32
-_Static_assert(sizeof(ActorBase) == 1720,
+    UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu && MAILBOX_SIZE == 16
+_Static_assert(sizeof(ActorBase) == 952,
                "sizeof(ActorBase) changed: update the layout notes above it");
 #endif
 

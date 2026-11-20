@@ -48,7 +48,8 @@ library). A newer minor whose duties it knows is read.
 
 **The runtime ABI.** `AETHER_RUNTIME_ABI_ID` (`runtime/aether_abi.h`) is
 the Aether version, `/abi` and `AETHER_RUNTIME_ABI_REV`, and the flags
-that change layouts (`+debug-mailbox`). A self-contained library carries
+that change layouts (`+debug-mailbox`, and `+mailbox<n>` for a mailbox ring
+of other than the default 16 slots, `-DMAILBOX_SIZE=n`). A self-contained library carries
 its own runtime, so this ABI never crosses its edge: on ELF `ae` links it
 `-Bsymbolic`, so its runtime calls bind to its own copy, not to the one a
 program linked `-rdynamic` exports, as macOS and Windows keep them apart by
@@ -65,7 +66,8 @@ a slice of it carries the mark `AETHER_SLICE_MADE` and its offset into the
 buffer in the padding after `flags` (and that field's bits 8 to 31), so C
 code compiled for revision 2 that freed a buffer's `.ptr`, or built a view by
 moving `.ptr`, is refused at revision 3 ([c-interop.md](c-interop.md),
-Counted buffers).
+Counted buffers); 4, an actor's mailbox ring is 16 slots, not 32 (#3776), so
+ActorBase is 952 bytes on a 64-bit target, not 1720.
 
 **Shared facilities.** A library without `--shared-runtime` brings a copy
 of the runtime, and copies in one process share the sandbox levels and the

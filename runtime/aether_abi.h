@@ -21,20 +21,20 @@
 
 #include "aether_version.h"
 
-#define AETHER_RUNTIME_ABI_REV 3
+#define AETHER_RUNTIME_ABI_REV 4
 
 #define AETHER_ABI_STR2(x) #x
 #define AETHER_ABI_STR(x) AETHER_ABI_STR2(x)
 
 /* Build flags that change a layout generated C reads: the debug mailbox,
- * and a mailbox ring of other than the default 32 slots (-DMAILBOX_SIZE=n,
+ * and a mailbox ring of other than the default 16 slots (-DMAILBOX_SIZE=n,
  * #3776), which changes ActorBase. */
 #ifdef AETHER_DEBUG_MAILBOX
 #  define AETHER_ABI_FLAG_DEBUG "+debug-mailbox"
 #else
 #  define AETHER_ABI_FLAG_DEBUG ""
 #endif
-#if defined(MAILBOX_SIZE) && (MAILBOX_SIZE) != 32
+#if defined(MAILBOX_SIZE) && (MAILBOX_SIZE) != 16
 #  define AETHER_ABI_FLAG_MAILBOX "+mailbox" AETHER_ABI_STR(MAILBOX_SIZE)
 #else
 #  define AETHER_ABI_FLAG_MAILBOX ""

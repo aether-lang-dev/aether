@@ -99,16 +99,18 @@ static inline void aether_message_free_payload(Message* msg) {
 }
 
 // Ring buffer mailbox for actors (power-of-2 for fast masking)
-// 32 slots: large enough for typical burst patterns (skynet parents see ≤10
-// child results; ping_pong sees 1; fork_join workers see 1) while keeping
-// each actor's memory footprint small enough to scale to millions of actors.
-// Overflow messages are re-queued via the scheduler's self-channel.
+// 16 slots (#3776): large enough for typical burst patterns (skynet parents
+// see 10 child results; ping_pong sees 1; fork_join workers see 1), and a
+// burst past it waits in the actor's overflow inbox. 32 slots made the ring
+// 1552 of an ActorBase's 1720 bytes; at 16 an actor is 43% smaller, 1M idle
+// actors peak at 721 MB where they took 1816, and the send, ask, idle and
+// fan-in rows of bench-core and skynet did not move.
 // A build may choose another power of two with -DMAILBOX_SIZE=n (#3776): a
 // smaller ring makes each actor smaller (the ring is most of ActorBase), and
 // a burst past it waits in the actor's overflow inbox (#3241), so nothing is
 // lost.
 #ifndef MAILBOX_SIZE
-#define MAILBOX_SIZE 32   // Buffer for actor message queue
+#define MAILBOX_SIZE 16   // Buffer for actor message queue
 #endif
 #if (MAILBOX_SIZE) < 2 || ((MAILBOX_SIZE) & ((MAILBOX_SIZE) - 1)) != 0
 #error "MAILBOX_SIZE must be a power of two, at least 2"

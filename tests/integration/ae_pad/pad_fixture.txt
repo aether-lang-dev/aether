@@ -84,15 +84,15 @@ message Sample  pad_fixture.ae:62  size 24  align 8  holes 3 (1 x 3)  tail 0  li
     16  c            long  8
   suggested: keep this order (none is smaller)  reorderable: no (a message: codegen orders its fields by alignment (#3773), the source is not rewritten)
 
-actor Counter  pad_fixture.ae:68  size 1792  align 64  holes 8 (2 x 4)  tail 16  lines 28 (64-aligned)
-     0  _aether_base         ActorBase        1720
-  1720  hits                 int              4
-  1724  (hole 4)
-  1728  last                 long             8
-  1736  seen                 bool             4
-  1740  (hole 4)
-  1744  _aether_step_inline  AetherMsgInline  32
-  1776  (tail 16)
+actor Counter  pad_fixture.ae:68  size 1024  align 64  holes 8 (2 x 4)  tail 16  lines 16 (64-aligned)
+     0  _aether_base         ActorBase        952
+   952  hits                 int              4
+   956  (hole 4)
+   960  last                 long             8
+   968  seen                 bool             4
+   972  (hole 4)
+   976  _aether_step_inline  AetherMsgInline  32
+  1008  (tail 16)
   suggested: keep this order (none is smaller)  reorderable: no (actor state: codegen lays it out after ActorBase in declaration order, the source is not rewritten)
 
 summary: 11 structs, 1 message, 1 actor; holes 70, tail 38; reorderable saving 40 (largest 16 in Rec); all saving 40
