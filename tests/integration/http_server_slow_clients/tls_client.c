@@ -150,13 +150,33 @@ int slow_tls_key_update(void* t) {
     return 0;
 }
 
+/* How the last read that returned nothing ended, for slow_tls_explain. */
+static int g_read_err;
+static int g_read_errno;
+static char g_read_why[256];
+
 /* Up to `cap` bytes: >0 read, 0 the server closed, -1 an error. */
 int slow_tls_read(void* t, char* buf, int cap) {
+    errno = 0;
     int n = SSL_read((SSL*)t, buf, cap);
     if (n > 0) return n;
     int e = SSL_get_error((SSL*)t, n);
+    g_read_err = e;
+    g_read_errno = errno;
+    g_read_why[0] = '\0';
+    unsigned long q = ERR_peek_last_error();
+    if (q) ERR_error_string_n(q, g_read_why, sizeof g_read_why);
     ERR_clear_error();
     return e == SSL_ERROR_ZERO_RETURN ? 0 : -1;
+}
+
+/* Why a response read over TLS came back empty: a close_notify with nothing
+ * before it (SSL_get_error 6) is the server closing without an answer; 5
+ * with an errno is the connection reset or cut; 1 a TLS error. */
+void slow_tls_explain(void) {
+    fprintf(stderr, "    tls client: the response read ended empty (SSL_get_error %d, errno %d, %s): %s\n",
+            g_read_err, g_read_errno, OpenSSL_version(OPENSSL_VERSION),
+            g_read_why[0] ? g_read_why : "no OpenSSL error");
 }
 
 void slow_tls_free(void* t) {

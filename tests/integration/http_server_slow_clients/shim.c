@@ -104,6 +104,7 @@ int slow_tls_record(void* t, const void* buf, int len, unsigned char* out, int c
 int slow_tls_read(void* t, char* buf, int cap);
 void slow_tls_free(void* t);
 int slow_tls_key_update(void* t);
+void slow_tls_explain(void);
 
 #define IDLE_MS        600
 #define BUDGET_MS      1000
@@ -208,7 +209,13 @@ static int read_status(client_sock s, void* tls, char* body, int body_cap) {
             if (have - (int)(end + 4 - buf) >= cl) break;
         }
     }
-    if (have == 0) return 0;
+    if (have == 0) {
+        /* Over TLS, say how: the macOS head rounds read nothing after the
+         * server's cut, and status 0 alone does not tell a close from a
+         * reset. */
+        if (tls) slow_tls_explain();
+        return 0;
+    }
     buf[have] = '\0';
     if (body && body_cap > 0) {
         char* end = strstr(buf, "\r\n\r\n");
