@@ -92,4 +92,17 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, open(os.path.join(d, m.group(1)), "rb").read(), "application/octet-stream")
         self._send(404, b"not found", "text/plain")
 
-HTTPServer(("127.0.0.1", port), H).serve_forever()
+class LoopbackServer(HTTPServer):
+    """HTTPServer without the name lookup: its server_bind resolves the
+    address to a host name (socket.getfqdn), a reverse DNS query that waits
+    out a timeout on macOS CI runners, about 30 s a start. These tests start
+    the mock once a case, so a macOS run took 250 s and more where Linux took
+    10 (test_release_sums_verified passed the sweep's 420 s). Nothing here
+    reads server_name."""
+    def server_bind(self):
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = self.server_address[0]
+        self.server_port = self.server_address[1]
+
+LoopbackServer(("127.0.0.1", port), H).serve_forever()
