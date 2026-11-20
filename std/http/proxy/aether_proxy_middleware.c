@@ -1263,9 +1263,14 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
         }
         if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && d->head_only) saw_content_length = 1;
         if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && !d->head_only) {
+            /* The upstream's spelling of the name, as the copying path keeps
+             * it (it sets the value on the field the upstream sent): only
+             * the value is this proxy's ("content-Length" came back as
+             * "Content-Length" here and as sent there, #3749). */
             char cl[48];
             size_t cn = 16;
-            memcpy(cl, "Content-Length: ", 16);
+            memcpy(cl, p, 14);
+            memcpy(cl + 14, ": ", 2);
             cn += http_write_dec(cl + cn, (unsigned long long)d->body_len);
             cl[cn++] = '\r';
             cl[cn++] = '\n';

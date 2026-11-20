@@ -96,9 +96,12 @@ static int name_ok(const char* s) {
     return 1;
 }
 
+/* What XML 1.0's Char production leaves out of text and attribute values:
+ * the C0 controls but tab, LF and CR. DEL (0x7f) is a Char ([#x20-#xD7FF]),
+ * so text may hold it; the reader ends a name at one. */
 static int chars_ok(const char* s) {
     for (const unsigned char* p = (const unsigned char*)s; *p; p++)
-        if ((*p < 0x20 && *p != '\t' && *p != '\n' && *p != '\r') || *p == 0x7f) return 0;
+        if (*p < 0x20 && *p != '\t' && *p != '\n' && *p != '\r') return 0;
     return 1;
 }
 
