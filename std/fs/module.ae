@@ -1354,6 +1354,9 @@ stat(path: string, follow: int) -> (Stat, int, string) {
 // not there and never truncating it: (fd, KIND_OK, "") or (-1, KIND_*, msg).
 // Open read-write and close-on-exec, so the holder can also keep a few bytes
 // in it (fd_size / fd_truncate / fd_pwrite_all). Take the lock with try_lock.
+// Inside a sandbox it needs fs_write, and the descriptor reads as well only
+// where fs_read is granted too: without it, it is write-only, which the lock
+// takes (#3751).
 lock_open(path: string) -> (int, int, string) {
     return fs_lock_open_raw(path)
 }

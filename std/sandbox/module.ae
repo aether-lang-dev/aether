@@ -408,10 +408,19 @@ grant_runtime(_ctx: Grants, name: string) -> string {
     while i < n {
         row = string.array_get(rows, i)
         len = string.length(row)
+        // A line ends "\r\n" where the interpreter writes text the Windows
+        // way; the "\r" is not part of the path.
+        if len > 0 && string.ends_with(row, "\r") == 1 { len = len - 1 }
         if len > 2 {
             kind = string.substring(row, 0, 2)
             path = string.substring(row, 2, len)
-            if kind == "D " { add_grant(_ctx, "fs_read", "${path}/*") }
+            // A directory: what is under it, and the directory itself, which
+            // an interpreter lists to fill its import cache (an opendir is a
+            // read of the directory, and "dir/*" does not cover "dir").
+            if kind == "D " {
+                add_grant(_ctx, "fs_read", "${path}/*")
+                add_grant(_ctx, "fs_read", path)
+            }
             if kind == "F " { add_grant(_ctx, "fs_read", path) }
             if kind == "P " { add_grant(_ctx, "fs_read", "${path}*") }
         }

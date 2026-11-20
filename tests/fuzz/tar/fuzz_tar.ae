@@ -1,0 +1,205 @@
+// The std.tar fuzz target: the archive reader (reader_open, reader_next,
+// entry_read) and extract, on an archive from wherever it came from. Built
+// --emit=obj and called from tests/fuzz/ae_target.c with the input whole.
+//
+// Each input is extracted for real, under a scratch directory of its own
+// ($FUZZ_SCRATCH, which run_fuzz_c.sh sets): root/archive.tar holds the
+// input, root/out is the destination, and root/outside holds one file,
+// "canary". Byte 0 picks the options: bit 0 allow_symlinks, bits 1-2 small
+// limits on entries and bytes; the rest is the archive.
+//
+// Each check is a property, and a failure abort()s, saying which:
+//
+//   T1  Nothing is written outside the destination, whatever the archive
+//       names (an absolute path, `..`, a drive or UNC prefix, a path through
+//       a symbolic link it made): root holds archive.tar, out and outside
+//       only, and outside holds the canary, unchanged.
+//   T2  With symbolic links refused, none is made; allowed, none points out
+//       of the destination.
+//   T3  An extraction that succeeds wrote what the reader reads: each
+//       regular file entry with a plain name (components of letters,
+//       digits, '.', '-' and '_', none `.` or `..`) is a file under out with
+//       those bytes, and each directory entry a directory. And it kept to
+//       its limits: no more files than max_entries, none larger than
+//       max_entry_bytes.
+//   T4  Nothing leaks (LeakSanitizer).
+import std.bytes
+import std.string
+import std.fs
+import std.os
+import std.tar
+import std.io
+
+extern abort()
+
+fn fail(what: string) {
+    _w = io.stderr_write("fuzz_tar: property failed: ${what}\n")
+    abort()
+}
+
+fn scratch_root() -> string {
+    base = os.getenv("FUZZ_SCRATCH")
+    if base == "" { base = "build/fuzz/tar/scratch" }
+    return "${base}/run"
+}
+
+fn write_file(path: string, data: byte[]) {
+    if fs.write_binary(path, data) != "" { fail("check 2") }
+}
+
+// The names in `dir`, each passed to `check` with its kind; the count.
+fn names_in(dir: string) -> ptr {
+    lst, err = fs.list_dir(dir)
+    if err != "" { return null }
+    return lst
+}
+
+fn is_dot(name: string) -> bool {
+    return name == "." || name == ".."
+}
+
+// T1: root holds archive.tar, out and outside, and outside the canary.
+fn nothing_outside(root: string) {
+    lst = names_in(root)
+    if lst == null { fail("check 3") }
+    n = fs.dir_list_count(lst)
+    i = 0
+    while i < n {
+        name = fs.dir_list_get(lst, i)
+        if !is_dot(name) && name != "archive.tar" && name != "out" && name != "outside" {
+            fail("check 4")
+        }
+        i = i + 1
+    }
+    fs.dir_list_free(lst)
+    out = names_in("${root}/outside")
+    if out == null { fail("check 5") }
+    m = fs.dir_list_count(out)
+    j = 0
+    while j < m {
+        name = fs.dir_list_get(out, j)
+        if !is_dot(name) && name != "canary" { fail("check 6") }
+        j = j + 1
+    }
+    fs.dir_list_free(out)
+    data, len, rerr = fs.read_binary("${root}/outside/canary")
+    if rerr != "" || len != 6 || string.substring(data, 0, len) != "canary" { fail("check 7") }
+}
+
+// T2 and T3's bounds: walk the destination; the number of regular files.
+fn walk_out(dir: string, allow_links: int, max_bytes: long, depth: int) -> int {
+    if depth > 64 { fail("check 8") }
+    lst = names_in(dir)
+    if lst == null { return 0 }
+    files = 0
+    n = fs.dir_list_count(lst)
+    i = 0
+    while i < n {
+        name = fs.dir_list_get(lst, i)
+        if !is_dot(name) {
+            path = "${dir}/${name}"
+            kind = fs.dir_list_kind(lst, i)
+            if fs.fs_is_symlink(path) == 1 || kind == fs.STAT_KIND_SYMLINK {
+                if allow_links == 0 { fail("check 9") }
+            } else if kind == fs.STAT_KIND_DIR {
+                files = files + walk_out(path, allow_links, max_bytes, depth + 1)
+            } else {
+                files = files + 1
+                _d, len, rerr = fs.read_binary(path)
+                if rerr == "" && (len as long) > max_bytes { fail("check 10") }
+            }
+        }
+        i = i + 1
+    }
+    fs.dir_list_free(lst)
+    return files
+}
+
+fn plain_name(name: string) -> bool {
+    n = string.length(name)
+    if n == 0 || n > 200 { return false }
+    comp = 0
+    dots = 0
+    i = 0
+    while i < n {
+        c = string.char_at_n(name, n, i) & 255
+        if c == 47 {
+            if comp == 0 || comp == dots { return false }
+            comp = 0
+            dots = 0
+        } else {
+            ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 46 || c == 45 || c == 95
+            if !ok { return false }
+            if c == 46 { dots = dots + 1 }
+            comp = comp + 1
+        }
+        i = i + 1
+    }
+    // A trailing '/' is a directory's; "a/." and "a/.." are not plain.
+    if comp > 0 && comp == dots { return false }
+    return true
+}
+
+// T3: what the reader reads is what was written.
+fn same_as_reader(root: string) {
+    r, oerr = tar.reader_open("${root}/archive.tar")
+    if oerr != "" { fail("check 11") }
+    guard = 0
+    while guard < 10000 {
+        got, nerr = tar.reader_next(r)
+        if nerr != "" || got == 0 { break }
+        name = tar.entry_name(r)
+        kind = tar.entry_kind(r)
+        if plain_name(name) && kind == tar.KIND_FILE {
+            data, len, rerr = fs.read_binary("${root}/out/${name}")
+            if rerr != "" { fail("check 12") }
+            off = 0
+            more = 1
+            while more == 1 {
+                chunk, clen, cerr = tar.entry_read(r, 4096)
+                if cerr != "" { fail("check 13: ${cerr}") }
+                if clen == 0 {
+                    more = 0
+                } else {
+                    if off + clen > len { fail("check 14") }
+                    if string.substring(data, off, off + clen) != string.substring(chunk, 0, clen) { fail("check 15") }
+                    off = off + clen
+                }
+            }
+            if off != len { fail("check 16") }
+        } else if plain_name(name) && kind == tar.KIND_DIRECTORY {
+            dname = name
+            dn = string.length(name)
+            if dn > 1 && string.char_at_n(name, dn, dn - 1) == 47 { dname = string.substring(name, 0, dn - 1) }
+            if fs.exists("${root}/out/${dname}") != 1 { fail("check 17") }
+        }
+        guard = guard + 1
+    }
+    tar.reader_close(r)
+}
+
+fuzz_target(data: ptr, len: int) {
+    if len < 1 {
+        return
+    }
+    flags = (data as byte[])[0] & 255
+    root = scratch_root()
+    if fs.remove_tree(root) != "" { fail("check 18") }
+    if fs.mkdir_p("${root}/outside") != "" { fail("check 19") }
+    write_file("${root}/outside/canary", string.bytes("canary"))
+    write_file("${root}/archive.tar", (data as byte[])[1..len])
+
+    opts = tar.default_extract_options()
+    opts.allow_symlinks = flags & 1
+    if (flags & 2) != 0 { opts.max_entries = 3 }
+    if (flags & 4) != 0 { opts.max_entry_bytes = 100 as long }
+    err = tar.extract("${root}/archive.tar", "${root}/out", opts)
+
+    nothing_outside(root)
+    files = walk_out("${root}/out", opts.allow_symlinks, opts.max_entry_bytes, 0)
+    if err == "" {
+        if files > opts.max_entries { fail("check 20") }
+        same_as_reader(root)
+    }
+    if fs.remove_tree(root) != "" { fail("check 21") }
+}

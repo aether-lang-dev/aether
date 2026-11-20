@@ -26,6 +26,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
+
+/* The monotonic clock streams are stamped with, in ms (#3738). */
+int64_t aether_h2_now_ms(void) {
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+    return (int64_t)time(NULL) * 1000;
+}
 
 #ifdef AETHER_HAS_NGHTTP2
 
@@ -59,8 +70,9 @@
 /* Per-stream state — what we've collected on the request side and
  * what we owe back on the response side. Streams live in a
  * singly-linked list off the session; lookup is O(N) which is fine
- * for the modest number of in-flight streams a typical h2 connection
- * holds (RFC default 100). */
+ * for the modest number of in-flight streams a connection may hold: the
+ * server advertises SETTINGS_MAX_CONCURRENT_STREAMS, 100 unless set
+ * (HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS, #3738). */
 typedef struct AetherH2Stream {
     int32_t stream_id;
 
@@ -85,6 +97,21 @@ typedef struct AetherH2Stream {
     /* Set when the body passed the server's max_body and the stream was
      * reset (#3738): later DATA is dropped and the stream never dispatched. */
     int    body_refused;
+    /* When the stream's first HEADERS arrived, in aether_h2_now_ms's
+     * clock: its request must be whole by the deadline that starts here
+     * (aether_h2_session_expire, #3738). */
+    int64_t opened_ms;
+    /* The request's deadline as it stands, 0 until first worked out, and
+     * the body bytes that have extended it so far: the minimum rate's credit
+     * is held to the rate window (http_body_budget_credit). */
+    int64_t due_ms;
+    size_t  body_credited;
+    /* The request's header list so far, counted as
+     * SETTINGS_MAX_HEADER_LIST_SIZE counts one (each field's name and value
+     * and 32), and whether it passed the server's h2_max_header_list: the
+     * stream is then answered 431 and nothing more of it is kept. */
+    size_t header_list;
+    int    header_refused;
 
     /* Response side — populated when the route handler returns,
      * consumed by the nghttp2_data_source_read_callback as the
@@ -151,6 +178,18 @@ struct AetherH2Session {
 
     AetherH2Stream*  streams;
     int              fatal;   /* set when a callback flagged a hard error */
+    /* The request body bytes the streams hold, not yet handed to a handler:
+     * no more than the server's max_body on one connection (#3738), as one
+     * HTTP/1.1 connection holds one body at a time. */
+    size_t           body_held;
+    /* When a stream last opened or closed (aether_h2_now_ms): the start of
+     * the connection's idle time once none is open (#3738). A request
+     * answered within one turn of the connection's loop is never seen open
+     * there. */
+    int64_t          last_active_ms;
+    /* When a response was last submitted or bytes last went to the client
+     * (aether_h2_session_last_progress). */
+    int64_t          last_progress_ms;
 
 #ifdef AETHER_H2_HAS_POOL
     /* Per-session async-dispatch state. The worker pool is the shared
@@ -188,6 +227,8 @@ static AetherH2Stream* stream_get_or_create(AetherH2Session* s, int32_t id) {
     str = calloc(1, sizeof(*str));
     if (!str) return NULL;
     str->stream_id = id;
+    str->opened_ms = aether_h2_now_ms();
+    s->last_active_ms = str->opened_ms;
     str->next = s->streams;
     s->streams = str;
     return str;
@@ -218,6 +259,8 @@ static void stream_unlink(AetherH2Session* s, int32_t id) {
         if ((*cur)->stream_id == id) {
             AetherH2Stream* dead = *cur;
             *cur = dead->next;
+            s->body_held -= dead->body_len <= s->body_held ? dead->body_len : s->body_held;
+            s->last_active_ms = aether_h2_now_ms();
             stream_free(dead);
             return;
         }
@@ -314,6 +357,26 @@ static int ng_on_header_callback(nghttp2_session* ng,
     AetherH2Stream* str = stream_get_or_create(s, frame->hd.stream_id);
     if (!str) return NGHTTP2_ERR_CALLBACK_FAILURE;
 
+    /* The header list is bounded as an HTTP/1.1 head is (#3738). HPACK
+     * lets a few bytes on the wire stand for a field of up to the dynamic
+     * table's size, over and over, and nghttp2 bounds neither the fields
+     * nor their total, so a HEADERS frame and its CONTINUATIONs grew this
+     * stream's header block without limit. Past h2_max_header_list the
+     * stream is answered 431 once its HEADERS end (ng_on_frame_recv) and
+     * nothing more of the list is kept. */
+    if (str->header_refused) return 0;
+    size_t list_max = s->server && s->server->limits.h2_max_header_list > 0
+                    ? (size_t)s->server->limits.h2_max_header_list
+                    : (size_t)HTTP_H2_DEFAULT_MAX_HEADER_LIST;
+    str->header_list += namelen + valuelen + 32;
+    if (str->header_list > list_max) {
+        str->header_refused = 1;
+        free(str->header_block);
+        str->header_block = NULL;
+        str->header_block_len = str->header_block_cap = 0;
+        return 0;
+    }
+
     /* Reject connection-specific request headers before they reach
      * the request shape — a peer that sent these is malformed and
      * the stream MUST be rejected (RFC 7540 §8.1.2.2). The TE
@@ -375,28 +438,42 @@ static int ng_on_data_chunk_recv(nghttp2_session* ng,
     (void)ng; (void)flags;
     AetherH2Session* s = (AetherH2Session*)user_data;
     AetherH2Stream* str = stream_lookup(s, stream_id);
-    if (!str || str->body_refused) return 0;
+    /* A stream already answered (refused, or past its deadline) keeps none
+     * of what it still sends. */
+    if (!str || str->body_refused || str->response_submitted) return 0;
     /* Every h2 request body is held whole until END_STREAM, and nghttp2's
      * automatic WINDOW_UPDATE kept it flowing with no bound (#3738). A body
      * past the server's limit (the one request_body applies, #3740) resets
      * the stream with CANCEL rather than REFUSED_STREAM, which tells a
      * client the request may be retried as it was. What it sent is freed
      * and the stream is never dispatched. */
-    int64_t max_body = (s->server && s->server->max_body > 0)
-                     ? s->server->max_body : HTTP_DEFAULT_MAX_BODY;
-    if ((uint64_t)str->body_len + (uint64_t)len > (uint64_t)max_body) {
+    int64_t max_body = (s->server && s->server->limits.max_body > 0)
+                     ? s->server->limits.max_body : HTTP_DEFAULT_MAX_BODY;
+    /* The limit holds for the connection as a whole too: each of its up
+     * to 100 streams could hold a body of max_body at once, a hundred
+     * times what one HTTP/1.1 connection can make the server hold. A
+     * stream that would take the connection past it is reset with
+     * REFUSED_STREAM, which tells the client the request was not
+     * processed and may be sent again, once the others are done. */
+    int too_big = (uint64_t)str->body_len + (uint64_t)len > (uint64_t)max_body;
+    int too_much = !too_big &&
+                   (uint64_t)s->body_held + (uint64_t)len > (uint64_t)max_body;
+    if (too_big || too_much) {
+        s->body_held -= str->body_len <= s->body_held ? str->body_len : s->body_held;
         free(str->body);
         str->body = NULL;
         str->body_len = str->body_cap = 0;
         str->body_refused = 1;
         str->response_submitted = 1;
-        nghttp2_submit_rst_stream(s->ng, NGHTTP2_FLAG_NONE, stream_id, NGHTTP2_CANCEL);
+        nghttp2_submit_rst_stream(s->ng, NGHTTP2_FLAG_NONE, stream_id,
+                                  too_big ? NGHTTP2_CANCEL : NGHTTP2_REFUSED_STREAM);
         return 0;
     }
     if (buf_append(&str->body, &str->body_len, &str->body_cap,
                    (const char*)data, len) != 0) {
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
+    s->body_held += len;
     return 0;
 }
 
@@ -446,6 +523,28 @@ static int ng_on_frame_recv_callback(nghttp2_session* ng,
     AetherH2Session* s = (AetherH2Session*)user_data;
     int end = (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) ? 1 : 0;
     int is_request_done = 0;
+
+    /* A request whose header list passed the limit (ng_on_header_callback)
+     * is answered 431 once its header block ends, as an HTTP/1.1 head past
+     * its limit is, and then reset (NO_ERROR: the answer is complete). It
+     * is never dispatched, and what it sends after is dropped. */
+    if (frame->hd.type == NGHTTP2_HEADERS &&
+        frame->headers.cat == NGHTTP2_HCAT_REQUEST) {
+        AetherH2Stream* str = stream_lookup(s, frame->hd.stream_id);
+        if (str && str->header_refused && !str->response_submitted) {
+            static const char status_name[] = ":status";
+            static const char status_431[] = "431";
+            nghttp2_nv nv = { (uint8_t*)status_name, (uint8_t*)status_431,
+                              sizeof(status_name) - 1, sizeof(status_431) - 1,
+                              NGHTTP2_NV_FLAG_NONE };
+            str->response_submitted = 1;
+            nghttp2_submit_response(s->ng, frame->hd.stream_id, &nv, 1, NULL);
+            if (!end)
+                nghttp2_submit_rst_stream(s->ng, NGHTTP2_FLAG_NONE,
+                                          frame->hd.stream_id, NGHTTP2_NO_ERROR);
+            return 0;
+        }
+    }
 
     if (frame->hd.type == NGHTTP2_HEADERS &&
         frame->headers.cat == NGHTTP2_HCAT_REQUEST &&
@@ -595,13 +694,15 @@ static HttpRequest* request_from_stream(AetherH2Stream* str) {
         req->header_count = i;
     }
 
+    /* The body moves to the request rather than being copied (#3738): a
+     * copy held it twice, the stream's until the stream closed, up to
+     * twice max_body for one request. buf_append keeps it NUL-terminated,
+     * as a request body is. */
     if (str->body && str->body_len > 0) {
-        req->body = malloc(str->body_len + 1);
-        if (req->body) {
-            memcpy(req->body, str->body, str->body_len);
-            req->body[str->body_len] = '\0';
-            req->body_length = str->body_len;
-        }
+        req->body = str->body;
+        req->body_length = str->body_len;
+        str->body = NULL;
+        str->body_len = str->body_cap = 0;
     }
     return req;
 }
@@ -732,7 +833,10 @@ static void dispatch_stream(AetherH2Session* s, AetherH2Stream* str) {
         return;
     }
 
+    size_t held = str->body_len;
     HttpRequest* req = request_from_stream(str);
+    /* The body went to the request: the connection no longer holds it. */
+    if (req && !str->body) s->body_held -= held <= s->body_held ? held : s->body_held;
     if (!req) {
         nghttp2_submit_rst_stream(s->ng, NGHTTP2_FLAG_NONE,
                                   str->stream_id, NGHTTP2_INTERNAL_ERROR);
@@ -835,11 +939,13 @@ static void submit_response_for_stream(AetherH2Session* s,
     char status_str[8];
     snprintf(status_str, sizeof(status_str), "%d", str->response_status);
 
-    int hdr_count = res->header_count;
-    if (hdr_count < 0) hdr_count = 0;
-    if (hdr_count > 256) hdr_count = 256;  /* sanity */
+    /* Every field the handler set, plus :status. There is no cap here: the
+     * response's arrays grow as fields are set (d5b4cc3ad), and a clamp at
+     * 256 dropped every field past it without a word. calloc refuses a
+     * count whose size overflows. */
+    size_t hdr_count = res->header_count > 0 ? (size_t)res->header_count : 0;
 
-    str->response_headers = calloc((size_t)(hdr_count + 1), sizeof(nghttp2_nv));
+    str->response_headers = calloc(hdr_count + 1, sizeof(nghttp2_nv));
     if (!str->response_headers) {
         http_request_free(req);
         http_server_response_free(res);
@@ -863,8 +969,8 @@ static void submit_response_for_stream(AetherH2Session* s,
     str->response_headers[0].valuelen  = strlen(status_str);
     str->response_headers[0].flags     = NGHTTP2_NV_FLAG_NONE;
 
-    int real_count = 1;
-    for (int i = 0; i < hdr_count; i++) {
+    size_t real_count = 1;
+    for (size_t i = 0; i < hdr_count; i++) {
         const char* hname  = res->header_keys   ? res->header_keys[i]   : NULL;
         const char* hvalue = res->header_values ? res->header_values[i] : NULL;
         if (!hname) continue;
@@ -909,6 +1015,9 @@ static void submit_response_for_stream(AetherH2Session* s,
                                      str->response_header_count,
                                      data_prd);
     str->response_submitted = 1;
+    /* The connection's idle clock starts over: a handler that took longer
+     * than the idle timeout has its response go out in full (#3738). */
+    s->last_progress_ms = aether_h2_now_ms();
 
     http_request_free(req);
     http_server_response_free(res);
@@ -943,7 +1052,30 @@ AetherH2Session* aether_h2_session_new(HttpServer* server,
     nghttp2_session_callbacks_set_on_frame_recv_callback(cbs, ng_on_frame_recv_callback);
     nghttp2_session_callbacks_set_on_stream_close_callback(cbs, ng_on_stream_close);
 
-    int rv = nghttp2_session_server_new(&s->ng, cbs, s);
+    /* nghttp2's protections, set explicitly so the server's limits are
+     * written down in one place rather than left to a library version's
+     * defaults (#3750). The values are nghttp2's own defaults where it has
+     * them. Each option exists from the release named; built against an
+     * older nghttp2 the session goes without it (the build warns, see the
+     * Makefile). */
+    nghttp2_option* opt = NULL;
+    if (nghttp2_option_new(&opt) != 0) opt = NULL;
+    if (opt) {
+#if NGHTTP2_VERSION_NUM >= 0x012800   /* 1.40: SETTINGS and PING ack floods */
+        nghttp2_option_set_max_outbound_ack(opt, 1000);
+#endif
+#if NGHTTP2_VERSION_NUM >= 0x012800   /* 1.40 */
+        nghttp2_option_set_max_settings(opt, 32);
+#endif
+#if NGHTTP2_VERSION_NUM >= 0x013c00   /* 1.60: rapid reset, CVE-2023-44487 */
+        nghttp2_option_set_stream_reset_rate_limit(opt, 1000, 33);
+#endif
+#if NGHTTP2_VERSION_NUM >= 0x013d00   /* 1.61: CONTINUATION flood, CVE-2024-28182 */
+        nghttp2_option_set_max_continuations(opt, 8);
+#endif
+    }
+    int rv = nghttp2_session_server_new2(&s->ng, cbs, s, opt);
+    if (opt) nghttp2_option_del(opt);
     nghttp2_session_callbacks_del(cbs);
     if (rv != 0) {
         free(s);
@@ -1008,7 +1140,7 @@ void aether_h2_session_free(AetherH2Session* sess) {
 
 int aether_h2_session_send_initial_settings(AetherH2Session* sess) {
     if (!sess || !sess->ng) return -1;
-    nghttp2_settings_entry iv[2];
+    nghttp2_settings_entry iv[3];
     int n = 0;
     iv[n].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
     iv[n++].value     = 1 << 20;  /* 1 MiB initial flow-control window */
@@ -1018,9 +1150,16 @@ int aether_h2_session_send_initial_settings(AetherH2Session* sess) {
      * many streams as it liked on one connection, each holding a request
      * and its body. 100 is the floor RFC 9113 5.1.2 recommends. */
     iv[n].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
-    iv[n++].value     = sess->server->h2_max_concurrent_streams > 0
-                      ? (uint32_t)sess->server->h2_max_concurrent_streams
+    iv[n++].value     = sess->server->limits.h2_max_concurrent_streams > 0
+                      ? (uint32_t)sess->server->limits.h2_max_concurrent_streams
                       : (uint32_t)HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
+
+    /* The header list the server keeps (#3738), so a client knows the
+     * bound before it sends a list past it (answered 431). */
+    iv[n].settings_id = NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE;
+    iv[n++].value     = sess->server->limits.h2_max_header_list > 0
+                      ? (uint32_t)sess->server->limits.h2_max_header_list
+                      : (uint32_t)HTTP_H2_DEFAULT_MAX_HEADER_LIST;
 
     return nghttp2_submit_settings(sess->ng, NGHTTP2_FLAG_NONE, iv, (size_t)n);
 }
@@ -1057,6 +1196,7 @@ int aether_h2_session_drain(AetherH2Session* sess,
         int written = write_fn(sess->conn_userdata,
                                sess->out_buf, sess->out_buf_len);
         if (written < 0) return -1;
+        if (written > 0) sess->last_progress_ms = aether_h2_now_ms();
         if ((size_t)written < sess->out_buf_len) {
             memmove(sess->out_buf, sess->out_buf + written,
                     sess->out_buf_len - written);
@@ -1145,15 +1285,99 @@ int aether_h2_session_want_close(AetherH2Session* sess) {
     return (!want_read && !want_write) ? 1 : 0;
 }
 
+int64_t aether_h2_session_last_active(AetherH2Session* sess) {
+    return sess ? sess->last_active_ms : 0;
+}
+
+int64_t aether_h2_session_last_progress(AetherH2Session* sess) {
+    return sess ? sess->last_progress_ms : 0;
+}
+
+void aether_h2_session_refuse_incomplete(AetherH2Session* sess) {
+    if (!sess || !sess->ng) return;
+    for (AetherH2Stream* str = sess->streams; str; str = str->next) {
+        if (str->request_done || str->response_submitted) continue;
+        sess->body_held -= str->body_len <= sess->body_held ? str->body_len : sess->body_held;
+        free(str->body);
+        str->body = NULL;
+        str->body_len = str->body_cap = 0;
+        str->body_refused = 1;
+        str->response_submitted = 1;
+        nghttp2_submit_rst_stream(sess->ng, NGHTTP2_FLAG_NONE, str->stream_id,
+                                  NGHTTP2_REFUSED_STREAM);
+    }
+}
+
+int aether_h2_session_busy(AetherH2Session* sess) {
+    if (!sess) return 0;
+#ifdef AETHER_H2_HAS_POOL
+    if (sess->dispatch_enabled) {
+        pthread_mutex_lock(&sess->ready_mu);
+        int busy = sess->in_flight > 0 || sess->ready_head != NULL;
+        pthread_mutex_unlock(&sess->ready_mu);
+        if (busy) return 2;
+    }
+#endif
+    return sess->streams ? 1 : 0;
+}
+
+/* Each stream's request must arrive whole within the server's head and
+ * body budgets of its first HEADERS (#3738), the body's extended by a second
+ * for each body_min_rate bytes it sent: the HTTP/1.1 limits (#3737), by the
+ * clock, since one connection carries many streams and no read waits on any
+ * one of them. A stream that sent a DATA frame now and then, each inside
+ * the idle timeout, held its request open, and its connection and worker
+ * with it, for as long as it liked. The credit a stream's bytes earn is held
+ * to the rate window (limits.body_rate_window_ms): kept whole, a burst then a
+ * trickle held the stream for hours. A late stream is reset with CANCEL and
+ * what it sent is freed. A stream being handled, or answered, is past it. */
+int64_t aether_h2_session_expire(AetherH2Session* sess, int64_t now_ms) {
+    if (!sess || !sess->ng || !sess->server) return 0;
+    const HttpServerLimits* lim = &sess->server->limits;
+    int64_t head = lim->head_timeout_ms > 0 ? lim->head_timeout_ms : 0;
+    int64_t body = lim->body_timeout_ms > 0 ? lim->body_timeout_ms : 0;
+    if (head == 0 && body == 0) return 0;
+    int64_t next = 0;
+    for (AetherH2Stream* str = sess->streams; str; str = str->next) {
+        if (str->request_done || str->response_submitted) continue;
+        if (!str->due_ms) str->due_ms = str->opened_ms + head + body;
+        if (lim->body_min_rate > 0 && str->body_len > str->body_credited) {
+            int64_t credit = (int64_t)str->body_len * 1000 / lim->body_min_rate -
+                             (int64_t)str->body_credited * 1000 / lim->body_min_rate;
+            str->due_ms = now_ms + http_body_budget_credit(str->due_ms - now_ms, credit,
+                                                           lim->body_rate_window_ms);
+            str->body_credited = str->body_len;
+        }
+        int64_t due = str->due_ms;
+        if (now_ms >= due) {
+            sess->body_held -= str->body_len <= sess->body_held ? str->body_len : sess->body_held;
+            free(str->body);
+            str->body = NULL;
+            str->body_len = str->body_cap = 0;
+            str->body_refused = 1;
+            str->response_submitted = 1;
+            nghttp2_submit_rst_stream(sess->ng, NGHTTP2_FLAG_NONE, str->stream_id,
+                                      NGHTTP2_CANCEL);
+            continue;
+        }
+        if (next == 0 || due < next) next = due;
+    }
+    return next;
+}
+
 void aether_h2_session_initiate_goaway(AetherH2Session* sess) {
     if (!sess || !sess->ng) return;
-    /* nghttp2_session_terminate_session submits GOAWAY with the
-     * given error code (NGHTTP2_NO_ERROR signals "we're done; no
-     * new streams" — the peer's existing streams complete normally).
-     * Subsequent want_read/want_write transitions to false once
-     * everything's drained, which our existing want_close logic
-     * already keys on. */
-    nghttp2_session_terminate_session(sess->ng, NGHTTP2_NO_ERROR);
+    /* A graceful GOAWAY (RFC 9113 6.8): no new streams past the last one
+     * processed, and the streams already open complete normally. Once it
+     * is sent and none is left, nghttp2_session_want_read and _want_write
+     * turn false, which want_close keys on. It was
+     * nghttp2_session_terminate_session, which ends the session as soon as
+     * its GOAWAY is out (both turn false at once), so a graceful shutdown
+     * dropped the streams it meant to let finish; an HTTP/2 connection that
+     * reaches its age (#3738) must let them finish too. */
+    nghttp2_submit_goaway(sess->ng, NGHTTP2_FLAG_NONE,
+                          nghttp2_session_get_last_proc_stream_id(sess->ng),
+                          NGHTTP2_NO_ERROR, NULL, 0);
 }
 
 /* ------------------------------------------------------------------
@@ -1269,6 +1493,21 @@ int aether_h2_session_want_close(AetherH2Session* sess) {
 }
 void aether_h2_session_initiate_goaway(AetherH2Session* sess) {
     (void)sess;
+}
+int aether_h2_session_busy(AetherH2Session* sess) {
+    (void)sess; return 0;
+}
+int64_t aether_h2_session_last_active(AetherH2Session* sess) {
+    (void)sess; return 0;
+}
+int64_t aether_h2_session_last_progress(AetherH2Session* sess) {
+    (void)sess; return 0;
+}
+void aether_h2_session_refuse_incomplete(AetherH2Session* sess) {
+    (void)sess;
+}
+int64_t aether_h2_session_expire(AetherH2Session* sess, int64_t now_ms) {
+    (void)sess; (void)now_ms; return 0;
 }
 AetherH2Session* aether_h2_session_from_h2c_upgrade(
     struct HttpServer* server,

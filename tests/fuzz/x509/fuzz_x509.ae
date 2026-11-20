@@ -1,0 +1,186 @@
+// The X.509 fuzz target: certificates as a TLS peer presents them
+// (std/cryptography/tls13_cert's parse_certificate, check_hostname,
+// parse_ocsp_status), the DER reader under them (std/cryptography/asn1) and
+// PEM (std/cryptography/pem), which trust stores and key files are read
+// with. Built --emit=obj and called from tests/fuzz/ae_target.c with the
+// input whole.
+//
+// Input: byte 0 picks what the rest is: 0 a certificate (DER), 1 DER read
+// TLV by TLV, 2 PEM text, 3 an OCSP response (DER). Each check is a
+// property, and a failure abort()s:
+//
+//   C1  A certificate parse_certificate accepts is described inside the
+//       input: the tbsCertificate is a SEQUENCE no longer than it, the
+//       issuer and subject are no longer than the tbsCertificate, the
+//       validity times are a UTCTime (13 bytes) or a GeneralizedTime (15)
+//       ending in Z, and each dNSName is non-empty.
+//   C2  A certificate matches its own names: check_hostname of each dNSName
+//       that is a plain host name (labels of letters, digits and hyphens,
+//       no wildcard, not an address) is "". An empty host name never
+//       matches.
+//   C3  The DER reader stays inside its input: every TLV it reads moves the
+//       position forward by at least two bytes and no further than the end,
+//       hands back a content no longer than what it moved over, and the
+//       contents of constructed ones read the same way, 32 levels deep.
+//   C4  PEM: what parse decodes is non-empty, comes with a label, and
+//       parse_at past the block finds the next one or nothing; an error
+//       comes with no bytes.
+//   C5  An OCSP response is GOOD, REVOKED, UNKNOWN or ERROR.
+//   C6  Nothing leaks (LeakSanitizer).
+import std.bytes
+import std.string
+import std.cryptography.asn1
+import std.cryptography.pem
+import std.cryptography.tls13_cert
+
+extern abort()
+
+const MAX_WALK = 32
+
+fn is_label_char(c: int) -> bool {
+    return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 45
+}
+
+// A plain host name: labels of 1 to 63 letters, digits and hyphens, not
+// starting or ending with a hyphen, with a letter somewhere (so not an IPv4
+// address), at most 253 bytes.
+fn plain_host(b: ptr, n: int) -> bool {
+    if n < 1 || n > 253 { return false }
+    letter = false
+    label = 0
+    i = 0
+    while i < n {
+        c = bytes.get(b, i) & 255
+        if c == 46 {
+            if label == 0 { return false }
+            if (bytes.get(b, i - 1) & 255) == 45 { return false }
+            label = 0
+        } else {
+            if !is_label_char(c) { return false }
+            if label == 0 && c == 45 { return false }
+            if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) { letter = true }
+            label = label + 1
+            if label > 63 { return false }
+        }
+        i = i + 1
+    }
+    if label == 0 { return false }
+    if (bytes.get(b, n - 1) & 255) == 45 { return false }
+    return letter
+}
+
+fn time_ok(t: ptr, n: int) -> bool {
+    if t == null { return false }
+    if n != 13 && n != 15 { return false }
+    return (bytes.get(t, n - 1) & 255) == 90
+}
+
+fn certificate(m: ptr, n: int) {
+    leaf = tls13_cert.LeafCert { tbs: null }
+    tls13_cert.init_leaf(&leaf)
+    err = tls13_cert.parse_certificate(bytes.view(m)[0..n], &leaf)
+    if err == "" {
+        // C1
+        tl = tls13_cert.leaf_tbs_len(&leaf)
+        if tl <= 0 || tl > n { abort() }
+        if (bytes.get(leaf.tbs, 0) & 255) != 0x30 { abort() }
+        if tls13_cert.leaf_subject_len(&leaf) > tl || tls13_cert.leaf_issuer_len(&leaf) > tl { abort() }
+        if !time_ok(tls13_cert.leaf_not_before(&leaf), tls13_cert.leaf_not_before_len(&leaf)) { abort() }
+        if !time_ok(tls13_cert.leaf_not_after(&leaf), tls13_cert.leaf_not_after_len(&leaf)) { abort() }
+        // C2
+        if tls13_cert.check_hostname(&leaf, "") == "" { abort() }
+        count = tls13_cert.leaf_dns_count(&leaf)
+        i = 0
+        while i < count {
+            nm = tls13_cert.leaf_dns_name(&leaf, i)
+            if nm == null { abort() }
+            nl = bytes.length(nm)
+            if nl <= 0 { abort() }
+            if plain_host(nm, nl) {
+                host = bytes.string_from_slice(bytes.view(nm)[0..nl])
+                if tls13_cert.check_hostname(&leaf, host) != "" { abort() }
+            }
+            i = i + 1
+        }
+    }
+    tls13_cert.free_leaf(&leaf)
+}
+
+// C3: read every TLV in `b` (n bytes), and inside constructed ones.
+fn walk(b: ptr, n: int, depth: int) {
+    if depth > MAX_WALK { return }
+    // The reader keeps the buffer it reads, so it reads a copy this owns.
+    own = bytes.new(n + 1)
+    bytes.set_length(own, n)
+    if n > 0 { bytes.copy_from_bytes(own, 0, b, 0, n) }
+    r = asn1.reader_new(own)
+    while asn1.reader_eof(r) == 0 {
+        before = asn1.reader_pos(r)
+        content, err = asn1.read_tlv(r)
+        if err != "" {
+            if content != null { abort() }
+            break
+        }
+        after = asn1.reader_pos(r)
+        if after < before + 2 || after > n { abort() }
+        cl = bytes.length(content)
+        if cl < 0 || cl > after - before { abort() }
+        if asn1.last_tag_pc(r) == asn1.TAG_PC_CONSTRUCTED() && cl > 0 {
+            walk(content, cl, depth + 1)
+        }
+        bytes.free(content)
+    }
+    asn1.reader_free(r)
+    bytes.free(own)
+}
+
+fn pem_text(m: ptr, n: int) {
+    text = bytes.string_from_slice(bytes.view(m)[0..n])
+    der, label, err = pem.parse(text)
+    if err != "" {
+        if der != null { abort() }
+        return
+    }
+    if der == null || bytes.length(der) <= 0 { abort() }
+    if string.length(label) == 0 { abort() }
+    dn = bytes.length(der)
+    // The block decodes to DER: read it, and as a certificate.
+    walk(der, dn, 0)
+    certificate(der, dn)
+    bytes.free(der)
+    // C4: the next block, past this one.
+    endm = string.index_of_from(text, "-----END ", 0)
+    if endm >= 0 {
+        der2, _label2, err2 = pem.parse_at(text, endm + 1)
+        if err2 != "" && der2 != null { abort() }
+        if der2 != null { bytes.free(der2) }
+    }
+}
+
+fn ocsp(m: ptr, n: int) {
+    s = tls13_cert.parse_ocsp_status(bytes.view(m)[0..n])
+    if s != tls13_cert.OCSP_GOOD && s != tls13_cert.OCSP_REVOKED && s != tls13_cert.OCSP_UNKNOWN && s != tls13_cert.OCSP_ERROR {
+        abort()
+    }
+}
+
+fuzz_target(data: ptr, len: int) {
+    if len < 1 {
+        return
+    }
+    sel = ((data as byte[])[0] & 255) % 4
+    n = len - 1
+    m = bytes.new(n + 1)
+    bytes.set_length(m, n)
+    if n > 0 { bytes.copy_from_slice(m, 0, (data as byte[])[1..len]) }
+    if sel == 0 {
+        certificate(m, n)
+    } else if sel == 1 {
+        walk(m, n, 0)
+    } else if sel == 2 {
+        pem_text(m, n)
+    } else {
+        ocsp(m, n)
+    }
+    bytes.free(m)
+}

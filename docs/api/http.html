@@ -66,6 +66,20 @@
     <li><a href="#server_set_max_body">server_set_max_body</a></li>
     <li><a href="#server_set_head_timeout_raw">server_set_head_timeout_raw</a></li>
     <li><a href="#server_set_head_timeout">server_set_head_timeout</a></li>
+    <li><a href="#server_set_body_timeout_raw">server_set_body_timeout_raw</a></li>
+    <li><a href="#server_set_body_timeout">server_set_body_timeout</a></li>
+    <li><a href="#server_set_body_rate_window_raw">server_set_body_rate_window_raw</a></li>
+    <li><a href="#server_set_body_rate_window">server_set_body_rate_window</a></li>
+    <li><a href="#server_set_tls_handshake_timeout_raw">server_set_tls_handshake_timeout_raw</a></li>
+    <li><a href="#server_set_tls_handshake_timeout">server_set_tls_handshake_timeout</a></li>
+    <li><a href="#server_set_h2_max_age_raw">server_set_h2_max_age_raw</a></li>
+    <li><a href="#server_set_h2_max_age">server_set_h2_max_age</a></li>
+    <li><a href="#server_set_loop_max_connections_raw">server_set_loop_max_connections_raw</a></li>
+    <li><a href="#server_set_loop_max_connections">server_set_loop_max_connections</a></li>
+    <li><a href="#server_set_park_max_connections_raw">server_set_park_max_connections_raw</a></li>
+    <li><a href="#server_set_park_max_connections">server_set_park_max_connections</a></li>
+    <li><a href="#server_set_max_connections_per_ip_raw">server_set_max_connections_per_ip_raw</a></li>
+    <li><a href="#server_set_max_connections_per_ip">server_set_max_connections_per_ip</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
     <li><a href="#server_set_h2">server_set_h2</a></li>
     <li><a href="#server_set_multi_accept_raw">server_set_multi_accept_raw</a></li>
@@ -552,6 +566,83 @@
       <pre class="usage"><code>server_set_head_timeout(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
     </div>
+    <div class="function" id="server_set_body_timeout_raw" data-name="server_set_body_timeout_raw">
+      <h3 class="function-name">server_set_body_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_body_timeout_raw(server, timeout_ns, min_rate) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long, min_rate: long</span></p>
+      <p class="doc">The budget for a request body (#3737): the server waits on the client for the body no longer than `timeout`, plus one second for every `min_rate_bytes` it has received, counting only the time it waits (not the handler's between reads). 30 s and 500 bytes a second unless set here. Past it a body the server reads before the handler runs is answered 408; one the handler reads (request_body, request_body_read) ends short and the response becomes 408. The connection closes either way. 0ns turns the bound off; a rate of 0 makes `timeout` an absolute bound on the wait. Returns &quot;&quot; or why the values were refused.</p>
+    </div>
+    <div class="function" id="server_set_body_timeout" data-name="server_set_body_timeout">
+      <h3 class="function-name">server_set_body_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_body_timeout(server, timeout, min_rate_bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration, min_rate_bytes: long</span></p>
+    </div>
+    <div class="function" id="server_set_body_rate_window_raw" data-name="server_set_body_rate_window_raw">
+      <h3 class="function-name">server_set_body_rate_window_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_body_rate_window_raw(server, window_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, window_ns: long</span></p>
+      <p class="doc">The window over which the body's minimum rate is held (#3737); 60 s unless set here. The bytes a client sends extend its body's budget (server_set_body_timeout), but never so that what is left of it passes this window: a client that sent a burst and then trickled below the minimum rate is cut off within the window of falling behind, where the burst's whole credit let it hold a worker for hours (60 MiB at 500 bytes a second is 35 hours). A client at or above the rate is never cut off by it. Applies on the worker path, the proxy event loop and HTTP/2. 0ns keeps every byte's credit. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_body_rate_window" data-name="server_set_body_rate_window">
+      <h3 class="function-name">server_set_body_rate_window <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_body_rate_window(server, window) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, window: Duration</span></p>
+    </div>
+    <div class="function" id="server_set_tls_handshake_timeout_raw" data-name="server_set_tls_handshake_timeout_raw">
+      <h3 class="function-name">server_set_tls_handshake_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_tls_handshake_timeout_raw(server, timeout_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long</span></p>
+      <p class="doc">The longest a TLS handshake may take as a whole (#3737), on both TLS backends; 30 s unless set here. Past it the connection is closed. The idle timeout bounds each of its reads on its own, so without this a client that sent its ClientHello a byte at a time held a worker for as long as it liked. 0ns turns the bound off. Returns &quot;&quot; or why it was refused.</p>
+    </div>
+    <div class="function" id="server_set_tls_handshake_timeout" data-name="server_set_tls_handshake_timeout">
+      <h3 class="function-name">server_set_tls_handshake_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_tls_handshake_timeout(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
+    </div>
+    <div class="function" id="server_set_h2_max_age_raw" data-name="server_set_h2_max_age_raw">
+      <h3 class="function-name">server_set_h2_max_age_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_h2_max_age_raw(server, timeout_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long</span></p>
+      <p class="doc">How long an HTTP/2 connection may live (#3738); 1 h unless set here. Past it the server sends GOAWAY, lets the streams it has finish, and closes no later than the idle timeout after. An HTTP/2 connection with no stream open closes after the idle timeout (server_set_keepalive) whatever this is. 0ns turns the bound off. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_h2_max_age" data-name="server_set_h2_max_age">
+      <h3 class="function-name">server_set_h2_max_age <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_h2_max_age(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
+    </div>
+    <div class="function" id="server_set_loop_max_connections_raw" data-name="server_set_loop_max_connections_raw">
+      <h3 class="function-name">server_set_loop_max_connections_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_loop_max_connections_raw(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
+      <p class="doc">The most connections the proxy event loop holds at once (#3750). The loop runs on Linux and macOS for a server whose work is a reverse proxy to plain upstreams. 0, the default, is half the process's open-file limit less 64, read when the loop starts, since each proxied connection takes an upstream descriptor too. At the bound the loop closes the connection that has waited longest with nothing of a request sent, and answers a new one 503 when there is none. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_loop_max_connections" data-name="server_set_loop_max_connections">
+      <h3 class="function-name">server_set_loop_max_connections <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_loop_max_connections(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
+    </div>
+    <div class="function" id="server_set_park_max_connections_raw" data-name="server_set_park_max_connections_raw">
+      <h3 class="function-name">server_set_park_max_connections_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_park_max_connections_raw(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
+      <p class="doc">The most idle keep-alive connections the worker path's parking lot holds (#3750); 0, the default, is the process's open-file limit less 64. The lot is where an idle connection waits for its next request without a worker; at the bound the one idle longest is closed to make room. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_park_max_connections" data-name="server_set_park_max_connections">
+      <h3 class="function-name">server_set_park_max_connections <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_park_max_connections(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
+    </div>
+    <div class="function" id="server_set_max_connections_per_ip_raw" data-name="server_set_max_connections_per_ip_raw">
+      <h3 class="function-name">server_set_max_connections_per_ip_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_max_connections_per_ip_raw(server, max_connections, ipv6_prefix) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int, ipv6_prefix: int</span></p>
+      <p class="doc">The most connections one client address may hold on the server (#3750), the worker path and the proxy event loop together; 0, the default, for no limit. Past it a new connection is answered 503 and closed (closed alone over TLS). Off by default because behind a load balancer or a NAT every client arrives from one address, and a limit would refuse real traffic, which is why nginx's limit_conn is opt-in too. An IPv6 client counts by its first `ipv6_prefix` bits (1 to 128): 64 counts each /64, the share one host usually holds. Returns &quot;&quot; or why the values were refused.</p>
+    </div>
+    <div class="function" id="server_set_max_connections_per_ip" data-name="server_set_max_connections_per_ip">
+      <h3 class="function-name">server_set_max_connections_per_ip <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_max_connections_per_ip(server, max_connections, ipv6_prefix) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int, ipv6_prefix: int</span></p>
+    </div>
     <div class="function" id="server_set_h2_raw" data-name="server_set_h2_raw">
       <h3 class="function-name">server_set_h2_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_set_h2_raw(server, max_concurrent_streams) <span class="arrow">-&gt;</span> string</code></pre>
@@ -813,8 +904,9 @@
     </div>
     <div class="function" id="ws_close" data-name="ws_close">
       <h3 class="function-name">ws_close <span class="kind">fn</span></h3>
-      <pre class="usage"><code>ws_close(ws, code, reason)</code></pre>
+      <pre class="usage"><code>ws_close(ws, code, reason) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">ws: ptr, code: int, reason: string</span></p>
+      <p class="doc">&quot;&quot; when the close frame went out (or the handle was already closed), else why nothing was sent: a code a close frame may not carry (RFC 6455 7.4: only 1000-1003, 1007-1014 and 3000-4999) or a reason that is not UTF-8.</p>
     </div>
     <div class="function" id="ws_set_max_message_raw" data-name="ws_set_max_message_raw">
       <h3 class="function-name">ws_set_max_message_raw <span class="kind">extern</span></h3>

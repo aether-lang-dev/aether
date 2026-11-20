@@ -189,6 +189,9 @@ int http_request_set_header_raw(HttpClientRequest* r, const char* n, const char*
 int http_request_set_body_raw(HttpClientRequest* r, const char* b, int l, const char* c) { (void)r; (void)b; (void)l; (void)c; return -1; }
 int http_request_set_timeout_raw(HttpClientRequest* r, int s) { (void)r; (void)s; return -1; }
 int http_request_set_timeout_ns_raw(HttpClientRequest* r, int64_t ns) { (void)r; (void)ns; return -1; }
+int http_request_set_max_response_raw(HttpClientRequest* r, int64_t m) { (void)r; (void)m; return -1; }
+int http_client_set_max_response_raw(int64_t m) { (void)m; return -1; }
+void http_client_limits(HttpClientLimits* out) { if (out) out->max_response = HTTP_CLIENT_DEFAULT_MAX_RESPONSE; }
 int http_request_set_follow_redirects_raw(HttpClientRequest* r, int n) { (void)r; (void)n; return -1; }
 int http_request_set_insecure_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_set_cafile_raw(HttpClientRequest* r, const char* p) { (void)r; (void)p; return -1; }
@@ -1241,7 +1244,10 @@ static int http_chunk_size_line(const char* line, size_t n, uint64_t* size) {
  * one grammar. 1 when all of it is there, with *frame_len the bytes it takes
  * (its trailer section and the CRLF that ends it included); 0 when more has
  * to arrive; -1 when it is not chunked framing. With `out`, the data of each
- * chunk is copied there as well and *out_len is the payload's length.
+ * chunk is copied there as well and *out_len is the payload's length. When
+ * more has to arrive, *out_len is the payload so far, what there is of the
+ * chunk being read included (nothing is copied then): a response limit
+ * counts it (#3750).
  *
  * Framing and decoding are this one walk, so the length a server buffers and
  * the bytes it then decodes cannot disagree: they did, when the framing check
@@ -1252,7 +1258,10 @@ static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
     size_t off = 0, oi = 0;
     for (;;) {
         const char* lf = (const char*)memchr(buf + off, '\n', len - off);
-        if (!lf) return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        if (!lf) {
+            if (out_len) *out_len = oi;
+            return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        }
         size_t line_len = (size_t)(lf - (buf + off));
         uint64_t size = 0;
         if (line_len > HTTP_CHUNK_LINE_MAX ||
@@ -1262,6 +1271,10 @@ static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
         if ((uint64_t)(len - off) < size + 2) {
             /* What is there of the CRLF after the data has to be one. */
             if ((uint64_t)(len - off) > size && buf[off + size] != '\r') return -1;
+            if (out_len) {
+                uint64_t have = (uint64_t)(len - off);
+                *out_len = oi + (size_t)(have < size ? have : size);
+            }
             return 0;
         }
         if (out) memcpy(out + oi, buf + off, (size_t)size);
@@ -1275,7 +1288,10 @@ static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
      * line ends in CRLF and carries no CR of its own. */
     for (;;) {
         const char* lf = (const char*)memchr(buf + off, '\n', len - off);
-        if (!lf) return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        if (!lf) {
+            if (out_len) *out_len = oi;
+            return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        }
         size_t line_len = (size_t)(lf - (buf + off));
         if (line_len > HTTP_CHUNK_LINE_MAX || line_len == 0 ||
             buf[off + line_len - 1] != '\r' ||
@@ -1454,6 +1470,10 @@ struct HttpClientRequest {
                           * DWORD ms) slice this down to whatever
                           * granularity they support. */
     int   max_redirects; /* 0 = don't follow (default); N>0 = follow up to N hops */
+    /* The most of a response this request holds (#3750), when
+     * max_response_set; else the client's default (http_client_limits). */
+    int64_t max_response;
+    int   max_response_set;
     int   insecure;      /* 0 = verify peer cert + hostname (default); 1 = skip
                           * both for THIS connection only (curl -k equivalent).
                           * Relaxed per-SSL, never on the shared SSL_CTX. */
@@ -1691,6 +1711,55 @@ int http_request_set_timeout_ns_raw(HttpClientRequest* req, int64_t timeout_ns) 
     return 0;
 }
 
+/* The client's limits (#3750): HTTP_CLIENT_DEFAULT_MAX_RESPONSE until a
+ * program sets another, for every request that sets none. Atomic: any
+ * thread may set it while others send. */
+static _Atomic int64_t http_client_max_response = HTTP_CLIENT_DEFAULT_MAX_RESPONSE;
+
+int http_client_set_max_response_raw(int64_t max_bytes) {
+    if (max_bytes < 0) return -1;
+    atomic_store(&http_client_max_response, max_bytes);
+    return 0;
+}
+
+void http_client_limits(HttpClientLimits* out) {
+    if (!out) return;
+    out->max_response = atomic_load(&http_client_max_response);
+}
+
+int http_request_set_max_response_raw(HttpClientRequest* req, int64_t max_bytes) {
+    if (!req || max_bytes < 0) return -1;
+    req->max_response = max_bytes;
+    req->max_response_set = 1;
+    return 0;
+}
+
+/* The most of a response `req` holds, 0 for no bound. */
+static int64_t http_request_max_response(const HttpClientRequest* req) {
+    if (req && req->max_response_set) return req->max_response;
+    return atomic_load(&http_client_max_response);
+}
+
+int64_t http_request_max_response_of(const HttpClientRequest* req) {
+    return http_request_max_response(req);
+}
+
+/* The error a response past `max` fails with, saying which limit and how
+ * to change it: the blocking client's, and the proxy event loop's for an
+ * upstream's answer (#3750), which the proxy reads by its prefix. */
+void http_response_too_large_text(int64_t max, char* out, size_t cap) {
+    snprintf(out, cap,
+             HTTP_CLIENT_TOO_LARGE_PREFIX " of %lld bytes "
+             "(set_max_response, or set_stream to read it in pieces)",
+             (long long)max);
+}
+
+static AetherString* http_response_too_large_error(int64_t max) {
+    char msg[192];
+    http_response_too_large_text(max, msg, sizeof(msg));
+    return string_new(msg);
+}
+
 int http_request_set_follow_redirects_raw(HttpClientRequest* req, int max_hops) {
     if (!req || max_hops < 0) return -1;
     req->max_redirects = max_hops;
@@ -1911,7 +1980,11 @@ static int response_status_of(const char* header_block) {
     if (!sp) return 0;
     const unsigned char* d = (const unsigned char*)sp + 1;
     if (!isdigit(d[0]) || !isdigit(d[1]) || !isdigit(d[2])) return 0;
-    if (isdigit(d[3])) return 0;
+    /* A code is 100 through 599 (RFC 9110 15), and the reason, if any,
+     * follows a space (RFC 9112 4): "HTTP/0 011.2 OK" read as status 11,
+     * which a proxy then wrote back as "HTTP/1.1 11". */
+    if (d[0] < '1' || d[0] > '5') return 0;
+    if (d[3] != '\0' && d[3] != ' ' && d[3] != '\r' && d[3] != '\n') return 0;
     return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
 }
 
@@ -1934,11 +2007,15 @@ static int no_body_expected(int status, const char* method) {
  * as C strings: a NUL hid the section and handed the whole response back as
  * a status-0 body, and a bare CR in a Location went out inside the request
  * line of the redirect. */
-static void http_head_section_repair(char* buf, size_t n) {
+static size_t http_head_section_repair(char* buf, size_t n) {
+    size_t replaced = 0;
     for (size_t i = 0; i < n; i++) {
-        if (buf[i] == '\0' || (buf[i] == '\r' && (i + 1 >= n || buf[i + 1] != '\n')))
+        if (buf[i] == '\0' || (buf[i] == '\r' && (i + 1 >= n || buf[i + 1] != '\n'))) {
             buf[i] = ' ';
+            replaced++;
+        }
     }
+    return replaced;
 }
 
 // -----------------------------------------------------------------
@@ -3076,9 +3153,10 @@ static size_t http_interim_scan(const char* buf, size_t len) {
     }
 }
 
-static size_t http_interim_prefix(char* buf, size_t len) {
+static size_t http_interim_prefix(char* buf, size_t len, size_t* replaced) {
     size_t off = http_interim_scan(buf, len);
-    http_head_section_repair(buf, off);
+    size_t r = http_head_section_repair(buf, off);
+    if (replaced) *replaced = r;
     return off;
 }
 
@@ -3086,14 +3164,21 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                                      const char* method) {
     if (!f->header_bytes) {
         /* The final response's head, past any interim ones. */
-        size_t skip = http_interim_prefix(buf, len);
+        size_t interim_replaced = 0;
+        size_t skip = http_interim_prefix(buf, len, &interim_replaced);
+        /* Sticky: an interim head repaired on an earlier call, before the
+         * final head was whole, is repaired all the same. */
+        if (interim_replaced) f->repaired = 1;
         char* hend = (char*)http_find_header_end(buf + skip, len - skip);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
         /* Read with its NULs and bare CRs as SP (#3572), here where the
          * section is first whole, so the framing and every reader after it
-         * read the same fields. */
-        http_head_section_repair(buf + skip, f->header_bytes - skip);
+         * read the same fields. What was replaced is recorded: the head is
+         * no longer the upstream's bytes, and a reader that would relay
+         * them as they came (the proxy's pass-through) cannot see where a
+         * bare CR stood, so it is told. */
+        if (http_head_section_repair(buf + skip, f->header_bytes - skip) > 0) f->repaired = 1;
         const char* head = buf + skip;
 
         /* Read Transfer-Encoding where it lies, every field of it as one
@@ -3143,7 +3228,9 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
     if (f->invalid) return 1;      /* stop reading; the driver reports it */
     if (!f->definite) return 0;
     if (f->chunked) {
-        int rc = http_chunked_frame(buf + f->header_bytes, len - f->header_bytes, NULL);
+        size_t frame = 0;
+        int rc = http_chunked_walk(buf + f->header_bytes, len - f->header_bytes, &frame,
+                                   NULL, &f->body_decoded);
         /* Framing that is not chunked framing has not said where the body
          * ends either: reading on would wait for an end that never comes. */
         if (rc < 0) f->invalid = 1;
@@ -3314,7 +3401,7 @@ char* http_build_request_head_into(const HttpReqHead* p,
 void http_response_fill_from_bytes(HttpResponse* response,
                                           char* buf, size_t len) {
     /* The final response, past any interim 1xx ones (http_interim_prefix). */
-    size_t interim = http_interim_prefix(buf, len);
+    size_t interim = http_interim_prefix(buf, len, NULL);
     buf += interim;
     len -= interim;
     /* Found as the framing found it, past any NUL (#3556): strstr stopped at
@@ -3323,6 +3410,14 @@ void http_response_fill_from_bytes(HttpResponse* response,
     char* header_end = (char*)http_find_header_end(buf, len);
     if (!header_end) {
         response->body = string_new_with_length(buf, len);
+        /* No head at all: nothing, or bytes that are not HTTP, before the
+         * peer closed. It came back as status 0 with no error, which the
+         * reverse proxy copied onto its own reply as "HTTP/1.1 0" (#3749,
+         * found by the proxy-response fuzzer), and a client read as a
+         * response. It is an error, as a head with no status is. */
+        if (!response->error)
+            response->error = string_new(len ? "the response has no complete head"
+                                             : "the connection closed with no response");
         return;
     }
     size_t header_bytes = (size_t)((header_end + 4) - buf);
@@ -3802,6 +3897,23 @@ int http_exchange_recv(HttpExchange* x) {
         int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
         if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
         if (n < 0)  return http_io_would_block() ? AE_X_WANT_READ : AE_X_ERROR;
+        /* Past the response limit, the read ends there (#3750): a server
+         * could make the client grow this buffer for as long as it kept
+         * sending. The limit is on the head and the body's payload: a
+         * chunked body's framing is not the response's size, and counted
+         * it put a body of the limit's size in 512-byte chunks past it, so
+         * a proxy refused what fit its cap. What the buffer holds of a
+         * chunked body is bounded at twice the limit, framing and all, so
+         * chunks of a byte each cannot grow it without bound either. */
+        if (x->max_len) {
+            size_t cap = x->max_len;
+            if (x->framing.chunked)
+                cap = x->max_len > (SIZE_MAX - 65536) / 2 ? SIZE_MAX : x->max_len * 2 + 65536;
+            if (x->len + (size_t)n > cap) {
+                x->too_large = 1;
+                return AE_X_ERROR;
+            }
+        }
 
         if (x->len + (size_t)n + 1 > x->cap) {
             size_t new_cap = x->cap ? x->cap * 2 : 16384;
@@ -3820,7 +3932,13 @@ int http_exchange_recv(HttpExchange* x) {
         x->len += (size_t)n;
         x->buf[x->len] = '\0';
 
-        if (http_response_is_complete(&x->framing, x->buf, x->len, x->method)) {
+        int done = http_response_is_complete(&x->framing, x->buf, x->len, x->method);
+        if (x->max_len && x->framing.chunked &&
+            x->framing.header_bytes + x->framing.body_decoded > x->max_len) {
+            x->too_large = 1;
+            return AE_X_ERROR;
+        }
+        if (done) {
             x->complete = 1;
             return AE_X_DONE;
         }
@@ -4106,7 +4224,27 @@ send_request:
         size_t hlen = 0, hcap = 0;
         char*  hend = NULL;
         int    sn, serr = 0;
+        /* The head is bounded as a buffered response is, in size by the
+         * response limit and in time by the request's timeout as a whole
+         * (#3750): it was read for as long as a server kept sending header
+         * bytes, each inside the per-read timeout, into a buffer that grew
+         * to match. */
+        int64_t head_max = http_request_max_response(req);
+        int64_t head_due = req->timeout_ns > 0
+            ? (int64_t)http_now_ms() + (req->timeout_ns + 999999LL) / 1000000LL : 0;
         while ((sn = transport_recv(&t, sbuf, sizeof(sbuf))) > 0) {
+            if (head_max > 0 && hlen + (size_t)sn > (size_t)head_max) {
+                free(hb);
+                transport_close(&t);
+                response->error = http_response_too_large_error(head_max);
+                return response;
+            }
+            if (head_due && (int64_t)http_now_ms() >= head_due) {
+                free(hb);
+                transport_close(&t);
+                response->error = string_new("request timed out before the response headers arrived");
+                return response;
+            }
             if (hlen + (size_t)sn + 1 > hcap) {
                 size_t nc = hcap ? hcap * 2 : 16384;
                 while (nc < hlen + (size_t)sn + 1) nc *= 2;
@@ -4182,7 +4320,7 @@ send_request:
                     free(hb);
                     transport_close(&t);
                     response->error = string_new(
-                        "response framing is ambiguous: the declared body length is not usable");
+                        HTTP_CLIENT_AMBIGUOUS_FRAMING);
                     return response;
                 }
                 clen = (long long)declared;
@@ -4255,6 +4393,8 @@ send_request:
          * each recv: SO_RCVTIMEO alone let a peer that dribbles a byte just
          * inside the limit hold the request open indefinitely. */
         http_exchange_set_timeout(&rx, req->timeout_ns);
+        int64_t max_response = http_request_max_response(req);
+        rx.max_len = max_response > 0 ? (size_t)max_response : 0;
         int rc = http_exchange_recv(&rx);
         timed_out = rx.timed_out;
         rx_complete_at_deadline = rx.complete || rx.peer_closed;
@@ -4271,7 +4411,7 @@ send_request:
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new(
-                "response framing is ambiguous: the declared body length is not usable");
+                HTTP_CLIENT_AMBIGUOUS_FRAMING);
             return response;
         }
         if (rx.oom) {
@@ -4279,6 +4419,13 @@ send_request:
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new("out of memory reading response");
+            return response;
+        }
+        if (rx.too_large) {
+            aether_caps_free(hdr, hdr_cap);
+            aether_caps_free(full_response, cap);
+            transport_close(&t);
+            response->error = http_response_too_large_error(max_response);
             return response;
         }
         /* A WANT on a blocking transport is SO_RCVTIMEO firing, not a socket
@@ -4327,10 +4474,9 @@ send_request:
             total_len = 0;
             cap = 0;
             recv_err = 0;
-            framing.header_bytes = 0;
-            framing.body_target = 0;
-            framing.chunked = 0;
-            framing.definite = 0;
+            /* All of it: what the stale connection's bytes set (invalid,
+             * repaired, body_decoded) says nothing of the redial's. */
+            memset(&framing, 0, sizeof framing);
             goto send_request;
         }
         /* The redial failed too, so the upstream is gone rather than the

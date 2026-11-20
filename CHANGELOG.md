@@ -14,6 +14,643 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.927.0]
+
+### Added
+
+- **A per-address connection limit for the HTTP server (#3750).**
+  `http.server_set_max_connections_per_ip(server, n, ipv6_prefix)` bounds
+  the connections one client address may hold, the worker path and the
+  proxy event loop counted together; past it a new connection is answered
+  503 and closed (closed alone over TLS), its close lingering no more than
+  500 ms so the answer is not reset away. It is off by default: behind a
+  load balancer or a NAT every client arrives from one address, and any
+  default limit would refuse real traffic there, as nginx's opt-in
+  `limit_conn` reflects. An IPv6 client counts by its first `ipv6_prefix`
+  bits, 64 by default, since one host usually holds a whole /64.
+
+- **Every decoder that reads untrusted input is fuzzed (#3749).** Eleven new
+  libFuzzer targets under `tests/fuzz/`, each checking its decoder's
+  contract rather than only that it does not crash: the WebSocket frame
+  reader, the HTTP/2 server glue, the reverse proxy's handling of an
+  upstream response, std.xml, std.yaml with the vendored libfyaml,
+  std.msgpack, std.tar and std.zip extraction (into a scratch directory,
+  checked to write nothing outside it), the TLS 1.3 record layer and
+  handshake parsers, and X.509, ASN.1 and PEM. Seeds come from the existing
+  tests. The fuzz workflow runs in three shards: a pull request fuzzes the
+  targets its changes reach (`tests/fuzz/select_targets.sh`), main fuzzes
+  them all, and a weekly run gives each 10 minutes. `make fuzz-replay` runs
+  every seed through the property checks where libFuzzer is not available.
+
+### Changed
+
+- **Sandbox: a call on a name is checked on that name (#3751).** `unlink`,
+  `rmdir`, `rename`, `mkdir`, `readlink`, `fs.is_symlink`, `fs.exists` (an
+  `lstat`), the new name of a link or symlink, and an open with
+  `O_NOFOLLOW` or `O_CREAT|O_EXCL` act on a symlink itself, and are now
+  checked on its directory plus its name rather than on where it leads.
+  Removing a symlink in a granted directory that points out is allowed (it
+  was refused), removing or renaming one outside the grant that points in
+  is refused (it was allowed), and a dangling symlink in a grant reads as
+  the link it is. A hard link now also needs the new name not to reach the
+  file more than the old one may: `fs_read` and `fs_write` on the target
+  for whichever the new name has, where before only `fs_write` on the new
+  name was asked. Under the LD_PRELOAD library a listing (`opendir`,
+  `scandir`) needs `fs_read` on the directory itself, as `fs.list_dir` has
+  since #3743, and a temporary file needs `fs_write` where it is made;
+  `mkdir` of an existing directory says `EEXIST` without a grant.
+
+- **`fs.lock_open` inside a sandbox: write-only without `fs_read` (#3751).**
+  It needs `fs_write`, as it always has, and is now opened where the check
+  saw it. Its descriptor reads as well only where `fs_read` is granted too;
+  with `fs_write` alone it is write-only, which `try_lock` takes (`flock`
+  and `LockFileEx` both lock a write-only descriptor). It used to be opened
+  read-write with only `fs_write` asked, which let the holder read a file
+  it was never granted to read.
+
+### Fixed
+
+- **An unchanged rebuild hits the cache even when the C compiler's
+  `--version` failed once (#3707).** The build cache key folds in the first
+  line of `<cc> --version`, but not how that run ended: a spawn failure, a
+  signal or an exit with nothing on stdout folded in no line, so that build
+  published under another key and the next identical build missed (seen on
+  macOS x86, where the run goes through the xcrun shim). Such a run is now
+  tried again, up to three times, and its outcome is part of the key, so a
+  compiler that always rejects `--version` (tcc) still caches. A compiler
+  whose `--version` never runs to an answer leaves the build uncached rather
+  than keyed without it, and `ae build -v` says so.
+
+- **A host that serves its own connections can speak HTTP/2 on them
+  (#3738).** The HTTP/2 loop sent GOAWAY once the server was not running,
+  and a host that hands connections to `http_server_drain_connection` never
+  starts its server, so every HTTP/2 connection it served got a GOAWAY
+  before its first request, which was never answered. The loop now keys on
+  the stop itself, which `http_server_stop` signals.
+
+- **An HTTP server out of descriptors no longer spins on its listener.**
+  When the process ran out of descriptors (or memory), accept() failed with
+  the connection still queued and the listener still readable, and both
+  accept loops went straight back to poll and accept: a core spun for as
+  long as a client held its connections open. The loops now stop watching
+  the listener for 100 ms after such a failure, as nginx disables its
+  accept events, and the queued connection is served once a descriptor
+  frees.
+
+- **A short HTTP/1.0 request is answered on a server with HTTP/2 on.** The
+  server read a new connection's first 24 bytes, the length of the HTTP/2
+  preface, before deciding whether it spoke HTTP/2, so a whole request
+  shorter than that (`GET / HTTP/1.0\r\n\r\n` is 18 bytes) waited for
+  bytes its client would never send and was answered 408. The first byte
+  that differs from the preface now settles it.
+
+- **`asn1.last_tag_class`, `last_tag_pc` and `last_tag_number` exist
+  (#3749).** `std.cryptography.asn1` exported them and defined none, so a
+  program calling one did not compile. They give the class, the constructed
+  bit and the number of the tag `read_tlv` read last.
+
+- **std.yaml: an empty stream is an empty document, and keys are looked up
+  as text (#3749).** `yaml.parse` of a stream with no document in it (empty,
+  or only comments) returned no document and no error; it returns a
+  document with no root, which `emit_document` writes as the empty text.
+  `mapping_lookup` read its key as YAML source, so a key such as `a: b`,
+  `[x]`, `#c` or a block scalar's text was not found in a mapping holding
+  it; keys are compared as the text they are (YAML source naming a
+  non-scalar key is still looked up as before). Found by the new YAML fuzz
+  target.
+
+- **The reverse proxy answers an upstream's response the same way on both of
+  its paths (#3749).** Found by the new proxy-response fuzz target, which
+  holds the copying path and the event loop's pass-through to the same head:
+  - an upstream that closed with no response head, or sent bytes that are
+    not HTTP, was read as status 0 with no error and the client was sent
+    `HTTP/1.1 0`; the HTTP client now reports it as an error, so the proxy
+    answers 502 (and `http.get` no longer hands back status 0 as a reply);
+  - the pass-through answered a response that had an interim (1xx) one ahead
+    of it with the interim's status; it leaves those to the copying path;
+  - the copying path kept only the last of a repeated field, so of several
+    `Set-Cookie` fields the client saw one; each is passed on;
+  - a response held at most 50 header fields and dropped the rest silently,
+    so a proxied response with more lost them; the fields now grow as
+    needed;
+  - the pass-through wrote a repeated `Content-Length` once a line; it
+    writes it once.
+
+- **std.tar: reading an entry to its end reports its end, not an error
+  (#3749).** `entry_read` answered "not positioned on an entry" once a file
+  entry had been read whole, so a loop reading to length 0 failed after the
+  last chunk of every file. It answers `("", 0, "")` there, and still refuses
+  a read before any entry or past the archive's end. Found by the new tar
+  fuzz target.
+
+- **WebSocket text must be UTF-8 (#3749).** The frame reader, shared by
+  server handles and `ws_connect`'s, handed text messages and close reasons
+  over whatever bytes they held. It now checks them as RFC 6455 8.1 asks,
+  strictly (no overlong form, no surrogate, nothing past U+10FFFF, no
+  message ending inside a code point), as the bytes arrive and across
+  fragments, so a code point split between two fragments is whole. Text
+  that is not UTF-8 closes the connection with `1007`. Binary messages are
+  not checked.
+
+- **WebSocket close frames keep to RFC 6455 5.5.1 and 7.4 (#3749).** A close
+  frame from the peer with a one-byte body, or with a code no close frame
+  may carry (below 1000, 1004 to 1006, 1015 to 2999, 5000 and up), now
+  closes the connection with 1002; both were echoed back as they came.
+  `ws_close` (and `http_ws_close` in C) now returns `""`, or why it sent
+  nothing: a code a close frame may not carry, or a reason that is not
+  UTF-8. A reason past 123 bytes is cut at a whole code point, where it was
+  cut at byte 123 even inside one. **Behaviour change:** `ws_close` with
+  such a code or reason used to send the close frame anyway and mark the
+  connection closed; it now sends nothing, returns the reason, and leaves
+  the connection open, so a caller that ignored the result and went on as
+  if it were closed should check it and close with an allowed code (1000
+  for a normal close).
+
+- **A file a sandboxed call holds open on Windows can be opened by others
+  again (#3751).** An open that may create a file asked for DELETE, so a
+  refused new file could be removed through its handle, and kept it for the
+  life of the handle; every later open of that file that does not share
+  delete (`fopen`, `_open`, another process, a second sandboxed process)
+  failed with a sharing violation while it was open, which broke
+  `fs.open` with "a" or "w", `fs.lock_open` across processes,
+  `fs.create_exclusive`, `fs.write_binary` and tailing a log. A file that
+  exists is now opened as it is, with no DELETE; a new one is verified and
+  then reopened without DELETE (`ReOpenFile`), shared for reading and
+  writing as `fopen` shares it. Where DELETE cannot be had, the new file is
+  made by `NtCreateFile` in the verified directory, so it never lands
+  outside the grant.
+
+- **`sandbox.grant_runtime` lets the interpreter list its own library
+  directories again, and works on Windows (#3751).** Since the preload
+  checks `opendir` and its kin, listing a directory needs `fs_read` on the
+  directory itself, which a grant of what is under it ("dir/*") does not
+  give; python3 lists each directory on its path to fill its import cache,
+  so under `spawn_socket` it stopped with "No module named 'encodings'".
+  Each library directory is now granted itself as well as what is under it.
+  On Windows the interpreter's answer ends its lines with "\r\n", and the
+  "\r" was kept as part of every path, so none of the grants matched.
+
+- **An HTTP/2 response keeps every field the handler set.** The HTTP/2
+  glue clamped a response's fields at 256 and dropped the rest without a
+  word; with the response's field arrays growing as fields are set, a
+  handler could set more and the client never saw them. The nghttp2 field
+  array is now sized from the count.
+
+- **`std.xml` no longer reads a control byte, a quote or `&` as part of a
+  name (#3749).** Inside a start tag the reader took every byte up to a
+  space, `<`, `>`, `/`, `=` or `?` as the element's or attribute's name, so
+  `<b\x0f>` was an element called `b\x0f`, a name XML cannot hold, and the
+  pretty printer wrote it back out. Such a byte now ends the name and the
+  tag is refused as malformed. Names are otherwise read as leniently as
+  before. Found by the XML fuzz target.
+  An empty CDATA section (`<![CDATA[]]>`) is no text event: the reader
+  gave one with no characters, which the builder's copy of the document
+  (writing empty text as nothing) did not have.
+
+- **A Unix-domain socket's path resolves on Windows again (#3763).** An
+  AF_UNIX socket file is a reparse point the system will not follow, so
+  the resolution that finds where a path leads failed on it, and a
+  sandboxed connect with `fs_write` on the socket's path was refused. A
+  reparse point that is not a name surrogate (a socket's, a deduplicated or
+  cloud file's) redirects no name and is now taken as the file itself; a
+  symlink or junction that cannot be followed is still refused.
+
+- **The reverse proxy answers a malformed upstream head the same way on
+  both of its paths (#3749).** The event loop's pass-through ended the
+  status line at the first LF and stopped reading fields at a bare CR,
+  while the copying path reads through the client, which turns a bare CR
+  into a space and ends lines only at CR LF. On a status line with a bare
+  CR and a bare LF the pass-through kept a Content-Length the copying path
+  dropped. The pass-through now takes only heads whose lines all end in CR
+  LF, with no bare CR, bare LF, NUL or folded line, as the upstream sent
+  them: the client's framing replaces a NUL or a bare CR with a space
+  before the pass-through sees the head (#3572), and it now records that it
+  did, so a repaired head goes the copying path too. Before, the
+  pass-through relayed "Content-Length: 1\rX: y" as one field with the
+  value "1 X: y". Found by the proxy-response fuzz target.
+  On an answer to HEAD neither path forwards a Content-Length the
+  upstream stated badly: each value must be digits only and every one the
+  same (RFC 9110 8.6, RFC 9112 6.3). The pass-through kept the first of
+  "2" and "0 OK", the copying path the last.
+  The proxy event loop refuses a response that never said where its body
+  ends (two Content-Length values, one not a number) as the worker path's
+  client does, a 502, where it built a response from the bytes and relayed
+  one of the lengths (#3782). And the proxy cache stores a field's value
+  without its trailing whitespace, as the miss sent it: a hit replayed it
+  padded.
+
+- **`fs.unlink` of a junction works inside an enforce block on Windows
+  (#3751).** The checked removal counted a junction as a directory, so
+  unlinking one in a block failed with "is a directory", while outside a
+  block (and `fs.is_symlink`) it is a link. Any name-surrogate reparse
+  point is now a link to the checked removal too, and what it points at
+  stays.
+
+- **`std.yaml` emits a block scalar that ends the input whole, and a
+  document no longer borrows the text it was parsed from (#3749).** A
+  document whose last line was a block scalar's, with no line break after
+  it (`k: >\n  abc`), emitted as `k: >` with the content gone, and read back
+  as an empty scalar: libfyaml's emitter writes a block scalar from its
+  source lines and takes the last one only when a line break follows it.
+  `parse` now gives libfyaml its own copy of the text, ending in a line
+  break, which the document owns and `free` releases; values read as before.
+  The document used to point into the caller's string, which it kept
+  reading to emit. Found by the YAML fuzz target.
+
+- **On Windows a checked call acts on the name a Win32 call would, and
+  `NUL` is a device (#3751).** The calls that make a name through
+  `NtCreateFile` or `NtSetInformationFile` (mkdir, rename, hard links,
+  `fs.write_atomic`) took the last name as written, so "new." and "sp "
+  were made literally and a file called "NUL" was made in a directory,
+  none of which a Win32 call reaches again. The whole path now goes through
+  `GetFullPathNameW` first, which drops a trailing dot or space and turns a
+  device name into the device. A device ("\.\NUL") is its own resource,
+  covered by a grant that names it or by `grant_all`, as `/dev/null` is on
+  POSIX: `fs.write("NUL")` was refused even under `grant_all`. "sub \x" is
+  also resolved one way by every check now.
+
+- **A path with a trailing slash names a directory in a sandboxed call, as
+  the kernel takes it (#3751).** The checked calls dropped the slash, so
+  `unlink("/box/link/")` removed the link and an open of "/box/new/" that
+  could create made a file. In an enforce block on POSIX and under the
+  preload, an unlink of "name/" never removes anything (`ENOTDIR`, or
+  `EISDIR` for a directory), an open that would create is `EISDIR`, an open
+  follows the name and needs a directory there, a rename moves a directory
+  only, and a new symlink, hard link or node is not made.
+
+- **The preload gives an `O_TMPFILE` file its name again (#3751).**
+  `linkat(fd, "", ..., AT_EMPTY_PATH)` was resolved to the descriptor's
+  "#123 (deleted)" path and linked by that name (`ENOENT`), and
+  `linkat(AT_FDCWD, "/proc/self/fd/N", ..., AT_SYMLINK_FOLLOW)` was refused
+  (`EACCES`). A link whose source is a descriptor now needs `fs_write` on the
+  new name, which may not reach the file more than the path the descriptor
+  is open on may, and is made with the caller's spelling of the source, so
+  an inherited descriptor of a file outside the grants still gets no name
+  inside them.
+
+- **The checked file calls work on WASI (#3751).** The walk that opens a
+  checked path one directory at a time started from `openat(AT_FDCWD, "/")`,
+  which wasi-libc resolves only when a preopened directory is "/". It now
+  starts from the preopen that holds the path (`__wasilibc_find_abspath`),
+  as does the checked `mkdir -p`.
+
+- **Smaller sandbox fixes (#3751).** Under the preload `lsetxattr` and
+  `lremovexattr` act on the name opened `O_PATH|O_NOFOLLOW` (through
+  `/proc/self/fd/N`) instead of by its resolved name; the chmod fallback for
+  glibc before 2.32 opens with `O_NONBLOCK|O_NOCTTY`, so a FIFO there no
+  longer blocks it; and the shell `os.execv` falls back to, which `os.run`
+  and `grant_shell` name too, is `_PATH_BSHELL` where the system defines it.
+
+- **A permanent policy under the preload lets its granted programs start
+  (#3751).** Landlock needs `EXECUTE` on a program's ELF interpreter and on
+  a `#!` script's interpreter, but only the named program got it, so
+  `exec:/usr/bin/ls` with `policy:permanent` failed with `EACCES`; and the
+  floor lacked the preload library and the grant file, so a program it
+  started lost its policy. An exec grant now gets what its program needs to
+  start (shared with `spawn_sandboxed`'s kernel layer), the floor adds the
+  library, the grant file and the shared memory the grants came from, and a
+  tcp grant that names a host makes the C library's resolver files
+  readable, for the preload and a spawned child alike. An fs grant becomes
+  a Landlock rule only on what the libc check would match: one spelt
+  through a symlink, or an entry of "/dir/name*" that is a symlink, no
+  longer reaches the tree the symlink points at.
+
+- **std.tar reads a regular-file entry whose name ends in '/' as a
+  directory (#3749).** That is the convention of the tars before typeflag
+  '5', which GNU tar, libarchive and Python's tarfile keep. The reader
+  called such an entry a file named "d/", while extract, which cleans the
+  name, wrote a file at "d": the two disagreed about the same entry, and an
+  entry under "d/" could not be extracted. `entry_kind` now gives
+  `KIND_DIRECTORY` for it and extract makes the directory. Found by the tar
+  fuzz target, through a GNU long name with a NUL in it.
+
+### Security
+
+- **SECURITY.md says how to report a vulnerability privately** (GitHub's
+  private reporting on the Security tab), which versions get fixes, what
+  counts as a vulnerability, and how the project protects its CI and
+  releases. The repository now requires SHA-pinned actions, scans for secrets
+  with push protection, takes Dependabot security updates, and no longer lets
+  a workflow approve a pull request (#3753, #3746).
+
+- **`os.execv` runs a file with no `#!` line through the shell only with
+  `grant_shell()` (#3762).** It called libc's `execvp`, which runs a file the
+  kernel refuses with ENOEXEC through `/bin/sh` by itself, after the exec
+  grant matched the file alone: the shell then ran whatever the file held.
+  `os.execv` now finds the program as `os.run` does and starts it with
+  `execv`, and makes the shell fallback itself only when the sandbox lets
+  the shell run, the rule #3755 set for `os.run`. Refused, `os.execv`
+  returns -1 with errno EACCES. A `#!` script is unchanged, and code trusted
+  to run shell scripts keeps running them by adding `grant_shell()`.
+
+- **WebSocket frames with a reserved bit set, or fragments out of order,
+  close the connection with 1002 (#3764).** std.http negotiates no
+  WebSocket extension, so RSV1 to RSV3 must be clear (RFC 6455 5.2), but a
+  frame with them set was read as if they were not: a peer that believed it
+  had permessage-deflate had its compressed bytes handed to the program as
+  the message. A continuation frame with no message in progress was taken
+  as a message of its own, and a text or binary frame inside a fragmented
+  message restarted it and dropped the fragments before it (5.4). All three
+  now fail the connection with 1002, on server handles and on
+  `http.ws_connect`'s alike. Control frames between fragments are still
+  allowed, as the RFC says.
+
+- **The sandbox follows junctions and symlinks on Windows (#3763).** An fs
+  path was resolved with `_fullpath`, which removes `.` and `..` from the
+  text but follows no junction or symbolic link, so a junction inside a
+  granted directory let sandboxed code read and write anything it pointed
+  at. The deepest existing part of a path (and of an fs grant's pattern) is
+  now opened and resolved to its final path with
+  `GetFinalPathNameByHandleW`, the names below it that do not exist yet kept
+  as written, as POSIX resolves paths with `realpath`. A name that exists
+  but cannot be followed, such as a link whose target is gone, is refused.
+  Junctions that stay inside a grant, and grants written through a
+  junction, work as before.
+
+- **A sandboxed file call reaches the file its check saw (#3751).** The
+  sandbox resolved a path and matched where it led, then handed the path as
+  written to libc, which resolved it again: a directory swapped for a
+  symlink (or a junction on Windows) between the two was followed out of
+  the grant. std's opens, listings and the calls that change a directory
+  (`fs.read`, `fs.write`, `fs.open`, `fs.copy`, `fs.list_dir`, `fs.walk`,
+  `fs.delete`, `fs.unlink`, `fs.rename`, `fs.move`, `fs.create_dir`,
+  `fs.mkdir_p`, `fs.symlink`, `fs.hard_link`, `fs.chmod`,
+  `fs.create_exclusive`) are now made on the resolution the check matched,
+  following no symlink: with `openat2` and `RESOLVE_NO_SYMLINKS` on Linux,
+  otherwise one directory at a time with `O_NOFOLLOW`, and the `*at` call
+  from the directory for a call on a name. On Windows an open is checked
+  again on the final path of what it opened. The LD_PRELOAD library makes
+  its calls the same way.
+
+- **The LD_PRELOAD sandbox holds every libc call that changes or lists the
+  file system (#3751).** `unlink`, `rename`, `mkdir`, `rmdir`, `symlink`,
+  `link`, `chmod`, `chown`, `truncate`, `creat`, the times and extended
+  attributes, `mknod`, `mkfifo`, `mkstemp` and `mkdtemp`, `opendir`,
+  `scandir`, `glob`, `nftw`, `fts`, `__open_2` and the other fortified and
+  large-file opens, `open_by_handle_at`, `dlmopen` and
+  `posix_spawn_file_actions_addopen` went straight to libc under a policy;
+  each is now checked (`fs_write` for what changes, `fs_read` for what reads
+  or lists). `openat` and the other `*at` calls resolved a relative path
+  against the working directory instead of their directory descriptor, so a
+  descriptor of a granted directory reached anything outside it; they now
+  read the descriptor's own path. A coverage test lists every path call of
+  the C library and fails on one that is neither wrapped nor named as a
+  lookup. The lookups (`stat`, `access`, `readlink`, `realpath`) stay
+  unwrapped, as documented.
+  The preload asks the program nothing (its in-process policy, a staged
+  file) before its own constructor has finished: a sanitizer's runtime
+  calls libc before any constructor (TSan's mkdir of its log_path), and the
+  program's instrumented code faulted there, inside TSan's start.
+
+- **Request bodies and TLS handshakes have budgets, and the head's deadline
+  holds through TLS (#3737).** The per-read idle timeout bounds one wait
+  for a byte, so a client that sent a byte just inside it, over and over,
+  held a server worker for as long as it liked. Now:
+  - a TLS handshake must finish within 30 s, on both TLS backends
+    (`http.server_set_tls_handshake_timeout`), or the connection closes;
+  - the server waits on a client for a request body no longer than 30 s
+    plus one second for every 500 bytes received
+    (`http.server_set_body_timeout(server, 30s, 500)`), counting only the
+    time it waits, so a slow handler does not use up the client's budget.
+    Past it the answer is 408 and the connection closes, whether the server
+    reads the body before the handler (a chunked body, a small one) or the
+    handler reads it with `request_body` or `request_body_read`. The rate
+    is held over a sliding window, 60 s unless
+    `http.server_set_body_rate_window` sets another: what the budget has
+    left never grows past it through bytes received, so a client that sends
+    a burst and then trickles below the rate is cut off within the window,
+    where a 60 MiB burst had earned 35 hours. The same holds on HTTP/2
+    streams and on the proxy event loop;
+  - the head's 30 s deadline from its first byte now also cuts off a TLS
+    record that arrives a byte at a time, and, on a server with HTTP/2 on,
+    counts the bytes read to look for the HTTP/2 preface, which were read
+    with no deadline at all. Records that carry no data (a TLS 1.3
+    KeyUpdate, on either TLS backend) do not start it: a kept-alive
+    connection is still idle after one.
+
+  A body that stopped arriving for the idle timeout while the handler read
+  it used to end short with no sign: the handler answered the cut body as if
+  it were whole, 200 included. It is now answered 408 too.
+  A wait the deadline bounds that runs out is the deadline passing, read
+  so whatever the millisecond clock says a moment later: a poll may return
+  a fraction of a millisecond early (macOS), and a TLS head cut there was
+  taken for an idle connection and closed with no 408.
+  A parked TLS connection that wakes on part of a record (a head on its
+  way, a byte at a time) is served, as the wait for a request's first
+  bytes already treated it; it went back to the lot at every byte until
+  its idle time ran out and was closed with no 408.
+  The head's clock starts at once when the TLS library already holds part
+  of a record (taken off the socket by the check that woke the connection),
+  a connection back from the lot keeps the idle time it began there, and a
+  per-read timeout after the head's clock started closes the connection as
+  a stalled request rather than parking it: a client sending a byte now
+  and then could otherwise be parked afresh each time and never cut off.
+
+- **HTTP/2 connections are bounded as a whole, close when idle, and age out
+  (#3738).** An HTTP/2 connection runs on a worker for its whole life, and
+  with the dispatch pool on its loop went round its one-second wait for
+  ever. Now:
+  - with no stream open for the idle timeout the server sends GOAWAY and
+    closes; PINGs and SETTINGS do not count as activity, and a connection
+    with streams open but nothing moving for the idle timeout (no bytes
+    either way, no handler running or finishing), closes too, so a handler
+    that runs past the idle timeout still has its whole response go out as
+    the client's flow-control window lets it;
+  - a server stop refuses the streams whose requests have not arrived whole
+    (REFUSED_STREAM, nothing of them handled) and gives the rest the idle
+    timeout to finish: a stream its client kept trickling, PINGs and all,
+    held `http_server_stop` for as long as the client liked;
+  - a stream whose request does not arrive whole within the head and body
+    budgets (#3737) of its first HEADERS is reset with CANCEL, so a body
+    sent a byte at a time no longer holds the connection;
+  - past `http.server_set_h2_max_age` (1 h by default) a connection gets a
+    graceful GOAWAY and closes once its streams finish;
+  - one connection holds no more than the body limit of request bodies at
+    once (a stream that would pass it is refused with REFUSED_STREAM): its
+    100 streams could each hold 64 MiB;
+  - a request's header list is at most 32 KiB, advertised in
+    SETTINGS_MAX_HEADER_LIST_SIZE and answered 431 past it: HPACK let a few
+    bytes on the wire grow it without bound.
+
+  A server stop's GOAWAY used `nghttp2_session_terminate_session`, which
+  ends the session as soon as the GOAWAY is out, so it dropped the streams
+  a graceful shutdown means to let finish; the GOAWAY is now graceful. A
+  stream's body moves to its request instead of being copied, which held it
+  twice. nghttp2's flood protections are set explicitly, and a build against
+  a libnghttp2 older than 1.61.0 (the CONTINUATION flood fix, CVE-2024-28182;
+  rapid reset, CVE-2023-44487, is fixed in 1.57.0) warns rather than fails,
+  since distributions backport both fixes under the old version number.
+
+- **Every HTTP resource limit is in one table, and the HTTP client bounds
+  what a server can make it hold (#3750).** The server's limits, added one
+  incident at a time, are now one struct (`HttpServerLimits`) with one set
+  of defaults, documented together in docs/http-server.md, "Resource
+  limits"; every existing setter keeps working and writes into it. The
+  chunked request body's 8 MiB bound no longer passes a lower
+  `server_set_max_body`. The HTTP client grew a response's buffer for as
+  long as the server kept sending, and read a streamed response's head the
+  same way with no deadline for the whole of it. A response now holds at
+  most 64 MiB, head and body, unless `client.set_max_response(req, n)` or
+  `client.set_default_max_response(n)` says otherwise (`0` for no bound),
+  and past it the request fails with an error naming the limit; a streamed
+  head is bounded by that limit and by the request's timeout. A chunked
+  body counts by its payload, not its chunk framing, which the client
+  holds no more than twice the limit of. A program that fetches larger
+  responses whole sets the limit to their size, or reads them with
+  `set_stream`. The reverse proxy gives each upstream fetch its own body
+  cap as the limit, on the worker path and on the proxy event loop, so a
+  cap past 64 MiB keeps working and a response past it is no longer
+  buffered whole before it is refused, nor retried on another upstream as
+  if the transport had failed; `ae add` fetches package archives of up to
+  1 GiB.
+
+  Behaviour change: every `std.http.client` request that is not streamed
+  now fails on a response above 64 MiB unless it sets a limit
+  (`client.set_max_response`, or `client.set_default_max_response` for the
+  program; `0` for none).
+
+- **The proxy event loop bounds slow clients and the connections it holds
+  (#3737, #3750).** On Linux and macOS a server whose work is a reverse
+  proxy serves its connections on an event loop, whose idle timer moved
+  with every byte: a client that sent one just inside it held a slot for
+  ever, and the loop had no bound on how many it held, so enough such
+  clients used up the process's descriptors. The loop now holds the worker
+  path's budgets, from the same limits: a request head within 30 s of its
+  first byte and a body within 30 s plus one second per 500 bytes, each
+  answered 408, and a TLS handshake within its 30 s. It holds at most
+  `http.server_set_loop_max_connections` connections, by default half the
+  process's open-file limit less 64; at the bound it closes the connection
+  that has waited longest with nothing of a request sent, and answers a new
+  one 503 when there is none. A refusal is followed by a short lingering
+  close, so a reset does not destroy it.
+
+- **Releases are signed, and the installers verify them (#3752).** Every
+  release now publishes `SHA256SUMS` over all its assets, a keyless cosign
+  signature of it (`SHA256SUMS.sigstore.json`, made with the release
+  workflow's GitHub OIDC identity and logged in Rekor; no long-lived key or
+  secret) and a build provenance attestation per asset. `get.sh`,
+  `ae version install`, `ae install` and `ae upgrade` check an archive
+  against `SHA256SUMS` and GitHub's digest before unpacking it, verify the
+  signature when `cosign` is installed and the provenance when `gh` is
+  installed and logged in, refuse on any failure, and say which checks they
+  could not make. The signature and the provenance must both name the
+  release workflow run from main or from the release's own tag, and no
+  other ref. `SHA256SUMS` is fetched from the release URL, so a spent
+  API rate limit no longer blocks an install of a signed release. Releases
+  from before 0.927.0, the first signed one, are checked by GitHub's
+  digest, as before; one at or above it without `SHA256SUMS`, or without
+  its signature when `cosign` is installed, is refused, so whoever can edit
+  a release cannot delete them and have its archive taken on the digest
+  alone. The release workflow fails a release that disagrees with that
+  floor, and verifies the previous release before its ABI matrix runs it.
+  See `docs/release-signing.md`.
+
+- **Idle keep-alive connections past the parking lot's bound no longer hold
+  workers (#3750).** The worker path waits for a connection's next request
+  in a parking lot rather than on a worker, but the lot held a fixed 4096,
+  and a connection the full lot declined went back to waiting on its
+  worker: idle clients past the bound held the workers one each. The bound
+  is now `limits.park_max_connections` (`http.server_set_park_max_connections`),
+  by default the process's open-file limit less 64 (4096 on Windows), and at it the lot closes the connection idle longest to
+  make room.
+
+- **A certificate with deeply nested indefinite lengths no longer overflows
+  the stack (#3749).** `std.cryptography.asn1` read an indefinite-length TLV
+  by calling itself for each TLV inside it, with no bound, so 30000 nested
+  `30 80` (60 KB, a certificate a TLS peer may send) crashed `read_tlv` and
+  `tls13_cert.parse_certificate` with a stack overflow. Indefinite lengths
+  now nest at most 64 deep; past that the read is an error. Found by the new
+  X.509 fuzz target.
+
+- **On Windows a sandboxed file call acts through a handle it verified
+  first (#3751).** An open for writing through a junction swapped in after
+  the check truncated the file it reached before the second check refused
+  it. Opens now never create or truncate by name: the file is opened, the
+  final path of its handle checked, and only then emptied (`SetEndOfFile`);
+  a file the call created and then refused is deleted through its handle.
+  Unlink, rmdir and remove set the disposition of a handle opened on the
+  name itself; rename and hard links go through `NtSetInformationFile`
+  with the verified destination directory as its root; mkdir, `mkdir -p`,
+  `fs.write_atomic`'s temporary and `fs.make_temp_file`/`make_temp_dir`
+  are made by `NtCreateFile` relative to a verified directory; `fs.copy`
+  copies between two checked handles; the lookups, `fs.readlink`,
+  `fs.realpath` and `fs.watch` verify the handle they use. A new symlink is
+  verified after it is made, and removed again if a swap sent it elsewhere.
+
+- **The rest of std's file calls use what their check saw, on POSIX too
+  (#3751).** `fs.write_atomic` makes its temporary and renames it from the
+  directory its path resolves to; `fs.make_temp_file` and
+  `fs.make_temp_dir` make the new name in the directory that was checked;
+  the lookups (`fs.exists`, `fs.stat`, `fs.size`, `fs.mtime`, `fs.is_dir`,
+  `fs.is_symlink`, `fs.readlink`, `fs.realpath`, `fs.statvfs`) are made
+  from the anchor of their directory without following its last name; and
+  `fs.watch` watches the descriptor the walk opened (`/proc/self/fd/N` for
+  inotify). Each of them used to re-resolve its path after the check, so a
+  directory swapped for a symlink in between reached outside the grant.
+
+- **The LD_PRELOAD sandbox: a permanent policy is held by the kernel too
+  (#3751).** A grant file with the line `policy:permanent` makes the
+  preload's constructor apply Landlock to the whole process from its fs and
+  exec grants (and tcp ports on Landlock ABI 4 and up), before `main`, so
+  a raw syscall or a static helper meets the kernel. Without the line
+  nothing changes. Where the kernel has no Landlock, or a grant cannot be a
+  Landlock rule, the policy stays at libc and the log says so. The Landlock
+  rules are now built by one header the spawn's kernel layer shares
+  (`runtime/sandbox/aether_landlock.h`). The preload also wraps FreeBSD's
+  `scandir_b`, `scandirat_b`, `mkostempsat`, file flags, extended
+  attributes and ACLs set by path, `funlinkat`, `revoke`, `undelete`,
+  `nmount`, `unmount`, `exect`, `_open` and `_openat`, and musl's
+  `__xmknod`; a chmod on glibc before 2.32 goes through `/proc/self/fd`
+  instead of a look then a call by name; a `freopen` with a path on the BSDs
+  puts the walked descriptor in the stream's place; and the coverage test's
+  sweep of path calls covers musl and FreeBSD's libc as well as glibc.
+
+- **`std.cryptography.asn1` reads an indefinite length in linear time
+  (#3749).** Each TLV inside an indefinite-length TLV was appended to the
+  content read so far by reallocating, copying and wiping all of it, so
+  `30 80`, N empty TLVs and `00 00` cost about N * N bytes: 5 seconds of CPU
+  for a 400 KB certificate a TLS peer may send. The content is now copied
+  once from the input, where those TLVs lie side by side. BER indefinite
+  lengths are read as before, and `last_tag` after one is now its own tag,
+  where it was the tag of the last TLV inside it.
+
+- **A certificate whose validity holds no proper time is refused (#3749).**
+  `tls13_cert.parse_certificate` read the validity as any TLV and its
+  notBefore and notAfter as any TLVs, dropping their errors, so a
+  certificate whose validity was not a SEQUENCE, held no time, or held
+  something other than a time parsed, with no notBefore or a notAfter of
+  arbitrary bytes. The validity must now be a SEQUENCE of two times as RFC
+  5280 writes them (UTCTime `YYMMDDHHMMSSZ` or GeneralizedTime
+  `YYYYMMDDHHMMSSZ`). Found by the X.509 fuzz target.
+
+- **On Windows `fs.chmod`, the listings and `std.tar`'s times act on what
+  their check saw (#3751).** Inside an enforce block `fs.chmod` changed the
+  DACL and the read-only attribute by name (`SetNamedSecurityInfoW`,
+  `SetFileAttributesW`), and `fs.list_dir`, `fs.walk` and `fs.glob` listed
+  by name (`FindFirstFileA`), after the check: a junction swapped in
+  between was followed out of the grant. `fs.chmod` now opens the file once,
+  verifies its final path, and changes both through that handle
+  (`SetSecurityInfo`, `SetFileInformationByHandle`); the listings read a
+  verified directory handle (`NtQueryDirectoryFile`, a glob's pattern
+  matched by the file system as `FindFirstFileA` matches it), each
+  subdirectory opened relative to its parent with no link followed;
+  `std.tar` sets times through a verified handle on Windows and with
+  `utimensat` from the anchor on POSIX. Outside a block the listings are
+  unchanged. The containment document now says exactly what holds: a file
+  an open creates through a swapped-in junction exists outside the grant
+  until the verification deletes it.
+
+- **The preload holds bind mounts and namespaces (#3751).** `mount` checked
+  only the mount point, and libc's `unshare` was not wrapped, so
+  `unshare(CLONE_NEWUSER|CLONE_NEWNS)` and a bind mount of a directory
+  outside the grants onto one inside them read past every path check. A
+  bind or a move now needs `fs_read` on its source (and `fs_write` unless
+  the bind is read-only), and both paths are passed as resolved; FreeBSD's
+  `nmount` checks a nullfs or unionfs source the same way and its legacy
+  `mount(2)` refuses those. `unshare` and `clone` with a `CLONE_NEW*` flag,
+  `clone3` with one, and `setns` need the native grant their system call
+  already needed (`syscall:unshare`, `syscall:setns`).
+
 ## [0.926.0]
 
 ### Fixed

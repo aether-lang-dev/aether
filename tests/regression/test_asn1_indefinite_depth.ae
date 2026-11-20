@@ -1,0 +1,82 @@
+// Regression (#3749, found by the X.509 fuzz target): std.cryptography.asn1
+// read an indefinite-length TLV by calling itself for each TLV inside it,
+// with no bound on how deep they nest. 30000 nested `30 80`, 60 KB, a
+// certificate a TLS peer may send, overflowed the stack, in read_tlv and in
+// tls13_cert.parse_certificate, which reads with it. The nesting is bounded
+// now: past it the read is an error, and nesting within it still reads.
+
+import std.bytes
+import std.string
+import std.cryptography.asn1
+import std.cryptography.tls13_cert
+
+extern exit(code: int)
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("FAIL: ${what}")
+    return 1
+}
+
+// `depth` indefinite-length SEQUENCEs one inside another, holding INTEGER 5,
+// each closed with its EOC when `closed`.
+fn nested(depth: int, closed: bool) -> ptr {
+    n = depth * 2 + 3
+    if closed { n = n + depth * 2 }
+    b = bytes.new(n)
+    bytes.set_length(b, n)
+    p = 0
+    i = 0
+    while i < depth {
+        bytes.set(b, p, 0x30)
+        bytes.set(b, p + 1, 0x80)
+        p = p + 2
+        i = i + 1
+    }
+    bytes.set(b, p, 0x02)
+    bytes.set(b, p + 1, 0x01)
+    bytes.set(b, p + 2, 0x05)
+    p = p + 3
+    if closed {
+        i = 0
+        while i < depth {
+            bytes.set(b, p, 0)
+            bytes.set(b, p + 1, 0)
+            p = p + 2
+            i = i + 1
+        }
+    }
+    return b
+}
+
+main() {
+    fails = 0
+
+    deep = nested(30000, false)
+    r = asn1.reader_new(deep)
+    content, err = asn1.read_tlv(r)
+    fails = fails + check(content == null && string.contains(err, "nested too deep") == 1,
+        "30000 nested indefinite lengths read as '${err}'")
+    asn1.reader_free(r)
+
+    leaf = tls13_cert.LeafCert { tbs: null }
+    tls13_cert.init_leaf(&leaf)
+    perr = tls13_cert.parse_certificate(bytes.view(deep)[0..bytes.length(deep)], &leaf)
+    fails = fails + check(perr != "", "30000 nested indefinite lengths parsed as a certificate")
+    tls13_cert.free_leaf(&leaf)
+    bytes.free(deep)
+
+    // Within the bound, nesting still reads.
+    ok = nested(32, true)
+    r2 = asn1.reader_new(ok)
+    c2, err2 = asn1.read_tlv(r2)
+    fails = fails + check(err2 == "" && c2 != null, "32 nested indefinite lengths did not read: ${err2}")
+    if c2 != null { bytes.free(c2) }
+    asn1.reader_free(r2)
+    bytes.free(ok)
+
+    if fails > 0 {
+        exit(1)
+    }
+    println("PASS: indefinite lengths nest to a bound")
+}

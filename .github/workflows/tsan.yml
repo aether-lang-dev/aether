@@ -81,7 +81,7 @@ jobs:
     - name: Install packages
       uses: ./.github/actions/apt-install
       with:
-        packages: clang make bc pkg-config libgtk-4-dev
+        packages: clang make bc pkg-config libgtk-4-dev gdb
         scope: tsan ${{ matrix.shard }}
 
     - name: Install toolchain

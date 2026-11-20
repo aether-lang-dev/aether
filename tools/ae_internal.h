@@ -169,6 +169,10 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
 
 int  run_cmd(const char* cmd);
 int  run_cmd_quiet(const char* cmd);
+/* The file a spawn of `prog` would run: a name with a directory part as it
+ * stands, a bare one looked up on PATH as the spawn looks it up. A string the
+ * caller frees, or NULL when there is none (tools/ae_cache.c). */
+char* ae_resolve_program(const char* prog);
 void build_aetherc_cmd(char* cmd, size_t cmd_size,
                        const char* input, const char* output);
 void build_gcc_cmd(char* cmd, size_t size,

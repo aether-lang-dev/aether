@@ -184,6 +184,10 @@ get_body(url: string, seconds: int) -> (string, string) {
     client.set_follow_redirects(req, 5)
     client.set_timeout(req, seconds * 1s)
     client.set_header(req, "User-Agent", "ae-fetch")
+    // A package archive can pass the client's 64 MiB response limit
+    // (#3750); this program asked for the whole of it, up to 1 GiB, and
+    // checks it against its hash.
+    client.set_max_response(req, 1024 * 1024 * 1024)
     resp, err = client.send_request(req)
     client.request_free(req)
     if err != "" {

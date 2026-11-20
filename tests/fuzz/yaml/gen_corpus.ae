@@ -1,0 +1,120 @@
+// Writes the seed corpus for the YAML fuzz target into the directory named on
+// the command line (corpus/ beside this file, as `make fuzz-corpus` runs it).
+// Edit this file, not the seeds.
+//
+// A seed is a document: the configuration shapes std.yaml reads, each scalar
+// style (plain, quoted with escapes, literal and folded blocks with their
+// chomping indicators), flow and block collections, anchors and aliases,
+// tags, comments, several documents, complex keys, and documents libfyaml
+// refuses; and the reproducers fuzzing found, kept as regression seeds
+// (crash_*).
+import std.os
+import std.io
+import std.fs
+import std.strbuilder
+import std.string
+
+extern exit(code: int)
+
+fn seed(dir: string, name: string, text: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, text)
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits: a reproducer a fuzzing run found,
+// kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        _a = strbuilder.append_byte(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // Documents libfyaml accepts.
+    seed(dir, "config", "server:\n  host: example.com\n  port: 8080\n  tls: true\nworkers: [1, 2, 3]\nname: \"svc\"\n")
+    seed(dir, "sequence", "- a\n- b\n- - c\n  - d\n- {e: f}\n")
+    seed(dir, "flow", "{a: [1, 2, {b: c}], d: 'e''f', g: \"h\\ti\\u00e9\\n\"}\n")
+    seed(dir, "literal", "text: |\n  line one\n  line two\nkeep: |+\n  kept\n\nstrip: |-\n  stripped\n")
+    seed(dir, "folded", "text: >\n  folded\n  lines\n\n  para\nindented: >2\n    deeper\n")
+    seed(dir, "anchors", "base: &b {x: 1, y: 2}\nuse: *b\nlist: [&s scalar, *s]\n")
+    seed(dir, "merge", "defaults: &d\n  a: 1\nentry:\n  <<: *d\n  b: 2\n")
+    seed(dir, "tags", "a: !!str 123\nb: !!int \"7\"\nc: !custom value\nd: !!binary aGVsbG8=\ne: !!null ''\n")
+    seed(dir, "comments", "# head\na: 1 # trailing\n# middle\nb:\n  # inside\n  - x\n")
+    seed(dir, "documents", "---\na: 1\n...\n---\n- b\n...\n")
+    seed(dir, "directives", "%YAML 1.2\n%TAG !e! tag:example.com,2000:\n---\n!e!thing value\n")
+    seed(dir, "complex_key", "? [a, b]\n: c\n? {d: e}\n: f\n? |\n  block key\n: g\n")
+    seed(dir, "null_values", "a:\nb: ~\nc: null\n? d\n")
+    seed(dir, "empty", "")
+    seed(dir, "scalar_only", "just a scalar\n")
+    seed(dir, "quoted_escapes", "s: \"\\x41\\u0042\\U00000043\\0\\a\\b\\e\\f\\r\\v\\/\\N\\_\\L\\P\"\n")
+    seed(dir, "multiline_plain", "a: this is\n  a multi\n  line plain\nb: 'single\n\n  quoted'\n")
+    seed(dir, "duplicate_keys", "a: 1\na: 2\n")
+    seed(dir, "unicode", "caf\xc3\xa9: \xe2\x82\xac\nemoji: \xf0\x9f\x98\x80\n")
+    seed(dir, "bom", "\xef\xbb\xbfa: 1\n")
+    seed(dir, "deep_flow", "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[x]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\n")
+    seed(dir, "crlf", "a: 1\r\nb:\r\n  - c\r\n")
+
+    // Documents it refuses.
+    seed(dir, "bad_indent", "a:\n  b: 1\n c: 2\n")
+    seed(dir, "unclosed_flow", "{a: [1, 2\n")
+    seed(dir, "unclosed_quote", "a: \"open\n")
+    seed(dir, "undefined_alias", "a: *nowhere\n")
+    seed(dir, "tab_indent", "a:\n\t- b\n")
+    seed(dir, "bad_escape", "a: \"\\q\"\n")
+    seed(dir, "colon_in_flow", "{a: b: c}\n")
+    seed(dir, "directive_after", "a: 1\n%YAML 1.2\n---\n")
+
+    // A block scalar whose last line ends the input, with no line break
+    // after it: the emitter dropped that line (each style and chomping).
+    seed(dir, "block_at_eof_folded", "k: >\n  abc")
+    seed(dir, "block_at_eof_literal", "k: |\n  abc")
+    seed(dir, "block_at_eof_strip", "k: >-\n  abc\n  def")
+    seed(dir, "block_at_eof_keep", "k: |+\n  abc")
+
+    // Reproducers fuzzing found, kept as regression seeds.
+    hex_seed(dir, "crash_block_at_eof",
+        "735c22203a7834315c75303034325e746578743a203e0a2020665530303030303034335c305c615c6f6c625c655c6655725c765c2f5c4e5c5f5c4c645c")
+    hex_seed(dir, "crash_cr_block_scalar",
+        "26610a21213f0d7c2d0d6e3f24")
+    hex_seed(dir, "crash_empty_entry_under_key",
+        "613a20310d0a623a0d0a20202d00630d0a")
+    hex_seed(dir, "crash_flow_question_mark",
+        "3f205b2e2e2e612c3f5d0a")
+}

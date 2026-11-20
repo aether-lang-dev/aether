@@ -407,6 +407,7 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 - [Reverse Proxy](docs/http-reverse-proxy.md) - `std.http.proxy` upstream pool, load balancing, health, cache, circuit breaker
 - [HTTP Record/Replay (VCR)](docs/http-vcr.md) - moved to the [`servirtium-vcr`](https://github.com/servirtium/servirtium-vcr) monorepo; no longer in the Aether stdlib
 - [Install Layout](docs/install-layout.md) - What ships in `~/.aether`, MANIFEST format, downstream-link contract
+- [Release Signing](docs/release-signing.md) - SHA256SUMS, keyless cosign signature and build provenance on every release, and what the installers verify
 - [Compiled Module Artifacts](docs/compiled-module-artifacts.md) - Installed std modules ship pre-parsed as `.aea`; when the compiler trusts one
 - [C constant import](docs/bindgen-consts.md) - `ae bindgen consts`, C macro constants as Aether consts
 - [Module System](docs/module-system-design.md) - `import`/`exports`, PATH-style `--lib` search chain, selective imports, package layout

@@ -1,0 +1,260 @@
+// Writes the seed corpus for the X.509 fuzz target into the directory named
+// on the command line (corpus/ beside this file, as `make fuzz-corpus` runs
+// it, from the repository's root). Edit this file, not the seeds.
+//
+// A seed is a selector byte (see fuzz_x509.ae) and its input. The
+// certificates are the ones the TLS tests use, read out of their sources
+// (tests/integration/crypto_tls13_chain and crypto_tls13_sig_algs: ECDSA on
+// P-256, P-384 and P-521, RSA, Ed25519; roots, intermediates and leaves,
+// with and without SANs and basicConstraints), each as DER, as PEM and as
+// DER for the TLV reader. Beside them, DER the reader must survive:
+// indefinite lengths nested deep and many TLVs inside one, a high tag
+// number that does not end, the longest length forms, contents past the
+// end; and OCSP responses; and the reproducers fuzzing found, kept as
+// regression seeds (crash_*).
+import std.os
+import std.io
+import std.fs
+import std.bytes
+import std.string
+import std.strbuilder
+import std.cryptography.pem
+
+extern exit(code: int)
+
+const SOURCES_CHAIN = "tests/integration/crypto_tls13_chain/test_tls13_chain.ae"
+const SOURCES_SIG_ALGS = "tests/integration/crypto_tls13_sig_algs/test_tls13_sig_algs.ae"
+const MAX_CERTS = 10
+
+fn write_out(dir: string, name: string, out: ptr, n: int) {
+    err = fs.write_binary("${dir}/${name}", bytes.view(out)[0..n])
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// The selector, then `n` bytes at `p`.
+fn with_selector(dir: string, name: string, sel: int, p: ptr, n: int) {
+    out = bytes.new(n + 1)
+    bytes.set_length(out, n + 1)
+    bytes.set(out, 0, sel)
+    if n > 0 { bytes.copy_from_bytes(out, 1, p, 0, n) }
+    write_out(dir, name, out, n + 1)
+    bytes.free(out)
+}
+
+fn laid(dir: string, name: string, sel: int, b: ptr) {
+    body = strbuilder.finish_with_length(b)
+    int n = body.len
+    out = bytes.new(n + 1)
+    bytes.set_length(out, n + 1)
+    bytes.set(out, 0, sel)
+    bytes.copy_from_slice(out, 1, body)
+    write_out(dir, name, out, n + 1)
+    bytes.free(out)
+}
+
+// Every PEM certificate written as a string literal in the .ae file at
+// `path` (its line breaks spelled \n), up to MAX_CERTS of them.
+fn certs_from(dir: string, path: string, tag: string) {
+    data, len, rerr = fs.read_binary(path)
+    if rerr != "" {
+        _w = io.stdout_write("gen_corpus: ${path}: ${rerr} (run from the repository's root)\n")
+        exit(1)
+    }
+    src = string.substring(data, 0, len)
+    from = 0
+    k = 0
+    while k < MAX_CERTS {
+        b = string.index_of_from(src, "-----BEGIN CERTIFICATE-----", from)
+        if b < 0 { break }
+        e = string.index_of_from(src, "-----END CERTIFICATE-----", b)
+        if e < 0 { break }
+        e = e + 25
+        literal = string.substring(src, b, e)
+        text = string.replace_all(literal, "\\n", "\n")
+        der, _label, perr = pem.parse(text)
+        if perr != "" {
+            _w = io.stdout_write("gen_corpus: ${path}: certificate ${k}: ${perr}\n")
+            exit(1)
+        }
+        dn = bytes.length(der)
+        with_selector(dir, "${tag}_${k}_der", 0, der, dn)
+        with_selector(dir, "${tag}_${k}_tlv", 1, der, dn)
+        tb = strbuilder.new(0)
+        _t = strbuilder.append(tb, text)
+        laid(dir, "${tag}_${k}_pem", 2, tb)
+        bytes.free(der)
+        from = e
+        k = k + 1
+    }
+    if k == 0 {
+        _w = io.stdout_write("gen_corpus: ${path}: no certificate found\n")
+        exit(1)
+    }
+}
+
+fn put(b: ptr, v: int) {
+    _a = strbuilder.append_byte(b, v & 255)
+}
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// A seed given as pairs of hex digits, the selector byte first: a
+// reproducer a fuzzing run found, kept as a regression seed.
+fn hex_seed(dir: string, name: string, hex: string) {
+    b = strbuilder.new(0)
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: ${name}: bad hex\n")
+            exit(1)
+        }
+        put(b, (hi << 4) | lo)
+        i = i + 2
+    }
+    body = strbuilder.finish_with_length(b)
+    int bn = body.len
+    out = bytes.new(bn + 1)
+    bytes.set_length(out, bn)
+    bytes.copy_from_slice(out, 0, body)
+    write_out(dir, name, out, bn)
+    bytes.free(out)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    certs_from(dir, SOURCES_CHAIN, "chain")
+    certs_from(dir, SOURCES_SIG_ALGS, "sigalg")
+
+    // DER for the reader (selector 1).
+    b = strbuilder.new(0)
+    i = 0
+    while i < 3000 {
+        put(b, 0x30)
+        put(b, 0x80)
+        i = i + 1
+    }
+    laid(dir, "indefinite_deep", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x80)
+    put(b, 0x02)
+    put(b, 0x01)
+    put(b, 0x05)
+    put(b, 0x00)
+    put(b, 0x00)
+    laid(dir, "indefinite_one", 1, b)
+
+    // Many TLVs side by side inside one indefinite length, up to the
+    // target's 16 KB: the read that was quadratic in their number (#3749).
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x80)
+    i = 0
+    while i < 4000 {
+        put(b, 0x05)
+        put(b, 0x00)
+        i = i + 1
+    }
+    put(b, 0x00)
+    put(b, 0x00)
+    laid(dir, "indefinite_flat", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x1f)
+    i = 0
+    while i < 40 {
+        put(b, 0xff)
+        i = i + 1
+    }
+    put(b, 0x01)
+    put(b, 0x00)
+    laid(dir, "high_tag_long", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x04)
+    put(b, 0x84)
+    put(b, 0x7f)
+    put(b, 0xff)
+    put(b, 0xff)
+    put(b, 0xff)
+    laid(dir, "length_huge", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x04)
+    put(b, 0x85)
+    put(b, 1)
+    put(b, 0)
+    put(b, 0)
+    put(b, 0)
+    put(b, 0)
+    laid(dir, "length_five_bytes", 1, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x10)
+    put(b, 0x02)
+    put(b, 0x01)
+    laid(dir, "content_past_end", 1, b)
+
+    // OCSP responses (selector 3): unsuccessful, and one cut short.
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x03)
+    put(b, 0x0a)
+    put(b, 0x01)
+    put(b, 0x01)
+    laid(dir, "ocsp_malformed_request", 3, b)
+
+    b = strbuilder.new(0)
+    put(b, 0x30)
+    put(b, 0x82)
+    put(b, 0x01)
+    put(b, 0x00)
+    put(b, 0x0a)
+    put(b, 0x01)
+    put(b, 0x00)
+    put(b, 0xa0)
+    put(b, 0x10)
+    laid(dir, "ocsp_truncated", 3, b)
+
+    // PEM text (selector 2) that is not a certificate.
+    b = strbuilder.new(0)
+    _p = strbuilder.append(b, "-----BEGIN CERTIFICATE-----\nnot base64 !!\n-----END CERTIFICATE-----\n")
+    laid(dir, "pem_bad_base64", 2, b)
+
+    b = strbuilder.new(0)
+    _q = strbuilder.append(b, "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n")
+    laid(dir, "pem_unterminated", 2, b)
+
+    // Reproducers fuzzing found, kept as regression seeds: a certificate
+    // whose validity holds no time, which parsed (selector 0).
+    hex_seed(dir, "crash_validity_no_time",
+        "00308201ce3082012fa003020102020900cddb27b384d01add300a06082a8648ce3d04030130800201050000035504030c13436861696e205465737420502d3532312043413020170d3236303130313030303030305a180f32313236303130313030303030305a30173115301306035504030c0c703532312e6578616d706c653059301306072a8648ce3d020106082a8648ce3d0301070342000432e31ec4df3f72bd7f282a552fa2cc2ce96b908f6e3e223090641a63737433aeac3813510dcde6257c0442e24e3fd0df143437c095aeb1a8cfb3bf212d4a409ca35b305930170603551d110410300e820c703532312e6578616d706c65301d0603551d0e04160414165456e7e8a8cf68cb023c166124db21d3612db5301f0603551d2304183016801413a524952763da8337cc9c27018e678791ee5685300a06082a8648ce3d04030403818c0030818802420092328d445bf71d9b4dc04b08d490c188f594d5240ce04fd1fd0e65854d67f50f364dc2e23db0b06d32f71f59c5583acf6cd3a48681e41e279e5b227e75c13b0ddb930242019250a058c88b7d419ec4a65c17f4a867c4b5b384f1147fb0ec6a112fc4044bea1229c5d44bd104bbf67653ec565f1ca84f91271bed593b9819e48d400660578ab6")
+    hex_seed(dir, "crash_tbs_not_sequence",
+        "003082018f3d820135a003020102020900905abd8fe3c30957300a06082a8648ce3d040302301a3118301606035504030c0f436861696e205465737420526f6f743020170d3236303130313030303030305a180f32313236303130313030303030305a3019311730150603550406f4f1bc6861696e2054657374204943413059301306072a8648ce3d02a706082a8648ce3d03010703420004a9113aebb3e509c8c4a1e62ba83520cacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacaca00cacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacaca785466fec59795f8a3633061300f060355ffff4f30000e7e3d020106082a8648ce3d0301070342000432e31ec4ffffffffffffffffff2a8648ce3d03010703420004d87d80d7fd796792c0f59d848dc3a483951eb80338502956159f314f6ed1346286836d0decba11470202206c5a7baf49cacacacacacacacacacaca787f4e482739c99d577944")
+    hex_seed(dir, "crash_empty_dnsname",
+        "00308201873082012da003020102020841c423153789b701300a06082a8648ce3d04030230193117301506035504030c0e65656e6f62632e6578616d706c653020170d3236303130313030303030305a180f32313236303130313030303030305a30193117301506035504030c0e76696374696d2e6578616d706c653059301306072a8648ce3d020106082a8648ce3d030107034200ee154fc3d06068a2cca70567358637813e5b2cc9907b2a14c77f056b0f3ffb6bbd8a88e6398210550c7c3a52c39609a5e03dc777f072b974679cc9e631fa9c03f0a35d305b30190603551d1104123010820000000e76696374696d2e65782d2d2d2d2d454e442043455254494649434154452d2d2d2d2d4f7fe5a0896d20ef7fbea1301f0603551d23041830168014c0ff6514ae0354e1287fd741794998461287d433300a06082a8648ce3d04030203480030450220137b7ef698b1e7aabb3b949ae8b763825e49777b85f0627e21737c97b1635564022100d218a93807f87d5286372f16fb3ba7721e049c09c16bba9b80f5358b63c41527")
+    hex_seed(dir, "crash_pem_empty_block",
+        "022d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d636c33527a3477436759494b6f5a497a6a304541774977476a45594d42594741315545417777500a51326868615734675647567a6443423053623239304d434158445449325d4445774d5441774d4441774d466f59445a49784d6a59774d5441784d4441774d4441770603551d1e0a576a41614d52677746675944565151444441394461474670626942555a584e3049464a76623351775754415442676371686b6a4f5051494242676771686b6a4f0a50514d4242774e434141523957696a56416873494a416b6e685777647949764c45746f727a4d6164526a7a5666794151774b774f4c61774948594e4e4f762d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d50510a596d5437317833744d35333441306e335874426c72702f6a365b4c2f5163694c6f30497751444142674e5648524d42617a3333477945564932302d2d2d2d2d454e442043455254494649434154452d2d2d2d2d")
+}

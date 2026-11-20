@@ -1,0 +1,81 @@
+// Regression (#3749, found by the YAML fuzz target): three answers of std.yaml
+// that did not hold together.
+//
+// 1. A stream with no document in it (empty, or only comments) parsed to
+//    (null, ""): no document and no error, a pair a caller reads as neither.
+//    It is valid YAML, and now parses to a document with no root.
+// 2. That document emitted nothing: emit_document said "emission failed".
+//    It emits the empty text, which parses back to it.
+// 3. mapping_lookup read its key as YAML source, so a key that YAML reads as
+//    something else ("a: b", "[x]", "#c", a block scalar's text ending in a
+//    line break, "'q'") was not found in a mapping that holds it. A key is
+//    now compared as the text it is; YAML source naming a non-scalar key
+//    ("[a, b]") is still looked up as before.
+
+import std.yaml
+
+extern exit(code: int)
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("FAIL: ${what}")
+    return 1
+}
+
+// The scalar the value node of `key` holds in `map`, or "<missing>".
+fn value_of(map: ptr, key: string) -> string {
+    v = yaml.mapping_lookup(map, key)
+    if v == null { return "<missing>" }
+    s, err = yaml.get_scalar(v)
+    if err != "" { return "<not a scalar>" }
+    return s
+}
+
+// 1 and 2 for one empty stream; the number of failures.
+fn empty_stream(src: string, label: string) -> int {
+    fails = 0
+    doc, err = yaml.parse(src)
+    fails = fails + check(err == "", "an empty stream (${label}) was refused: ${err}")
+    fails = fails + check(doc != null, "an empty stream (${label}) parsed to no document and no error")
+    if doc != null {
+        fails = fails + check(yaml.root(doc) == null, "an empty stream (${label}) has a root")
+        out, eerr = yaml.emit_document(doc)
+        fails = fails + check(eerr == "", "an empty document (${label}) did not emit: ${eerr}")
+        fails = fails + check(out == "", "an empty document (${label}) emitted '${out}'")
+        yaml.free(doc)
+    }
+    return fails
+}
+
+main() {
+    fails = 0
+    fails = fails + empty_stream("", "empty")
+    fails = fails + empty_stream("# only a comment\n", "a comment")
+    fails = fails + empty_stream("\n\n   \n", "white space")
+
+    // A real refusal still says why.
+    bad, berr = yaml.parse("{a: [1, 2\n")
+    fails = fails + check(bad == null && berr != "", "an unclosed flow mapping was not refused with a message")
+
+    // 3: keys YAML would read as something else.
+    src = "\"a: b\": 1\n\"[x]\": 2\n\"#c\": 3\n? |\n  block key\n: 4\n\"'q'\": 5\nplain: 6\n? [a, b]\n: 7\n"
+    doc, err = yaml.parse(src)
+    fails = fails + check(err == "", "the lookup document was refused: ${err}")
+    if doc != null {
+        map = yaml.root(doc)
+        fails = fails + check(value_of(map, "a: b") == "1", "the key 'a: b' was not found")
+        fails = fails + check(value_of(map, "[x]") == "2", "the key '[x]' was not found")
+        fails = fails + check(value_of(map, "#c") == "3", "the key '#c' was not found")
+        fails = fails + check(value_of(map, "block key\n") == "4", "the block-scalar key was not found")
+        fails = fails + check(value_of(map, "'q'") == "5", "the key \"'q'\" was not found")
+        fails = fails + check(value_of(map, "plain") == "6", "the plain key was not found")
+        fails = fails + check(value_of(map, "[a, b]") == "7", "the complex key [a, b] is no longer found by its YAML text")
+        fails = fails + check(value_of(map, "absent") == "<missing>", "an absent key was found")
+        yaml.free(doc)
+    }
+
+    if fails > 0 {
+        exit(1)
+    }
+    println("PASS: an empty stream is an empty document, and lookup compares keys as text")
+}

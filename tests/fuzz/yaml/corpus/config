@@ -1,0 +1,6 @@
+server:
+  host: example.com
+  port: 8080
+  tls: true
+workers: [1, 2, 3]
+name: "svc"

@@ -1,0 +1,6 @@
+HTTP/1.1 200 OK
+X-Bad: aInjected: yes
+X-Good: b
+Content-Length: 1
+
+x

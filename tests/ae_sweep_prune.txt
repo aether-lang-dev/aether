@@ -380,3 +380,9 @@ tests/integration/sed_parity/
 tests/integration/sandbox_preload_write_atomic/
 # probe.ae calls the C in bridge.c (aether.toml's extra_sources); test_closure_from_c.sh builds and runs them together.
 tests/integration/closure_from_c/
+# probe.ae calls the rounds in shim.c (--extra); test_http_server_slow_clients.sh builds and runs them together.
+tests/integration/http_server_slow_clients/
+# client.ae needs resp_server.c running (AE_TEST_PORT); test_http_client_max_response.sh runs them together.
+tests/integration/http_client_max_response/
+# probe.ae calls the host in shim.c (--extra); test_http_server_h2_drain_host.sh builds and runs them together.
+tests/integration/http_server_h2_drain_host/

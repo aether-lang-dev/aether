@@ -52,8 +52,21 @@ int main(int argc, char** argv) {
             if (access(dots, F_OK) == 0) try("dotdot", dots);
         }
         snprintf(link, sizeof link, "%s/libplain.so", tmp);
-        unlink(link);
-        if (symlink(libc_path, link) == 0) {
+        /* The run outside the sandbox makes the link: under the preload the
+         * grants hold no fs_write, so symlink (and unlink) are refused there
+         * and the boxed run finds the link already made. */
+        char cur[PATH_MAX];
+        ssize_t n = readlink(link, cur, sizeof cur - 1);
+        int have = 0;
+        if (n > 0) {
+            cur[n] = '\0';
+            have = strcmp(cur, libc_path) == 0;
+        }
+        if (!have) {
+            unlink(link);
+            have = symlink(libc_path, link) == 0;
+        }
+        if (have) {
             try("symlink", link);
             /* The same link by bare name, found on LD_LIBRARY_PATH (the
              * script points it at tmp): no path to resolve, so only the

@@ -1,0 +1,290 @@
+// Writes the seed corpus for the WebSocket fuzz target into the directory
+// named on the command line (corpus/ beside this file, as `make fuzz-corpus`
+// runs it). Edit this file, not the seeds.
+//
+// A seed is three bytes of settings (the role and cap, how much is buffered
+// ahead, the chunk size; see fuzz_websocket.c) and a stream of frames: each
+// opcode, fragmented messages with control frames between their fragments,
+// the 7-bit, 16-bit and 64-bit lengths, a close with a code, and every rule
+// a frame can break (masking the wrong way for the role, a reserved opcode, a
+// fragmented or long control frame, a message past the cap, a frame cut
+// short), for a server handle and a client handle.
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.strbuilder
+
+extern exit(code: int)
+
+const KEY0 = 55
+const KEY1 = 250
+const KEY2 = 18
+const KEY3 = 129
+
+fn key_byte(i: int) -> int {
+    k = i % 4
+    if k == 0 { return KEY0 }
+    if k == 1 { return KEY1 }
+    if k == 2 { return KEY2 }
+    return KEY3
+}
+
+// One frame: FIN, the opcode, masked or not, `n` bytes of `payload` (n may
+// exceed the payload's length: the extra bytes are 'x'). `declared` is the
+// length the header states (normally n).
+fn frame(b: ptr, fin: int, opcode: int, masked: int, payload: string, n: int, declared: long) {
+    _a = strbuilder.append_byte(b, (fin * 128) + opcode)
+    m = masked * 128
+    if declared < 126 {
+        _b = strbuilder.append_byte(b, m + (declared as int))
+    } else if declared < 65536 {
+        _c = strbuilder.append_byte(b, m + 126)
+        _d = strbuilder.append_byte(b, ((declared >> 8) & 255) as int)
+        _e = strbuilder.append_byte(b, (declared & 255) as int)
+    } else {
+        _f = strbuilder.append_byte(b, m + 127)
+        i = 0
+        while i < 8 {
+            _g = strbuilder.append_byte(b, ((declared >> ((7 - i) * 8)) & 255) as int)
+            i = i + 1
+        }
+    }
+    if masked == 1 {
+        _h = strbuilder.append_byte(b, KEY0)
+        _i = strbuilder.append_byte(b, KEY1)
+        _j = strbuilder.append_byte(b, KEY2)
+        _k = strbuilder.append_byte(b, KEY3)
+    }
+    plen = string.length(payload)
+    i = 0
+    while i < n {
+        c = 120
+        if i < plen { c = string.char_at_n(payload, plen, i) & 255 }
+        if masked == 1 { c = c ^ key_byte(i) }
+        _l = strbuilder.append_byte(b, c)
+        i = i + 1
+    }
+}
+
+// A whole frame of `payload`.
+fn whole(b: ptr, fin: int, opcode: int, masked: int, payload: string) {
+    n = string.length(payload)
+    frame(b, fin, opcode, masked, payload, n, n as long)
+}
+
+fn start(role: int, cap: int, ahead: int, chunk: int) -> ptr {
+    b = strbuilder.new(0)
+    _a = strbuilder.append_byte(b, role + cap * 2)
+    _b = strbuilder.append_byte(b, ahead)
+    _c = strbuilder.append_byte(b, chunk)
+    return b
+}
+
+fn write_seed(dir: string, name: string, b: ptr) {
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// The seeds for one role: 0 a server handle (frames come masked), 1 a client
+// handle (frames come unmasked). `m` is the mask the peer must use.
+fn role_seeds(dir: string, role: int, tag: string) {
+    m = 1 - role
+
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 1, m, "hello")
+    write_seed(dir, "${tag}_text", b)
+
+    b = start(role, 0, 128, 5)
+    whole(b, 1, 2, m, "\x00\x01\x02\xff binary")
+    whole(b, 1, 1, m, "second")
+    write_seed(dir, "${tag}_two_messages", b)
+
+    b = start(role, 0, 255, 1)
+    whole(b, 0, 1, m, "frag")
+    whole(b, 1, 9, m, "ping in between")
+    whole(b, 0, 0, m, "men")
+    whole(b, 1, 10, m, "")
+    whole(b, 1, 0, m, "ted")
+    write_seed(dir, "${tag}_fragmented", b)
+
+    b = start(role, 0, 0, 7)
+    whole(b, 1, 9, m, "are you there")
+    whole(b, 1, 8, m, "\x03\xe8bye")
+    write_seed(dir, "${tag}_ping_close", b)
+
+    b = start(role, 0, 64, 16)
+    frame(b, 1, 2, m, "", 300, 300 as long)
+    write_seed(dir, "${tag}_len16", b)
+
+    b = start(role, 0, 0, 63)
+    frame(b, 1, 2, m, "", 12000, 70000 as long)
+    write_seed(dir, "${tag}_len64_cut", b)
+
+    b = start(role, 0, 0, 63)
+    frame(b, 1, 2, m, "", 4, 1099511627776 as long)
+    write_seed(dir, "${tag}_huge_declared", b)
+
+    b = start(role, 3, 0, 63)
+    whole(b, 0, 1, m, "0123456789")
+    whole(b, 0, 0, m, "0123456789")
+    whole(b, 1, 0, m, "0123456789")
+    write_seed(dir, "${tag}_over_cap_fragments", b)
+
+    b = start(role, 1, 0, 63)
+    whole(b, 1, 1, m, "x")
+    whole(b, 1, 1, m, "xy")
+    write_seed(dir, "${tag}_cap_one", b)
+
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 1, 1 - m, "wrong mask")
+    write_seed(dir, "${tag}_wrong_mask", b)
+
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 3, m, "reserved")
+    write_seed(dir, "${tag}_reserved_opcode", b)
+
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 11, m, "reserved control")
+    write_seed(dir, "${tag}_reserved_control", b)
+
+    b = start(role, 0, 0, 63)
+    whole(b, 0, 9, m, "fragmented ping")
+    write_seed(dir, "${tag}_fragmented_ping", b)
+
+    b = start(role, 0, 0, 63)
+    frame(b, 1, 9, m, "", 126, 126 as long)
+    write_seed(dir, "${tag}_long_ping", b)
+
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 0, m, "stray continuation")
+    write_seed(dir, "${tag}_stray_continuation", b)
+
+    b = start(role, 0, 0, 63)
+    whole(b, 0, 1, m, "first")
+    whole(b, 1, 2, m, "interrupts")
+    write_seed(dir, "${tag}_interrupted", b)
+
+    b = start(role, 0, 0, 63)
+    frame(b, 1, 1, m, "cut short", 9, 40 as long)
+    write_seed(dir, "${tag}_truncated_payload", b)
+
+    b = start(role, 0, 0, 63)
+    _a = strbuilder.append_byte(b, 129)
+    write_seed(dir, "${tag}_truncated_header", b)
+
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 8, m, "")
+    write_seed(dir, "${tag}_empty_close", b)
+
+    // Reserved bits (RSV1, RSV3), with no extension negotiated.
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 0x41, m, "deflated?")
+    write_seed(dir, "${tag}_rsv1", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 0x12, m, "x")
+    write_seed(dir, "${tag}_rsv3", b)
+
+    // UTF-8 (RFC 6455 8.1): a code point split across fragments, with a
+    // ping between them; then each way a text message is not UTF-8.
+    b = start(role, 0, 0, 3)
+    whole(b, 0, 1, m, "caf\xc3")
+    whole(b, 1, 9, m, "p")
+    whole(b, 0, 0, m, "\xa9 \xe2\x82")
+    whole(b, 1, 0, m, "\xac \xf0\x9f\x98\x80")
+    write_seed(dir, "${tag}_utf8_split", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 1, m, "bad \xff byte")
+    write_seed(dir, "${tag}_utf8_invalid_byte", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 1, m, "\xc0\xaf overlong")
+    write_seed(dir, "${tag}_utf8_overlong", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 1, m, "\xe0\x80\xaf overlong3")
+    write_seed(dir, "${tag}_utf8_overlong3", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 1, m, "\xed\xa0\x80 surrogate")
+    write_seed(dir, "${tag}_utf8_surrogate", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 1, m, "\xf4\x90\x80\x80 past max")
+    write_seed(dir, "${tag}_utf8_past_max", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 0, 1, m, "ends inside \xe2")
+    whole(b, 1, 0, m, "\x82")
+    write_seed(dir, "${tag}_utf8_truncated", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 2, m, "\xff\xfe binary is not checked")
+    write_seed(dir, "${tag}_binary_not_utf8", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 8, m, "\x03\xe8caf\xc3\xa9")
+    write_seed(dir, "${tag}_close_utf8_reason", b)
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 8, m, "\x03\xe8\xc3(")
+    write_seed(dir, "${tag}_close_bad_reason", b)
+
+    // Close frames (RFC 6455 5.5.1, 7.4): a one-byte body, and codes at
+    // each edge of what a close frame may carry.
+    b = start(role, 0, 0, 63)
+    whole(b, 1, 8, m, "\x03")
+    write_seed(dir, "${tag}_close_one_byte", b)
+    close_code(dir, role, m, tag, 999)
+    close_code(dir, role, m, tag, 1003)
+    close_code(dir, role, m, tag, 1004)
+    close_code(dir, role, m, tag, 1005)
+    close_code(dir, role, m, tag, 1006)
+    close_code(dir, role, m, tag, 1007)
+    close_code(dir, role, m, tag, 1014)
+    close_code(dir, role, m, tag, 1015)
+    close_code(dir, role, m, tag, 1016)
+    close_code(dir, role, m, tag, 2999)
+    close_code(dir, role, m, tag, 3000)
+    close_code(dir, role, m, tag, 4999)
+    close_code(dir, role, m, tag, 5000)
+    close_code(dir, role, m, tag, 65535)
+}
+
+// A close frame with `code` and the reason "x".
+fn close_code(dir: string, role: int, m: int, tag: string, code: int) {
+    b = start(role, 0, 0, 63)
+    _a = strbuilder.append_byte(b, 136)
+    _b = strbuilder.append_byte(b, (m * 128) + 3)
+    if m == 1 {
+        _c = strbuilder.append_byte(b, KEY0)
+        _d = strbuilder.append_byte(b, KEY1)
+        _e = strbuilder.append_byte(b, KEY2)
+        _f = strbuilder.append_byte(b, KEY3)
+    }
+    hi = (code >> 8) & 255
+    lo = code & 255
+    if m == 1 {
+        hi = hi ^ KEY0
+        lo = lo ^ KEY1
+    }
+    _g = strbuilder.append_byte(b, hi)
+    _h = strbuilder.append_byte(b, lo)
+    x = 120
+    if m == 1 { x = x ^ KEY2 }
+    _i = strbuilder.append_byte(b, x)
+    write_seed(dir, "${tag}_close_code_${code}", b)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+    role_seeds(dir, 0, "server")
+    role_seeds(dir, 1, "client")
+
+    b = start(0, 0, 0, 0)
+    write_seed(dir, "empty_stream", b)
+}

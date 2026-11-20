@@ -121,7 +121,19 @@ static inline const char* aether_sandbox_shell(void) {
     return (comspec && *comspec) ? comspec : "cmd.exe";
 }
 #else
+// The system's shell: _PATH_BSHELL where <paths.h> names it (/system/bin/sh on
+// Android), else /bin/sh. os.execv's fallback for a file with no #! line,
+// os.run's command strings and grant_shell all name this one.
+#if defined(__has_include)
+#  if __has_include(<paths.h>)
+#    include <paths.h>
+#  endif
+#endif
+#ifdef _PATH_BSHELL
+#define AETHER_SANDBOX_SHELL _PATH_BSHELL
+#else
 #define AETHER_SANDBOX_SHELL "/bin/sh"
+#endif
 static inline const char* aether_sandbox_shell(void) { return AETHER_SANDBOX_SHELL; }
 #endif
 

@@ -784,7 +784,7 @@
       <h3 class="function-name">lock_open <span class="kind">fn</span></h3>
       <pre class="usage"><code>lock_open(path) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string</span></p>
-      <p class="doc">Open `path` to hold an advisory lock on, creating it (mode 0600) if it is not there and never truncating it: (fd, KIND_OK, &quot;&quot;) or (-1, KIND_*, msg). Open read-write and close-on-exec, so the holder can also keep a few bytes in it (fd_size / fd_truncate / fd_pwrite_all). Take the lock with try_lock.</p>
+      <p class="doc">Open `path` to hold an advisory lock on, creating it (mode 0600) if it is not there and never truncating it: (fd, KIND_OK, &quot;&quot;) or (-1, KIND_*, msg). Open read-write and close-on-exec, so the holder can also keep a few bytes in it (fd_size / fd_truncate / fd_pwrite_all). Take the lock with try_lock. Inside a sandbox it needs fs_write, and the descriptor reads as well only where fs_read is granted too: without it, it is write-only, which the lock takes (#3751).</p>
     </div>
     <div class="function" id="try_lock" data-name="try_lock">
       <h3 class="function-name">try_lock <span class="kind">fn</span></h3>

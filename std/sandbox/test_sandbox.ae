@@ -55,7 +55,34 @@ fn stored(category: string, pattern: string) -> string {
     return s
 }
 
+// #3762: os.execv in a child of this test, so that an exec that should
+// have been refused replaces only the child. `role` is "execv-script" (the
+// file's grant alone) or "execv-shell" (and grant_shell); the child exits 3
+// when os.execv returned, which a refused start does.
+fn execv_child(role: string, script: string) {
+    argv = list.new()
+    list.add(argv, script)
+    g = sandbox.new("execv-child") {
+        grant_exec(script)
+        if role == "execv-shell" { grant_shell() }
+    }
+    sandbox.enforce(g) callback {
+        _rc = os.execv(script, argv)
+    }
+    // Refused: what the child made is released before it reports, so a
+    // leak check at exit (LeakSanitizer exits 23) does not hide the 3.
+    sandbox.free(g)
+    list.free(argv)
+    exit(3)
+}
+
 main() {
+    if os.args_count() > 2 {
+        role = os.args_get(1)
+        if role == "execv-script" || role == "execv-shell" {
+            execv_child(role, os.args_get(2))
+        }
+    }
     fw = spec.init()
 
     dir, terr = fs.make_temp_dir("", "ae_sandbox_test")
@@ -173,7 +200,34 @@ main() {
         }
     }
 
+    // grant_runtime's library directories are listed as well as read from:
+    // an interpreter fills its import cache by listing each directory on its
+    // path, and a grant of what is under a directory ("dir/*") does not grant
+    // listing the directory itself.
+    py_argv = list.new()
+    list.add(py_argv, "-I")
+    list.add(py_argv, "-c")
+    list.add(py_argv, "import os; print(os.path.dirname(os.path.realpath(os.__file__)))")
+    py_out, py_code, py_err = os.run_capture("python3", py_argv, null)
+    list.free(py_argv)
+    py_lib = string.trim(py_out)
+    have_py = 0
+    if py_err == "" && py_code == 0 && py_lib != "" { have_py = 1 }
+
     spec.describe(fw, "std.sandbox enforce") {
+        spec.it_when(have_py, "grant_runtime lets the runtime list its library directories", "no python3 here") callback {
+            g = sandbox.new("python") {
+                grant_runtime("python3")
+            }
+            listed = "not tried"
+            sandbox.enforce(g) callback {
+                l, lerr = fs.list_dir(py_lib)
+                listed = lerr
+                if lerr == "" { fs.dir_list_free(l) }
+            }
+            sandbox.free(g)
+            spec.assert_str_eq(listed, "", "the standard library's directory lists")
+        }
         spec.it("lets a granted env variable through and hides the rest") callback {
             g = sandbox.new("env") {
                 grant_env("AE_SANDBOX_TEST_OPEN")
@@ -393,6 +447,33 @@ main() {
                 }
                 sandbox.free(g2)
                 list.free(argv)
+            }
+        }
+
+        // #3762: os.execv used execvp, which runs a file with no #! line
+        // through /bin/sh by itself, with no grant for the shell. It now
+        // takes the shell only with grant_shell. The exec runs in a child
+        // of this test (execv_child), which exits 3 when os.execv returned.
+        spec.it("os.execv runs a file with no #! line through the shell only with grant_shell") callback {
+            self_path = os.argv0()
+            if select(windows: 1, other: 0) == 0 && string.index_of(self_path, "/") >= 0 {
+                script = "${dir}/no_shebang_execv"
+                _w = fs.write(script, "exit 7\n")
+                _c = fs.chmod(script, 493) // 0o755
+                argv = list.new()
+                list.add(argv, "execv-script")
+                list.add(argv, script)
+                _o, code, err = os.run_capture(self_path, argv, null)
+                spec.assert_ok(err, "the child starts")
+                spec.assert_eq(code, 3, "without a shell grant os.execv returns, refused")
+                argv2 = list.new()
+                list.add(argv2, "execv-shell")
+                list.add(argv2, script)
+                _o2, code2, err2 = os.run_capture(self_path, argv2, null)
+                spec.assert_ok(err2, "the child starts")
+                spec.assert_eq(code2, 7, "with grant_shell the shell runs the script")
+                list.free(argv)
+                list.free(argv2)
             }
         }
 

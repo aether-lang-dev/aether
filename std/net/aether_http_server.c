@@ -111,6 +111,51 @@ const char* http_status_text(int code) {
     }
 }
 
+#if AETHER_HAS_NETWORKING && !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__) && !defined(ESP_PLATFORM)
+#include <sys/resource.h>   /* getrlimit: http_server_default_connection_bound */
+#endif
+
+/* The default bound on the connections a server holds in one place, when
+ * the program set none: the process's open-file limit less 64 (the
+ * server's own), divided by the descriptors each connection takes there,
+ * between 16 and 32768. The proxy event loop's (loop_max_connections)
+ * takes two, a proxied connection holding an upstream one too; the parking
+ * lot's (park_max_connections) one. 4096 where there is no such limit to
+ * read (Windows, and builds with no networking or no getrlimit). */
+int http_server_default_connection_bound(int fds_per_connection) {
+    if (fds_per_connection < 1) fds_per_connection = 1;
+#if AETHER_HAS_NETWORKING && !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__) && !defined(ESP_PLATFORM)
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) return 32768;
+    long long m = ((long long)rl.rlim_cur - 64) / fds_per_connection;
+    if (m < 16) m = 16;
+    if (m > 32768) m = 32768;
+    return (int)m;
+#else
+    return 4096;
+#endif
+}
+
+/* The defaults every server starts with, the one place they are set (#3750):
+ * the table is in the header, by HttpServerLimits. */
+void http_server_limits_default(HttpServerLimits* limits) {
+    if (!limits) return;
+    memset(limits, 0, sizeof(*limits));
+    limits->idle_timeout_ms           = HTTP_DEFAULT_IDLE_TIMEOUT_MS;
+    limits->tls_handshake_timeout_ms  = HTTP_DEFAULT_TLS_HANDSHAKE_TIMEOUT_MS;
+    limits->head_timeout_ms           = HTTP_DEFAULT_HEAD_TIMEOUT_MS;
+    limits->body_timeout_ms           = HTTP_DEFAULT_BODY_TIMEOUT_MS;
+    limits->body_min_rate             = HTTP_DEFAULT_BODY_MIN_RATE;
+    limits->body_rate_window_ms       = HTTP_DEFAULT_BODY_RATE_WINDOW_MS;
+    limits->max_body                  = HTTP_DEFAULT_MAX_BODY;
+    limits->max_chunked_body          = HTTP_DEFAULT_MAX_CHUNKED_BODY;
+    limits->ws_max_message            = HTTP_WS_DEFAULT_MAX_MESSAGE;
+    limits->h2_max_concurrent_streams = HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
+    limits->h2_max_header_list        = HTTP_H2_DEFAULT_MAX_HEADER_LIST;
+    limits->h2_max_age_ms             = HTTP_H2_DEFAULT_MAX_AGE_MS;
+    limits->per_ip_ipv6_prefix        = 64;
+}
+
 #if !AETHER_HAS_NETWORKING
 // Stubs when networking is unavailable
 HttpServer* http_server_create(int p) { (void)p; return NULL; }
@@ -153,6 +198,7 @@ void http_server_drain_connection(HttpServer* s, int fd) { (void)s; (void)fd; }
 void http_server_thread_enter(HttpServer* s) { (void)s; }
 void http_server_thread_leave(HttpServer* s) { (void)s; }
 const char* http_server_shutdown_graceful_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return ""; }
+const char* http_server_set_body_rate_window_raw(HttpServer* s, int64_t w) { (void)s; (void)w; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_health_probes_raw(HttpServer* s, const char* lp, const char* rp,
                                               HttpReadyCheck rc, void* ud) {
     (void)s; (void)lp; (void)rp; (void)rc; (void)ud; return "";
@@ -204,7 +250,15 @@ const char* http_ws_set_max_message_raw(HttpWsConn* w, int64_t m) { (void)w; (vo
 const char* http_server_set_ws_max_message_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "WebSocket unavailable: networking not built in"; }
 const char* http_server_set_max_body_raw(HttpServer* s, int64_t m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_head_timeout_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
-void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
+const char* http_server_set_body_timeout_raw(HttpServer* s, int64_t t, int64_t r) { (void)s; (void)t; (void)r; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_tls_handshake_timeout_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_h2_max_age_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_loop_max_connections_raw(HttpServer* s, int m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
+const char* http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; return "WebSocket unavailable: networking not built in"; }
+const char* http_server_set_park_max_connections_raw(HttpServer* s, int m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_max_connections_per_ip_raw(HttpServer* s, int m, int p) { (void)s; (void)m; (void)p; return "HTTP server unavailable: networking not built in"; }
+int  http_server_ip_acquire(struct HttpServer* s, int fd, HttpIpSlot* slot, int e) { (void)s; (void)fd; (void)e; if (slot) slot->held = 0; return 0; }
+void http_server_ip_release(struct HttpServer* s, HttpIpSlot* slot) { (void)s; (void)slot; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_post(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -309,7 +363,6 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
     #include <fcntl.h>
     #include <limits.h>
     #include <poll.h>
-    #include <sys/ioctl.h>         /* FIONREAD: conn_fd_unread (#3405) */
     #include <errno.h>
     /* Linux, macOS and FreeBSD sendfile(2) live in different headers with
      * different signatures. Only one is pulled in per platform.
@@ -410,7 +463,8 @@ AETHER_WEAK int aether_pure_tls_server_recv(void* pure_conn, void* buf, int len)
 }
 /* What the pure server holds that a read returns without waiting on the
  * socket (#3384): the bytes of a record a recv could not hand over whole,
- * or 1 for a whole record already read. poll(2) sees neither. */
+ * or 1 for a whole record already read; -1 for part of one (#3737). poll(2)
+ * sees none of them. */
 AETHER_WEAK int aether_pure_tls_server_pending(void* pure_conn) {
     (void)pure_conn;
     return 0;
@@ -423,6 +477,16 @@ AETHER_WEAK int aether_pure_tls_server_available(void) {
 }
 AETHER_WEAK void aether_pure_tls_server_close(void* pure_conn) {
     (void)pure_conn;
+}
+/* The handshake with an absolute deadline, `budget_ms` from now (#3737),
+ * and the bound on the reads of the next recv; std.cryptography.tls13_server
+ * overrides both. Without them the handshake has each read's timeout only. */
+AETHER_WEAK void* aether_pure_tls_server_accept_due(int fd, void* creds, int budget_ms, int idle_ms) {
+    (void)budget_ms; (void)idle_ms;
+    return aether_pure_tls_server_accept_creds(fd, creds);
+}
+AETHER_WEAK void aether_pure_tls_server_set_read_budget(void* pure_conn, int budget_ms, int idle_ms) {
+    (void)pure_conn; (void)budget_ms; (void)idle_ms;
 }
 
 /* The pure server's parsed chain and key for this PEM text (#3362), or NULL
@@ -483,6 +547,21 @@ static int pt_server_pending(void* c) {
 static void pt_server_close(void* c) {
     pt_server_close_fn f = (pt_server_close_fn)aether_callback_lookup("aether_pure_tls_server_close");
     if (f) f(c); else aether_pure_tls_server_close(c);
+}
+typedef void* (*pt_server_accept_due_fn)(int, void*, int, int);
+typedef void  (*pt_server_set_read_budget_fn)(void*, int, int);
+/* The handshake finished within budget_ms or failed (#3737); 0 for no bound
+ * beyond each read's timeout. An implementation registered without this
+ * entry point (#2297) is used through its plain accept. */
+static void* pt_server_accept_due(int fd, void* creds, int budget_ms, int idle_ms) {
+    pt_server_accept_due_fn f = (pt_server_accept_due_fn)aether_callback_lookup("aether_pure_tls_server_accept_due");
+    if (f) return f(fd, creds, budget_ms, idle_ms);
+    if (aether_callback_lookup("aether_pure_tls_server_accept_creds")) return pt_server_accept(fd, creds);
+    return aether_pure_tls_server_accept_due(fd, creds, budget_ms, idle_ms);
+}
+static void pt_server_set_read_budget(void* c, int budget_ms, int idle_ms) {
+    pt_server_set_read_budget_fn f = (pt_server_set_read_budget_fn)aether_callback_lookup("aether_pure_tls_server_set_read_budget");
+    if (f) f(c, budget_ms, idle_ms); else aether_pure_tls_server_set_read_budget(c, budget_ms, idle_ms);
 }
 typedef void* (*pt_server_load_fn)(const char*, const char*);
 typedef void  (*pt_server_free_creds_fn)(void*);
@@ -637,8 +716,10 @@ typedef struct HttpConn {
     int   nonblocking;
     /* Set when the server refused a request it had not finished reading, so
      * the client may still be sending: conn_close then closes in stages
-     * (conn_linger) rather than resetting the refusal away. */
+     * (conn_linger) rather than resetting the refusal away, for no longer
+     * than linger_max_ms (0 for HTTP_LINGER_MAX_MS). */
     int   linger_on_close;
+    int   linger_max_ms;
     /* A request the proxy event loop took through the middleware ahead of
      * its proxy mount, handed over with its connection when the mount did
      * not take it (http_server_adopt_request, #3214): handle_one_request
@@ -651,6 +732,34 @@ typedef struct HttpConn {
      * request in it (a TLS KeyUpdate) parks it again for what is left of
      * its idle time, not a fresh one (#3405). */
     int64_t             parked_since_ms;
+    /* An absolute deadline on this connection's reads (#3737), in
+     * conn_now_ms's clock, 0 for none. conn_recv waits no later than it,
+     * whatever the per-read timeout, through every layer a read goes
+     * through: a TLS record that arrives a byte at a time, each just inside
+     * the per-read timeout, is cut off too. read_due_hit says the last read
+     * failed because it passed; read_due_base_ms is the receive timeout to
+     * put back when the deadline is lifted (conn_read_due_clear). */
+    int64_t read_due_ms;
+    int     read_due_hit;
+    int     read_due_base_ms;
+    /* The current request's body budget (#3737): the server waits on the
+     * client for its body no longer than body_timeout_ms, plus a second for
+     * each body_min_rate bytes received. Only time spent waiting counts,
+     * not the handler's between reads, and what bytes earn never takes what
+     * is left past body_window_ms. Copied from the server's limits when the
+     * request's head is read; body_left_ms is what is left of it, and
+     * body_timed_out is set once it ran out. */
+    int     body_timeout_ms;
+    int     body_min_rate;
+    int     body_window_ms;
+    int64_t body_left_ms;
+    int64_t body_got;
+    int     body_timed_out;
+    /* This connection's share of its client address's count
+     * (limits.max_connections_per_ip, #3750), given back when the server is
+     * done with the connection: closed, or its descriptor handed away. */
+    HttpIpSlot          ip;
+    struct HttpServer*  ip_server;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -677,7 +786,109 @@ static void conn_set_nonblocking(HttpConn* c, int on) {
 }
 #endif
 
+static int64_t conn_now_ms(void);
+static void conn_set_recv_timeout(HttpConn* c, int ms);
+static int conn_recv_due(HttpConn* c, void* buf, int len);
+static int conn_recv_timed_out(void);
+
+/* A read gave up for want of time: leave the error code a receive timeout
+ * leaves, which conn_recv_timed_out reads. */
+static void conn_set_timeout_error(void) {
+#if defined(_WIN32)
+    WSASetLastError(WSAETIMEDOUT);
+#else
+    errno = EAGAIN;
+#endif
+}
+
+/* No socket error, before a read whose own error conn_recv_timed_out will
+ * read: an older EAGAIN left behind (a TLS layer's retry) is not this
+ * read's timeout. */
+static void conn_clear_sock_error(void) {
+#if defined(_WIN32)
+    WSASetLastError(0);
+#endif
+    errno = 0;
+}
+
+/* Wait up to `ms` (negative: no bound) for `fd` to be ready for `events`
+ * (POLLIN or POLLOUT): 1 ready, or an error or a hangup the next call
+ * reports; 0 the time ran out; -1 the wait failed. */
+static int conn_poll_fd(int fd, short events, int ms) {
+    /* Until `due` by this server's clock, not by poll's: poll may return a
+     * fraction of a millisecond early (macOS), and a caller that then read
+     * the clock found its deadline not yet reached, so a head cut there was
+     * taken for an idle connection (#3737). A timeout before `due` waits
+     * again for what is left. */
+    int64_t due = ms >= 0 ? conn_now_ms() + ms : 0;
+    for (;;) {
+        int wait = -1;
+        if (ms >= 0) {
+            int64_t left = due - conn_now_ms();
+            wait = left > 0 ? (int)left : 0;
+        }
+#ifdef _WIN32
+        WSAPOLLFD p;
+        p.fd = (SOCKET)fd;
+        p.events = events;
+        p.revents = 0;
+        int r = WSAPoll(&p, 1, wait);
+        if (r > 0) return 1;
+        if (r < 0) return -1;
+#else
+        struct pollfd p = { fd, events, 0 };
+        int r = poll(&p, 1, wait);
+        if (r > 0) return 1;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+#endif
+        if (ms < 0 || wait == 0 || conn_now_ms() >= due) return 0;
+    }
+}
+
+/* The socket non-blocking or back to blocking, on every platform: a read
+ * or a handshake under a deadline waits in conn_poll_fd rather than in the
+ * TLS library (#3737). On Windows the writes that follow expect a blocking
+ * socket (SO_SNDTIMEO bounds them there), so the caller turns it back. */
+static void conn_sock_nonblocking(HttpConn* c, int on) {
+#ifdef _WIN32
+    on = on ? 1 : 0;
+    if (c->nonblocking == on) return;
+    u_long mode = (u_long)on;
+    if (ioctlsocket((SOCKET)c->fd, FIONBIO, &mode) == 0) c->nonblocking = on;
+#else
+    conn_set_nonblocking(c, on);
+#endif
+}
+
+/* The wait for one more byte under a read deadline: what is left of the
+ * deadline, or the per-read timeout when that is shorter. */
+static int conn_due_wait_ms(const HttpConn* c, int64_t left) {
+    int base = c->read_due_base_ms;
+    if (base > 0 && (int64_t)base < left) return base;
+    return left > INT_MAX ? INT_MAX : (int)left;
+}
+
+/* Put an absolute deadline on `c`'s reads (#3737), `due` in conn_now_ms's
+ * clock, until conn_read_due_clear. */
+static void conn_read_due_set(HttpConn* c, int64_t due) {
+    if (!c->read_due_ms)
+        c->read_due_base_ms = c->applied_recv_timeout_ms > 0 ? c->applied_recv_timeout_ms : 0;
+    c->read_due_ms = due;
+}
+
+/* Lift the deadline, and put back the receive timeout it shortened. */
+static void conn_read_due_clear(HttpConn* c) {
+    if (!c->read_due_ms) return;
+    c->read_due_ms = 0;
+    conn_set_recv_timeout(c, c->read_due_base_ms);
+}
+
 static int conn_recv(HttpConn* c, void* buf, int len) {
+    c->read_due_hit = 0;
+    if (c->read_due_ms) return conn_recv_due(c, buf, len);
     if (c->pure_tls) {
         return pt_server_recv(c->pure_tls, buf, len);
     }
@@ -692,6 +903,184 @@ static int conn_recv(HttpConn* c, void* buf, int len) {
     }
 #endif
     return (int)recv(c->fd, buf, len, 0);
+}
+
+#ifdef AETHER_HAS_OPENSSL
+/* SSL_read under c's read deadline. A blocking SSL_read waits for a whole
+ * record however slowly it arrives, each byte inside the per-read timeout,
+ * so the socket is non-blocking here and every wait for the client is a
+ * conn_poll_fd no longer than what is left (#3737). Plaintext OpenSSL
+ * already holds is returned without a wait. */
+static int conn_ssl_read_due(HttpConn* c, void* buf, int len) {
+    SSL* ssl = (SSL*)c->ssl;
+    if (SSL_pending(ssl) > 0) {
+        int n = SSL_read(ssl, buf, len);
+        return n > 0 ? n : -1;
+    }
+    conn_sock_nonblocking(c, 1);
+    int n;
+    for (;;) {
+        n = SSL_read(ssl, buf, len);
+        if (n > 0) break;
+        int e = SSL_get_error(ssl, n);
+        short ev;
+        if (e == SSL_ERROR_WANT_READ) ev = POLLIN;
+        else if (e == SSL_ERROR_WANT_WRITE) ev = POLLOUT;
+        else { n = -1; break; }
+        int64_t left = c->read_due_ms - conn_now_ms();
+        int wait = left > 0 ? conn_due_wait_ms(c, left) : 0;
+        int r = left > 0 ? conn_poll_fd(c->fd, ev, wait) : 0;
+        if (r <= 0) {
+            if (r == 0) {
+                conn_set_timeout_error();
+                /* A wait the deadline bounded that ran out is the deadline,
+                 * whatever the clock reads a moment later: a poll may return
+                 * a fraction of a millisecond early (macOS), and read by the
+                 * millisecond clock the head looked idle, so it was closed
+                 * with no 408 (http_server_slow_clients, macOS). */
+                if ((int64_t)wait >= left) c->read_due_hit = 1;
+            }
+            n = -1;
+            break;
+        }
+    }
+#ifdef _WIN32
+    conn_sock_nonblocking(c, 0);
+#endif
+    return n;
+}
+#endif
+
+/* A read under c's deadline (conn_read_due_set): it waits no later than the
+ * deadline, and no longer than the per-read timeout for the next byte, on a
+ * plain socket and through either TLS backend. Past the deadline it fails as
+ * a timed-out read does, with read_due_hit set (#3737). */
+static int conn_recv_due(HttpConn* c, void* buf, int len) {
+    int64_t left = c->read_due_ms - conn_now_ms();
+    if (left <= 0) {
+        c->read_due_hit = 1;
+        conn_set_timeout_error();
+        return -1;
+    }
+    int wait = conn_due_wait_ms(c, left);
+    /* The wait ends at the deadline, not at the per-read timeout before it:
+     * a timeout of it is the deadline passing (conn_ssl_read_due says why
+     * the clock alone does not settle that). */
+    int wait_is_due = (int64_t)wait >= left;
+    int n;
+    if (c->pure_tls) {
+        /* The pure server reads a record in as many reads as it takes, each
+         * bounded by the socket's timeout only; it is told the deadline as
+         * well. The first byte is waited for here, under the per-read
+         * timeout, unless the server already holds something to return. */
+        n = 0;
+        if (pt_server_pending(c->pure_tls) <= 0) {
+            int r = conn_poll_fd(c->fd, POLLIN, wait);
+            if (r <= 0) {
+                if (r == 0) conn_set_timeout_error();
+                n = -1;
+            }
+        }
+        if (n == 0) {
+            conn_set_recv_timeout(c, wait);
+            pt_server_set_read_budget(c->pure_tls, left > INT_MAX ? INT_MAX : (int)left,
+                                      c->read_due_base_ms);
+            conn_clear_sock_error();   /* the timeout test below reads only this read's */
+            n = pt_server_recv(c->pure_tls, buf, len);
+            pt_server_set_read_budget(c->pure_tls, 0, 0);
+        }
+        if (n < 0 && wait_is_due && conn_recv_timed_out()) c->read_due_hit = 1;
+    }
+#ifdef AETHER_HAS_OPENSSL
+    else if (c->ssl) {
+        n = conn_ssl_read_due(c, buf, len);
+    }
+#endif
+    else {
+#ifndef _WIN32
+        conn_set_nonblocking(c, 0);
+#endif
+        /* A plain recv returns at its first byte, so the receive timeout cut
+         * to the deadline bounds it. */
+        conn_set_recv_timeout(c, wait);
+        conn_clear_sock_error();
+        n = (int)recv(c->fd, buf, len, 0);
+        if (n < 0 && wait_is_due && conn_recv_timed_out()) c->read_due_hit = 1;
+    }
+    /* Each branch set read_due_hit where its own wait at the deadline ran
+     * out (errno read right after that read, not here, where a TLS error
+     * may have left an older EAGAIN); past the deadline by the clock
+     * counts too. */
+    if (n < 0 && (c->read_due_hit || conn_now_ms() >= c->read_due_ms)) {
+        c->read_due_hit = 1;
+        conn_set_timeout_error();
+    }
+    return n;
+}
+
+/* Start the body budget of the request whose head was just read (#3737),
+ * from the server's limits. */
+static void conn_body_budget_start(HttpConn* c, const HttpServerLimits* limits) {
+    c->body_timeout_ms = limits->body_timeout_ms;
+    c->body_min_rate   = limits->body_min_rate;
+    c->body_window_ms  = limits->body_rate_window_ms;
+    c->body_left_ms    = limits->body_timeout_ms;
+    c->body_got        = 0;
+    c->body_timed_out  = 0;
+}
+
+/* A read of the current request's body, under its budget (#3737): the
+ * client has body_timeout_ms, plus a second for each body_min_rate bytes it
+ * has sent, of the server's waiting. Only the time spent here counts: a
+ * handler that takes its time between reads does not use up the client's.
+ * The per-read idle timeout alone let a client that sent a byte just inside
+ * it hold the worker for as long as it liked. What bytes earn is held to
+ * the rate window (http_body_budget_credit): a burst's credit kept whole
+ * let the trickle after it hold the worker for hours. Once the budget is
+ * spent the read fails as a timed-out one does and body_timed_out is set. */
+static int conn_recv_body(HttpConn* c, void* buf, int len) {
+    if (c->body_timed_out) {
+        conn_set_timeout_error();
+        return -1;
+    }
+    if (c->body_timeout_ms <= 0) {
+        int n = conn_recv(c, buf, len);
+        if (n > 0) c->body_got += n;
+        /* A body read that waited out the idle timeout is the client's
+         * too: the handler had a body cut short and answered as if it were
+         * whole, 200 and all. */
+        if (n < 0 && conn_recv_timed_out()) c->body_timed_out = 1;
+        return n;
+    }
+    int64_t budget = c->body_left_ms;
+    if (budget <= 0) {
+        c->body_timed_out = 1;
+        conn_set_timeout_error();
+        return -1;
+    }
+    int64_t t0 = conn_now_ms();
+    conn_read_due_set(c, t0 + budget);
+    int n = conn_recv(c, buf, len);
+    int timed_out = n < 0 && (c->read_due_hit || conn_recv_timed_out());
+    conn_read_due_clear(c);
+    c->body_left_ms -= conn_now_ms() - t0;
+    if (n > 0) {
+        int64_t before = c->body_got;
+        c->body_got += n;
+        if (c->body_min_rate > 0)
+            c->body_left_ms = http_body_budget_credit(
+                c->body_left_ms,
+                c->body_got * 1000 / c->body_min_rate - before * 1000 / c->body_min_rate,
+                c->body_window_ms);
+    }
+    /* Past the budget, or past the idle timeout waiting for the next byte:
+     * either way the body did not arrive, and the handler must not answer
+     * as if it had. */
+    if (timed_out) {
+        c->body_timed_out = 1;
+        conn_set_timeout_error();
+    }
+    return n;
 }
 
 #ifndef _WIN32
@@ -1144,6 +1533,11 @@ static int64_t conn_now_ms(void);
  * stopped sending. See conn_linger. */
 #define HTTP_LINGER_MAX_MS  2000
 #define HTTP_LINGER_IDLE_MS 500
+/* The bound for a connection refused before anything of it was read (one
+ * address past its limit, #3750), as the proxy event loop's for its own
+ * (EV_LINGER_FULL_MS): such a client can open one after another, and each
+ * held a worker for up to HTTP_LINGER_MAX_MS. */
+#define HTTP_LINGER_FULL_MS 500
 
 /* Close in stages, as RFC 9112 9.6 asks of a server that stops reading a
  * request part-way. A refusal (413, 414, 431, a framing 400) goes out while
@@ -1157,14 +1551,15 @@ static int64_t conn_now_ms(void);
  * discarding until the client closes, stops sending for HTTP_LINGER_IDLE_MS,
  * or HTTP_LINGER_MAX_MS has passed, leaves nothing unread for the kernel to
  * reset over while the client is still catching up. Bounded both ways so a
- * client that never stops costs a worker two seconds, not the idle timeout. */
-static void conn_linger(int fd) {
+ * client that never stops costs a worker two seconds, not the idle timeout;
+ * `max_ms` a shorter bound, 0 for that one. */
+static void conn_linger(int fd, int max_ms) {
 #ifdef _WIN32
     shutdown(fd, SD_SEND);
 #else
     shutdown(fd, SHUT_WR);
 #endif
-    int64_t deadline = conn_now_ms() + HTTP_LINGER_MAX_MS;
+    int64_t deadline = conn_now_ms() + (max_ms > 0 ? max_ms : HTTP_LINGER_MAX_MS);
     char scratch[4096];
     for (;;) {
         int64_t left = deadline - conn_now_ms();
@@ -1225,10 +1620,14 @@ static void conn_close(HttpConn* c) {
     if (c->ssl) conn_tls_close(c);
 #endif
     if (c->fd >= 0) {
-        if (c->linger_on_close) conn_linger(c->fd);
+        if (c->linger_on_close) conn_linger(c->fd, c->linger_max_ms);
         close(c->fd);
         c->fd = -1;
     }
+    /* The address's count goes down once the connection is gone, its
+     * linger over: a client whose refusals linger holds that many
+     * connections meanwhile, as it held them before (#3750). */
+    if (c->ip_server) http_server_ip_release(c->ip_server, &c->ip);
     if (c->buf) {
         /* Cap-aware (#343): the per-connection read buffer is grown
          * via conn_buf_ensure (caps_realloc) and freed only here; its
@@ -1264,7 +1663,7 @@ static void conn_buf_compact(HttpConn* c) {
 }
 
 /* Give back a read buffer grown past HTTP_RX_KEEP_MAX for one request (a
- * chunked body is decoded in it, up to HTTP_MAX_CHUNKED_BODY), once that
+ * chunked body is decoded in it, up to the server's chunked body limit), once that
  * request is done: back to its first size when what is left in it (the next
  * request, pipelined) fits. Kept, it pinned the largest body for as long as
  * the connection stayed open, parked included, where a pooled client
@@ -1355,14 +1754,43 @@ static int aether_alpn_select_cb(SSL* ssl,
  * handshake failure (caller should close conn->fd and discard).
  * After the handshake, queries the negotiated ALPN protocol so the
  * connection knows whether to drive HTTP/1.1 or HTTP/2 on the wire. */
-static int conn_tls_accept(HttpConn* conn, SSL_CTX* ctx) {
+static int conn_tls_accept(HttpConn* conn, SSL_CTX* ctx, int64_t due_ms) {
     SSL* ssl = SSL_new(ctx);
     if (!ssl) return -1;
     if (SSL_set_fd(ssl, conn->fd) != 1) {
         SSL_free(ssl);
         return -1;
     }
-    int r = SSL_accept(ssl);
+    int r;
+    if (!due_ms) {
+        r = SSL_accept(ssl);
+    } else {
+        /* An absolute deadline on the whole handshake (#3737). A blocking
+         * SSL_accept waits for each record however slowly it arrives, each
+         * byte inside the per-read timeout, so a client that sent its
+         * ClientHello a byte at a time held this worker for as long as it
+         * liked. Non-blocking, every wait on the client is a poll no longer
+         * than what is left of the deadline, nor than the idle timeout. */
+        int idle = conn->applied_recv_timeout_ms > 0 ? conn->applied_recv_timeout_ms : 0;
+        conn_sock_nonblocking(conn, 1);
+        for (;;) {
+            r = SSL_accept(ssl);
+            if (r > 0) break;
+            int e = SSL_get_error(ssl, r);
+            short ev;
+            if (e == SSL_ERROR_WANT_READ) ev = POLLIN;
+            else if (e == SSL_ERROR_WANT_WRITE) ev = POLLOUT;
+            else break;
+            int64_t left = due_ms - conn_now_ms();
+            if (left <= 0) { r = -1; break; }
+            int wait = (idle > 0 && (int64_t)idle < left) ? idle
+                     : (left > INT_MAX ? INT_MAX : (int)left);
+            if (conn_poll_fd(conn->fd, ev, wait) <= 0) { r = -1; break; }
+        }
+#ifdef _WIN32
+        conn_sock_nonblocking(conn, 0);   /* SSL_write on Windows blocks */
+#endif
+    }
     if (r <= 0) {
         /* Handshake failed — peer probably spoke plain HTTP at a TLS
          * port, or sent an unsupported cipher. Drain OpenSSL's error
@@ -1511,7 +1939,6 @@ HttpServer* http_server_create(int port) {
     server->tls_key_pem = NULL;
     server->pure_creds = NULL;
     server->h2_enabled = 0;
-    server->h2_max_concurrent_streams = 0;  /* 0: advertise 100 (#3738) */
     /* HTTP/1.1 is persistent by default (RFC 9112 section 9.3), and a proxy
      * or client that dials this server pays a handshake per request when it
      * is not: the load balancer measured 3.7x behind nginx with 8% of
@@ -1521,10 +1948,7 @@ HttpServer* http_server_create(int port) {
      * length. 0 = unlimited requests, 0 = the 30s idle default. */
     server->keep_alive_enabled = 1;
     server->keep_alive_max = 0;
-    server->keep_alive_idle_ms = 0;
-    server->ws_max_message = HTTP_WS_DEFAULT_MAX_MESSAGE;
-    server->max_body = HTTP_DEFAULT_MAX_BODY;
-    server->head_timeout_ms = HTTP_DEFAULT_HEAD_TIMEOUT_MS;
+    http_server_limits_default(&server->limits);
     server->response_transformer_chain = NULL;
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
@@ -1535,6 +1959,7 @@ HttpServer* http_server_create(int port) {
     pthread_mutex_init(&server->live_lock, NULL);
     pthread_mutex_init(&server->tls_lock, NULL);
     pthread_mutex_init(&server->tls_config_lock, NULL);
+    pthread_mutex_init(&server->ip_lock, NULL);
     pthread_mutex_init(&server->run_lock, NULL);
     pthread_cond_init(&server->run_done, NULL);
     server->serving = 0;
@@ -1595,7 +2020,9 @@ const char* http_server_set_keepalive_raw(HttpServer* server,
     int64_t idle_ms = idle_ns / 1000000LL;
     if (idle_ms < 0) idle_ms = 0;
     if (idle_ms > INT_MAX) idle_ms = INT_MAX;
-    server->keep_alive_idle_ms = (int)idle_ms;
+    /* 0 is the default, as it always was; the limit lives with the others
+     * (#3750). */
+    server->limits.idle_timeout_ms = idle_ms > 0 ? (int)idle_ms : HTTP_DEFAULT_IDLE_TIMEOUT_MS;
     return "";
 }
 
@@ -1607,7 +2034,7 @@ const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_b
     if (max_bytes <= 0) return "max message must be positive";
     if ((uint64_t)max_bytes > (uint64_t)HTTP_WS_MAX_MESSAGE_LIMIT)
         return "max message is past the 2 GiB a message length can report";
-    server->ws_max_message = (size_t)max_bytes;
+    server->limits.ws_max_message = (size_t)max_bytes;
     return "";
 }
 
@@ -1615,7 +2042,7 @@ const char* http_server_set_ws_max_message_raw(HttpServer* server, int64_t max_b
 const char* http_server_set_max_body_raw(HttpServer* server, int64_t max_bytes) {
     if (!server) return "server is null";
     if (max_bytes <= 0) return "max body must be positive";
-    server->max_body = max_bytes;
+    server->limits.max_body = max_bytes;
     return "";
 }
 
@@ -1628,8 +2055,190 @@ const char* http_server_set_head_timeout_raw(HttpServer* server, int64_t timeout
     int64_t ms = timeout_ns / 1000000LL;
     if (timeout_ns > 0 && ms == 0) ms = 1;
     if (ms > INT_MAX) ms = INT_MAX;
-    server->head_timeout_ms = (int)ms;
+    server->limits.head_timeout_ms = (int)ms;
     return "";
+}
+
+/* A timeout in ns as the limits store it, in ms: under 1 ms rounds up to 1
+ * so it is not taken for 0, which turns the bound off. */
+static int limits_timeout_ms(int64_t timeout_ns) {
+    int64_t ms = timeout_ns / 1000000LL;
+    if (timeout_ns > 0 && ms == 0) ms = 1;
+    if (ms > INT_MAX) ms = INT_MAX;
+    return (int)ms;
+}
+
+/* The body's budget (#3737): the server waits on a client for its body no
+ * longer than `timeout_ns`, plus a second for each `min_rate` bytes it has
+ * received. 0 for the timeout turns the bound off; 0 for the rate makes the
+ * timeout an absolute bound on the wait. */
+const char* http_server_set_body_timeout_raw(HttpServer* server, int64_t timeout_ns,
+                                             int64_t min_rate) {
+    if (!server) return "server is null";
+    if (timeout_ns < 0) return "body timeout must not be negative";
+    if (min_rate < 0) return "body minimum rate must not be negative";
+    if (min_rate > INT_MAX) return "body minimum rate is past 2 GiB a second";
+    server->limits.body_timeout_ms = limits_timeout_ms(timeout_ns);
+    server->limits.body_min_rate = (int)min_rate;
+    return "";
+}
+
+/* The window over which the body's minimum rate is held (#3737); 0 keeps
+ * every byte's credit (http_body_budget_credit). */
+const char* http_server_set_body_rate_window_raw(HttpServer* server, int64_t window_ns) {
+    if (!server) return "server is null";
+    if (window_ns < 0) return "body rate window must not be negative";
+    server->limits.body_rate_window_ms = limits_timeout_ms(window_ns);
+    return "";
+}
+
+/* The longest a TLS handshake may take as a whole (#3737); 0 leaves only the
+ * idle timeout on each of its reads. */
+const char* http_server_set_tls_handshake_timeout_raw(HttpServer* server, int64_t timeout_ns) {
+    if (!server) return "server is null";
+    if (timeout_ns < 0) return "TLS handshake timeout must not be negative";
+    server->limits.tls_handshake_timeout_ms = limits_timeout_ms(timeout_ns);
+    return "";
+}
+
+/* How long an HTTP/2 connection may live (#3738): past it the server sends
+ * GOAWAY and closes once its streams finish, no later than the idle timeout
+ * after. 0 for no bound. */
+const char* http_server_set_h2_max_age_raw(HttpServer* server, int64_t timeout_ns) {
+    if (!server) return "server is null";
+    if (timeout_ns < 0) return "HTTP/2 connection age must not be negative";
+    server->limits.h2_max_age_ms = limits_timeout_ms(timeout_ns);
+    return "";
+}
+
+/* The proxy event loop's connection bound (#3750); 0 for its default, read
+ * when the loop starts (http_evloop_max_connections). */
+const char* http_server_set_loop_max_connections_raw(HttpServer* server, int max_connections) {
+    if (!server) return "server is null";
+    if (max_connections < 0) return "the event loop's connection bound must not be negative";
+    server->limits.loop_max_connections = max_connections;
+    return "";
+}
+
+/* The parking lot's bound (#3750); 0 for the default, read when the lot is
+ * made as the server starts. */
+const char* http_server_set_park_max_connections_raw(HttpServer* server, int max_connections) {
+    if (!server) return "server is null";
+    if (max_connections < 0) return "the parking lot's bound must not be negative";
+    server->limits.park_max_connections = max_connections;
+    return "";
+}
+
+/* The per-address limit (#3750); 0 for none, the default. */
+const char* http_server_set_max_connections_per_ip_raw(HttpServer* server, int max_connections,
+                                                       int ipv6_prefix) {
+    if (!server) return "server is null";
+    if (max_connections < 0) return "the per-address limit must not be negative";
+    if (ipv6_prefix < 1 || ipv6_prefix > 128) return "the IPv6 prefix must be 1 to 128 bits";
+    server->limits.max_connections_per_ip = max_connections;
+    server->limits.per_ip_ipv6_prefix = ipv6_prefix;
+    return "";
+}
+
+/* ---- connections per client address (#3750) ----
+ *
+ * A count for each address that holds a connection, in a chained table of
+ * HTTP_IP_BUCKETS buckets under ip_lock; a node goes when its count does.
+ * Shared by the worker path and the proxy event loop, which hand
+ * connections to each other. */
+#define HTTP_IP_BUCKETS 1024
+
+typedef struct HttpIpNode {
+    unsigned char      key[16];
+    int                count;
+    struct HttpIpNode* next;
+} HttpIpNode;
+
+/* The address `fd`'s peer counts as: an IPv4 address as an IPv4-mapped IPv6
+ * one, an IPv6 address cut to `prefix` bits, since one host usually holds a
+ * whole /64 and could otherwise open a connection from each address in it.
+ * -1 when the peer has no IP address. */
+static int ip_key_of_fd(int fd, int prefix, unsigned char key[16]) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(fd, (struct sockaddr*)&ss, &len) != 0) return -1;
+    memset(key, 0, 16);
+    if (ss.ss_family == AF_INET) {
+        key[10] = key[11] = 0xff;
+        memcpy(key + 12, &((struct sockaddr_in*)&ss)->sin_addr, 4);
+        return 0;
+    }
+    if (ss.ss_family != AF_INET6) return -1;
+    const unsigned char* a = (const unsigned char*)&((struct sockaddr_in6*)&ss)->sin6_addr;
+    memcpy(key, a, 16);
+    static const unsigned char mapped[12] = { 0,0,0,0, 0,0,0,0, 0,0,0xff,0xff };
+    if (memcmp(a, mapped, 12) == 0) return 0;   /* an IPv4 client, whole */
+    for (int bit = prefix; bit < 128; bit++) key[bit / 8] &= (unsigned char)~(0x80u >> (bit % 8));
+    return 0;
+}
+
+static unsigned ip_bucket_of(const unsigned char key[16]) {
+    unsigned h = 2166136261u;
+    for (int i = 0; i < 16; i++) h = (h ^ key[i]) * 16777619u;
+    return h % HTTP_IP_BUCKETS;
+}
+
+int http_server_ip_acquire(struct HttpServer* server, int fd, HttpIpSlot* slot, int enforce) {
+    slot->held = 0;
+    int limit = server->limits.max_connections_per_ip;
+    if (limit <= 0) return 0;
+    if (ip_key_of_fd(fd, server->limits.per_ip_ipv6_prefix, slot->key) != 0) return 0;
+    pthread_mutex_lock(&server->ip_lock);
+    if (!server->ip_buckets) server->ip_buckets = calloc(HTTP_IP_BUCKETS, sizeof(HttpIpNode*));
+    HttpIpNode** buckets = (HttpIpNode**)server->ip_buckets;
+    if (!buckets) { pthread_mutex_unlock(&server->ip_lock); return 0; }
+    HttpIpNode** at = &buckets[ip_bucket_of(slot->key)];
+    HttpIpNode* node = *at;
+    while (node && memcmp(node->key, slot->key, 16) != 0) node = node->next;
+    if (node && enforce && node->count >= limit) {
+        pthread_mutex_unlock(&server->ip_lock);
+        return -1;
+    }
+    if (!node) {
+        node = (HttpIpNode*)calloc(1, sizeof(HttpIpNode));
+        if (!node) { pthread_mutex_unlock(&server->ip_lock); return 0; }
+        memcpy(node->key, slot->key, 16);
+        node->next = *at;
+        *at = node;
+    }
+    node->count++;
+    slot->held = 1;
+    pthread_mutex_unlock(&server->ip_lock);
+    return 0;
+}
+
+void http_server_ip_release(struct HttpServer* server, HttpIpSlot* slot) {
+    if (!server || !slot || !slot->held) return;
+    slot->held = 0;
+    pthread_mutex_lock(&server->ip_lock);
+    HttpIpNode** buckets = (HttpIpNode**)server->ip_buckets;
+    if (buckets) {
+        HttpIpNode** at = &buckets[ip_bucket_of(slot->key)];
+        while (*at && memcmp((*at)->key, slot->key, 16) != 0) at = &(*at)->next;
+        if (*at && --(*at)->count <= 0) {
+            HttpIpNode* gone = *at;
+            *at = gone->next;
+            free(gone);
+        }
+    }
+    pthread_mutex_unlock(&server->ip_lock);
+}
+
+/* Every count, when the server is freed. */
+static void ip_table_free(HttpServer* server) {
+    HttpIpNode** buckets = (HttpIpNode**)server->ip_buckets;
+    if (!buckets) return;
+    for (int i = 0; i < HTTP_IP_BUCKETS; i++) {
+        HttpIpNode* node = buckets[i];
+        while (node) { HttpIpNode* next = node->next; free(node); node = next; }
+    }
+    free(buckets);
+    server->ip_buckets = NULL;
 }
 
 // =================================================================
@@ -2624,7 +3233,8 @@ const char* http_server_set_h2_raw(HttpServer* server,
     }
 #ifdef AETHER_HAS_NGHTTP2
     server->h2_enabled = 1;
-    server->h2_max_concurrent_streams = max_concurrent_streams;
+    server->limits.h2_max_concurrent_streams = max_concurrent_streams > 0
+        ? max_concurrent_streams : HTTP_H2_DEFAULT_MAX_CONCURRENT_STREAMS;
     return "";
 #else
     (void)max_concurrent_streams;
@@ -3371,6 +3981,7 @@ void http_request_reset(HttpRequest* req) {
     req->stream_consumed = 0;
     req->body_max = 0;
     req->body_refused = 0;
+    req->body_timed_out = 0;
 }
 
 /* Parse into an object the caller owns, reusing what it already holds. */
@@ -3601,6 +4212,28 @@ void* http_server_proxy_opts(HttpServer* server) {
     return NULL;
 }
 
+/* Room for one more header in `res`'s arrays: 1, or 0 when it cannot be
+ * made. They start with 50 slots (http_response_create, or the lazy
+ * allocation in the setters) and double when full. The capacity is not
+ * stored, since the struct's layout is part of the ABI, so it is the one the
+ * count implies: 50, then 100, 200 and so on. A response held 50 headers and
+ * dropped the rest without a word, so a proxied response with more lost
+ * them on the copying path while the pass-through forwarded them (#3749,
+ * found by the proxy-response fuzzer). */
+static int response_header_room(HttpServerResponse* res) {
+    int cap = 50;
+    while (cap < res->header_count && cap <= INT_MAX / 4) cap *= 2;
+    if (res->header_count < cap) return 1;
+    if (cap > INT_MAX / 4) return 0;
+    char** keys = (char**)realloc(res->header_keys, sizeof(char*) * (size_t)cap * 2);
+    if (!keys) return 0;
+    res->header_keys = keys;
+    char** values = (char**)realloc(res->header_values, sizeof(char*) * (size_t)cap * 2);
+    if (!values) return 0;
+    res->header_values = values;
+    return 1;
+}
+
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
     if (!res) return;
     /* A header carrying a line ending would be written into the response head
@@ -3633,10 +4266,10 @@ void http_response_set_header(HttpServerResponse* res, const char* key, const ch
         }
     }
 
-    // Add new header (max 50). Store only if both copies succeed; a NULL key
-    // would crash the strcasecmp above on the next call, a NULL value the
-    // serializer's strlen.
-    if (res->header_count >= 50) return;
+    // Add new header, growing the arrays when full. Store only if both copies
+    // succeed; a NULL key would crash the strcasecmp above on the next call,
+    // a NULL value the serializer's strlen.
+    if (!response_header_room(res)) return;
     char* kd = strdup(key);
     char* vd = strdup(value);
     if (!kd || !vd) { free(kd); free(vd); return; }
@@ -3675,7 +4308,7 @@ void http_response_clear_headers(HttpServerResponse* res) {
 // multiplicity that the serializer at line 1149 emits as separate
 // `Name: Value\r\n` lines.
 //
-// 50-header cap is shared with `set_header`; over-cap silently drops.
+// The arrays grow as set_header's do (response_header_room).
 void http_response_add_header(HttpServerResponse* res, const char* key, const char* value) {
     if (!res) return;
     /* Same rejection as set_header: a line ending here splits the response. */
@@ -3686,7 +4319,7 @@ void http_response_add_header(HttpServerResponse* res, const char* key, const ch
         res->header_count = 0;
         if (!res->header_keys || !res->header_values) return;
     }
-    if (res->header_count >= 50) return;
+    if (!response_header_room(res)) return;
     char* kd = strdup(key);
     char* vd = strdup(value);
     if (!kd || !vd) { free(kd); free(vd); return; }
@@ -3799,6 +4432,9 @@ void* http_response_accept_tunnel(HttpServerResponse* res) {
     conn->fd = -1;
     res->takeover_taken = 1;
     res->takeover_conn = NULL;
+    /* The descriptor is the program's now, and no longer the server's to
+     * count against its address (#3750). */
+    if (conn->ip_server) http_server_ip_release(conn->ip_server, &conn->ip);
 
     void* sock = tcp_socket_from_fd_owned(fd);
     if (!sock) {
@@ -4566,21 +5202,87 @@ int http_ws_send_binary(HttpWsConn* ws, const void* data, int len) {
     return ws_send_frame_masked(ws->conn, WS_OP_BIN, data, len, ws->mask_tx);
 }
 
-void http_ws_close(HttpWsConn* ws, int code, const char* reason) {
-    if (!ws || ws->closed) return;
-    /* Close payload: 2 bytes status code (network order) + UTF-8
-     * reason. Reason capped at 123 bytes per spec. */
+/* Strict UTF-8 (RFC 3629), checked a piece at a time, so a code point may
+ * straddle two pieces (two fragments of one message). `need` is how many
+ * continuation bytes the sequence in progress still wants, and [lo, hi] the
+ * range the next one must fall in: that range is what refuses an overlong
+ * form (E0 then below A0, F0 then below 90), a surrogate (ED then above 9F)
+ * and a code point past U+10FFFF (F4 then above 8F). C0, C1 and F5 to FF
+ * never begin a sequence. */
+typedef struct {
+    int need;
+    unsigned char lo, hi;
+} WsUtf8;
+
+/* 0 while every byte so far is valid UTF-8 (a sequence may be unfinished),
+ * -1 at the first that is not. */
+static int ws_utf8_feed(WsUtf8* u, const unsigned char* p, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = p[i];
+        if (u->need == 0) {
+            if (c < 0x80) continue;
+            u->lo = 0x80;
+            u->hi = 0xBF;
+            if (c >= 0xC2 && c <= 0xDF) u->need = 1;
+            else if (c == 0xE0) { u->need = 2; u->lo = 0xA0; }
+            else if (c == 0xED) { u->need = 2; u->hi = 0x9F; }
+            else if (c >= 0xE1 && c <= 0xEF) u->need = 2;
+            else if (c == 0xF0) { u->need = 3; u->lo = 0x90; }
+            else if (c == 0xF4) { u->need = 3; u->hi = 0x8F; }
+            else if (c >= 0xF1 && c <= 0xF3) u->need = 3;
+            else return -1;
+        } else {
+            if (c < u->lo || c > u->hi) return -1;
+            u->need--;
+            u->lo = 0x80;
+            u->hi = 0xBF;
+        }
+    }
+    return 0;
+}
+
+/* Whether a close frame may carry `code` (RFC 6455 7.4): 1000 to 1003, 1007
+ * to 1014 (the IANA registry's), and 3000 to 4999 (libraries and
+ * applications). Below 1000 is not used; 1004 is reserved; 1005, 1006 and
+ * 1015 say what happened without a close frame and are never sent in one;
+ * 1016 to 2999 are reserved for the protocol; 5000 and up are not defined. */
+static int ws_close_code_allowed(int code) {
+    return (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) ||
+           (code >= 3000 && code <= 4999);
+}
+
+const char* http_ws_close(HttpWsConn* ws, int code, const char* reason) {
+    if (!ws) return "websocket is null";
+    if (ws->closed) return "";
+    /* A code a close frame may not carry is refused, never sent: the peer
+     * fails the connection on it with 1002 (RFC 6455 7.4). */
+    if (!ws_close_code_allowed(code))
+        return "close code is not one a close frame may carry (RFC 6455 7.4): "
+               "1000-1003, 1007-1014 or 3000-4999";
+    /* Close payload: 2 bytes status code (network order) + UTF-8 reason, at
+     * most 123 bytes (125 for the control frame). A reason that is not
+     * UTF-8 is refused, as the peer would fail with 1007 on it; a longer
+     * one is cut at the last whole code point that fits, where cutting at
+     * 123 bytes could leave half of one, which is not UTF-8. */
     unsigned char payload[125];
     payload[0] = (unsigned char)((code >> 8) & 0xFF);
     payload[1] = (unsigned char)(code & 0xFF);
-    int rn = 0;
+    size_t rn = 0;
     if (reason && *reason) {
-        rn = (int)strlen(reason);
-        if (rn > 123) rn = 123;
+        size_t full = strlen(reason);
+        WsUtf8 u = { 0, 0x80, 0xBF };
+        if (ws_utf8_feed(&u, (const unsigned char*)reason, full) != 0 || u.need != 0)
+            return "close reason is not UTF-8";
+        rn = full;
+        if (rn > 123) {
+            rn = 123;
+            while (rn > 0 && ((unsigned char)reason[rn] & 0xC0) == 0x80) rn--;
+        }
         memcpy(payload + 2, reason, rn);
     }
-    ws_send_frame_masked(ws->conn, WS_OP_CLOSE, payload, 2 + rn, ws->mask_tx);
+    ws_send_frame_masked(ws->conn, WS_OP_CLOSE, payload, (int)(2 + rn), ws->mask_tx);
     ws->closed = 1;
+    return "";
 }
 
 /* The largest message `ws` reassembles. */
@@ -4780,6 +5482,10 @@ int http_ws_poll(HttpWsConn* ws, int timeout_ms) {
 int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
     if (!ws || !ws->conn || ws->closed) return -1;
     ws->msg_len = 0;  /* reset for this message */
+    /* A text message is UTF-8, checked as its bytes arrive and across its
+     * fragments; one that is not fails the connection with 1007 (RFC 6455
+     * 5.6, 8.1). */
+    WsUtf8 utf8 = { 0, 0x80, 0xBF };
 
     /* Deadline for the whole call, so ping floods or fragmentation cannot
      * extend it. Only consulted before a frame starts. */
@@ -4787,6 +5493,9 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
                        ? conn_now_ms() + (long long)timeout_ms
                        : -1;
     int first_frame = 1;
+    /* A text or binary frame without FIN has begun a message that later
+     * continuation frames finish (RFC 6455 5.4). */
+    int in_message = 0;
 
     for (;;) {
         /* Bound the wait for the next frame header. Mid-message (a
@@ -4847,6 +5556,14 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
          * reserved control ones taken as data (#3759). */
         if ((opcode >= 0x3 && opcode <= 0x7) || opcode >= 0xB)
             return ws_fail(ws, 1002, "reserved opcode");
+        /* RSV1-3 mean something only under an extension that defines them,
+         * and neither end of std.http negotiates one, so a frame with any
+         * of them set fails the connection (RFC 6455 5.2, #3764). It was
+         * taken as if the bits were clear: a peer that believed it had
+         * permessage-deflate had its compressed bytes handed to the program
+         * as the message. */
+        if (hdr2[0] & 0x70)
+            return ws_fail(ws, 1002, "reserved bits set with no extension");
 
         if (opcode == WS_OP_PING || opcode == WS_OP_PONG || opcode == WS_OP_CLOSE) {
             /* A control frame carries at most 125 bytes and is never
@@ -4868,6 +5585,22 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
                 continue;
             }
             if (opcode == WS_OP_PONG) continue;  /* unsolicited pong: discard */
+            /* A close frame's body, when it has one, is a two-byte code and
+             * then a reason (RFC 6455 5.5.1): one byte is no code at all,
+             * and a code a close frame may not carry (7.4: below 1000,
+             * 1004 to 1006, 1015 to 2999, 5000 and up) is a protocol error.
+             * Both fail with 1002; they were echoed back as they came. */
+            if (pl == 1)
+                return ws_fail(ws, 1002, "close frame with a one-byte body");
+            if (pl >= 2 && !ws_close_code_allowed((ctl[0] << 8) | ctl[1]))
+                return ws_fail(ws, 1002, "close code not allowed on the wire");
+            /* The reason, after the code, is UTF-8 (5.5.1); one that is not
+             * fails with 1007 (8.1) rather than being echoed back. */
+            if (pl > 2) {
+                WsUtf8 reason = { 0, 0x80, 0xBF };
+                if (ws_utf8_feed(&reason, ctl + 2, (size_t)pl - 2) != 0 || reason.need != 0)
+                    return ws_fail(ws, 1007, "invalid UTF-8 in a close reason");
+            }
             /* Echo the close frame back (RFC 6455 5.5.1) and report it. */
             ws_send_frame_masked(ws->conn, WS_OP_CLOSE, ctl, (int)pl, ws->mask_tx);
             ws->closed = 1;
@@ -4875,10 +5608,22 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
         }
 
         /* Data frame (text / binary / continuation): append it to the
-         * message, then stop at FIN. */
+         * message, then stop at FIN. A message is a text or binary frame
+         * then continuations up to the one with FIN, with only control
+         * frames between (RFC 6455 5.4). A continuation with no message in
+         * progress was taken as a message of its own, and a text or binary
+         * frame inside one restarted it, dropping what had arrived: both
+         * fail the connection (#3764). A message is begun and finished
+         * within one call, so the call's own state says whether one is in
+         * progress. */
+        if (opcode == WS_OP_CONT && !in_message)
+            return ws_fail(ws, 1002, "continuation frame with no message in progress");
+        if (opcode != WS_OP_CONT && in_message)
+            return ws_fail(ws, 1002, "new data frame inside a fragmented message");
         if (opcode == WS_OP_TEXT || opcode == WS_OP_BIN) {
             ws->msg_opcode = opcode;
             ws->msg_len = 0;  /* fresh message */
+            in_message = 1;
         }
         /* The message cap is checked before a byte of the frame is read or
          * a buffer grown for it: a frame may declare up to 2^63 bytes, and
@@ -4903,11 +5648,19 @@ int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
             if (ws_recv_exact(ws->conn, dst, (int)step) != 0) { ws->closed = 1; return -1; }
             if (masked)
                 for (size_t i = 0; i < step; i++) dst[i] ^= (char)mask_key[(done + i) & 3];
+            if (ws->msg_opcode == WS_OP_TEXT &&
+                ws_utf8_feed(&utf8, (const unsigned char*)dst, step) != 0)
+                return ws_fail(ws, 1007, "invalid UTF-8 in a text message");
             done += step;
         }
         ws->msg_len += want;
 
-        if (fin) break;
+        if (fin) {
+            /* A text message that ends inside a code point is not UTF-8. */
+            if (ws->msg_opcode == WS_OP_TEXT && utf8.need != 0)
+                return ws_fail(ws, 1007, "invalid UTF-8 in a text message");
+            break;
+        }
     }
 
     /* NUL-terminate text messages for caller convenience; binary
@@ -5338,7 +6091,7 @@ void http_ws_client_free(HttpWsConn* ws) {
         if (ws->conn->fd >= 0) {
             /* After a protocol failure (ws_fail) the failed frame is unread;
              * drain it so the close frame is not lost to a reset. */
-            if (ws->conn->linger_on_close) conn_linger(ws->conn->fd);
+            if (ws->conn->linger_on_close) conn_linger(ws->conn->fd, ws->conn->linger_max_ms);
             close(ws->conn->fd);
         }
         free(ws->conn);
@@ -5625,11 +6378,23 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
  * response already on the wire (a takeover, a chunked stream) is the
  * caller's to skip. */
 static void response_refuse_body(HttpRequest* req, HttpServerResponse* res) {
-    if (!req->body_refused) return;
-    http_response_reset(res);
-    http_response_set_status(res, 413);
-    http_response_set_header(res, "Content-Type", "text/plain");
-    http_response_set_body(res, "request body exceeds server limit\n");
+    if (req->body_refused) {
+        http_response_reset(res);
+        http_response_set_status(res, 413);
+        http_response_set_header(res, "Content-Type", "text/plain");
+        http_response_set_body(res, "request body exceeds server limit\n");
+        return;
+    }
+    /* The body arrived too slowly for the server's body budget (#3737): the
+     * handler had a body cut short, so whatever it answered is not an answer
+     * to the request the client sent. 408 closes the connection, whose next
+     * request would start in the middle of this one's body. */
+    if (req->body_timed_out) {
+        http_response_reset(res);
+        http_response_set_status(res, 408);
+        http_response_set_header(res, "Content-Type", "text/plain");
+        http_response_set_body(res, "request body timed out\n");
+    }
 }
 
 /* Whether some of `req`'s streamed body is still on its connection, which
@@ -5671,7 +6436,7 @@ static void request_body_settle(HttpConn* conn, HttpRequest* req) {
         while (left > 0) {
             char scratch[4096];
             int chunk = left < (int64_t)sizeof(scratch) ? (int)left : (int)sizeof(scratch);
-            int n = conn_recv(sconn, scratch, chunk);
+            int n = conn_recv_body(sconn, scratch, chunk);   /* under the body's budget, #3737 */
             if (n <= 0) break;
             req->stream_consumed += n;
             left -= n;
@@ -5750,8 +6515,7 @@ static int keep_alive_decision(HttpServer* server, HttpRequest* req, int status,
 static void keep_alive_value(HttpServer* server, int requests_served, int max_requests,
                              char* out, size_t cap) {
     int remaining = max_requests - requests_served - 1;
-    int idle_sec = server->keep_alive_idle_ms > 0
-        ? server->keep_alive_idle_ms / 1000 : 30;
+    int idle_sec = server->limits.idle_timeout_ms / 1000;
     snprintf(out, cap, "timeout=%d, max=%d", idle_sec, remaining);
 }
 
@@ -5885,15 +6649,150 @@ static void conn_live_remove(HttpServer* server, int fd) {
  * not started at all once the server is stopping, which reads as the client
  * having closed. The flag is read after the listing, and stop sets it before
  * it shuts the listed connections down, so a stop either finds this wait
- * listed or is seen here. */
+ * listed or is seen here.
+ *
+ * On a TLS connection the head's clock (#3737) starts here, with the first
+ * byte on the socket: a record can arrive a byte at a time, each inside the
+ * idle timeout, and the read that waits for it to be whole has to be under
+ * the head's deadline already. So the wait for that first byte is a poll
+ * under the idle timeout, and the read after it runs under the deadline.
+ * A plain recv returns at its first byte, and its caller starts the clock.
+ * *started is set when the clock started here.
+ *
+ * Bytes on the socket that turn out to be whole records carrying no data (a
+ * TLS 1.3 KeyUpdate, an empty record, a warning alert) are no request: the
+ * connection is still idle, and the wait ends as an idle one does, with no
+ * clock started (conn_tls_idle_probe). Started at those bytes, the head's
+ * deadline passed while the client sent nothing more, and a kept-alive
+ * connection whose client updated its keys was answered 408. */
+static int conn_tls_buffered(HttpConn* conn);
+static int conn_tls_idle_probe(HttpConn* conn);
+static int conn_tls_record_begun(HttpConn* conn);
 static int conn_recv_request_start(HttpServer* server, HttpConn* conn,
-                                   void* buf, int len) {
+                                   void* buf, int len, int64_t* started) {
     int fd = conn->fd;
     conn_live_add(server, fd);
     int n = 0;
-    if (!atomic_load(&server->stopping)) n = conn_recv(conn, buf, len);
+    if (!atomic_load(&server->stopping)) {
+        int head_ms = server->limits.head_timeout_ms;
+        if (head_ms > 0 && (conn->ssl || conn->pure_tls) && !conn_tls_buffered(conn) &&
+            conn_tls_record_begun(conn)) {
+            /* Part of a record is already in the TLS library, taken off the
+             * socket by the check that woke this connection from the lot
+             * (conn_readable_has_request): the request has begun, so its
+             * clock starts now. Waiting on the empty socket for the next
+             * byte instead let a client that sent one byte per idle timeout
+             * be parked afresh each time, never cut off. */
+            *started = conn_now_ms();
+            conn_read_due_set(conn, *started + head_ms);
+            n = conn_recv(conn, buf, len);
+        } else if (head_ms > 0 && (conn->ssl || conn->pure_tls) && !conn_tls_buffered(conn)) {
+            int idle = conn->applied_recv_timeout_ms > 0 ? conn->applied_recv_timeout_ms : -1;
+            int64_t idle_end = idle > 0 ? conn_now_ms() + idle : 0;
+            for (;;) {
+                int wait = -1;
+                if (idle_end) {
+                    int64_t left = idle_end - conn_now_ms();
+                    wait = left > 0 ? (int)left : 0;
+                }
+                int r = conn_poll_fd(fd, POLLIN, wait);
+                if (r == 0) {
+                    conn_set_timeout_error();
+                    n = -1;
+                } else if (r < 0) {
+                    n = -1;
+                } else if (conn_tls_idle_probe(conn) == 0) {
+                    continue;   /* records with no data: still idle, the same wait */
+                } else {
+                    *started = conn_now_ms();
+                    conn_read_due_set(conn, *started + head_ms);
+                    n = conn_recv(conn, buf, len);
+                }
+                break;
+            }
+        } else {
+            n = conn_recv(conn, buf, len);
+        }
+    }
     conn_live_remove(server, fd);
     return n;
+}
+
+/* After the socket turned readable with no request begun, what its bytes
+ * are (#3737): 1 plaintext to read, 0 nothing but whole records that carry
+ * no data, which the TLS backend has now handled (a KeyUpdate, an empty
+ * record, a warning alert), with nothing more on the socket, -1 part of a
+ * record, or the end or an error, which the read that follows reports. Only
+ * at 0 is the connection still idle: a record begun is a request begun, as
+ * far as the head's clock goes, since one can arrive a byte at a time with
+ * nothing of it decrypted until it is whole. */
+static int conn_tls_idle_probe(HttpConn* conn) {
+#ifdef AETHER_HAS_OPENSSL
+    if (conn->ssl) {
+        SSL* ssl = (SSL*)conn->ssl;
+        unsigned char b;
+        conn_sock_nonblocking(conn, 1);
+        ERR_clear_error();
+        int r = SSL_peek(ssl, &b, 1);
+        int e = r > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, r);
+        ERR_clear_error();
+#ifdef _WIN32
+        conn_sock_nonblocking(conn, 0);
+#endif
+        if (r > 0) return 1;
+        if (e == SSL_ERROR_WANT_READ && !SSL_has_pending(ssl)) return 0;
+        return -1;
+    }
+#endif
+    if (conn->pure_tls) {
+        /* The pure server handles the whole records the socket holds, and
+         * says whether data, part of a record, or nothing is left (#3405). */
+        int p = pt_server_pending(conn->pure_tls);
+        if (p != 0) return p > 0 ? 1 : -1;
+        /* Nothing held: unless more arrived meanwhile, or the client closed
+         * (readable with nothing to read), the connection is idle. */
+        return conn_poll_fd(conn->fd, POLLIN, 0) > 0 ? -1 : 0;
+    }
+    return 1;
+}
+
+/* Part of a record a TLS backend already holds, nothing of it decrypted:
+ * the bytes have left the socket, so poll(2) does not see them, and the
+ * request they begin has begun. */
+static int conn_tls_record_begun(HttpConn* conn) {
+#ifdef AETHER_HAS_OPENSSL
+    if (conn->ssl) {
+        SSL* ssl = (SSL*)conn->ssl;
+        return SSL_pending(ssl) <= 0 && SSL_has_pending(ssl);
+    }
+#endif
+    if (conn->pure_tls) return pt_server_pending(conn->pure_tls) < 0;
+    return 0;
+}
+
+/* Plaintext a TLS backend already holds, which a read returns without
+ * waiting on the socket and poll(2) does not see. */
+static int conn_tls_buffered(HttpConn* conn) {
+#ifdef AETHER_HAS_OPENSSL
+    if (conn->ssl && SSL_pending((SSL*)conn->ssl) > 0) return 1;
+#endif
+    if (conn->pure_tls && pt_server_pending(conn->pure_tls) > 0) return 1;
+    return 0;
+}
+
+/* A read of a request head under its deadline (#3737): the whole head must
+ * arrive within head_timeout_ms of its first byte, *started, which is set
+ * here once a byte is in hand (or by conn_recv_request_start). The deadline
+ * stays on the connection's reads until conn_read_due_clear. With nothing of
+ * the request read yet, this is the wait for one to begin. */
+static int conn_recv_head(HttpServer* server, HttpConn* conn, void* buf, int len,
+                          int64_t* started) {
+    int head_ms = server->limits.head_timeout_ms;
+    if (*started == 0 && conn->write_pos > conn->read_pos) *started = conn_now_ms();
+    if (*started != 0 && head_ms > 0 && !conn->read_due_ms)
+        conn_read_due_set(conn, *started + head_ms);
+    if (conn->write_pos > conn->read_pos) return conn_recv(conn, buf, len);
+    return conn_recv_request_start(server, conn, buf, len, started);
 }
 
 /* Did the last recv fail because the socket's receive timeout fired, rather
@@ -6188,9 +7087,15 @@ int http_request_head_check(const char* head, const char* hdr_end,
     return HTTP_HEAD_OK;
 }
 
-/* The largest chunked request body this server will buffer. A chunked body
- * declares no length in advance, so nothing else bounds it. */
-#define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
+/* The largest chunked request body this server buffers: limits.max_chunked_body
+ * (HTTP_DEFAULT_MAX_CHUNKED_BODY), and never more than max_body, which bounds
+ * every other body request_body buffers. A chunked body declares no length in
+ * advance, so nothing else bounds it. */
+static int64_t server_chunked_body_cap(const HttpServer* server) {
+    int64_t cap = server->limits.max_chunked_body;
+    if (server->limits.max_body < cap) cap = server->limits.max_body;
+    return cap;
+}
 
 /* The request whose bytes start at `req` (`len` of them, read so far) is
  * known to be a HEAD: its request line begins with that method and the space
@@ -6278,6 +7183,20 @@ static void conn_send_request_timeout(HttpConn* conn, const char* req, size_t re
         "Connection: close\r\n"
         "\r\n"
         "request head timed out\n";
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
+}
+
+/* A request body the server reads before the handler runs (a chunked one, or
+ * one that fits the connection buffer) that came too slowly for the body's
+ * budget (#3737). */
+static void conn_send_body_timeout(HttpConn* conn, const char* req, size_t req_len) {
+    static const char msg[] =
+        "HTTP/1.1 408 Request Timeout\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 23\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request body timed out\n";
     conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
@@ -6381,10 +7300,15 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         conn->pending_req = NULL;
         conn->pending_res = NULL;
         res->takeover_conn = conn;
-        req->body_max = server->max_body;   /* #3740 */
+        req->body_max = server->limits.max_body;   /* #3740 */
+        conn_body_budget_start(conn, &server->limits);   /* #3737 */
         return dispatch_request(server, conn, req, res, conn->pending_from,
                                 conn->pending_t_start, requests_served, max_requests);
     }
+
+    /* When the first byte of this request's head was in hand, the start of
+     * its deadline (#3737); 0 until then. */
+    int64_t head_started_ms = 0;
 
 #ifdef AETHER_HAS_NGHTTP2
     /* Prior-knowledge h2 detection (RFC 7540 §3.5). When the server
@@ -6394,24 +7318,36 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * the HTTP/1.1 parse; on match, hand the connection to the h2
      * driver and return 0 so the outer keep-alive loop stops. */
     if (server->h2_enabled && requests_served == 0 && !conn->is_h2) {
-        /* Buffer at least the 24-byte preface before deciding. The
-         * existing read loop only reads when looking for \r\n\r\n;
-         * pre-fetch a little here so the probe has bytes to inspect. */
-        while ((conn->write_pos - conn->read_pos) < 24) {
+        /* Read until the bytes in hand either are the 24-byte preface or
+         * differ from it. The existing read loop only reads when looking
+         * for \r\n\r\n; pre-fetch a little here so the probe has bytes to
+         * inspect. It read until it had 24 bytes whatever they were, so a
+         * whole HTTP/1.0 request shorter than that ("GET / HTTP/1.0\r\n\r\n"
+         * is 18) waited for bytes its client would never send, and was
+         * answered 408. The first byte that differs settles it. */
+        /* These bytes are the head's first, so its deadline runs from the
+         * first of them (#3737): read one at a time, each inside the idle
+         * timeout, they held the worker for 23 idle timeouts before the
+         * head's clock started. */
+        while (conn_buffered_is_h2_preface(conn) < 0) {
             if (conn->write_pos + 1 >= conn->buf_cap) break;
-            int n = conn->write_pos == conn->read_pos
-                ? conn_recv_request_start(server, conn, conn->buf + conn->write_pos,
-                                          conn->buf_cap - conn->write_pos - 1)
-                : conn_recv(conn, conn->buf + conn->write_pos,
-                            conn->buf_cap - conn->write_pos - 1);
-            if (n <= 0) return 0;  /* EOF / timeout / error */
+            int n = conn_recv_head(server, conn, conn->buf + conn->write_pos,
+                                   conn->buf_cap - conn->write_pos - 1, &head_started_ms);
+            if (n <= 0) {  /* EOF / timeout / error */
+                if (n < 0 && conn->read_due_hit)
+                    conn_send_request_timeout(conn, conn->buf + conn->read_pos,
+                                              (size_t)(conn->write_pos - conn->read_pos));
+                return 0;
+            }
             conn->write_pos += n;
         }
         int probe = conn_buffered_is_h2_preface(conn);
         if (probe == 1) {
             /* Bytes already consumed by the preface stay in the
              * conn buffer; handle_h2_connection feeds them to
-             * nghttp2 before reading more from the wire. */
+             * nghttp2 before reading more from the wire. The head's
+             * deadline does not bound the connection's life. */
+            conn_read_due_clear(conn);
             conn->is_h2 = 1;
             handle_h2_connection(server, conn, NULL);
             return 0;
@@ -6427,10 +7363,6 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * scan starts from read_pos so already-buffered pipelined bytes
      * count toward the header boundary. */
     char* hdr_end = NULL;
-    /* When the first byte of this head was in hand, and whether the wait
-     * was cut to its deadline (#3737). */
-    int64_t head_started_ms = 0;
-    int head_deadline_applied = 0;
     while (1) {
         if (conn->write_pos > conn->read_pos) {
             /* NUL-terminate the unconsumed slice in place — we have
@@ -6442,22 +7374,6 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             hdr_end = (char*)http_find_header_end(conn->buf + conn->read_pos,
                                                   (size_t)(conn->write_pos - conn->read_pos));
             if (hdr_end) break;
-            if (head_started_ms == 0) head_started_ms = conn_now_ms();
-        }
-        /* The whole head must arrive within head_timeout_ms of its first
-         * byte (#3737). The per-recv timeout alone let a client that sends
-         * a byte just inside it hold this worker for as long as it liked;
-         * each wait is now cut to what is left of the deadline as well. */
-        if (head_started_ms != 0 && server->head_timeout_ms > 0) {
-            int64_t left = head_started_ms + server->head_timeout_ms - conn_now_ms();
-            if (left <= 0) {
-                conn_send_request_timeout(conn, conn->buf + conn->read_pos,
-                                          (size_t)(conn->write_pos - conn->read_pos));
-                return 0;
-            }
-            int per_recv = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
-            conn_set_recv_timeout(conn, left < per_recv ? (int)left : per_recv);
-            head_deadline_applied = 1;
         }
         /* A head holds no more than the connection buffer's first size,
          * HTTP_CONN_BUF_CAP, less the NUL, answered 431 past it (#3252).
@@ -6470,30 +7386,41 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             conn_send_head_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
             return 0;
         }
-        int n = conn->write_pos == conn->read_pos
-            ? conn_recv_request_start(server, conn, conn->buf + conn->write_pos,
-                                      conn->buf_cap - conn->write_pos - 1)
-            : conn_recv(conn, conn->buf + conn->write_pos,
-                        conn->buf_cap - conn->write_pos - 1);
+        /* The whole head must arrive within head_timeout_ms of its first
+         * byte (#3737). The per-recv timeout alone let a client that sends
+         * a byte just inside it hold this worker for as long as it liked;
+         * conn_recv_head reads under the deadline, through TLS too. */
+        int n = conn_recv_head(server, conn, conn->buf + conn->write_pos,
+                               conn->buf_cap - conn->write_pos - 1, &head_started_ms);
         if (n <= 0) {
             /* Nothing yet, and nothing of this request read so far: the
              * connection is idle rather than broken, and the caller can park
              * it instead of closing it (#1663). Anything mid-request stays a
              * close, because a half-read request cannot be resumed by a
-             * different worker without carrying parse state with it. */
-            if (n < 0 && conn->write_pos == conn->read_pos && conn_recv_timed_out())
+             * different worker without carrying parse state with it. Not when
+             * the head's deadline passed: over TLS a head can be on its way,
+             * a record not yet whole, with nothing of it decrypted. */
+            /* Nor once the head's clock started (head_started_ms): over TLS
+             * that is part of a record taken, a request begun with nothing
+             * of it decrypted, and a per-read timeout there is a request
+             * stalled part-way, closed as one on a plain connection is. */
+            if (n < 0 && conn->write_pos == conn->read_pos && conn_recv_timed_out() &&
+                !conn->read_due_hit && head_started_ms == 0) {
+                conn_read_due_clear(conn);
                 return HTTP_REQUEST_IDLE;
+            }
             /* The head's deadline passed during the wait: say so. */
-            if (n < 0 && head_started_ms != 0 && server->head_timeout_ms > 0 &&
-                conn_now_ms() - head_started_ms >= server->head_timeout_ms)
+            if (n < 0 && conn->read_due_hit)
                 conn_send_request_timeout(conn, conn->buf + conn->read_pos,
                                           (size_t)(conn->write_pos - conn->read_pos));
             return 0;  /* EOF / error */
         }
         conn->write_pos += n;
     }
-    /* The body's reads wait by the idle timeout again. */
-    if (head_deadline_applied) conn_apply_recv_timeout(server, conn);
+    /* The body's reads wait by the idle timeout again, under their own
+     * budget (#3737). */
+    conn_read_due_clear(conn);
+    conn_body_budget_start(conn, &server->limits);
 
     int header_size = (int)(hdr_end - conn->buf) + 4 - conn->read_pos;
     int request_total = header_size;
@@ -6552,7 +7479,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                  * bound on it is the one this server imposes. Without one, a
                  * sender that never emits the terminal chunk grows this
                  * buffer for as long as it cares to keep writing. */
-                if (have > HTTP_MAX_CHUNKED_BODY) {
+                if ((int64_t)have > server_chunked_body_cap(server)) {
                     conn_send_payload_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
                     return 0;
                 }
@@ -6561,8 +7488,14 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                 return 0;
             int space = conn->buf_cap - conn->write_pos - 1;
             if (space <= 0) return 0;
-            int n = conn_recv(conn, conn->buf + conn->write_pos, space);
-            if (n <= 0) return 0;              /* closed or timed out mid-body */
+            int n = conn_recv_body(conn, conn->buf + conn->write_pos, space);
+            if (n <= 0) {                      /* closed or timed out mid-body */
+                /* Too slow for the body's budget (#3737): say so. */
+                if (conn->body_timed_out)
+                    conn_send_body_timeout(conn, conn->buf + conn->read_pos,
+                                              (size_t)(conn->write_pos - conn->read_pos));
+                return 0;
+            }
             conn->write_pos += n;
             conn->buf[conn->write_pos] = '\0';
         }
@@ -6605,8 +7538,14 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             int avail = conn->buf_cap - conn->write_pos - 1;
             int chunk = want < avail ? want : avail;
             if (chunk <= 0) return 0;
-            int n = conn_recv(conn, conn->buf + conn->write_pos, chunk);
-            if (n <= 0) return 0;
+            int n = conn_recv_body(conn, conn->buf + conn->write_pos, chunk);
+            if (n <= 0) {
+                /* Too slow for the body's budget (#3737): say so. */
+                if (conn->body_timed_out)
+                    conn_send_body_timeout(conn, conn->buf + conn->read_pos,
+                                              (size_t)(conn->write_pos - conn->read_pos));
+                return 0;
+            }
             conn->write_pos += n;
         }
         request_total = needed_total;
@@ -6668,7 +7607,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
 
 
     /* The most of the body http_request_body may buffer (#3740). */
-    req->body_max = server->max_body;
+    req->body_max = server->limits.max_body;
 
     /* The peer, the local address and the TLS state, from the connection. */
     http_request_copy_conn_meta(req, conn);
@@ -6840,7 +7779,7 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
                         .conn = conn, .closed = 0,
                         .msg_buf = NULL, .msg_cap = 0,
                         .msg_len = 0, .msg_opcode = 0,
-                        .max_message = server->ws_max_message,
+                        .max_message = server->limits.ws_max_message,
                     };
                     wr->handler(req, &ws_handle, wr->user_data);
                     /* If the handler returned without closing,
@@ -6965,7 +7904,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
                                  HttpServerResponse* res) {
     if (!server || !req || !res) return;
     /* The most of the body http_request_body may hand back (#3740). */
-    req->body_max = server->max_body;
+    req->body_max = server->limits.max_body;
     int64_t t_start = http_now_us();
 
     /* Middleware chain — same shape as the HTTP/1.1 path. */
@@ -7064,6 +8003,38 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
      * an unused variable (an error under -Werror with nghttp2 enabled). */
     int wake_fd = aether_h2_session_wake_fd(sess);  /* -1 when no pool */
 #endif
+    /* The connection's clocks (#3738). It runs on a worker for its whole
+     * life, so it must end: when no stream has been open for the idle
+     * timeout (frames that open none, PINGs or SETTINGS, do not keep it),
+     * when streams are open but nothing has moved for the idle timeout and
+     * no handler is running, and h2_max_age_ms after it began, by a GOAWAY
+     * that lets its streams finish within the idle timeout. Each stream's
+     * request has its own deadline (aether_h2_session_expire). The loop
+     * waited for the client with no bound, and on the dispatch pool's path
+     * went round its one-second poll for ever.
+     *
+     * "Moved" is progress either way: bytes from the client, a handler
+     * running or finishing (its response submitted), bytes written to the
+     * client. Counted from the client's last bytes alone, a handler that ran
+     * past the idle timeout had the connection closed under its response:
+     * the first window of it went out, and the GOAWAY came before the
+     * client's WINDOW_UPDATE could let the rest follow.
+     *
+     * A stop sends the GOAWAY, resets the streams whose requests have not
+     * arrived whole (nothing of them was handled), and gives the rest the
+     * idle timeout to finish, as an aged connection's streams get: a stream
+     * the client kept trickling, PINGs and all, held the stop for as long
+     * as the client liked. The loop sees a stop within its one-second poll:
+     * an HTTP/2 connection is not in live_fds, which the stop shuts down to
+     * wake the waits for a next request, since shutting it down would cut
+     * off the streams it lets finish. */
+    const HttpServerLimits* lim = &server->limits;
+    int idle_ms = lim->idle_timeout_ms > 0 ? lim->idle_timeout_ms : HTTP_DEFAULT_IDLE_TIMEOUT_MS;
+    int64_t started = aether_h2_now_ms();
+    int64_t idle_since = started;   /* when the last stream closed; 0 while one is open */
+    int64_t last_progress = started;   /* when the connection last moved (above) */
+    int64_t close_by = 0;           /* past max age or stopped: the end, whatever is left */
+    int stop_seen = 0;
     while (1) {
         /* Graceful shutdown bridge (#260 Tier 3 + h2). When
          * http_server_stop / http_server_shutdown_graceful flips
@@ -7071,10 +8042,25 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
          * the peer knows not to start new streams; in-flight
          * streams keep running until they finish naturally. After
          * the GOAWAY drains and all streams close, want_close
-         * flips and we exit. */
-        if (!goaway_sent && !server->is_running) {
-            aether_h2_session_initiate_goaway(sess);
-            goaway_sent = 1;
+         * flips and we exit. The stop is `stopping`, not
+         * `is_running`: a host that serves connections itself
+         * (http_server_drain_connection) never starts the server, so
+         * is_running was 0 from the first turn and every HTTP/2
+         * connection it served got a GOAWAY before its first
+         * request. */
+        if (atomic_load(&server->stopping)) {
+            if (!goaway_sent) {
+                aether_h2_session_initiate_goaway(sess);
+                goaway_sent = 1;
+            }
+            /* Every turn: a stream the client opened before it saw the
+             * GOAWAY is refused as well. */
+            aether_h2_session_refuse_incomplete(sess);
+            if (!stop_seen) {
+                int64_t by = aether_h2_now_ms() + idle_ms;
+                if (!close_by || by < close_by) close_by = by;
+                stop_seen = 1;
+            }
         }
 
         /* Drain any worker-completed responses BEFORE the wire
@@ -7087,35 +8073,106 @@ static void handle_h2_connection(HttpServer* server, HttpConn* conn,
 
         if (aether_h2_session_want_close(sess)) break;
 
-#if !defined(_WIN32)
-        /* When concurrent dispatch is on, poll the socket AND the
-         * wake pipe so a worker finishing mid-recv doesn't have to
-         * wait for the next byte from the peer to get its response
-         * onto the wire. wake_fd == -1 when the pool is off — fall
-         * through to the plain blocking recv path. */
-        if (wake_fd >= 0) {
-            struct pollfd pfds[2];
-            pfds[0].fd = conn->fd;       pfds[0].events = POLLIN; pfds[0].revents = 0;
-            pfds[1].fd = wake_fd;         pfds[1].events = POLLIN; pfds[1].revents = 0;
-            /* 1s timeout so the graceful-shutdown / is_running flag
-             * gets re-checked at least once per second even when the
-             * connection is otherwise idle. */
-            int pr = poll(pfds, 2, 1000);
-            if (pr < 0) { if (errno == EINTR) continue; break; }
-            if (pr == 0) continue;  /* timeout — re-loop */
-            if (pfds[1].revents & POLLIN) {
-                /* drain_ready will run at the top of the next loop
-                 * iteration (it also drains the pipe). */
-                continue;
-            }
-            if (!(pfds[0].revents & POLLIN)) continue;
-            /* fall through to recv */
+        /* The deadlines (#3738): streams late with their requests are
+         * reset, and the connection's own clocks are read. */
+        int64_t now = aether_h2_now_ms();
+        int64_t next = aether_h2_session_expire(sess, now);
+        int busy = aether_h2_session_busy(sess);
+        int64_t progress = aether_h2_session_last_progress(sess);
+        if (progress > last_progress) last_progress = progress;
+        int64_t idle_due = 0;
+        if (busy == 0) {
+            /* Idle since the last stream closed: one opened and answered
+             * within a turn of this loop is never seen open here. */
+            int64_t active = aether_h2_session_last_active(sess);
+            if (idle_since == 0) idle_since = now;
+            if (active > idle_since) idle_since = active;
+            idle_due = idle_since + idle_ms;
+        } else {
+            idle_since = 0;
+            /* A handler running is progress; once it is done the clock
+             * runs from then. */
+            if (busy == 2) last_progress = now;
+            else idle_due = last_progress + idle_ms;
         }
-#endif
+        if (idle_due && now >= idle_due) {
+            /* Idle past the timeout: say so with a GOAWAY, and close. */
+            if (!goaway_sent) {
+                aether_h2_session_initiate_goaway(sess);
+                goaway_sent = 1;
+            }
+            break;   /* the final drain below sends it */
+        }
+        if (idle_due && (!next || idle_due < next)) next = idle_due;
+        if (lim->h2_max_age_ms > 0 && !close_by) {
+            int64_t age_due = started + lim->h2_max_age_ms;
+            if (now >= age_due) {
+                /* Old enough: no new streams, and the ones open get the
+                 * idle timeout to finish. */
+                if (!goaway_sent) {
+                    aether_h2_session_initiate_goaway(sess);
+                    goaway_sent = 1;
+                }
+                close_by = now + idle_ms;
+                continue;   /* the drain at the top sends the GOAWAY */
+            }
+            if (!next || age_due < next) next = age_due;
+        }
+        if (close_by) {
+            if (now >= close_by) break;
+            if (!next || close_by < next) next = close_by;
+        }
 
+        /* Wait for the client, or for a worker's response, no later than
+         * the next deadline, and no more than a second, so a stop is seen
+         * (the GOAWAY above). What a TLS backend already holds is ready
+         * without a wait. */
+        int wait = 1000;
+        if (next) {
+            int64_t w = next - now;
+            if (w < wait) wait = w > 0 ? (int)w : 0;
+        }
+        if (!conn_tls_buffered(conn)) {
+#if !defined(_WIN32)
+            struct pollfd pfds[2];
+            nfds_t npfd = 1;
+            pfds[0].fd = conn->fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
+            if (wake_fd >= 0) {
+                /* A worker finishing mid-wait gets its response onto the
+                 * wire without waiting for the client's next byte. */
+                pfds[1].fd = wake_fd; pfds[1].events = POLLIN; pfds[1].revents = 0;
+                npfd = 2;
+            }
+            int pr = poll(pfds, npfd, wait);
+            if (pr < 0) { if (errno == EINTR) continue; break; }
+            if (pr == 0) continue;   /* a deadline or the stop check: re-loop */
+            /* drain_ready runs at the top of the next iteration (it also
+             * drains the pipe). */
+            if (npfd == 2 && (pfds[1].revents & POLLIN)) continue;
+            if (!(pfds[0].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+#else
+            int pr = conn_poll_fd(conn->fd, POLLIN, wait);
+            if (pr < 0) break;
+            if (pr == 0) continue;
+#endif
+        }
+
+        /* One read, as a whole within the idle timeout, and no later than
+         * the connection's end: a TLS record that arrives a byte at a time
+         * is cut off (#3737). */
+        int64_t read_due = conn_now_ms() + idle_ms;
+        if (close_by) {
+            int64_t end_in = close_by - aether_h2_now_ms();
+            if (end_in < idle_ms) read_due = conn_now_ms() + (end_in > 0 ? end_in : 1);
+        }
+        conn_read_due_set(conn, read_due);
         int n = conn_recv(conn, inbuf, (int)sizeof(inbuf));
+        conn_read_due_clear(conn);
         if (n <= 0) break;  /* EOF / timeout / error */
         if (aether_h2_session_feed(sess, inbuf, (size_t)n) < 0) break;
+        /* After the feed: a handler it ran here (no dispatch pool) is
+         * progress too. */
+        last_progress = aether_h2_now_ms();
     }
 
     /* Final drain — any worker tasks still queued must complete or
@@ -7198,8 +8255,7 @@ static void conn_set_recv_timeout(HttpConn* c, int ms) {
 /* Per-recv socket timeout, applied whenever a worker is about to block on
  * this connection. Also the idle guard against a slow-loris client. */
 static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
-    conn_set_recv_timeout(c, server->keep_alive_idle_ms > 0
-                             ? server->keep_alive_idle_ms : 30000);
+    conn_set_recv_timeout(c, server->limits.idle_timeout_ms);
 }
 
 /* The send timeout, the same idle timeout: a send that makes no progress for
@@ -7209,7 +8265,7 @@ static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
  * itself on POSIX (conn_wait_io); SO_SNDTIMEO is the bound on Windows, and
  * for the pure-Aether TLS server's writes, which std.tcp waits on by it. */
 static void conn_apply_send_timeout(HttpServer* server, HttpConn* c) {
-    int ms = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+    int ms = server->limits.idle_timeout_ms;
     if (c->applied_send_timeout_ms == ms) return;
     c->applied_send_timeout_ms = ms;
 #ifdef _WIN32
@@ -7225,68 +8281,38 @@ static void conn_apply_send_timeout(HttpServer* server, HttpConn* c) {
 #endif
 }
 
-/* Bytes received on fd and not yet read, or -1. */
-static long conn_fd_unread(int fd) {
-#if defined(_WIN32)
-    u_long n = 0;
-    if (ioctlsocket((SOCKET)fd, FIONREAD, &n) != 0) return -1;
-    return (long)n;
-#else
-    int n = 0;
-    if (ioctl(fd, FIONREAD, &n) != 0) return -1;
-    return (long)n;
-#endif
-}
-
 /* A connection its socket says is readable: will a read find a request?
  *
  * On a plain connection readable is bytes of one, or the peer's end. On a
  * TLS connection it can be records with no application data, a KeyUpdate
  * above all, which a read handles and then waits behind for the whole idle
  * timeout, holding a worker for nothing (#3405). So TLS asks the library
- * without waiting:
- * - the pure server handles the whole records the socket holds (its
- *   pending check takes only what FIONREAD counts) and reports data, or an
- *   end or an error;
- * - OpenSSL peeks with the socket non-blocking for that one call.
+ * without waiting, as the wait for a request's first bytes does
+ * (conn_tls_idle_probe): plaintext already decrypted, part of a record, or
+ * the end or an error is a request to serve; only whole records with no
+ * data leave the connection idle.
  * 1 when a read now has data, or an end or an error to report; 0 when the
  * connection should wait in the lot instead. Readable with nothing to read
  * is the peer's end, which a read must see. */
 static int conn_readable_has_request(HttpConn* conn) {
-    if (conn->pure_tls) {
-        /* Counted before the pending check, which takes what is there: bytes
-         * that held no data (a KeyUpdate) leave the socket empty after it,
-         * and only a socket empty before it is the peer's end. */
-        long before = conn_fd_unread(conn->fd);
-        if (pt_server_pending(conn->pure_tls) != 0) return 1;
-        return before <= 0;
+    /* The same answer the wait for a request's first bytes gives
+     * (conn_tls_idle_probe): only whole records with no data leave the
+     * connection idle, and a record begun is a request begun. This check
+     * called part of a record idle (OpenSSL's WANT_READ with the bytes
+     * already taken, the pure server's -1), so a connection parked before
+     * its client's first byte went back to the lot at every byte of a
+     * head sent slowly, until its idle time ran out, and was closed with a
+     * close_notify and no 408 (http_server_slow_clients on macOS, where the
+     * first wait after the handshake can end before that byte). */
+    if (conn->pure_tls || conn->ssl) {
+        if (conn_tls_buffered(conn)) return 1;
+        int has = conn_tls_idle_probe(conn) != 0;
+        /* The probe leaves an OpenSSL socket non-blocking on POSIX for the
+         * read it is followed by; here the connection may go back to the
+         * lot instead, as blocking as it came. */
+        if (conn->ssl) conn_sock_nonblocking(conn, 0);
+        return has;
     }
-#ifdef AETHER_HAS_OPENSSL
-    if (conn->ssl) {
-        SSL* ssl = (SSL*)conn->ssl;
-        if (SSL_pending(ssl) > 0) return 1;
-        char b;
-#if defined(_WIN32)
-        u_long on = 1, off = 0;
-        ioctlsocket((SOCKET)conn->fd, FIONBIO, &on);
-#else
-        conn_set_nonblocking(conn, 1);
-#endif
-        int n = SSL_peek(ssl, &b, 1);
-        int err = n > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, n);
-#if defined(_WIN32)
-        ioctlsocket((SOCKET)conn->fd, FIONBIO, &off);
-#else
-        conn_set_nonblocking(conn, 0);
-#endif
-        if (n > 0) return 1;
-        if (err == SSL_ERROR_WANT_READ) {
-            ERR_clear_error();
-            return 0;
-        }
-        return 1;
-    }
-#endif
     return 1;
 }
 
@@ -7386,7 +8412,11 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
 #endif
 
     int max_requests = server->keep_alive_max;
-    int64_t idle_since_ms = 0;
+    /* A connection back from the lot keeps the idle time it began there
+     * (0 for a new one, which is calloc'd): a wake that brings no request
+     * must not earn it a whole new idle timeout, or a client that sends a
+     * byte now and then keeps it open for as long as it likes. */
+    int64_t idle_since_ms = conn->parked_since_ms;
     for (;;) {
         int rc = handle_one_request(server, conn, conn->requests_served, max_requests);
         if (rc == 0) break;
@@ -7400,8 +8430,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
             /* A stopping server keeps no idle connection (#2672): the lot
              * refuses it, and waiting here would hold up the stop. */
             if (!lot || atomic_load(&server->stopping)) break;
-            int idle_ms = server->keep_alive_idle_ms > 0
-                ? server->keep_alive_idle_ms : 30000;
+            int idle_ms = server->limits.idle_timeout_ms;
             if (idle_since_ms == 0) idle_since_ms = conn_now_ms();
             int64_t waited = conn_now_ms() - idle_since_ms;
             if (waited >= idle_ms) break;   /* silent past the deadline: close */
@@ -7439,8 +8468,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
          * pure cost; it waits not at all when every worker is busy, because
          * then the wait is time another connection spends queued. */
         if (lot && !atomic_load(&server->stopping) && !conn_next_request_imminent(conn)) {
-            int idle_ms = server->keep_alive_idle_ms > 0
-                ? server->keep_alive_idle_ms : 30000;
+            int idle_ms = server->limits.idle_timeout_ms;
             conn->parked_since_ms = conn_now_ms();
             if (http_park_add(lot, conn, idle_ms) == 0) {
                 atomic_fetch_sub(&server->inflight_connections, 1);
@@ -7465,7 +8493,7 @@ void http_server_resume_connection(HttpServer* server, HttpConn* conn) {
     HttpParkLot* lot = (HttpParkLot*)server->park_lot;
     if (lot && (conn->pure_tls || conn->ssl) && !atomic_load(&server->stopping) &&
         !conn_readable_has_request(conn)) {
-        int idle_ms = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+        int idle_ms = server->limits.idle_timeout_ms;
         int64_t left = (int64_t)idle_ms - (conn_now_ms() - conn->parked_since_ms);
         if (left <= 0) {
             conn_close(conn);
@@ -7521,6 +8549,10 @@ int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ss
     if (!server || client_fd < 0) return -1;
     HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
     if (!conn) return -1;
+    /* Counted against its address again, not refused: the event loop
+     * admitted it and gave its count back as it handed it over (#3750). */
+    conn->ip_server = server;
+    http_server_ip_acquire(server, client_fd, &conn->ip, 0);
     adopt_conn_serve(server, conn);
     return 0;
 }
@@ -7538,6 +8570,10 @@ int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
     HttpMiddlewareNode* proxy = server_proxy_node(server);
     HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
     if (!conn) return -1;
+    /* Counted against its address again, not refused: the event loop
+     * admitted it and gave its count back as it handed it over (#3750). */
+    conn->ip_server = server;
+    http_server_ip_acquire(server, client_fd, &conn->ip, 0);
     /* The responses already sent on the connection count against the
      * server's keep_alive_max wherever the next one is served (#3229). */
     conn->requests_served = requests_served;
@@ -7648,6 +8684,29 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      * indefinitely"; the guard must see "nothing applied yet" instead. */
     conn->applied_recv_timeout_ms = -1;
 
+    /* One address past its limit of connections (#3750): 503 and closed,
+     * or over TLS, where a plaintext answer means nothing, closed. Before
+     * the handshake, which is what such a client would cost. */
+    conn->ip_server = server;
+    if (http_server_ip_acquire(server, client_fd, &conn->ip, 1) != 0) {
+        if (!server->tls_enabled) {
+            static const char full[] =
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n"
+                "Content-Length: 21\r\nRetry-After: 1\r\nConnection: close\r\n\r\n"
+                "too many connections\n";
+            conn_apply_send_timeout(server, conn);
+            conn_send(conn, full, (int)sizeof(full) - 1);
+            /* Its request, if it sent one yet, is read and dropped so the
+             * answer is not reset away, for no longer than the event loop's
+             * refusal lingers: this client can open the next at once. */
+            conn->linger_on_close = 1;
+            conn->linger_max_ms = HTTP_LINGER_FULL_MS;
+        }
+        conn_close(conn);
+        free(conn);
+        return;
+    }
+
     if (server->tls_enabled) {
         /* The handshake is bounded as a request is (#3703): the receive and
          * send timeouts conn_serve puts on the socket, the keep-alive idle
@@ -7677,11 +8736,17 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
             ctx = (SSL_CTX*)server->tls_ctx;
 #endif
         pthread_mutex_unlock(&server->tls_lock);
+        /* The whole handshake within tls_handshake_timeout_ms of now (#3737):
+         * the idle timeout above bounds one read only. */
+        int hs_ms = server->limits.tls_handshake_timeout_ms;
         if (pure) {
-            void* pure_conn = pt_server_accept(conn->fd, creds ? creds->creds : NULL);
+            void* pure_conn = pt_server_accept_due(conn->fd, creds ? creds->creds : NULL, hs_ms,
+                                                   conn->applied_recv_timeout_ms > 0
+                                                   ? conn->applied_recv_timeout_ms : 0);
             pt_creds_unref(creds);
             if (!pure_conn) {
                 /* pt_server_accept consumes the fd on failure too. */
+                http_server_ip_release(server, &conn->ip);
                 free(conn);
                 return;
             }
@@ -7690,10 +8755,11 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
 #ifdef AETHER_HAS_OPENSSL
         else if (ctx) {
             /* SSL_new holds a reference of its own from here. */
-            int rc = conn_tls_accept(conn, ctx);
+            int rc = conn_tls_accept(conn, ctx, hs_ms > 0 ? conn_now_ms() + hs_ms : 0);
             SSL_CTX_free(ctx);
             if (rc != 0) {
                 close(client_fd);
+                http_server_ip_release(server, &conn->ip);
                 free(conn);
                 return;
             }
@@ -7716,6 +8782,32 @@ static void handle_client_connection(HttpServer* server, int client_fd) {
     /* Thread-pool path — defers to the public drain helper so the
      * keep-alive / TLS / route-dispatch logic lives in one place. */
     http_server_drain_connection(server, client_fd);
+}
+
+/* How long the accept loops stop watching the listener after accept()
+ * found the process, or the system, out of descriptors or memory. */
+#define HTTP_ACCEPT_PAUSE_MS 100
+
+/* Did the last accept() fail for want of a descriptor or of memory? The
+ * connection stays in the listener's queue and the listener stays
+ * readable, so a loop that went straight back to poll and accept spun a
+ * core until a descriptor freed, which a client holding many connections
+ * open decides. The loops stop watching the listener for
+ * HTTP_ACCEPT_PAUSE_MS instead, as nginx disables its accept events: the
+ * queued connection is served once a descriptor frees, which is the usual
+ * end of it as idle connections time out. The reserve descriptor trick
+ * (close a spare, accept, close the connection, reopen the spare) turns
+ * that into refused connections for clients that would have been served a
+ * moment later, costs a descriptor per listener, and has no counterpart on
+ * Windows; the connection bounds (limits.loop_max_connections,
+ * park_max_connections) keep exhaustion from being the steady state. */
+static int accept_out_of_descriptors(void) {
+#if defined(_WIN32)
+    int e = WSAGetLastError();
+    return e == WSAEMFILE || e == WSAENOBUFS;
+#else
+    return errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM;
+#endif
 }
 
 
@@ -7935,23 +9027,35 @@ static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller
     AetherIoEvent events[256];
     AcceptWaiting waiting = { NULL, 0 };
 
+    /* While accept() is out of descriptors the listener is not re-armed
+     * until this time (accept_out_of_descriptors); 0 when it is armed. */
+    int64_t listen_paused_until = 0;
+
     while (server->is_running) {
+        if (listen_paused_until && conn_now_ms() >= listen_paused_until) {
+            listen_paused_until = 0;
+            aether_io_poller_add(poller, listen_fd, NULL, AETHER_IO_READ);
+        }
         int n = aether_io_poller_poll(poller, events, 256, 100);
 
         for (int i = 0; i < n; i++) {
             int fd = events[i].fd;
 
             if (fd == listen_fd) {
-                // Re-register listen fd (one-shot semantics auto-removed it)
-                aether_io_poller_add(poller, listen_fd, NULL, AETHER_IO_READ);
-
-                // Accept all pending connections
+                // Accept all pending connections, then re-register the
+                // listen fd (one-shot semantics auto-removed it), unless
+                // accept() ran out of descriptors: then it waits out a
+                // pause first rather than firing again at once.
+                int out_of_fds = 0;
                 while (1) {
                     struct sockaddr_storage client_addr;
                     socklen_t client_len = sizeof(client_addr);
                     int client_fd = accept(listen_fd,
                         (struct sockaddr*)&client_addr, &client_len);
-                    if (client_fd < 0) break;
+                    if (client_fd < 0) {
+                        out_of_fds = accept_out_of_descriptors();
+                        break;
+                    }
 
                     // Optimistic path: check if data already arrived (very common
                     // for HTTP — request follows TCP handshake immediately).
@@ -7974,6 +9078,10 @@ static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller
                         close(client_fd);
                     }
                 }
+                if (out_of_fds)
+                    listen_paused_until = conn_now_ms() + HTTP_ACCEPT_PAUSE_MS;
+                else
+                    aether_io_poller_add(poller, listen_fd, NULL, AETHER_IO_READ);
             } else {
                 // Data ready (from poller, one-shot already removed) — dispatch
                 accept_waiting_clear(&waiting, fd);
@@ -8315,14 +9423,23 @@ static int http_server_serve(HttpServer* server) {
         server->conn_pool = pool;
         /* The lot resubmits woken connections into the same pool. Capacity is
          * descriptors, not threads, which is the whole point: a few thousand
-         * idle keep-alive clients cost a table slot each. */
+         * idle keep-alive clients cost a table slot each. Bounded by
+         * limits.park_max_connections (#3750); at it the lot closes the
+         * connection idle longest. */
         if (pool) {
-            server->park_lot = http_park_create(server, http_park_resume, 4096);
+            int park_max = server->limits.park_max_connections > 0
+                ? server->limits.park_max_connections : http_server_default_connection_bound(1);
+            server->park_lot = http_park_create(server, http_park_resume, park_max);
         }
 #endif
 
         // Fallback: poll + thread pool (non-Linux or no actor handler)
+        /* While accept() is out of descriptors, the listener is not watched
+         * until this time (accept_out_of_descriptors); 0 when it is. */
+        int64_t listen_paused_until = 0;
         while (server->is_running) {
+            int64_t pause_left = listen_paused_until ? listen_paused_until - conn_now_ms() : 0;
+            if (pause_left <= 0) listen_paused_until = 0;
 #if !defined(_WIN32)
             /* The wake pipe beside the socket: a stop writes to it, which
              * wakes this poll() everywhere (shutting the socket down wakes it
@@ -8332,6 +9449,15 @@ static int http_server_serve(HttpServer* server) {
                 { .fd = server->socket_fd, .events = POLLIN },
                 { .fd = server->wake_fds[0], .events = POLLIN },
             };
+            if (listen_paused_until) {
+                /* The wake pipe alone, for what is left of the pause. */
+                int woke = poll(&pfd[1], server->wake_fds[0] >= 0 ? 1 : 0, (int)pause_left);
+                if (woke > 0 && (pfd[1].revents & POLLIN)) {
+                    char drain[64];
+                    while (read(server->wake_fds[0], drain, sizeof(drain)) > 0) { }
+                }
+                continue;
+            }
             int ready = poll(pfd, server->wake_fds[0] >= 0 ? 2 : 1, 1000);
             if (ready <= 0) continue;
             if (server->wake_fds[0] >= 0 && (pfd[1].revents & POLLIN)) {
@@ -8351,6 +9477,15 @@ static int http_server_serve(HttpServer* server) {
                 { .fd = (SOCKET)server->socket_fd, .events = POLLRDNORM },
                 { .fd = (SOCKET)server->wake_fds[0], .events = POLLRDNORM },
             };
+            if (listen_paused_until) {
+                /* The wake socket alone, for what is left of the pause. */
+                if (server->wake_fds[0] < 0) { Sleep((DWORD)pause_left); continue; }
+                if (WSAPoll(&pfd[1], 1, (int)pause_left) > 0 && (pfd[1].revents & POLLRDNORM)) {
+                    char drain[64];
+                    while (recv((SOCKET)server->wake_fds[0], drain, (int)sizeof drain, 0) > 0) { }
+                }
+                continue;
+            }
             int ready = WSAPoll(pfd, server->wake_fds[0] >= 0 ? 2 : 1, 1000);
             if (ready <= 0) continue;
             if (server->wake_fds[0] >= 0 && (pfd[1].revents & POLLRDNORM)) {
@@ -8365,6 +9500,8 @@ static int http_server_serve(HttpServer* server) {
             int client_fd = accept(server->socket_fd, (struct sockaddr*)&client_addr, &client_len);
             if (client_fd < 0) {
                 if (!server->is_running) break;
+                if (accept_out_of_descriptors())
+                    listen_paused_until = conn_now_ms() + HTTP_ACCEPT_PAUSE_MS;
                 continue;
             }
 
@@ -8707,6 +9844,8 @@ static void server_destroy(HttpServer* server) {
     pthread_mutex_destroy(&server->evloop_lock);
     pthread_mutex_destroy(&server->tls_lock);
     pthread_mutex_destroy(&server->tls_config_lock);
+    ip_table_free(server);
+    pthread_mutex_destroy(&server->ip_lock);
 #if !defined(_WIN32) && !defined(__wasi__)
     if (server->wake_fds[0] >= 0) close(server->wake_fds[0]);
     if (server->wake_fds[1] >= 0) close(server->wake_fds[1]);
@@ -9284,8 +10423,14 @@ const char* http_request_body(HttpRequest* req) {
                 cap = next;
             }
             int64_t room = cap - got;
-            int n = conn_recv(conn, buf + got, room < INT_MAX ? (int)room : INT_MAX);
-            if (n <= 0) break;
+            int n = conn_recv_body(conn, buf + got, room < INT_MAX ? (int)room : INT_MAX);
+            if (n <= 0) {
+                /* Too slow for the body's budget (#3737): the prefix is
+                 * kept, as for a client that closed, and the server
+                 * answers 408 whatever the handler sets. */
+                if (conn->body_timed_out) req->body_timed_out = 1;
+                break;
+            }
             got += n;
         }
         buf[got] = '\0';
@@ -9433,8 +10578,13 @@ int http_request_body_read_raw(HttpRequest* req, int64_t offset, int max) {
         /* (b) read the rest straight off the socket, bounded by want. */
         while (got < want) {
             int chunk = (int)(want - got);
-            int n = conn_recv(conn, g_rbr_buf + got, chunk);
-            if (n <= 0) break;   /* short read / peer closed mid-body */
+            int n = conn_recv_body(conn, g_rbr_buf + got, chunk);
+            if (n <= 0) {   /* short read / peer closed mid-body */
+                /* Too slow for the body's budget (#3737): the server
+                 * answers 408 whatever the handler sets. */
+                if (conn->body_timed_out) req->body_timed_out = 1;
+                break;
+            }
             got += n;
         }
         if (got <= 0) { release_rbr_locked(); return rbr_yield_eof(); }

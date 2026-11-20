@@ -1350,6 +1350,10 @@ static char* resolve_program(const char* prog) {
 #endif
 }
 
+char* ae_resolve_program(const char* prog) {
+    return resolve_program(prog);
+}
+
 /* #2477: the identity of the C compiler the build will run.
  *
  * The key covered the source, aetherc, ae, libaether and the flags, but not
@@ -1366,8 +1370,69 @@ static char* resolve_program(const char* prog) {
  * another compiler, and one upgraded in place has other bytes. Computed once
  * per process; it reads the compiler driver once, about what hashing aetherc
  * costs. The spec and its words are taken whole (#2538), where 1 KB copies
- * left a longer one's tail out of the key. 0 when out of memory, which makes
- * no key. */
+ * left a longer one's tail out of the key. 0 when out of memory, or when a
+ * compiler's `--version` could not be run to an answer (see
+ * compiler_version_probe), which makes no key. */
+
+/* How one `<cc> --version` run ended, as compiler_version_probe reports it. */
+enum {
+    CCVER_LINE,       /* it printed a first line on stdout */
+    CCVER_NO_LINE,    /* it exited, with stdout empty: a compiler that does not
+                         take --version (tcc), or one that failed this once */
+    CCVER_SIGNALLED,  /* killed by a signal (POSIX) or crashed (Windows) */
+    CCVER_NO_SPAWN    /* it could not be started */
+};
+
+#define CCVER_ATTEMPTS 3
+
+/* Run `"<resolved>" --version` until it answers: the first line of its stdout
+ * into `line` (CCVER_LINE), or, after CCVER_ATTEMPTS runs that printed no
+ * line, how the last one ended. *rc is the last run's result and *runs how
+ * many there were.
+ *
+ * The answer is part of the cache key, so it has to be the same every time
+ * for the same compiler (#3707). A run that could not be spawned, died on a
+ * signal or printed nothing gave no line, and the key simply lacked it: a
+ * transient failure on one build (macOS runs this through a wrapper, the
+ * xcrun shim and clang) gave that build another ccid, it published under it,
+ * and the next unchanged build missed. Such a run is tried again; a compiler
+ * that always exits without a line gives that outcome, with its exit status,
+ * every time, so it still caches. */
+static int compiler_version_probe(const char* resolved, char* line, size_t line_size,
+                                  int* rc, int* runs) {
+    int outcome = CCVER_NO_SPAWN;
+    *rc = AE_SPAWN_FAILED;
+    *runs = 0;
+    line[0] = '\0';
+    char* cmd = str_join4("\"", 1, resolved, "\" --version", "");
+    if (!cmd) return CCVER_NO_SPAWN;
+    for (int attempt = 0; attempt < CCVER_ATTEMPTS; attempt++) {
+        /* Spawned directly, as every compile step is (#3532): popen hands
+         * the line to cmd.exe on Windows, a second process start that was
+         * about half of this probe's 23 ms there. */
+        char out_path[1200];
+        ae_private_temp_path(out_path, sizeof(out_path), "ccver.out");   /* #3745 */
+        remove(out_path);   /* a run that never starts must not read the last one's */
+        *rc = run_cmd_capture_stdout(cmd, out_path);
+        (*runs)++;
+        int have_line = 0;
+        FILE* vf = fopen(out_path, "r");
+        if (vf) {
+            if (fgets(line, (int)line_size, vf)) have_line = 1;
+            fclose(vf);
+        }
+        remove(out_path);
+        if (*rc == AE_SPAWN_FAILED)  outcome = CCVER_NO_SPAWN;
+        else if (*rc < 0)            outcome = CCVER_SIGNALLED;
+        else if (have_line)          outcome = CCVER_LINE;
+        else                         outcome = CCVER_NO_LINE;
+        if (outcome == CCVER_LINE) break;
+        line[0] = '\0';
+    }
+    free(cmd);
+    return outcome;
+}
+
 static unsigned long long c_compiler_fingerprint(void) {
     static int done = 0;
     static unsigned long long fp = 0;
@@ -1408,37 +1473,42 @@ static unsigned long long c_compiler_fingerprint(void) {
          * and /usr/bin/clang (xcrun shims, switched by xcode-select or an
          * Xcode update), a ccache masquerade directory. What the program
          * says it is comes from the compiler that will actually run, so
-         * its first line of `--version` is folded in too; a program with
-         * no such line folds in nothing. */
-        char* cmd = str_join4("\"", 1, resolved, "\" --version", "");
-        if (!cmd) { free(resolved); continue; }
-        /* Spawned directly, as every compile step is (#3532): popen hands
-         * the line to cmd.exe on Windows, a second process start that was
-         * about half of this probe's 23 ms there. */
-        char out_path[1200];
-        ae_private_temp_path(out_path, sizeof(out_path), "ccver.out");   /* #3745 */
-        int version_rc = run_cmd_capture_stdout(cmd, out_path);
-        free(cmd);
+         * its first line of `--version` is folded in too. A program that
+         * answers with no such line folds in that it did not, and its exit
+         * status: the outcome of the run is part of the key, so a run that
+         * failed this once cannot pass for one that never prints a line
+         * (#3707). */
         char line[512];
-        int have_line = 0;
-        FILE* vf = fopen(out_path, "r");
-        if (vf) {
-            if (fgets(line, sizeof(line), vf)) {
-                have_line = 1;
-                h = (h * 1099511628211ULL) ^ fnv64_str(line);
-            }
-            fclose(vf);
+        int version_rc = 0, runs = 0;
+        int outcome = compiler_version_probe(resolved, line, sizeof(line), &version_rc, &runs);
+        if (outcome == CCVER_LINE) {
+            h = (h * 1099511628211ULL) ^ fnv64_str(line);
+        } else if (outcome == CCVER_NO_LINE) {
+            char what[64];
+            snprintf(what, sizeof(what), "\n--version: no line, exit %d\n", version_rc);
+            h = (h * 1099511628211ULL) ^ fnv64_str(what);
         }
-        remove(out_path);
-        /* Each part of the compiler's identity, under -v (#3707): an
-         * unchanged rebuild that missed the cache on macOS x86 computed
-         * another ccid than the build before it, and the one input that
-         * comes from running a program rather than reading a file is this
-         * `--version` line, whose run's outcome the key does not see. */
+        /* Each part of the compiler's identity, under -v (#3707). */
         if (tc.verbose) {
-            if (have_line) line[strcspn(line, "\r\n")] = '\0';
-            fprintf(stderr, "[cache] ccid: %s file=%016llx version rc=%d line=%s\n", resolved,
-                    driver_hash, version_rc, have_line ? line : "none");
+            line[strcspn(line, "\r\n")] = '\0';
+            static const char* const outcome_name[] = { "line", "no line", "signalled",
+                                                        "not started" };
+            fprintf(stderr, "[cache] ccid: %s file=%016llx version rc=%d runs=%d outcome=%s line=%s\n",
+                    resolved, driver_hash, version_rc, runs, outcome_name[outcome],
+                    outcome == CCVER_LINE ? line : "none");
+        }
+        /* Still unanswered after every retry, the compiler's identity is not
+         * known, and a key made without it would be another build's key:
+         * this build makes none, so it neither serves nor publishes. */
+        if (outcome == CCVER_SIGNALLED || outcome == CCVER_NO_SPAWN) {
+            if (tc.verbose)
+                fprintf(stderr, "[cache] ccid: '%s --version' did not run to an answer in %d "
+                                "tries; this build is not cached\n", resolved, runs);
+            free(resolved);
+            free(word);
+            free(owned);
+            fp = 0;
+            return fp;
         }
         free(resolved);
     }
@@ -1498,15 +1568,18 @@ static int program_file_identity(const char* prog, const char* name, char* out, 
 /* The answer's slot: the compiler command, the question, the compiler's
  * fingerprint, and the program the command runs, as it is on disk now (so a
  * command that names another compiler than the one the fingerprint resolved
- * is keyed by its own). 0 when the program cannot be found: nothing is
- * remembered for it. */
+ * is keyed by its own). 0 when the program cannot be found, or the compiler's
+ * identity is not known (c_compiler_fingerprint 0): nothing is remembered for
+ * it, as no build is cached under an unknown compiler. */
 static int probe_memo_path(const char* cc, const char* what, char* out, size_t outsz) {
     char ident[1400];
     if (!program_file_identity(cc, NULL, ident, sizeof(ident))) return 0;
+    unsigned long long ccid = c_compiler_fingerprint();
+    if (!ccid) return 0;
     unsigned long long h = fnv64_more(fnv64_more(fnv64_str(cc ? cc : ""), "\n"),
                                       what ? what : "");
     h = fnv64_more(fnv64_more(h, "\n"), ident);
-    h = (h * 1099511628211ULL) ^ c_compiler_fingerprint();
+    h = (h * 1099511628211ULL) ^ ccid;
     init_cache_dir();
     snprintf(out, outsz, "%s/%016llx.probe", s_cache_dir, h);
     return 1;

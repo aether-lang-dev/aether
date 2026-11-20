@@ -575,6 +575,17 @@ else
 endif
 ifneq ($(NGHTTP2_LDFLAGS),)
   NGHTTP2_CFLAGS += -DAETHER_HAS_NGHTTP2
+  # #3738: the HTTP/2 server leans on libnghttp2 for two floods, rapid reset
+  # (CVE-2023-44487, fixed in 1.57.0) and CONTINUATION (CVE-2024-28182, fixed
+  # in 1.61.0). An older library still builds, with a warning, rather than
+  # being refused: distributions backport both fixes under the old version
+  # number (Ubuntu 24.04's 1.59.0 carries them), so the number alone cannot
+  # say a library is unsafe. docs/http-server.md, "HTTP/2", says what to check.
+  ifeq ($(shell pkg-config --exists libnghttp2 2>/dev/null && echo yes),yes)
+    ifneq ($(shell pkg-config --atleast-version=1.61.0 libnghttp2 2>/dev/null && echo yes),yes)
+      $(warning libnghttp2 $(shell pkg-config --modversion libnghttp2 2>/dev/null) is older than 1.61.0, which fixes the HTTP/2 CONTINUATION flood (CVE-2024-28182; 1.57.0 fixes rapid reset, CVE-2023-44487). Unless your distribution backported both fixes, upgrade it before serving HTTP/2: see docs/http-server.md)
+    endif
+  endif
   # #1896: nghttp2.h declares its API __declspec(dllimport) unless
   # NGHTTP2_STATICLIB is defined (nghttp2.h:58-65). Without it every call
   # compiles to an __imp_nghttp2_* reference, which the static libnghttp2.a
@@ -1518,10 +1529,14 @@ fuzz-ipc-frames-corpus: compiler ae stdlib
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/fuzz/ipc_frames/gen_corpus.ae 	    -o $(BUILD_DIR)/fuzz/gen_ipc_corpus$(EXE_EXT)
 	@./$(BUILD_DIR)/fuzz/gen_ipc_corpus$(EXE_EXT) tests/fuzz/ipc_frames/corpus
 
-# The C-parser fuzz targets (tests/fuzz/run_fuzz_c.sh): each harness compiles
-# the std sources it tests into itself, with the flags std objects are built
-# with, so those carry the fuzzer's coverage and the sanitizers.
-FUZZ_C_TARGETS = http_head http_chunked url json
+# The fuzz targets tests/fuzz/run_fuzz_c.sh runs: a C harness compiles the
+# std sources it tests into itself, with the flags std objects are built
+# with, and an Aether one is compiled by `ae build --emit=obj` with the
+# fuzzing compiler, so either carries the fuzzer's coverage and the
+# sanitizers. h2 also needs libnghttp2 (pkg-config), so fuzz-replay runs it
+# only where that is found.
+FUZZ_C_TARGETS = http_head http_chunked url json websocket proxy_response xml yaml \
+                 msgpack tar zip tls13_record tls13_handshake x509
 FUZZ_STD_CFLAGS = $(filter-out -MMD -MP -DAETHER_VERSION=%,$(AETHER_REQUIRED_CFLAGS))
 
 .PHONY: print-fuzz-std-cflags
@@ -1543,14 +1558,25 @@ fuzz-url: compiler ae stdlib
 fuzz-json: compiler ae stdlib
 	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh json
 
+# The decoders #3749 added: the WebSocket frame reader, the HTTP/2 glue, the
+# proxy's handling of an upstream response, std.xml, std.yaml, std.msgpack,
+# std.tar and std.zip extraction, the TLS 1.3 record layer and handshake
+# parsers, and X.509 (tests/fuzz/README.md says what each checks).
+FUZZ_MORE_TARGETS = websocket h2 proxy-response xml yaml msgpack tar zip \
+                    tls13-record tls13-handshake x509
+.PHONY: $(addprefix fuzz-,$(FUZZ_MORE_TARGETS))
+$(addprefix fuzz-,$(FUZZ_MORE_TARGETS)): fuzz-%: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh $(subst -,_,$*)
+
 .PHONY: fuzz-replay
-# The C-parser harnesses built with $(CC) and no libFuzzer, each dictionary
-# entry and each seed run through its property checks once: what can be
-# checked where clang has no libFuzzer (Windows among them). Every
-# dictionary, the CBOR and frame-reader ones too, is read as libFuzzer reads
-# it, so an entry it would refuse fails here rather than only on CI.
+# The harnesses run_fuzz_c.sh builds, built with $(CC) and no libFuzzer,
+# each dictionary entry and each seed run through its property checks once:
+# what can be checked where clang has no libFuzzer (Windows among them), h2
+# where libnghttp2 is found. Every dictionary, the CBOR and frame-reader ones
+# too, is read as libFuzzer reads it, so an entry it would refuse fails here
+# rather than only on CI.
 fuzz-replay: compiler ae stdlib
-	@for t in $(FUZZ_C_TARGETS); do \
+	@for t in $(FUZZ_C_TARGETS) $$(pkg-config --exists libnghttp2 2>/dev/null && echo h2); do \
 	    FUZZ_REPLAY=1 CC='$(CC)' FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' \
 	        sh tests/fuzz/run_fuzz_c.sh $$t || exit 1; \
 	done
@@ -1566,12 +1592,12 @@ fuzz-ci: compiler ae stdlib
 	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/fuzz_ci.sh
 
 .PHONY: fuzz-corpus
-# Rewrite the C-parser fuzzers' seed corpora from their generators
+# Rewrite the fuzz targets' seed corpora from their generators
 # (tests/fuzz/<target>/gen_corpus.ae); the seeds are committed, so this is
 # only for when a generator changes.
 fuzz-corpus: compiler ae stdlib
 	@mkdir -p $(BUILD_DIR)/fuzz
-	@for t in $(FUZZ_C_TARGETS); do \
+	@for t in $(FUZZ_C_TARGETS) h2; do \
 	    ./$(BUILD_DIR)/ae$(EXE_EXT) build tests/fuzz/$$t/gen_corpus.ae \
 	        -o $(BUILD_DIR)/fuzz/gen_$${t}_corpus$(EXE_EXT) || exit 1; \
 	    rm -rf tests/fuzz/$$t/corpus; \
@@ -2268,6 +2294,14 @@ endif
 # change to the Makefile did, and a stale preload was tested and installed.
 SANDBOX_PRELOAD :=
 SANDBOX_PRELOAD_LIBS :=
+# The compiler the preload is built with. It is injected into programs this
+# build did not make (a contained child, the shell, timeout(1)), so it is
+# built as it ships, whatever compiler wrapper the rest of the build goes
+# through: under TSan, tests/scripts/sanitizer_sweep.sh points this at the
+# plain clang. A preload built under TSan needs __tsan_init from the program
+# it lands in, and it lands under TSan's own interceptors, whose REAL() calls
+# reach each of its wrappers.
+SANDBOX_PRELOAD_CC ?= $(CC)
 ifeq ($(shell uname -s),Linux)
 SANDBOX_PRELOAD := $(BUILD_DIR)/libaether_sandbox.so
 SANDBOX_PRELOAD_LIBS := -ldl -lrt
@@ -2275,7 +2309,7 @@ else ifeq ($(shell uname -s),FreeBSD)
 SANDBOX_PRELOAD := $(BUILD_DIR)/libaether_sandbox.so
 endif
 ifneq ($(SANDBOX_PRELOAD),)
-$(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_path.h runtime/aether_sandbox_match.h
+$(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_path.h runtime/aether_sandbox_match.h runtime/sandbox/aether_landlock.h
 	@echo "Building sandbox preload library..."
 	@mkdir -p $(dir $@)
 	@# The old library goes first: a rebuild that failed left it in place and
@@ -2283,7 +2317,7 @@ $(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_p
 	@# made. A failure is not fatal (spawn_sandboxed is then unavailable),
 	@# and the compiler's output is kept beside it to say why.
 	@rm -f $@
-	@if $(CC) -shared -fPIC -o $@ runtime/libaether_sandbox_preload.c $(SANDBOX_PRELOAD_LIBS) > $@.log 2>&1; then \
+	@if $(SANDBOX_PRELOAD_CC) -shared -fPIC -o $@ runtime/libaether_sandbox_preload.c $(SANDBOX_PRELOAD_LIBS) > $@.log 2>&1; then \
 	    rm -f $@.log; echo "✓ Sandbox preload: $@"; \
 	else \
 	    rm -f $@; echo "⚠ Sandbox preload: build failed, see $@.log (spawn_sandboxed will be unavailable)"; \
@@ -3746,6 +3780,7 @@ check-tests:
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \
 	fi
 	@sh tests/scripts/check_action_pins.sh
+	@sh tests/scripts/check_signing_floor.sh
 
 # Every non-host contrib module's Aether surface, type-checked (#1442).
 #

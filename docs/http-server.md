@@ -192,6 +192,48 @@ whole until the stream ends, under the limit `server_set_max_body` sets
 (64 MiB by default, #3740); past it the stream is reset with
 `RST_STREAM` (`CANCEL`) and its handler never runs.
 
+An HTTP/2 connection runs on a worker for its whole life, so it is bounded
+the way a run of HTTP/1.1 requests is (#3738):
+
+- **The connection holds no more than `max_body` of request bodies** at
+  once, as one HTTP/1.1 connection holds one body: a stream that would take
+  it past that is reset with `REFUSED_STREAM`, which tells the client the
+  request was not processed and can be sent again.
+- **A header list is at most 32 KiB**, counted as
+  `SETTINGS_MAX_HEADER_LIST_SIZE` counts it and advertised there. Past it
+  the stream is answered `431` and never dispatched. HPACK lets a few bytes
+  on the wire stand for a large field, over and over.
+- **A stream's request must arrive whole in time**: within the head and
+  body budgets (`server_set_head_timeout`, `server_set_body_timeout`) of
+  its first HEADERS, the body's extended by its minimum rate, held to the
+  rate window (`server_set_body_rate_window`). Late, it is
+  reset with `CANCEL`.
+- **Idle connections close.** With no stream open for the idle timeout
+  (`server_set_keepalive`), the server sends `GOAWAY` and closes; PINGs and
+  SETTINGS do not count as activity. With streams open but nothing
+  moving for the idle timeout (no bytes in or out, no handler running or
+  finishing) it closes too; a handler that runs past the idle timeout
+  still has its whole response go out as the client's window allows.
+- **Connections age out.** Past `server_set_h2_max_age` (1 h by default)
+  the server sends a graceful `GOAWAY`: the streams already open finish,
+  no new ones start, and the connection closes within the idle timeout.
+  The same graceful `GOAWAY` is what a server stop sends; it used to end
+  the session at once and drop the streams it meant to let finish. A stop
+  also refuses the streams whose requests have not arrived whole
+  (`REFUSED_STREAM`) and gives the rest the idle timeout, so a client that
+  keeps a stream trickling cannot hold the stop.
+
+nghttp2's own protections (against `SETTINGS` and `PING` ack floods, rapid
+reset and `CONTINUATION` floods) are set explicitly when the session is
+made, at nghttp2's defaults, so they do not depend on a library version's
+choice. Two of them live in libnghttp2 itself: the rapid reset fix
+(CVE-2023-44487) is in 1.57.0 and the `CONTINUATION` flood fix
+(CVE-2024-28182) in 1.61.0. A build against an older libnghttp2 succeeds
+with a warning rather than failing, since distributions backport both
+fixes under the old version number (Ubuntu 24.04's 1.59.0 carries them).
+If the warning appears, check that your libnghttp2 has both fixes, or
+upgrade it, before serving HTTP/2 to untrusted clients.
+
 ### Per-stream concurrent dispatch
 
 By default, h2 streams within one connection dispatch sequentially
@@ -424,7 +466,30 @@ for the whole of it, 30 s from its first byte by default: a head not
 complete by then is answered `408` and the connection closes (#3737).
 Without it a client that sent a byte just inside the idle timeout, over
 and over, held a worker for as long as it liked. Set it with
-`http.server_set_head_timeout(server, 10s)`; `0ns` turns it off.
+`http.server_set_head_timeout(server, 10s)`; `0ns` turns it off. The
+deadline holds through TLS too: a record that arrives a byte at a time is
+cut off when it passes, and on a server with HTTP/2 on it runs from the
+first of the bytes read to look for the HTTP/2 preface.
+
+The TLS handshake and the request body have budgets of the same kind
+(#3737). A handshake must finish within 30 s of the connection's first
+read, on both TLS backends, or the connection closes
+(`http.server_set_tls_handshake_timeout`). For a body the server waits on
+the client no longer than 30 s plus one second for every 500 bytes
+received (`http.server_set_body_timeout(server, 30s, 500)`); only the time
+spent waiting counts, so a handler that takes its time between reads does
+not use up the client's. A body that runs out of budget, or stops for the
+idle timeout, is answered `408` and the connection closes: before the
+handler runs when the server reads the body itself (a chunked body, or one
+that fits the connection buffer), and after it when the handler reads it
+with `request_body` or `request_body_read`, whose read ends short. A rate
+of 0 makes the body's timeout absolute. The rate is held over a sliding
+window, 60 s unless set (`http.server_set_body_rate_window`): what the
+budget has left never grows past it through bytes received, so a client
+that sends a burst and then trickles below the rate is cut off within
+the window of falling behind, not after the burst's whole credit. Every
+limit is in one table in
+[Resource limits](#resource-limits).
 
 ### Idle connections wait in a poller, not on a worker
 
@@ -775,7 +840,7 @@ wants one (#3118). Inside the handler:
 | `ws_message_bytes(ws)` | the most recent message as a borrowed `byte[]` view (binary-safe; `.len` is its length), valid until the next recv/send/close. |
 | `ws_send_text(ws, text)` | emit one text frame; `0` on success, `-1` on transport error. |
 | `ws_send_binary(ws, data)` | emit one binary frame holding the bytes of `data` (a `byte[]`; binary-safe). |
-| `ws_close(ws, code, reason)` | emit a close frame; `1000` = normal, `1001` = going away, `1011` = internal error. |
+| `ws_close(ws, code, reason)` | emit a close frame; `1000` = normal, `1001` = going away, `1011` = internal error. `""`, or why nothing was sent: a code a close frame may not carry (only 1000 to 1003, 1007 to 1014 and 3000 to 4999), or a reason that is not UTF-8; the handle stays open then. A reason longer than 123 bytes is cut at a whole code point. |
 | `ws_set_max_message(ws, max_bytes)` | the cap on one message for this handle from the next `ws_recv` on; `""` or why the value was refused. |
 
 Returning from the handler closes with code `1000` automatically.
@@ -802,6 +867,27 @@ client handle from `ws_connect` closes with `1002` on a masked frame from
 its server. `ws_recv` returns `-1` after each. Browsers and every
 conforming client mask their frames, and `ws_connect`'s handles always
 have.
+
+Neither end negotiates an extension (no `Sec-WebSocket-Extensions`), so a
+frame with any of RSV1, RSV2 or RSV3 set closes the connection with `1002`
+(5.2, #3764). Fragments must come in order (5.4): a message is a text or
+binary frame and then continuation frames up to the one with FIN, with
+only control frames (a ping, say) between them. A continuation frame with
+no message in progress, or a text or binary frame inside a fragmented
+message, closes the connection with `1002`. Both ends apply these rules.
+
+A text message must be UTF-8 (8.1), and so must a close frame's reason:
+no overlong form, no surrogate, nothing past U+10FFFF, and a message may
+not end inside a code point. It is checked as the bytes arrive and across
+fragments, so a code point split between two fragments is whole. Text that
+is not UTF-8 closes the connection with `1007`, and `ws_recv` returns `-1`.
+A binary message is not checked.
+
+A close frame from the peer is checked too (5.5.1, 7.4): a body of one byte
+holds no code, and a code a close frame may not carry (below 1000, 1004 to
+1006, 1015 to 2999, 5000 and up) closes the connection with `1002` rather
+than being echoed back. `ws_close` refuses to send such a code, with an
+error.
 
 ## Server-Sent Events
 
@@ -1073,6 +1159,83 @@ Either path may be `""` to skip; `ready_check` may be null. Mirrors
 Kubernetes / Docker probe conventions.
 
 ---
+
+## Resource limits
+
+Every bound the server puts on what one client can make it hold (memory,
+a worker, a connection) is in one place, `HttpServerLimits` in
+`std/net/aether_http_server.h`, with one set of defaults (#3750). This is
+that table; each limit has a setter, and the older setters
+(`server_set_keepalive`, `server_set_max_body`, ...) write into it. A
+timeout of `0ns` turns that bound off.
+
+| Limit | Default | Set with | Past it |
+|---|---|---|---|
+| Idle: a wait for the next byte, a send that makes no progress, a kept-alive connection's wait for its next request | 30 s | `server_set_keepalive` (its idle timeout) | the wait fails; the connection closes |
+| TLS handshake, as a whole | 30 s | `server_set_tls_handshake_timeout` | the connection closes |
+| Request head, from its first byte | 30 s | `server_set_head_timeout` | `408`; the connection closes |
+| Request body: the server's waiting, extended by one second per `min_rate` bytes received | 30 s and 500 bytes/s | `server_set_body_timeout` | `408`; the connection closes |
+| The most of that extension a body keeps: the window over which the minimum rate is held, so a burst followed by a trickle below it is cut off within the window | 60 s | `server_set_body_rate_window` | `408`; the connection closes (HTTP/2: the stream is reset) |
+| Body `request_body` buffers | 64 MiB | `server_set_max_body` | `413` (HTTP/2: the stream is reset) |
+| Chunked body, read whole before the handler | 8 MiB, and never past the body limit | none | `413`; the connection closes |
+| WebSocket message | 64 MiB | `server_set_ws_max_message`, `ws_set_max_message` | close `1009` |
+| HTTP/2 streams on one connection | 100 | `server_set_h2` | the new stream is reset |
+| HTTP/2 request bodies held on one connection | the body limit | `server_set_max_body` | the stream is refused (`REFUSED_STREAM`) |
+| HTTP/2 header list | 32 KiB | none | `431` |
+| HTTP/2 request, from its first HEADERS | the head and body budgets | as those | the stream is reset (`CANCEL`) |
+| HTTP/2 connection with no stream open | the idle timeout | as that | `GOAWAY`; closed |
+| HTTP/2 connection's age | 1 h | `server_set_h2_max_age` | graceful `GOAWAY`; closed when its streams are done |
+| Connections the proxy event loop holds | half the process's open-file limit, less 64 | `server_set_loop_max_connections` | the connection that has waited longest with nothing of a request sent is closed; with none, the new one gets `503` |
+| Idle keep-alive connections the worker path parks (waiting without a worker) | the process's open-file limit, less 64 | `server_set_park_max_connections` | the connection idle longest is closed |
+| Connections from one client address, the worker path and the event loop together | off (0) | `server_set_max_connections_per_ip(server, n, ipv6_prefix)` | `503`; closed (over TLS, closed) |
+
+The per-address limit is off by default on purpose: behind a load
+balancer, a reverse proxy or a NAT every client arrives from one address,
+and any default limit would refuse real traffic there (nginx's `limit_conn`
+is opt-in for the same reason). Turn it on for a server that clients reach
+directly. An IPv4 client counts by its address, an IPv6 client by its first
+`ipv6_prefix` bits, 64 unless set: one host usually holds a whole /64 and
+could otherwise open connections from every address in it.
+
+
+The proxy event loop (Linux and macOS, for a server whose work is a
+reverse proxy to plain upstreams) holds the same head, body and handshake
+budgets as the worker path, by the clock, since it reads a request whole
+before anything runs on it; a slow request gets the same `408`. Its idle
+timer moves with every byte, as a receive timeout does, so before these
+budgets a client that sent a byte just inside it held a slot for ever.
+
+
+When the process runs out of descriptors, accept() fails with the
+connection still queued and the listener still readable. The accept loops
+then stop watching the listener for 100 ms, as nginx disables its accept
+events, so the queued connection is served once a descriptor frees rather
+than a core spinning on accept() until then. The reserve descriptor trick
+(close a spare, accept, close the connection) was not taken: it refuses
+clients that would have been served a moment later, and the connection
+bounds keep exhaustion from being the steady state.
+
+Fixed limits, which size buffers and have no setter: a request head
+16 KiB (`431`), a request line 2 KiB (`414`), a header line 1 KiB and 50
+headers (`431`).
+
+The HTTP client has one limit of the same kind (`HttpClientLimits` in
+`std/net/aether_http.h`):
+
+| Limit | Default | Set with | Past it |
+|---|---|---|---|
+| A buffered response, head and body (a chunked body by its payload, its framing held to twice the limit); a streamed response's head | 64 MiB | `client.set_max_response(req, n)`, `client.set_default_max_response(n)`; `0` for none | the request fails: "response is larger than the client's limit of N bytes" |
+
+A request's timeout (`client.set_timeout`) bounds the whole exchange, a
+streamed response's head included. A response you want whole past 64 MiB
+takes `set_max_response` with its size; one you can read in pieces takes
+`set_stream`, which holds one window of the body at a time. The reverse
+proxy gives each upstream fetch its own body cap as the limit.
+
+`tests/integration/http_server_slow_clients` drives each time limit with a
+client that keeps just inside the idle timeout, over plain and both TLS
+backends; `http_server_body_limit`, `ws_receive_limits`,
+`http_server_h2_limits` and `http_client_max_response` drive the rest.
 
 ## Performance tuning checklist
 

@@ -610,6 +610,11 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
                     const char* v = colon + 1;
                     while (v < eol && (*v == ' ' || *v == '\t')) v++;
                     size_t vl = (size_t)(eol - v);
+                    /* Neither leading nor trailing whitespace is part of a
+                     * value (RFC 9110 5.5): the miss sent it trimmed (both
+                     * proxy paths, #3749), and a hit replayed it as the
+                     * upstream wrote it (#3782). */
+                    while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
                     e->header_keys[idx]   = (char*)malloc(kl + 1);
                     e->header_values[idx] = (char*)malloc(vl + 1);
                     if (e->header_keys[idx] && e->header_values[idx]) {

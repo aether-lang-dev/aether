@@ -53,6 +53,7 @@ static inline void raw_recv_timeout_ms(raw_sock s, int ms) {
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
@@ -61,7 +62,15 @@ static inline void raw_recv_timeout_ms(raw_sock s, int ms) {
 typedef int raw_sock;
 #define RAW_SOCK_INVALID (-1)
 
-static inline int raw_socket_start(void) { return 0; }
+/* A send to a peer that has closed raises SIGPIPE, which ends the process,
+ * so raw_send_all could not report it as it says it does (-1). On Linux the
+ * peer's reset usually arrives first and the send fails with ECONNRESET;
+ * on macOS it is EPIPE, and the signal, so a fixture server whose client
+ * gave up mid-body died there and refused every later case. */
+static inline int raw_socket_start(void) {
+    signal(SIGPIPE, SIG_IGN);
+    return 0;
+}
 static inline void raw_socket_close(raw_sock s) { close(s); }
 static inline void raw_sleep_ms(int ms) {
     struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000L * 1000L };

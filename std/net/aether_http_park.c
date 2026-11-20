@@ -254,15 +254,32 @@ int http_park_add(HttpParkLot* lot, HttpConn* conn, int idle_ms) {
     /* Checked again under the lock, which http_park_close sets it under: a
      * connection added after the close emptied the lot would be held by a
      * lot nobody watches or empties any more. */
-    if (atomic_load(&lot->shutdown) || lot->count >= lot->capacity) {
+    if (atomic_load(&lot->shutdown)) {
         pthread_mutex_unlock(&lot->lock);
         return -1;
+    }
+    /* Full (limits.park_max_connections, #3750): the connection idle
+     * longest, the one nearest its deadline, is closed to make room. The
+     * lot declined instead, and the caller kept the connection waiting on
+     * its worker, so idle clients past the bound held the workers one each:
+     * the cost parking exists to remove. */
+    HttpConn* evicted = NULL;
+    if (lot->count >= lot->capacity) {
+        int oldest = 0;
+        for (int i = 1; i < lot->count; i++)
+            if (lot->slots[i].deadline_ms < lot->slots[oldest].deadline_ms) oldest = i;
+        evicted = lot->count > 0 ? park_take_locked(lot, oldest, 1) : NULL;
+        if (!evicted) {
+            pthread_mutex_unlock(&lot->lock);
+            return -1;
+        }
     }
     /* Register before publishing the slot: an event that arrives between the
      * two would find no slot and be dropped, and the connection would wait
      * for its deadline instead of its client. */
     if (aether_io_poller_add(&lot->poller, fd, conn, AETHER_IO_READ) != 0) {
         pthread_mutex_unlock(&lot->lock);
+        if (evicted) http_conn_close_owned(evicted);
         return -1;
     }
     lot->slots[lot->count].conn = conn;
@@ -271,6 +288,8 @@ int http_park_add(HttpParkLot* lot, HttpConn* conn, int idle_ms) {
     park_index_set(lot, fd, lot->count);
     lot->count++;
     pthread_mutex_unlock(&lot->lock);
+    /* Closed outside the lock, as the deadline sweep closes them. */
+    if (evicted) http_conn_close_owned(evicted);
     return 0;
 }
 

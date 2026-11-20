@@ -70,7 +70,7 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_fs_write(path)` | `fs_write` | path being opened, created or written |
 | `grant_fs(path)` | `fs_read`, `fs_write` and `fs` | reads, writes and directory operations such as `os.chdir` |
 | `grant_exec(cmd)` | `exec` | program (`os.run` and its family) or command string (`os.system`, `os.exec`) |
-| `grant_shell()` | `exec` | the shell a command string runs through: `/bin/sh`, or on Windows what `COMSPEC` names (`cmd.exe`) |
+| `grant_shell()` | `exec` | the shell a command string runs through: `/bin/sh` (`_PATH_BSHELL` where the system names another), or on Windows what `COMSPEC` names (`cmd.exe`) |
 | `grant_env(name)` | `env` | environment variable name |
 | `grant_tcp(host)` | `tcp` | host name (std.net) or resolved IP (LD_PRELOAD); ports are not checked |
 | `grant_tcp_listen()` | `tcp_listen` | any listening socket |
@@ -229,13 +229,14 @@ its own and the shell's, `grant_shell()`. The pair allows anything the shell
 can be told to run, so give it only to code you would let run any command.
 The LD_PRELOAD library applies the same rule to `system()` and `popen()`.
 
-A file with no `#!` line is a script too. `os.run` and its siblings run one
-through `/bin/sh`, as `execvp` does, and the shell runs whatever the file
-holds, so it needs `grant_shell()` as well as the file's own grant. Without
-it the start fails with "permission denied" (#3755). A script that names its
-interpreter on a `#!` line needs no shell grant, since the kernel starts the
-interpreter itself. The LD_PRELOAD library asks the same of `execvp` and
-`execlp`.
+A file with no `#!` line is a script too. `os.run` and its siblings, and
+`os.execv`, run one through `/bin/sh`, as `execvp` does, and the shell runs
+whatever the file holds, so it needs `grant_shell()` as well as the file's
+own grant. Without it the start fails with "permission denied" (#3755;
+#3762 for `os.execv`, which used libc's `execvp` and so took the shell by
+itself). A script that names its interpreter on a `#!` line needs no shell
+grant, since the kernel starts the interpreter itself. The LD_PRELOAD
+library asks the same of `execvp` and `execlp`.
 
 ```aether,fragment
 // Untrusted code: name the program and pass an argv. No shell runs.
@@ -432,6 +433,209 @@ it reveals or changes, on the path as it resolves:
 Nested sandboxes are intersected, an inner sandbox cannot escalate
 beyond what the outer sandbox grants.
 
+### What each mode holds, and what it does not
+
+The sandbox runs in three modes. They share one grant list, one matcher
+and one path resolution, and differ in who makes the check and whether
+the kernel stands behind it.
+
+**In-process enforce** (`sandbox.enforce`, a host bridge's
+`run_sandboxed`). The checks are std's own, made by the calling thread
+against its levels.
+
+- Holds: every std call in the table above, checked where its path leads,
+  and made on what was checked (#3751), so a directory swapped for a
+  symlink or a junction by another thread or process between the check and
+  the call is not followed out of the grant:
+  - On POSIX the call is made on the resolution following no symlink: an
+    open with `openat2` and `RESOLVE_NO_SYMLINKS` on Linux where the kernel
+    has it, otherwise one directory at a time from `/` with `O_NOFOLLOW`; a
+    call on a name (unlink, rmdir, rename, mkdir, symlink, link, chmod, a
+    lookup) with its `*at` variant from the directory opened that way.
+    `fs.write_atomic` makes its temporary and renames it from that
+    directory; `fs.make_temp_file` and `fs.make_temp_dir` make their name
+    in the directory that was checked; `fs.walk` descends with `openat`
+    from each directory; the lookups (`fs.exists`, `fs.stat`, `fs.size`,
+    `fs.mtime`, `fs.is_dir`, `fs.is_symlink`, `fs.readlink`,
+    `fs.realpath`, `fs.statvfs`) are `fstatat` (or `readlinkat`, or
+    `fstatvfs` of a walked descriptor) from the anchor; `fs.watch`
+    watches the walked descriptor through `/proc/self/fd/N` (inotify) or
+    the descriptor itself (kqueue); `std.tar` sets times with `utimensat`
+    from the anchor. A name spelt with a trailing slash is a directory, as
+    the kernel takes it (see the standalone preload below). On WASI the
+    walk starts from the preopened directory that holds the path, which
+    wasi-libc reaches only through it.
+  - On Windows what a call acts on, or the directory it acts in, is opened
+    without changing it and the final path of the handle is checked
+    (`GetFinalPathNameByHandleW`) before anything happens: an open for
+    writing never truncates or creates by name (no `CREATE_ALWAYS` or
+    `TRUNCATE_EXISTING`); the file is emptied with `SetEndOfFile` once
+    verified, and a file the call created and then refused is deleted
+    through its handle. Only an open that may create asks for `DELETE`,
+    and once verified its handle is reopened without it (`ReOpenFile`), so
+    the file is shared as `fopen` shares it; where `DELETE` cannot be had
+    the new file is made by `NtCreateFile` in the verified directory
+    instead. Unlink, rmdir and remove set the disposition of a
+    handle opened with `DELETE` and `FILE_FLAG_OPEN_REPARSE_POINT`; rename
+    and a hard link go through `NtSetInformationFile` with the verified
+    destination directory as `RootDirectory`; mkdir, `mkdir -p`,
+    `fs.write_atomic`'s temporary and the temporary files are made by
+    `NtCreateFile` relative to a verified directory; `fs.copy` copies
+    between two checked handles; a lookup, `fs.readlink` and
+    `fs.realpath` verify the handle they read; `fs.watch` reads changes
+    from a verified directory handle (`ReadDirectoryChangesW`);
+    `fs.chmod` changes the DACL (`SetSecurityInfo`) and the read-only
+    attribute (`SetFileInformationByHandle`) through a verified handle, and
+    `std.tar` sets times through one (`SetFileTime`); `fs.list_dir`,
+    `fs.walk` and `fs.glob` list a verified directory handle
+    (`NtQueryDirectoryFile`, a glob's last part matched by the file system
+    as `FindFirstFileA` matches it), each subdirectory opened relative to
+    its parent with no link followed, as the POSIX walk enters no symlink.
+    The name a call makes is the one a Win32 call acts on: the whole path
+    goes through `GetFullPathNameW` first, so a trailing dot or space is
+    dropped and a device name is the device (`\\.\NUL`, its own resource,
+    covered by a grant that names it or by `grant_all`, as `/dev/null` is
+    on POSIX). A symlink
+    is made by name (`CreateSymbolicLinkW` has no handle form), then
+    opened and verified, and removed again if a swap sent it elsewhere.
+- Calls on a name check that name (its directory resolved, the name kept),
+  not where a symlink there leads: removing a symlink in a granted
+  directory that points out is allowed and leaves its target alone, and
+  removing or renaming one outside the grant that points in is refused. A
+  hard link needs `fs_write` on the new name, and the new name may not
+  reach the file more than the old one may (`fs_read` and `fs_write` on
+  the target for whichever the new name has).
+- `fs.lock_open` needs `fs_write`, as it always has; inside an enforce
+  block its descriptor reads as well only where `fs_read` is granted too
+  (the lock itself, `flock` or `LockFileEx`, takes a write-only one).
+- Does not hold: code that does not go through std (an extern, inline
+  assembly, a library's own calls), other threads (each thread has its own
+  levels), and a few windows that remain by the platform's design. On
+  Windows a symlink exists for a moment, by name, before it is verified and
+  removed, and so does a file an open creates through a junction swapped in
+  after the check: it is made where the junction leads, outside the grant,
+  then found by the verification and deleted through its handle before
+  anything is written to it (where `DELETE` cannot be had it is made in the
+  verified directory, never outside); a hard link is refused before
+  anything changes. On a POSIX system whose `*at` calls
+  re-resolve by name instead of from the descriptor (Cygwin and MSYS2
+  emulate them so), the walk holds nothing more than a check by name.
+  Without `/proc` on Linux, `fs.watch` watches by name and compares the
+  file it reaches with the one it opened. There is no kernel backstop: the
+  levels are entered and left, and Landlock cannot be lifted once applied,
+  so an in-process enforce block cannot ask the kernel to hold it.
+
+**Standalone preload** (`LD_PRELOAD=libaether_sandbox.so` with a grant
+file, the shared memory or the descriptor `spawn_sandboxed` hands over).
+The checks are the library's, at libc's entry points, for every thread of
+the process.
+
+- Holds: every libc call that opens, lists, creates, removes or changes a
+  file by path (`open` and its large-file and `_FORTIFY_SOURCE` variants,
+  `openat`, `creat`, `fopen`, `freopen`, `opendir`, `scandir`,
+  `scandirat`, `glob`, `nftw`, `ftw`, `fts`, `unlink`, `unlinkat`,
+  `remove`, `rmdir`, `mkdir`, `mkdirat`, `mknod`, `mkfifo`, `rename`,
+  `renameat`, `renameat2`, `symlink`, `link`, `chmod`, `lchmod`,
+  `fchmodat`, `chown`, `lchown`, `fchownat`, `truncate`, the times, the
+  extended attributes, `mkstemp` and its kin, `mkdtemp`, `tmpfile`,
+  `open_by_handle_at`, `mount`, `posix_spawn_file_actions_addopen`; on
+  FreeBSD also `scandir_b`, `scandirat_b`, `mkostempsat`, the file flags,
+  the extended attributes and ACLs set by path, `funlinkat`, `revoke`,
+  `undelete`, `nmount`, `unmount`, `exect` and libc's exported `_open` and
+  `_openat`), each made in the same three steps as in-process: resolved
+  (relative to its directory descriptor for an `*at` call, read from
+  `/proc/self/fd` or `F_KINFO`; it was the working directory), checked, and
+  made on the resolution following no symlink. A chmod that glibc before
+  2.32 cannot make without following goes through `/proc/self/fd/N` of the
+  name opened `O_PATH|O_NOFOLLOW`, or through a descriptor opened for it.
+  A `freopen` with a path reopens the stream through `/proc/self/fd/N` of
+  the file the walk opened, or on the BSDs puts that descriptor in the
+  stream's place (`dup2`) and reopens it with no name. A name spelt with a
+  trailing slash ("name/") is a directory, as the kernel takes it: an unlink
+  of one never removes anything (`ENOTDIR`, or `EISDIR` for a directory),
+  an open that would create is `EISDIR`, a rename moves a directory only,
+  and a new symlink, hard link or node is not made (`EEXIST` or `ENOENT`);
+  an open of one follows the name and needs a directory there. A hard link
+  whose source is a descriptor (`linkat` with `AT_EMPTY_PATH`, or
+  `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW`, the ways an `O_TMPFILE` file
+  gets its name) needs `fs_write` on the new name, which may not reach the
+  file more than the path the descriptor is open on may, and is made with
+  the caller's own spelling of the source. `lsetxattr` and `lremovexattr`
+  open the name `O_PATH|O_NOFOLLOW` and set through `/proc/self/fd/N`.
+  `mount` checks `fs_write` on the mount point and, for a bind or a move,
+  `fs_read` on the source (and `fs_write` unless the bind is read-only),
+  and passes both as resolved; FreeBSD's `nmount` does the same for a
+  nullfs or unionfs source ("target", "from"), and its `mount(2)` refuses
+  those. `unshare` and `clone` with a `CLONE_NEW*` flag, `clone3` with one,
+  and `setns` need the native grant their system call needs
+  (`syscall:unshare`, `syscall:setns`): a new user and mount namespace
+  would let a bind mount show any directory where a grant allows. The
+  process starts
+  (`execve` and the rest of the family, `posix_spawn`, `fork`, `system`,
+  `popen`), `dlopen` and `dlmopen`, `connect`, `bind`, `listen`, `accept`,
+  `getenv`, raw `syscall()`, and executable memory. A test lists every
+  path call of glibc, musl and FreeBSD's libc and fails on one that is
+  neither wrapped nor named as a lookup
+  (`tests/integration/sandbox_preload_fs_coverage`).
+- Lookups are not wrapped: `stat` and its kin, `access`, `readlink`,
+  `realpath`, `getxattr`, `statfs`, `pathconf`, `chdir`, FreeBSD's ACL and
+  extended attribute reads. They say that a name exists and what it is,
+  never what it holds, and libc and the runtime make them for their own
+  needs (a `PATH` search, the resolution above). `mkdir` of a name that
+  exists answers `EEXIST` without a grant, as a lookup would, so `mkdir -p`
+  works through the directories above a grant.
+- **A permanent policy is held by the kernel too.** A grant file (or the
+  shared memory or descriptor) with the line `policy:permanent` says the
+  policy is the process's for its whole life. The constructor then applies
+  Landlock to the whole process from its grants, before `main`: `fs_read`,
+  `fs_write`, `fs` and `exec` grants become Landlock rules as they do for a
+  spawned child, tcp grants with a port become connect rules on Landlock
+  ABI 4 and up (with no tcp grant, connect is refused; a tcp grant with no
+  port or a `tcp_listen` grant leaves that right to the wrappers), and the
+  floor a running program needs is added (the loader's cache and its C
+  library's directory, the locale archive, `/dev/null`, `/dev/urandom`),
+  with the preload library, the grant file and the shared memory the grants
+  came from, which a program it starts reads to keep the policy. A program
+  an `exec` grant names gets what the kernel needs to start it, its ELF
+  interpreter and the libraries beside it, or a `#!` script's interpreter,
+  and with any `exec` grant this program's own interpreter is executable;
+  with a tcp grant that names a host, the files the C library reads to
+  resolve it (`/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`,
+  `/etc/host.conf`, `/etc/gai.conf`, `/etc/localtime`) are readable. An fs
+  grant becomes a rule only on what the libc check would match: a path
+  spelt through a symlink, and an entry of "/dir/name*" that is a symlink,
+  get none, so no rule reaches the tree a symlink points at.
+  The log is opened first, and the restriction sets `PR_SET_NO_NEW_PRIVS`,
+  so a set-user-ID program the process starts no longer gains its owner's
+  rights. Without the line nothing changes. On a kernel without Landlock,
+  or with a grant Landlock cannot express (a suffix pattern such as
+  `*.log`), the policy holds at libc only, and the log says so
+  (`AETHER_SANDBOX: landlock: ...`).
+- Does not hold, without `policy:permanent` or without Landlock: anything
+  that does not call libc's exported functions (a static binary, a raw
+  `syscall` instruction, `io_uring`), libc's calls to itself (glibc's
+  `fopen` opens on its internal `open`, which is why `fopen` has a wrapper
+  of its own), and a process that unsets `LD_PRELOAD` before an exec the
+  policy allowed. On Linux with `/proc` not mounted, an `*at` call from a
+  directory descriptor is refused (the descriptor's path cannot be read)
+  and a `freopen` with a path reopens by the resolved name. FreeBSD's ACL,
+  extended attribute and `revoke` calls have no form relative to a
+  directory and are made by the resolved name.
+
+**Spawned child** (`spawn_sandboxed`, `sandbox.spawn_socket`). The
+preload, as above, inside the child, and on Linux the kernel behind it:
+Landlock holds the child's file access to the grants (read and write by
+path, inherited by everything it starts, a static binary included), and a
+seccomp filter holds process creation, `ptrace` and the other raw calls
+listed below. On FreeBSD an Aether child also enters Capsicum. With a
+permanent policy the standalone preload's process has the Landlock half of
+this; the seccomp filter stays the spawn's.
+
+Choose by what runs: trusted Aether code limiting itself, in-process;
+cooperative native code (a plugin, an interpreter) in this process, the
+preload, with `policy:permanent` where nothing will lift the policy; code
+that may try to escape, a spawned child on Linux or FreeBSD.
+
 ## Per-function effect tags
 
 The sandbox and `--with=fs,net,os` gate the *whole program*. Effect tags add a
@@ -492,9 +696,19 @@ that cannot be searched) is refused, not matched as written.
 An fs grant's pattern is resolved the same way when it is made
 (`grant_fs_read("/var/x/*")` covers `/private/var/x/...` on macOS, and a
 grant named through a symlink covers where the symlink leads); `*` and
-suffix patterns such as `*.log` are kept as written. On Windows paths are
-made absolute and normalised with `_fullpath`; symlinks there are not
-followed.
+suffix patterns such as `*.log` are kept as written.
+
+On Windows `.` and `..` are resolved by the text first, as Windows itself
+resolves them before the file system sees a path (`GetFullPathNameW`). The
+deepest part of the result that exists is then opened and
+`GetFinalPathNameByHandleW` says where it really is, every junction and
+symbolic link on the way followed; the names below it that do not exist yet
+are kept as written. So a junction in a granted directory that points
+outside it is refused, as a symlink is on POSIX, and a name that exists but
+cannot be followed (a link whose target is gone) is refused rather than
+matched as written. Until #3763 the path was only normalised with
+`_fullpath`, which follows nothing, and a junction in a granted `C:\box` reached
+anything it pointed at.
 
 Non-fs categories (`tcp`, `env`, `exec`) carry no path semantics;
 their resources are matched verbatim.
@@ -926,7 +1140,10 @@ cat sandbox-config.ae
 
 | Attack vector | Blocked by |
 |--------------|------------|
-| File read/write outside grants | `open`/`fopen`/`openat` interception |
+| File read/write outside grants | the `open` family, `fopen`, `freopen`, `opendir`, `scandir`, `glob`, `nftw`, `fts` interception, made on the path checked |
+| Creating, removing, renaming, linking or changing files outside grants | `creat`, `mkdir`, `mknod`, `mkfifo`, `unlink`, `remove`, `rmdir`, `rename`, `symlink`, `link`, `chmod`, `chown`, `truncate`, the times, the extended attributes, `mkstemp` and `mkdtemp` interception (#3751) |
+| A path relative to a directory descriptor (`openat`, `unlinkat` and the rest) | resolved against the descriptor's own path, not the working directory (#3751) |
+| A directory swapped for a symlink between the check and the call | the call made on the checked resolution following no symlink (#3751) |
 | Network to non-granted hosts | `connect` interception |
 | Env var access outside grants | `getenv` interception |
 | Process execution outside grants | `execve` interception |
@@ -950,9 +1167,9 @@ Linux namespaces, OpenBSD pledge/unveil) for defence in depth.
 ### Raw `syscall()`
 
 libc's `syscall()` is interposed so it cannot be used to go round this
-library: a raw call skips the argument checks the wrappers make, and most
-calls have no wrapper at all (`unlink`, `rename`, `mkdir`, `sendto`, `kill`,
-`ptrace` are not intercepted as libc calls). With nothing in force (no grant
+library: a raw call skips the argument checks the wrappers make (the file
+system calls below, `connect`), and some calls have no libc wrapper here at
+all (`sendto`, `kill`, `ptrace`). With nothing in force (no grant
 source, no in-process level on the calling thread) every call is forwarded.
 With a policy in force it is **default-deny**:
 
@@ -964,9 +1181,10 @@ With a policy in force it is **default-deny**:
 | Anything else (`openat`, `unlinkat`, `renameat`, `sendto`, `kill` of another process, `ptrace`, an unknown number, ...) | Refused with `EPERM` and logged, `AETHER_DENIED: native syscall:<name>` (the number for a call the preload does not name), unless a `native` grant names it: `grant_native("syscall:unlinkat")`, or `native:*` / `grant_all()` for every call. |
 
 Names are the kernel's for the architecture (`<sys/syscall.h>`), so a grant
-reads the same on x86_64 and aarch64. libc's own `unlink()` and friends are
-not intercepted: they get the kernel's answer (on Linux, under
-`spawn_socket`, Landlock's) whatever the preload's policy. (`syscall()` used
+reads the same on x86_64 and aarch64. libc's own `unlink()`, `rename()`,
+`mkdir()` and the other path calls are held to the fs grants by their
+wrappers (#3751; before, they had none and got the kernel's answer whatever
+the preload's policy). (`syscall()` used
 to answer every call `ENOSYS` with no policy and `EPERM` under one, so under
 the preload GLib's futex waits returned at once and its threads spun, and
 the Aether scheduler's `sched_getaffinity` and `membarrier` failed.)
@@ -982,7 +1200,10 @@ checks `path` too, under an in-process level and a grant file alike. It does
 that only for an open that creates a new file (`O_CREAT|O_EXCL`) named
 exactly `<path>.tmp.<this pid>.<digits>` on the thread that staged it; any
 other open is checked under its own name, so the stage cannot open an
-existing file or reach past that one sibling. `rename` is not intercepted.
+existing file or reach past that one sibling. The rename of the temporary
+over `path`, and its removal when the write fails, are staged the same way
+(#3751, which wraps `rename`, `unlink` and `remove`): checked as writes of
+`path`, for that one name only.
 
 ### Kernel layer: Landlock
 
@@ -1160,16 +1381,15 @@ functions, but the kernel offers many alternative paths to the same
 operations.** A determined attacker who knows Linux internals can
 use paths we don't intercept. The tables below enumerate the surface
 so you can reason about it explicitly rather than assume coverage.
-Widening the LD_PRELOAD interception surface is tracked on the
-issue backlog.
+Every libc path call is either wrapped or listed as a lookup; the
+coverage test fails on one that is neither (#3751).
 
 #### Filesystem, not intercepted
 
 | Function / syscall | What it does | Risk |
 |-------------------|-------------|------|
 | `openat2()` | Newer open variant (Linux 5.6+) | Bypasses our `open`/`openat` interception |
-| `open_by_handle_at()` | Open file by kernel handle | Bypasses path-based checks entirely |
-| `name_to_handle_at()` | Get kernel handle for a path | Used with `open_by_handle_at` |
+| `name_to_handle_at()` | Get kernel handle for a path | A lookup; the handle is opened only by `open_by_handle_at`, which is wrapped (the file it opened is named and checked) |
 | `sendfile()` | Kernel-level copy between fds | Reads files without `read()` |
 | `copy_file_range()` | Kernel-level file-to-file copy | No `open` interception needed if fd already obtained |
 | `io_uring` | Async I/O submission ring | Submits read/write/open ops that bypass libc entirely |
