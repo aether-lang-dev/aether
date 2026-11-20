@@ -103,7 +103,16 @@ static inline void aether_message_free_payload(Message* msg) {
 // child results; ping_pong sees 1; fork_join workers see 1) while keeping
 // each actor's memory footprint small enough to scale to millions of actors.
 // Overflow messages are re-queued via the scheduler's self-channel.
+// A build may choose another power of two with -DMAILBOX_SIZE=n (#3776): a
+// smaller ring makes each actor smaller (the ring is most of ActorBase), and
+// a burst past it waits in the actor's overflow inbox (#3241), so nothing is
+// lost.
+#ifndef MAILBOX_SIZE
 #define MAILBOX_SIZE 32   // Buffer for actor message queue
+#endif
+#if (MAILBOX_SIZE) < 2 || ((MAILBOX_SIZE) & ((MAILBOX_SIZE) - 1)) != 0
+#error "MAILBOX_SIZE must be a power of two, at least 2"
+#endif
 #define MAILBOX_MASK (MAILBOX_SIZE - 1)
 typedef struct {
     Message messages[MAILBOX_SIZE];

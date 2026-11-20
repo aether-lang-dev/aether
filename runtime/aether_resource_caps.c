@@ -57,9 +57,9 @@
  * another frees counts up on the first and down on the second.
  *
  * Under a cap the check has to be exact, so the capped path counts on
- * g_mem_exact alone, and setting the cap first moves every slot's count
+ * g_mem.exact alone, and setting the cap first moves every slot's count
  * into it (caps_fold_slots): a cap set later sees the bytes already in use.
- * The total is always g_mem_exact plus the slots. */
+ * The total is always g_mem.exact plus the slots. */
 #define CAPS_USE_SLOTS 64
 typedef struct {
     _Atomic int64_t bytes;
@@ -69,9 +69,18 @@ static CapsUseSlot g_use_slots[CAPS_USE_SLOTS] AETHER_ALIGNED(64);
 static _Atomic unsigned g_use_next = 0;
 /* This thread's slot, plus one; 0 until it first counts. */
 static AETHER_TLS_SHARED unsigned t_use_slot = 0;
-static _Atomic int64_t g_mem_exact = 0;
-static _Atomic uint64_t g_mem_cap  = 0;   /* 0 = unlimited */
-/* Held while the slots are moved into g_mem_exact: setting a cap is rare,
+/* The capped count and the cap. While a cap is set every allocation and
+ * free in every thread writes `exact`, so the two have a line of their own
+ * (#3774): beside them, aether_caps_slow (read by every allocation) and
+ * aether_caps_armed (read at every polled loop back-edge) went with the
+ * line on each write. `cap` is 0 for unlimited. */
+static struct {
+    _Atomic int64_t exact;
+    _Atomic uint64_t cap;
+    char pad[64 - 2 * sizeof(uint64_t)];
+} AETHER_ALIGNED(64) g_mem = { .exact = 0, .cap = 0 };
+_Static_assert(sizeof(g_mem) == 64, "g_mem is one cache line");
+/* Held while the slots are moved into g_mem.exact: setting a cap is rare,
  * and two folds at once could each see the other's half-moved count. */
 static atomic_flag g_fold_lock = ATOMIC_FLAG_INIT;
 
@@ -145,7 +154,7 @@ static inline int caps_capped(void) {
     return (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & CAPS_SLOW_CAP) != 0;
 }
 
-/* Every slot's count moved into g_mem_exact, under g_fold_lock. Each slot
+/* Every slot's count moved into g_mem.exact, under g_fold_lock. Each slot
  * is emptied by an exchange, an atomic read and write, so a thread adding
  * to it at the same time loses nothing: its add lands before the exchange,
  * and moves, or after it, and stays for the next fold. A total below zero
@@ -156,9 +165,9 @@ static void caps_fold_slots(void) {
     int64_t moved = 0;
     for (int i = 0; i < CAPS_USE_SLOTS; i++)
         moved += atomic_exchange_explicit(&g_use_slots[i].bytes, 0, memory_order_relaxed);
-    int64_t cur = atomic_fetch_add_explicit(&g_mem_exact, moved, memory_order_relaxed) + moved;
+    int64_t cur = atomic_fetch_add_explicit(&g_mem.exact, moved, memory_order_relaxed) + moved;
     while (cur < 0 &&
-           !atomic_compare_exchange_weak_explicit(&g_mem_exact, &cur, 0,
+           !atomic_compare_exchange_weak_explicit(&g_mem.exact, &cur, 0,
                                                   memory_order_relaxed, memory_order_relaxed)) {
     }
     atomic_flag_clear_explicit(&g_fold_lock, memory_order_release);
@@ -172,23 +181,23 @@ int aether_caps_check_alloc(size_t bytes) {
     }
     /* Cleared since the flag was read: count it where the capped path
      * would, so the free that follows under the same flag finds it. */
-    uint64_t cap = atomic_load_explicit(&g_mem_cap, memory_order_relaxed);
+    uint64_t cap = atomic_load_explicit(&g_mem.cap, memory_order_relaxed);
     if (cap == 0) {
-        atomic_fetch_add_explicit(&g_mem_exact, (int64_t)bytes, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_mem.exact, (int64_t)bytes, memory_order_relaxed);
         return 1;
     }
 
     /* Cap-set path: CAS-add to keep current+bytes <= cap. Loop
      * because another thread may bump the counter between our load
      * and our CAS — re-read and retry. */
-    int64_t cur = atomic_load_explicit(&g_mem_exact, memory_order_relaxed);
+    int64_t cur = atomic_load_explicit(&g_mem.exact, memory_order_relaxed);
     for (;;) {
         uint64_t held = cur > 0 ? (uint64_t)cur : 0;
         if ((uint64_t)bytes > cap || held > cap - (uint64_t)bytes) {
             return 0;  /* would exceed cap */
         }
         if (atomic_compare_exchange_weak_explicit(
-                &g_mem_exact, &cur, cur + (int64_t)bytes,
+                &g_mem.exact, &cur, cur + (int64_t)bytes,
                 memory_order_relaxed, memory_order_relaxed)) {
             return 1;
         }
@@ -204,11 +213,11 @@ void aether_caps_account_free(size_t bytes) {
         caps_use_add(-(int64_t)bytes);
         return;
     }
-    atomic_fetch_sub_explicit(&g_mem_exact, (int64_t)bytes, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&g_mem.exact, (int64_t)bytes, memory_order_relaxed);
 }
 
 void aether_caps_set_memory_cap(uint64_t bytes) {
-    atomic_store_explicit(&g_mem_cap, bytes, memory_order_relaxed);
+    atomic_store_explicit(&g_mem.cap, bytes, memory_order_relaxed);
     if (bytes) atomic_fetch_or_explicit(&aether_caps_slow, CAPS_SLOW_CAP, memory_order_relaxed);
     else atomic_fetch_and_explicit(&aether_caps_slow, ~CAPS_SLOW_CAP, memory_order_relaxed);
     /* After the flag, so what is counted from here on goes to the counter
@@ -228,8 +237,11 @@ void aether_caps_set_memory_cap(uint64_t bytes) {
  * whose body calls nothing and never again, so the loop ran to its end. */
 _Atomic int aether_caps_armed = 0;
 
+/* Stored only when it is not set yet: the store takes the line exclusive,
+ * and every thread polls it at its loop back-edges (#3774). */
 static inline void caps_arm(void) {
-    atomic_store_explicit(&aether_caps_armed, 1, memory_order_relaxed);
+    if (!atomic_load_explicit(&aether_caps_armed, memory_order_relaxed))
+        atomic_store_explicit(&aether_caps_armed, 1, memory_order_relaxed);
 }
 
 void aether_caps_set_deadline_ms(int64_t ms) {
@@ -284,7 +296,7 @@ int aether_caps_deadline_flag(void) {
 uint64_t aether_caps_used_bytes(void) {
     /* The sum of the two parts. Read while other threads count, it is the
      * total of some moment close to the call, as the one counter was. */
-    int64_t total = atomic_load_explicit(&g_mem_exact, memory_order_relaxed);
+    int64_t total = atomic_load_explicit(&g_mem.exact, memory_order_relaxed);
     for (int i = 0; i < CAPS_USE_SLOTS; i++)
         total += atomic_load_explicit(&g_use_slots[i].bytes, memory_order_relaxed);
     return total > 0 ? (uint64_t)total : 0;

@@ -1,7 +1,9 @@
 // Send cost per message (#3518). Two actors pass one message back and forth
 // `count` times: a one-int message, a two-int message, a string field that is
 // forwarded as received (the copy path), and a string field built fresh for
-// each send (a temporary the message can take).
+// each send (a temporary the message can take). And a long, a byte and a
+// long (#3773): laid out by alignment it fits the payload a message carries
+// inline, as two ints do.
 //
 // Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
 
@@ -12,6 +14,7 @@ message P1 { n: int }
 message P2 { n: int, m: int }
 message PS { n: int, s: string }
 message PF { n: int, s: string }
+message PL { a: long, b: byte, c: long }
 
 actor Side {
     state peer = 0
@@ -28,6 +31,9 @@ actor Side {
         }
         PF(n, s) -> {
             if n < target { peer ! PF { n: n + 1, s: string.from_int(n) } }
+        }
+        PL(a, b, c) -> {
+            if a < target { peer ! PL { a: a + 1, b: b, c: c + 1 } }
         }
     }
 }
@@ -46,8 +52,10 @@ bench(kind: int, count: int) -> float {
         a ! P2 { n: 0, m: 0 }
     } else if kind == 3 {
         a ! PS { n: 0, s: "a string field of some length" }
-    } else {
+    } else if kind == 4 {
         a ! PF { n: 0, s: string.from_int(0) }
+    } else {
+        a ! PL { a: 0, b: 7, c: 0 }
     }
     wait_for_idle()
     t1 = os.now_monotonic_ns()
@@ -60,4 +68,5 @@ main() {
     println("row send_2int ${bench(2, count)} ns/msg")
     println("row send_string_forwarded ${bench(3, count)} ns/msg")
     println("row send_string_fresh ${bench(4, count)} ns/msg")
+    println("row send_long_byte_long ${bench(5, count)} ns/msg")
 }

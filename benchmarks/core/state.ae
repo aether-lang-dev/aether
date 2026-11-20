@@ -1,0 +1,32 @@
+// Actor state access cost (#3772). One handler runs a loop that reads and
+// writes an `int` state field on every iteration, the shape of an actor that
+// accumulates into its state (a counter, a total, a position).
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+
+message Run { n: int }
+
+actor Acc {
+    state total = 0
+    receive {
+        Run(n) -> {
+            for i in 0..n {
+                total = total + (i & 7)
+            }
+        }
+    }
+}
+
+main() {
+    count = 20000000
+    a = spawn(Acc())
+    t0 = os.now_monotonic_ns()
+    a ! Run { n: count }
+    wait_for_idle()
+    t1 = os.now_monotonic_ns()
+    // The total is part of the output so the loop cannot be dropped.
+    if a.total < 0 { println("unexpected total ${a.total}") }
+    println("row actor_state_loop ${(t1 - t0) as float / count as float} ns/iter")
+}

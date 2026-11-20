@@ -1,0 +1,58 @@
+// Regression (#3773): a message's fields are laid out by alignment, so a
+// small field declared between two 8-byte ones costs no padding.
+//
+// The fields were ranked by kind: ints and bools first, pointers next, then
+// everything else in declaration order. `{ a: long, b: byte, c: long }` was
+// `id, a, b, c`, 32 bytes, past the 28 a message carries inline, so each
+// send allocated a copy and the receiver freed it (62.6 against 41.9 ns per
+// message in a ping-pong). By alignment it is `id, b, a, c`, 24 bytes. The
+// sizes are checked on a 64-bit target, and on every target each field
+// reaches the handler with its value.
+
+extern exit(code: int)
+
+message MLong { a: long, b: byte, c: long }
+message MFloat { a: float, f: f32, c: long }
+message MMix { s: string, b: byte, n: int, u: uint16, d: float, k: bool }
+message Get {}
+
+actor R {
+    state seen = 0
+    state bad = 0
+    receive {
+        MLong(a, b, c) -> {
+            if a != 1000000000000 || b != 7 || c != -3 { bad = bad + 1 }
+            seen = seen + 1
+        }
+        MFloat(a, f, c) -> {
+            if a != 1.5 || f != 2.5 as f32 || c != 4 { bad = bad + 1 }
+            seen = seen + 1
+        }
+        MMix(s, b, n, u, d, k) -> {
+            if s != "hi" || b != 200 || n != -8 || u != 65000 || d != 1.25 || !k { bad = bad + 1 }
+            seen = seen + 1
+        }
+        Get() -> {}
+    }
+}
+
+main() {
+    if sizeof(ptr) == 8 {
+        if sizeof(MLong) != 24 || sizeof(MFloat) != 24 || sizeof(MMix) != 32 {
+            println("FAIL: sizes ${sizeof(MLong)} ${sizeof(MFloat)} ${sizeof(MMix)}, want 24 24 32")
+            exit(1)
+        }
+    }
+    r = spawn(R())
+    for i in 0..100 {
+        r ! MLong { a: 1000000000000, b: 7, c: -3 }
+        r ! MFloat { a: 1.5, f: 2.5 as f32, c: 4 }
+        r ! MMix { s: "hi", b: 200, n: -8, u: 65000, d: 1.25, k: true }
+    }
+    wait_for_idle()
+    if r.seen != 300 || r.bad != 0 {
+        println("FAIL: seen ${r.seen} of 300, ${r.bad} with a wrong field")
+        exit(1)
+    }
+    println("PASS: message fields by alignment")
+}

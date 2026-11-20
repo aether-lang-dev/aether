@@ -1,0 +1,65 @@
+// #3778: alloc.raw_aligned gives a block at its alignment through every
+// allocator: the system one (the platform's aligned allocator), an arena and
+// a tracking wrapper (asked for the alignment more). An alignment that is not
+// a power of two, or is smaller than a pointer, is refused. Every block is
+// written end to end and given back, and the tracker sees nothing left.
+
+import std.alloc(system, raw_aligned, release_aligned, of_arena, arena_free)
+import std.tracking(wrap, count, bytes, destroy)
+import std.arena
+import std.mem
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+// Blocks of a few sizes at `al` through `a`: each at its alignment, each
+// written end to end (a block shorter than asked overruns, which the leak
+// and sanitizer gates see), and each given back.
+check(a: ptr, name: string, al: int) {
+    sizes = [1, 64, 200, 4096]
+    for i in 0..4 {
+        n = sizes[i]
+        p = raw_aligned(a, n, al)
+        if p == null { fail("${name}: raw_aligned(${n}, ${al}) returned null") }
+        if mem.ptr_to_long(p) % al != 0 {
+            fail("${name}: raw_aligned(${n}, ${al}) at ${mem.ptr_to_long(p)}, not a multiple")
+        }
+        for k in 0..n { mem.set_byte(p, k, k & 255) }
+        if mem.get_byte(p, n - 1) != ((n - 1) & 255) { fail("${name}: last byte of ${n} lost") }
+        release_aligned(a, p, n, al)
+    }
+}
+
+main() {
+    alignments = [16, 64, 4096]
+    sys = system()
+    t = wrap(system())
+    ar = arena.create(1024 * 1024)
+    aa = of_arena(ar)
+    for i in 0..3 {
+        al = alignments[i]
+        check(sys, "system", al)
+        check(t, "tracking", al)
+        check(aa, "arena", al)
+    }
+    if count(t) != 0 || bytes(t) != 0 {
+        fail("tracking: ${count(t)} blocks, ${bytes(t)} bytes left after every release")
+    }
+
+    // Refused: not a power of two, smaller than a pointer, zero.
+    bad = [0, 3, 48, 1, 2]
+    for i in 0..5 {
+        if raw_aligned(sys, 32, bad[i]) != null { fail("system: alignment ${bad[i]} not refused") }
+        if raw_aligned(t, 32, bad[i]) != null { fail("tracking: alignment ${bad[i]} not refused") }
+    }
+    if count(t) != 0 { fail("tracking: a refused alignment allocated") }
+
+    destroy(t)
+    arena_free(aa)
+    arena.destroy(ar)
+    println("PASS: raw_aligned through system, tracking and arena")
+}

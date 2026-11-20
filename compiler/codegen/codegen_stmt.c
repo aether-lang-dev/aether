@@ -7745,6 +7745,10 @@ static void emit_destructure_state_store(CodeGenerator* gen, const char* name, T
                 opt_slot_text(cg_intern(get_c_type(st)), pt, tmp_id, j, 0, 0, NULL));
         return;
     }
+    if (actor_state_atomic_bits(gen, name)) {   /* #3772: relaxed */
+        fprintf(gen->output, "AETHER_STATE_STORE(self->%s, _tup%d._%d);\n", name, tmp_id, j);
+        return;
+    }
     fprintf(gen->output, "self->%s = _tup%d._%d;\n", name, tmp_id, j);
 }
 
@@ -10396,6 +10400,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "_aether_store_%s(&self->%s, ", sname, stmt->value);
                     emit_struct_take(gen, stmt->children[0], sname, stmt->value);
                     fprintf(gen->output, ");\n");
+                } else if (stmt->child_count > 0 && actor_state_atomic_bits(gen, stmt->value)) {
+                    /* #3772: an atomic field is written relaxed. */
+                    fprintf(gen->output, "AETHER_STATE_STORE(self->%s, ", stmt->value);
+                    generate_expression(gen, stmt->children[0]);
+                    fprintf(gen->output, ");\n");
                 } else {
                     fprintf(gen->output, "self->%s", stmt->value);
                     if (stmt->child_count > 0) {
@@ -11603,6 +11612,35 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
                 }
 
+                /* #3772: `x op= y` on an atomic state field is a relaxed
+                 * store of `x op y`, the binary operator with its own rules
+                 * (#3524) and a relaxed read of `x`. As an atomic `op=` it
+                 * was a seq_cst read-modify-write, a locked instruction on
+                 * x86, for a field the actor's step alone writes. */
+                if (is_state_var && actor_state_atomic_bits(gen, stmt->value)) {
+                    size_t sol = strlen(op);
+                    char sop[4] = {0};
+                    if (sol >= 2 && sol <= 3 && op[sol - 1] == '=') memcpy(sop, op, sol - 1);
+                    if (sop[0]) {
+                        ASTNode* lhs = create_ast_node(AST_IDENTIFIER, stmt->value,
+                                                       stmt->line, stmt->column);
+                        lhs->node_type = stmt->node_type ? clone_type(stmt->node_type) : NULL;
+                        ASTNode* bin = create_ast_node(AST_BINARY_EXPRESSION, sop,
+                                                       stmt->line, stmt->column);
+                        bin->node_type = stmt->node_type ? clone_type(stmt->node_type) : NULL;
+                        add_child(bin, lhs);
+                        add_child(bin, stmt->children[1]);
+                        fprintf(gen->output, "AETHER_STATE_STORE(self->%s, ", stmt->value);
+                        generate_expression(gen, bin);
+                        fprintf(gen->output, ");\n");
+                        /* The right side is the statement's; only the two
+                         * nodes made here are freed. */
+                        bin->children[1] = NULL;
+                        bin->child_count = 1;
+                        free_ast_node(bin);
+                        break;
+                    }
+                }
                 /* #2428: `v op= x` on an eight-lane value is `v = helper(v, x)`
                  * (the halves form is a struct; see codegen_expr.c). The
                  * typechecker records the target's type on the node for this. */

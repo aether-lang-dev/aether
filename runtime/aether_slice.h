@@ -15,11 +15,12 @@
  * and reports `.len` as -1. Sub-slicing it with an explicit end
  * (`v[0..n]`) yields a bounded slice.
  *
- * Every helper is `static inline`: the header is textually included by
- * each generated program, so a program that never touches a slice pays
- * nothing, and there is no runtime symbol to link. A failed check goes
- * through aether_panic(), the same unwind `panic("...")` uses, so a
- * `try` block can catch it and an actor step dies cleanly. */
+ * Every helper is `static inline`, but a failed check's, which are static,
+ * cold and out of line (AETHER_SLICE_FAIL): the header is textually
+ * included by each generated program, so a program that never touches a
+ * slice pays nothing, and there is no runtime symbol to link. A failed
+ * check goes through aether_panic(), the same unwind `panic("...")` uses,
+ * so a `try` block can catch it and an actor step dies cleanly. */
 
 #include <stddef.h>
 #include <stdarg.h>
@@ -354,7 +355,23 @@ static inline void aether_slice_release_msg(const void* p) {
     string_release((const char*)p);
 }
 
-static inline void aether_slice_panicf(const char* fmt, ...) {
+/* #3777: a failed check's helpers are out of line, cold and noreturn. The
+ * checks stay inline (aether_slice_at, aether_array_index), and their
+ * failure is one call the compiler lays out after the hot path. As inline
+ * functions, noreturn was only inferred, with the definition visible and
+ * optimization on: cl.exe, -O0 and -Og builds inlined the message's
+ * argument setup and its variadic call into every indexing site. Static,
+ * so a program has its own copy and there is no runtime symbol to link;
+ * `unused`, as a program that never fails a check never calls one. */
+#if defined(__GNUC__) || defined(__clang__)
+#define AETHER_SLICE_FAIL static __attribute__((cold, noinline, noreturn, unused))
+#elif defined(_MSC_VER)
+#define AETHER_SLICE_FAIL static __declspec(noinline) __declspec(noreturn)
+#else
+#define AETHER_SLICE_FAIL static
+#endif
+
+AETHER_SLICE_FAIL void aether_slice_panicf(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     void* msg = aether_interp_string(fmt, ap);
@@ -363,7 +380,7 @@ static inline void aether_slice_panicf(const char* fmt, ...) {
     aether_panic_owned((const char*)msg, aether_slice_release_msg);
 }
 
-static inline void aether_slice_fail_index(int64_t idx, uint64_t len,
+AETHER_SLICE_FAIL void aether_slice_fail_index(int64_t idx, uint64_t len,
                                            const char* file, int line) {
     aether_slice_panicf("%s:%d: slice index %lld out of range for length %llu",
                         file, line, (long long)idx, (unsigned long long)len);
@@ -371,7 +388,7 @@ static inline void aether_slice_fail_index(int64_t idx, uint64_t len,
 
 /* #3113: an index into a fixed-size array `T[N]` outside `0 ..< N`, the
  * slice's panic with the array's length. */
-static inline void aether_array_fail_index(int64_t idx, uint64_t len,
+AETHER_SLICE_FAIL void aether_array_fail_index(int64_t idx, uint64_t len,
                                            const char* file, int line) {
     aether_slice_panicf("%s:%d: array index %lld out of range for length %llu",
                         file, line, (long long)idx, (unsigned long long)len);
@@ -379,7 +396,7 @@ static inline void aether_array_fail_index(int64_t idx, uint64_t len,
 
 /* #3479: `s[i]` on a string outside `0 ..= length` (`length` is its
  * terminator, 0), the slice's panic with the string's length. */
-static inline void aether_string_fail_index(int64_t idx, uint64_t len,
+AETHER_SLICE_FAIL void aether_string_fail_index(int64_t idx, uint64_t len,
                                             const char* file, int line) {
     aether_slice_panicf("%s:%d: string index %lld out of range for length %llu",
                         file, line, (long long)idx, (unsigned long long)len);
@@ -396,7 +413,7 @@ static inline int64_t aether_array_index(int64_t i, uint64_t len,
     return i;
 }
 
-static inline void aether_slice_fail_range(int64_t lo, int64_t hi, uint64_t len,
+AETHER_SLICE_FAIL void aether_slice_fail_range(int64_t lo, int64_t hi, uint64_t len,
                                            const char* file, int line) {
     aether_slice_panicf("%s:%d: slice range %lld..%lld out of range for length %llu",
                         file, line, (long long)lo, (long long)hi,
@@ -415,7 +432,7 @@ static inline void* aether_slice_at(AetherSlice s, int64_t i, size_t elem_size,
     return (char*)s.ptr + (uint64_t)i * elem_size;
 }
 
-static inline void aether_slice_fail_readonly(const char* file, int line) {
+AETHER_SLICE_FAIL void aether_slice_fail_readonly(const char* file, int line) {
     aether_slice_panicf("%s:%d: a write through a read-only view of a string", file, line);
 }
 

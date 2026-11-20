@@ -478,6 +478,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor);
    C type (so a read from outside the actor goes through atomic_load)? */
 int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
                                 const char* field);
+/* #3772: the current actor's state field `name`: 32 or 64 when it is
+   atomic, read and written relaxed in its handlers; 0 otherwise. */
+int actor_state_atomic_bits(CodeGenerator* gen, const char* name);
 
 /* Extern function registry — tracks param types for call-site cast emission */
 void register_extern_func(CodeGenerator* gen, ASTNode* ext);
@@ -851,7 +854,7 @@ int loop_sends_without_waiting(ASTNode* node);
 const char* get_single_int_field(MessageDef* msg_def);
 /* The fields of a message in the order its C struct declares them, and the
  * C type each has there; the .c and the --emit-header file share them (#2517). */
-int message_struct_fields(ASTNode* msg_def, ASTNode** out);
+int message_struct_fields(ASTNode* program, ASTNode* msg_def, ASTNode** out);
 const char* message_field_c_type(ASTNode* msg_def, ASTNode* field);
 void generate_default_return_value(CodeGenerator* gen, Type* type);
 int is_function_generated(CodeGenerator* gen, const char* func_name);

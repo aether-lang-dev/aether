@@ -28,6 +28,8 @@ alloc.release(a, p, 256)
 | `alloc.raw(a, n)` | Allocate `n` bytes through `a`. Null on failure. |
 | `alloc.resize(a, p, old, n)` | Resize `p` from `old` to `n` bytes. `n == 0` frees and returns null; a null `p` allocates. |
 | `alloc.release(a, p, n)` | Release a block. `n` is the size it was allocated with (a hint size-aware allocators use). |
+| `alloc.raw_aligned(a, n, al)` | Allocate `n` bytes at an address that is a multiple of `al`, a power of two at least the size of a pointer (64 for a record that owns a cache line). Null for another alignment or on failure. |
+| `alloc.release_aligned(a, p, n, al)` | Release a block from `raw_aligned`, with its size and alignment. Never `release`: the system allocator's aligned blocks have a free of their own on Windows. |
 
 ### Arena-backed
 

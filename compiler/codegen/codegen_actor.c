@@ -343,11 +343,15 @@ static int state_field_is_ptr(CodeGenerator* gen, ASTNode* actor, const char* fi
 }
 
 // The state fields generate_actor_definition emits with an atomic C type:
-// the int / long / Duration ones it does not widen to a pointer.
+// the int / long / Duration ones it does not widen to a pointer. Their
+// width in bits (32 for `atomic_int`, 64 for `_Atomic int64_t`), 0 for any
+// other field. The struct and every access of a field read this one rule,
+// so a field is declared atomic exactly when its accesses are atomic ones.
 static int state_decl_is_atomic(CodeGenerator* gen, ASTNode* actor, ASTNode* decl) {
     if (!decl->node_type || state_field_is_ptr(gen, actor, decl->value)) return 0;
-    return decl->node_type->kind == TYPE_INT || decl->node_type->kind == TYPE_INT64 ||
-           decl->node_type->kind == TYPE_DURATION;
+    if (decl->node_type->kind == TYPE_INT) return 32;
+    if (decl->node_type->kind == TYPE_INT64 || decl->node_type->kind == TYPE_DURATION) return 64;
+    return 0;
 }
 
 int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
@@ -367,6 +371,19 @@ int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
         return 0;
     }
     return 0;
+}
+
+/* #3772: the width of the current actor's state field `name` when it is
+ * atomic (32 or 64), else 0. The actor's handlers read it with
+ * AETHER_STATE_LOAD and write it with AETHER_STATE_STORE, both relaxed: an
+ * actor runs one step at a time, and what a step wrote reaches its next
+ * step through the mailbox's release and acquire, so the order a seq_cst
+ * access adds buys nothing. On x86 each seq_cst store was a locked
+ * exchange, 6 ns where a plain store is 1. Still atomic, so a read from
+ * another thread is never torn. */
+int actor_state_atomic_bits(CodeGenerator* gen, const char* name) {
+    if (!gen || !gen->current_actor || !name || !is_actor_state_var(gen, name)) return 0;
+    return actor_state_field_is_atomic(gen, gen->current_actor, name);
 }
 
 /* #2528: a `string` state field owns what it holds (a `ptr`-widened field
@@ -535,8 +552,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "ActorBase _aether_base;");
     print_line(gen, "");
 
-    // State fields (user-defined)
-    // NOTE: All state fields are atomic to allow safe cross-thread access
+    // State fields (user-defined), in declaration order.
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* child = actor->children[i];
         if (child->type == AST_STATE_DECLARATION) {
@@ -556,11 +572,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         get_c_type(child->node_type->element_type), child->value,
                         child->node_type->array_size);
             } else {
-                // Use atomic types for numeric fields to enable safe concurrent access
-                if (child->node_type && child->node_type->kind == TYPE_INT) {
+                /* An int, long or Duration field is atomic, so a read from
+                 * another thread (`a.count` in main) is never torn. The
+                 * actor's own handlers read and write it relaxed
+                 * (actor_state_atomic_bits, #3772). */
+                int bits = state_decl_is_atomic(gen, actor, child);
+                if (bits == 32) {
                     fprintf(gen->output, "atomic_int %s;\n", child->value);
-                } else if (child->node_type && (child->node_type->kind == TYPE_INT64 ||
-                                                child->node_type->kind == TYPE_DURATION)) {
+                } else if (bits == 64) {
                     fprintf(gen->output, "_Atomic int64_t %s;\n", child->value);
                 } else {
                     generate_type(gen, child->node_type);

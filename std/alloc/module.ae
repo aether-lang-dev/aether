@@ -2,7 +2,8 @@
 
 exports(
     system, of_arena, arena_free,
-    raw, resize, release
+    raw, resize, release,
+    raw_aligned, release_aligned
 )
 
 extern aether_allocator_system() -> ptr
@@ -11,6 +12,8 @@ extern aether_allocator_arena_destroy(a: @frees ptr)
 extern aether_allocator_alloc(a: ptr, size: size_t) -> ptr
 extern aether_allocator_realloc(a: ptr, block: ptr, old_size: size_t, new_size: size_t) -> ptr
 extern aether_allocator_free(a: @frees ptr, block: ptr, size: size_t)
+extern aether_allocator_alloc_aligned(a: ptr, size: size_t, alignment: size_t) -> ptr
+extern aether_allocator_free_aligned(a: ptr, block: @frees ptr, size: size_t, alignment: size_t)
 
 system() -> ptr {
     return aether_allocator_system()
@@ -33,4 +36,17 @@ resize(a: ptr, block: ptr, old_size: int, new_size: int) -> ptr {
 
 release(a: ptr, block: ptr, size: int) {
     aether_allocator_free(a, block, size)
+}
+
+// #3778: `size` bytes at an address that is a multiple of `alignment` (a
+// power of two, at least the size of a pointer: 16, 64 for a record that is
+// to own a cache line, 4096 for a page). Null for another alignment, or
+// when the memory cannot be had. Give it back with release_aligned and the
+// same size and alignment, never with release.
+raw_aligned(a: ptr, size: int, alignment: int) -> ptr {
+    return aether_allocator_alloc_aligned(a, size, alignment)
+}
+
+release_aligned(a: ptr, block: ptr, size: int, alignment: int) {
+    aether_allocator_free_aligned(a, block, size, alignment)
 }

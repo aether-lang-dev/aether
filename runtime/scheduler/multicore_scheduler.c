@@ -859,7 +859,7 @@ int scheduler_actor_end(ActorBase* actor, const char* reason, int bit) {
     return 1;
 }
 
-static void overflow_append(int target, ActorBase* actor, Message msg) {
+AETHER_COLD static void overflow_append(int target, ActorBase* actor, Message msg) {
     if (unlikely(target < 0 || target > MAX_CORES)) {
         fprintf(stderr, "aether: overflow_append: target %d out of range [0, %d]\n",
                 target, MAX_CORES);
@@ -1414,7 +1414,14 @@ static int actor_table_grow_locked(Scheduler* sched, int numa_node) {
 
 #define AETHER_EXTERNAL_READER_SLOTS 32
 
-static _Atomic uint64_t g_reclaim_epoch = 1;  // never 0: 0 means "not reading"
+/* The epoch, never 0: 0 means "not reading". Every core loads it at the top
+ * of every loop iteration, so it has a line to itself (#3774): placed by
+ * the linker, it sat beside next_actor_id, and each spawn anywhere took the
+ * line from every core. */
+static struct {
+    _Atomic uint64_t epoch;
+    char pad[64 - sizeof(uint64_t)];
+} AETHER_ALIGNED(64) g_reclaim = { .epoch = 1 };
 static _Atomic uint64_t g_external_reader[AETHER_EXTERNAL_READER_SLOTS];
 
 // Set on a core's scheduler thread, whose own `reclaim_epoch` already covers
@@ -1471,7 +1478,7 @@ void scheduler_reader_online(void) {
     t_reader = r;
     // As reclaim_core_online: publish first, then the fence that pairs with
     // a releaser's.
-    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    uint64_t epoch = atomic_load_explicit(&g_reclaim.epoch, memory_order_acquire);
     atomic_store_explicit(&r->epoch, epoch, memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
 }
@@ -1480,7 +1487,7 @@ void scheduler_reader_quiescent(void) {
     ReclaimReader* r = t_reader;
     if (!r) return;
     // The same store a core makes at the top of its loop.
-    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    uint64_t epoch = atomic_load_explicit(&g_reclaim.epoch, memory_order_acquire);
     if (epoch != atomic_load_explicit(&r->epoch, memory_order_relaxed)) {
         atomic_store_explicit(&r->epoch, epoch, memory_order_release);
     }
@@ -1525,7 +1532,7 @@ static inline void retired_unlock(void) {
 // with a releaser's (the first bullet above).
 static void reclaim_core_online(Scheduler* sched) {
     t_reclaim_core_thread = 1;
-    uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+    uint64_t epoch = atomic_load_explicit(&g_reclaim.epoch, memory_order_acquire);
     atomic_store_explicit(&sched->reclaim_epoch, epoch, memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
 }
@@ -1541,7 +1548,7 @@ static void reclaim_core_offline(Scheduler* sched) {
 static int reclaim_reader_enter(void) {
     if (t_reclaim_core_thread || t_reader) return -1;
     for (;;) {
-        uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+        uint64_t epoch = atomic_load_explicit(&g_reclaim.epoch, memory_order_acquire);
         for (int i = 0; i < AETHER_EXTERNAL_READER_SLOTS; i++) {
             uint64_t expected = 0;
             if (atomic_load_explicit(&g_external_reader[i], memory_order_relaxed) == 0 &&
@@ -1714,7 +1721,7 @@ static void release_undelivered_at_end(ActorBase* actor, Message* msg) {
     if (msg->_reply_slot) reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_DEAD);
 }
 
-static void send_to_dead_actor(ActorBase* actor, Message* msg) {
+AETHER_COLD static void send_to_dead_actor(ActorBase* actor, Message* msg) {
     AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0, msg->type, msg->sender_id);
     release_undelivered(actor, msg);
     if (actor && (atomic_load_explicit(&actor->dead, memory_order_relaxed) & AETHER_ACTOR_RELEASED)) {
@@ -1785,7 +1792,7 @@ static void foreign_send_leave(void) {
     atomic_fetch_sub(&g_foreign_senders, 1);
 }
 
-static void send_while_stopped(ActorBase* actor, Message* msg) {
+AETHER_COLD static void send_while_stopped(ActorBase* actor, Message* msg) {
     release_undelivered(actor, msg);
     atomic_fetch_add_explicit(&g_stopped_sends, 1, memory_order_relaxed);
     if (!atomic_flag_test_and_set_explicit(&g_stopped_send_reported, memory_order_relaxed)) {
@@ -1964,7 +1971,7 @@ static void actor_retire(ActorBase* actor) {
         g_retired_capacity = cap;
     }
     // Taken under the lock, so the list stays in epoch order.
-    uint64_t epoch = atomic_fetch_add_explicit(&g_reclaim_epoch, 1, memory_order_seq_cst);
+    uint64_t epoch = atomic_fetch_add_explicit(&g_reclaim.epoch, 1, memory_order_seq_cst);
     g_retired[g_retired_count].actor = actor;
     g_retired[g_retired_count].epoch = epoch;
     g_retired_count++;
@@ -2881,7 +2888,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
         // in a long step, another thread walking the tables) the attempt is
         // repeated only every 1024 iterations, not on every spin.
         {
-            uint64_t epoch = atomic_load_explicit(&g_reclaim_epoch, memory_order_acquire);
+            uint64_t epoch = atomic_load_explicit(&g_reclaim.epoch, memory_order_acquire);
             if (epoch != atomic_load_explicit(&sched->reclaim_epoch, memory_order_relaxed)) {
                 atomic_store_explicit(&sched->reclaim_epoch, epoch, memory_order_release);
                 actor_reclaim(0);

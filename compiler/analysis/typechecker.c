@@ -8217,6 +8217,9 @@ int typecheck_program(ASTNode* program) {
     return 1;
 }
 
+static int refuse_unknown_type(const char* what, const char* name, Type* t, SymbolTable* table,
+                               int line, int column);
+
 int typecheck_node(ASTNode* node, SymbolTable* table) {
     if (!node) return 0;
     
@@ -8266,6 +8269,21 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
             return 1;
         case AST_STRUCT_DEFINITION:
             return typecheck_struct_definition(node, table);
+        case AST_MESSAGE_DEFINITION: {
+            /* A field of a type that names nothing, refused as a struct's
+             * is (#2896). Let through, it was reported only at a send, as
+             * "expected florp, got int", and a message never sent reached
+             * C as an unknown type name. */
+            int ok = 1;
+            for (int i = 0; i < node->child_count; i++) {
+                ASTNode* f = node->children[i];
+                if (f && f->type == AST_MESSAGE_FIELD &&
+                    refuse_unknown_type("the field", f->value, f->node_type, table,
+                                        f->line, f->column))
+                    ok = 0;
+            }
+            return ok;
+        }
         case AST_CFN_TYPE_DEF:
             // #2200: every reference was rewritten in resolve_cfn_types and
             // a duplicate name reported there; the declaration itself is
@@ -8645,13 +8663,19 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                 ASTNode* init = child->children[0];
                 typecheck_node(child, actor_table);
                 checked = 1;
+                /* A written type that names nothing is refused as a
+                 * struct field's is (#2896), not reported as a mismatch
+                 * with its value ("'d' is florp, but this value is int"). */
+                int unknown = refuse_unknown_type("the state field", child->value,
+                                                  child->node_type, actor_table,
+                                                  child->line, child->column);
                 Type* it = infer_type(init, actor_table);
                 /* `null` goes where a binding, a field or a result of the
                  * type takes it (ast_type_takes_null): a string, a pointer,
                  * a closure, a slice. A slice alone was let through here,
                  * and `state string s = null`, which compiled before the
                  * state's value was checked, was refused. */
-                int fits = !it || it->kind == TYPE_UNKNOWN ||
+                int fits = unknown || !it || it->kind == TYPE_UNKNOWN ||
                            is_assignable(it, child->node_type) ||
                            (init->type == AST_NULL_LITERAL && ast_type_takes_null(child->node_type));
                 if (!fits) {

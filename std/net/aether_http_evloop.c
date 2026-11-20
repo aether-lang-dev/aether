@@ -32,6 +32,8 @@
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_thread.h"
 #include "../../runtime/utils/aether_spawn.h"
+#include "../../runtime/utils/aether_compiler.h"
+#include "../../runtime/utils/aether_aligned.h"
 #include <sys/uio.h>
 
 /* Linux names this on the call; the BSDs and macOS have SO_NOSIGPIPE on the
@@ -258,8 +260,10 @@ typedef struct {
 
     /* Connections with a deadline, earliest first. A proxy has to give up on
      * an upstream that never answers, and the loop needs to know when the
-     * next one is due without walking everything it owns. */
-    EvConn**       timers;
+     * next one is due without walking everything it owns. From here on the
+     * driver's own words, which it writes on every return from the poller:
+     * a line apart from the resolver's above (#3774). */
+    AETHER_ALIGNED(64) EvConn** timers;
     int            timer_count, timer_cap;
 
     /* Returns from the poller with events, for http_evloop_wakeups. Written
@@ -276,28 +280,54 @@ typedef struct {
      * recomputed only when the server says it changed: three walks of the
      * chain on every request before (#3269). */
     HttpLoopPlan   plan;
-} EvDriver;
+} AETHER_ALIGNED(64) EvDriver;   /* whole lines: two drivers share none (#3774) */
 
+/* Grouped by who writes, a line per group (#3774): every driver reads
+ * `stopping` on every iteration and every submit reads it, and beside it
+ * the counters each connection's start and end write took the line from
+ * all of them. Allocated at its alignment (ev_alloc_zeroed). */
 struct HttpEvLoop {
+    /* Set at the start and read by everyone. */
     HttpServer* server;
     EvDriver*   drivers;
     int         driver_count;
-    atomic_int  active;
     /* The most connections the drivers hold at once (#3750): the server's
      * limits.loop_max_connections, or half the process's open-file limit
      * less 64 (ev_max_connections). */
     int         max_active;
-    atomic_int  taken;           /* connections taken since the start (#3214) */
-    atomic_int  stopping;
-    atomic_int  next_driver;     /* round-robin placement of new connections */
-    /* Request bodies over the worker's buffer size the drivers hold now, by
-     * declared length, against body_slots bodies of the mount's cap: the
-     * workers the worker path would run (#3263). */
-    atomic_llong body_held;
     int          body_slots;
     /* The upstreams' names, looked up off the drivers' threads (#3267). */
     HttpResolver* resolver;
+    atomic_int  stopping;
+    /* Written by the acceptor on each submit. */
+    AETHER_ALIGNED(64) atomic_int next_driver;   /* round-robin placement of new connections */
+    /* Written by the drivers as connections start and end. */
+    AETHER_ALIGNED(64) atomic_int active;
+    atomic_int  taken;           /* connections taken since the start (#3214) */
+    /* Request bodies over the worker's buffer size the drivers hold now, by
+     * declared length, against body_slots bodies of the mount's cap: the
+     * workers the worker path would run (#3263). */
+    AETHER_ALIGNED(64) atomic_llong body_held;
 };
+#define EV_APART(a, b) \
+    (offsetof(struct HttpEvLoop, a) / 64 != offsetof(struct HttpEvLoop, b) / 64)
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && \
+    (AETHER_GCC_COMPAT || defined(_MSC_VER))
+_Static_assert(EV_APART(stopping, next_driver) && EV_APART(stopping, active) &&
+               EV_APART(stopping, body_held) && EV_APART(next_driver, active) &&
+               sizeof(EvDriver) % 64 == 0,
+               "HttpEvLoop: a word the drivers write shares the line they poll");
+#endif
+#undef EV_APART
+
+/* The loop and its drivers at the alignment their lines need: calloc's 16
+ * bytes would put a group across two lines. */
+static void* ev_alloc_zeroed(size_t n, size_t size) {
+    if (size && n > ((size_t)-1) / size) return NULL;
+    void* p = aether_aligned_heap_alloc(n * size, 64);
+    if (p) memset(p, 0, n * size);
+    return p;
+}
 
 /* What the resolver writes down a driver's pipe, where the accept path writes
  * a descriptor and a stop writes -1 (ev_names_answered). */
@@ -2391,11 +2421,11 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
      * (http_server_evloop_serves, #3214). */
     if (!http_server_proxy_opts(server) || !http_server_evloop_serves(server)) return NULL;
 
-    HttpEvLoop* loop = (HttpEvLoop*)calloc(1, sizeof(HttpEvLoop));
+    HttpEvLoop* loop = (HttpEvLoop*)ev_alloc_zeroed(1, sizeof(HttpEvLoop));
     if (!loop) return NULL;
     loop->server = server;
-    loop->drivers = (EvDriver*)calloc((size_t)threads, sizeof(EvDriver));
-    if (!loop->drivers) { free(loop); return NULL; }
+    loop->drivers = (EvDriver*)ev_alloc_zeroed((size_t)threads, sizeof(EvDriver));
+    if (!loop->drivers) { aether_aligned_heap_free(loop); return NULL; }
     loop->driver_count = threads;
     atomic_init(&loop->active, 0);
     atomic_init(&loop->taken, 0);
@@ -2409,8 +2439,8 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
      * loop (#3267). */
     loop->resolver = http_resolver_new(ev_names_answered, loop);
     if (!loop->resolver) {
-        free(loop->drivers);
-        free(loop);
+        aether_aligned_heap_free(loop->drivers);
+        aether_aligned_heap_free(loop);
         return NULL;
     }
 
@@ -2427,8 +2457,8 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     }
     if (started == 0) {
         http_resolver_free(loop->resolver);
-        free(loop->drivers);
-        free(loop);
+        aether_aligned_heap_free(loop->drivers);
+        aether_aligned_heap_free(loop);
         return NULL;      /* the caller keeps the worker path */
     }
     return loop;
@@ -2459,8 +2489,8 @@ void http_evloop_stop(HttpEvLoop* loop) {
         free(d->timers);
         ev_driver_destroy(d);
     }
-    free(loop->drivers);
-    free(loop);
+    aether_aligned_heap_free(loop->drivers);
+    aether_aligned_heap_free(loop);
 }
 
 #else /* no threads, no poller, or no pipe: the worker path is unchanged */

@@ -40,10 +40,34 @@ after grow: 7
 released
 ```
 
+`raw_aligned(a, size, alignment)` gives a block at an address that is a
+multiple of `alignment`, a power of two at least the size of a pointer: 64
+lets a record own a cache line, which malloc's 16 bytes do not promise. It is
+given back with `release_aligned` and the same size and alignment, never with
+`release`: on Windows the system allocator's aligned blocks have a free of
+their own. Any allocator can do it; one without an aligned allocation of its
+own (an arena, a tracking wrapper) is asked for `alignment` bytes more.
+
+```aether,run
+import std.alloc
+import std.mem
+
+main() {
+    a = alloc.system()
+    p = alloc.raw_aligned(a, 256, 64)
+    println("aligned: ${mem.ptr_to_long(p) % 64 == 0}")
+    alloc.release_aligned(a, p, 256, 64)
+}
+```
+```output
+aligned: true
+```
+
 Swapping `alloc.system()` for `tracking.wrap(alloc.system())` in that example
 would leave the body untouched and let the program assert, at the end, that
 nothing leaked: see `std/tracking`.
 
 ## Exports
 
-`system`, `of_arena`, `arena_free`, `raw`, `resize`, `release`.
+`system`, `of_arena`, `arena_free`, `raw`, `resize`, `release`, `raw_aligned`,
+`release_aligned`.

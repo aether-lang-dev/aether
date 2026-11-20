@@ -39,7 +39,7 @@ void aether_free_message(void* msg_data) {
     free(msg_data);
 }
 
-void aether_message_drop(ActorBase* target, Message* msg) {
+AETHER_COLD void aether_message_drop(ActorBase* target, Message* msg) {
     if (aether_message_is_inline(msg)) {
         /* #3534: the payload is the message's own bytes. Its fields are
          * released from an aligned copy, and the message holds nothing
