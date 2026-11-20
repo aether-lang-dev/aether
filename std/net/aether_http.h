@@ -277,6 +277,12 @@ int http_request_set_timeout_ns_raw(HttpClientRequest* req, int64_t timeout_ns);
 // How the error of a response past max_response begins, for a caller (the
 // reverse proxy) that answers it differently from a failed transport.
 #define HTTP_CLIENT_TOO_LARGE_PREFIX "response is larger than the client's limit"
+// The error of a response that never said where its body ends (two
+// Content-Length values, one not a number, framing that is not chunked
+// framing): the blocking client's, and the proxy event loop's for the same
+// bytes, so both paths answer it alike.
+#define HTTP_CLIENT_AMBIGUOUS_FRAMING \
+    "response framing is ambiguous: the declared body length is not usable"
 typedef struct HttpClientLimits {
     int64_t max_response;
 } HttpClientLimits;

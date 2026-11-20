@@ -588,13 +588,6 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
      * lookup path can replay them onto HttpServerResponse. */
     int hdr_count = 0;
     const char* p = response_headers ? response_headers : "";
-    /* The fields as the miss path put them on the response it sent, so a
-     * hit answers with the same ones (#3749, #3782): a value without its trailing
-     * whitespace, and, on an answer to HEAD, no Content-Length unless every
-     * one the upstream sent is the same number. Stored as sent, a hit
-     * replayed "0 OK" where the miss had sent no length. */
-    int drop_length = strcmp(method, "HEAD") == 0 &&
-                      !aether_proxy_head_lengths_agree(p, p + strlen(p));
     /* The block's last field has no CRLF after it (#3714). */
     while (*p) {
         const char* eol;
@@ -612,16 +605,15 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
                 const char* eol;
                 const char* next = aether_proxy_block_line(p, &eol);
                 const char* colon = memchr(p, ':', (size_t)(eol - p));
-                if (colon && drop_length && colon - p == 14 &&
-                    http_ci_eq(p, "Content-Length", 14)) {
-                    p = next;
-                    continue;
-                }
                 if (colon) {
                     size_t kl = (size_t)(colon - p);
                     const char* v = colon + 1;
                     while (v < eol && (*v == ' ' || *v == '\t')) v++;
                     size_t vl = (size_t)(eol - v);
+                    /* Neither leading nor trailing whitespace is part of a
+                     * value (RFC 9110 5.5): the miss sent it trimmed (both
+                     * proxy paths, #3749), and a hit replayed it as the
+                     * upstream wrote it (#3782). */
                     while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
                     e->header_keys[idx]   = (char*)malloc(kl + 1);
                     e->header_values[idx] = (char*)malloc(vl + 1);

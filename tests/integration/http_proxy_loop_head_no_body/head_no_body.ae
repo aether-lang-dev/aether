@@ -17,8 +17,8 @@
 // follow the head, and every path keeps the upstream's Content-Length, 4 or
 // none (the worker path said 0, #3713). On the event loop the framed answer
 // keeps the connection, and the unframed one ends it. A third answer states
-// two lengths that disagree (#3782): the loop forwards neither and ends the
-// connection as for no length; the worker path refuses it (502).
+// two lengths that disagree (#3782): it never said where its body ends, and
+// every path refuses it (502), as the worker path's client always did.
 
 import std.http
 import std.http.proxy
@@ -166,15 +166,11 @@ main() {
                 if ok && on_loop && g == 0 {
                     ok = got == loop_wants[i]
                 }
-            } else if on_loop && g == 0 {
-                // #3782: the loop forwards no length (RFC 9110 8.6, the two
-                // disagree), so the GET's length is unknown and the
-                // connection ends after the head, as for an upstream that
-                // stated none. It forwarded none and kept the connection.
-                ok = got == "200 length none head only closed"
             } else {
-                // The worker path's client refuses the answer as framed
-                // ambiguously: a 502, its head only.
+                // #3782: the answer never said where its body ends, so every
+                // path refuses it as the worker path's client does: a 502,
+                // its head only. The loop built a 200 from it and relayed
+                // one of the lengths, keeping the connection.
                 ok = string.index_of(got, " head only ") >= 0 && string.starts_with(got, "502 ") == 1
             }
             if ok {

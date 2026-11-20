@@ -94,9 +94,18 @@ probe(port: int, method: string) -> string {
         return "no answer"
     }
     status = string.substring(wire, 9, 12)
-    cl = content_length(string.substring(wire, 0, end + 2))
+    head = string.substring(wire, 0, end + 2)
+    cl = content_length(head)
     body = string.length(wire) - (end + 4)
-    return "${status} length ${cl} body ${body}"
+    // X-Pad's value as sent, brackets showing any trailing whitespace; only
+    // the #3782 answer carries one.
+    pad = ""
+    at = string.index_of(head, "\r\nX-Pad:")
+    if at >= 0 {
+        rest = string.substring(head, at + 8, string.length(head))
+        pad = " pad [${string.substring(rest, 0, string.index_of(rest, "\r\n"))}]"
+    }
+    return "${status} length ${cl} body ${body}${pad}"
 }
 
 // A proxy on its own port with a cache keyed by `key` in front of an upstream
@@ -175,20 +184,15 @@ main() {
     stop(s2, pool2, opts2, cache2, srv2)
 
     // #3782: a cache keyed by method, so an answer to HEAD is stored, with
-    // two Content-Length fields that disagree. A hit answers as the miss
-    // did. The event loop (Linux, macOS) forwards no length on the miss
-    // and stored the upstream's block as it came, so its hit said "0 OK";
-    // the worker path's client refuses the answer (502) and stores nothing.
-    bad_head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nContent-Length: 0 OK\r\nCache-Control: max-age=60\r\n\r\n"
-    s3, pool3, opts3, cache3, srv3 = start(framed_get, bad_head, 2, "method_url")
-    miss = probe(http.server_port(s3), "HEAD")
-    hit = probe(http.server_port(s3), "HEAD")
+    // a field value the upstream padded with spaces. The miss sends it
+    // trimmed (RFC 9110 5.5, both proxy paths); the store kept the padding,
+    // so the hit sent "v  ". One upstream connection: the hit is the cache's.
+    padded_head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nX-Pad: v  \r\nCache-Control: max-age=60\r\n\r\n"
+    s3, pool3, opts3, cache3, srv3 = start(framed_get, padded_head, 1, "method_url")
+    bad = bad + check("HEAD, a miss", probe(http.server_port(s3), "HEAD"), "200 length 2 body 0 pad [ v]")
+    bad = bad + check("the same HEAD from the cache (#3782)", probe(http.server_port(s3), "HEAD"),
+                      "200 length 2 body 0 pad [ v]")
     stop(s3, pool3, opts3, cache3, srv3)
-    bad = bad + check("HEAD with disagreeing lengths: the hit answers as the miss (#3782)", hit, miss)
-    if string.index_of(miss, "0 OK") >= 0 || string.index_of(hit, "0 OK") >= 0 {
-        println("  FAIL a length the upstream stated badly went out: '${miss}' / '${hit}'")
-        bad = bad + 1
-    }
 
     if bad > 0 {
         println("FAIL: ${bad} case(s)")

@@ -1902,7 +1902,19 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
 
     HttpResponse* resp = http_response_alloc_empty();
     if (!resp) return -1;
-    if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, ev_response_end(c));
+    if (c->x.framing.invalid) {
+        /* A response that never said where its body ends (two
+         * Content-Length values, one not a number) is not one to hand on:
+         * the blocking client refuses the same bytes with this error, and
+         * the exchange answers it as the worker path does (a retry, or
+         * 502). The loop built a response from them and relayed it, with
+         * one of the lengths: the two paths disagreed on the client's next
+         * response and on where this one ended (#3782). */
+        resp->error = string_new(HTTP_CLIENT_AMBIGUOUS_FRAMING);
+        if (!resp->error) { http_response_free(resp); return -1; }
+    } else if (c->x.buf) {
+        http_response_fill_from_bytes(resp, c->x.buf, ev_response_end(c));
+    }
     c->px.resp = resp;
     ev_release_attempt(c);
 

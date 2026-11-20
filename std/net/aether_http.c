@@ -4320,7 +4320,7 @@ send_request:
                     free(hb);
                     transport_close(&t);
                     response->error = string_new(
-                        "response framing is ambiguous: the declared body length is not usable");
+                        HTTP_CLIENT_AMBIGUOUS_FRAMING);
                     return response;
                 }
                 clen = (long long)declared;
@@ -4411,7 +4411,7 @@ send_request:
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new(
-                "response framing is ambiguous: the declared body length is not usable");
+                HTTP_CLIENT_AMBIGUOUS_FRAMING);
             return response;
         }
         if (rx.oom) {
