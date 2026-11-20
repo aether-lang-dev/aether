@@ -82,6 +82,10 @@ typedef struct {
     /* A chunked body's payload so far, its framing not counted: what a
      * response limit counts of it (http_exchange_recv, #3750). */
     size_t body_decoded;
+    /* The head held a NUL or a bare CR, now SP (http_head_section_repair,
+     * #3572): its bytes are not the upstream's, and where a bare CR stood
+     * can no longer be seen, so nothing relays them as they came. */
+    int    repaired;
 } HttpRespFraming;
 
 typedef struct {

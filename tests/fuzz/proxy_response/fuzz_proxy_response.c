@@ -188,7 +188,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     int copy_status = check_head("copying path", out, head_len, out_len - head_len, is_head);
 
     /* The pass-through, where the event loop would take it (ev_try_direct). */
-    if (complete && !f.invalid && !f.chunked && f.definite && f.header_bytes) {
+    if (complete && !f.invalid && !f.chunked && f.definite && f.header_bytes && !f.repaired) {
         AetherProxyOpts* opts2 = new_opts();
         AetherProxyExchange px2;
         HttpRequest* req2;

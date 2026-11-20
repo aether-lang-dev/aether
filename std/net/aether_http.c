@@ -2007,11 +2007,15 @@ static int no_body_expected(int status, const char* method) {
  * as C strings: a NUL hid the section and handed the whole response back as
  * a status-0 body, and a bare CR in a Location went out inside the request
  * line of the redirect. */
-static void http_head_section_repair(char* buf, size_t n) {
+static size_t http_head_section_repair(char* buf, size_t n) {
+    size_t replaced = 0;
     for (size_t i = 0; i < n; i++) {
-        if (buf[i] == '\0' || (buf[i] == '\r' && (i + 1 >= n || buf[i + 1] != '\n')))
+        if (buf[i] == '\0' || (buf[i] == '\r' && (i + 1 >= n || buf[i + 1] != '\n'))) {
             buf[i] = ' ';
+            replaced++;
+        }
     }
+    return replaced;
 }
 
 // -----------------------------------------------------------------
@@ -3149,9 +3153,10 @@ static size_t http_interim_scan(const char* buf, size_t len) {
     }
 }
 
-static size_t http_interim_prefix(char* buf, size_t len) {
+static size_t http_interim_prefix(char* buf, size_t len, size_t* replaced) {
     size_t off = http_interim_scan(buf, len);
-    http_head_section_repair(buf, off);
+    size_t r = http_head_section_repair(buf, off);
+    if (replaced) *replaced = r;
     return off;
 }
 
@@ -3159,14 +3164,19 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                                      const char* method) {
     if (!f->header_bytes) {
         /* The final response's head, past any interim ones. */
-        size_t skip = http_interim_prefix(buf, len);
+        size_t interim_replaced = 0;
+        size_t skip = http_interim_prefix(buf, len, &interim_replaced);
         char* hend = (char*)http_find_header_end(buf + skip, len - skip);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
         /* Read with its NULs and bare CRs as SP (#3572), here where the
          * section is first whole, so the framing and every reader after it
-         * read the same fields. */
-        http_head_section_repair(buf + skip, f->header_bytes - skip);
+         * read the same fields. What was replaced is recorded: the head is
+         * no longer the upstream's bytes, and a reader that would relay
+         * them as they came (the proxy's pass-through) cannot see where a
+         * bare CR stood, so it is told. */
+        f->repaired = interim_replaced +
+            http_head_section_repair(buf + skip, f->header_bytes - skip) > 0;
         const char* head = buf + skip;
 
         /* Read Transfer-Encoding where it lies, every field of it as one
@@ -3389,7 +3399,7 @@ char* http_build_request_head_into(const HttpReqHead* p,
 void http_response_fill_from_bytes(HttpResponse* response,
                                           char* buf, size_t len) {
     /* The final response, past any interim 1xx ones (http_interim_prefix). */
-    size_t interim = http_interim_prefix(buf, len);
+    size_t interim = http_interim_prefix(buf, len, NULL);
     buf += interim;
     len -= interim;
     /* Found as the framing found it, past any NUL (#3556): strstr stopped at
@@ -4462,10 +4472,9 @@ send_request:
             total_len = 0;
             cap = 0;
             recv_err = 0;
-            framing.header_bytes = 0;
-            framing.body_target = 0;
-            framing.chunked = 0;
-            framing.definite = 0;
+            /* All of it: what the stale connection's bytes set (invalid,
+             * repaired, body_decoded) says nothing of the redial's. */
+            memset(&framing, 0, sizeof framing);
             goto send_request;
         }
         /* The redial failed too, so the upstream is gone rather than the

@@ -643,6 +643,15 @@ read_header(reader_ptr: ptr) -> {
     var kind = KIND_OTHER
     if typeflag == 48 || typeflag == 0 { // '0' or '\0'
         kind = KIND_FILE
+        // A regular-file entry whose name ends in '/' is a directory: the
+        // convention of the tars before typeflag '5', which GNU tar,
+        // libarchive and Python's tarfile keep. extract cleans the name,
+        // and the file it would write at "a/" is "a", the directory's
+        // path, so the reader names the kind extract makes.
+        fn_len = string_length(full_name)
+        if string_char_at_n(full_name, fn_len, fn_len - 1) == 47 {
+            kind = KIND_DIRECTORY
+        }
     } else if typeflag == 53 { // '5'
         kind = KIND_DIRECTORY
     } else if typeflag == 50 { // '2'

@@ -1777,6 +1777,12 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
     if (!c->x.complete || c->x.framing.invalid)              return 0;
     if (c->x.framing.chunked || !c->x.framing.definite)      return 0;
     if (!c->x.buf || c->x.framing.header_bytes == 0)         return 0;
+    /* A head the framing repaired (a NUL or a bare CR, now SP) is not the
+     * upstream's bytes, and direct_head_clean can no longer see where a
+     * bare CR stood: relayed, "Content-Length: 1\rFoo: x" went out as one
+     * field with the value "1 Foo: x". The copying path reads the repaired
+     * fields and writes its own head. */
+    if (c->x.framing.repaired)                               return 0;
     /* Response transformers are the route handler's: a proxied response is
      * not one of theirs on the worker path either (#3213), so the upstream's
      * own bytes are the answer whether one is registered or not. The request

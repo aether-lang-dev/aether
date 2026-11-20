@@ -188,6 +188,22 @@ main() {
     n = file(t, n, "short.txt", "long named")
     finish(dir, "gnu_long_name", t, n, 2)
 
+    // A regular-file entry named "d/" is a directory (the tars before
+    // typeflag '5'), here with data it does not keep; and one a GNU
+    // long name names, its NULs ending the name at "a/b/".
+    // The reader called each a file and extract made a directory (a CI
+    // finding, check 12).
+    t = tar_new(0)
+    n = 1
+    n = entry(t, n, "d/", 48, "", "abc", 3 as long, 0)
+    finish(dir, "slash_named_file", t, n, 2)
+
+    t = tar_new(0)
+    n = 1
+    n = entry(t, n, "././@LongLink", 76, "", "a/b/", 10 as long, 0)
+    n = file(t, n, "short.txt", "long named")
+    finish(dir, "gnu_long_name_slash", t, n, 2)
+
     t = tar_new(2)
     n = 1
     n = file(t, n, "1", "a")
