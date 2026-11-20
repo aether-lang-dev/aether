@@ -63,6 +63,9 @@ extern char** environ;
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
+#ifdef __FreeBSD__
+#include <glob.h>
+#endif
 
 /* Shared header — AETHER_LIB_DIRS_MAX + AETHER_LIB_PATH_SEP_CHAR.
  * Pulled in early so the Toolchain struct can size its lib_dirs
@@ -5193,6 +5196,59 @@ static void default_macos_deployment_target(void) {
 }
 #endif
 
+#ifdef __FreeBSD__
+/* The link libraries of std.casper (libaether.a always carries
+ * aether_casper.o, which calls cap_init, cap_getpwnam, cap_sysctlbyname and
+ * cap_getaddrinfo), found on the machine ae runs on, so a release ae built
+ * on another machine links a Casper program as a source build does.
+ * Each library is "-l<name>" where the unversioned lib<name>.so a linker
+ * looks for exists, else the versioned lib<name>.so.N file itself:
+ * GhostBSD ships only the versioned files for these (no .so links, and a
+ * different N per library: libcap_sysctl is .so.2, its siblings .so.1), so
+ * "-lcasper" does not resolve there. cap_getaddrinfo is in libcap_net, and
+ * in libcap_dns where that is all there is (FreeBSD 12 and older). A
+ * library that is nowhere is left out, and the link says which symbol is
+ * missing. */
+static bool casper_lib_flag(const char* name, char* out, size_t size) {
+    static const char* const dirs[] = { "/usr/lib", "/lib" };
+    char path[256];
+    size_t i;
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        snprintf(path, sizeof(path), "%s/lib%s.so", dirs[i], name);
+        if (access(path, R_OK) == 0) {
+            snprintf(out, size, "-l%s", name);
+            return true;
+        }
+    }
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        glob_t g;
+        snprintf(path, sizeof(path), "%s/lib%s.so.*", dirs[i], name);
+        if (glob(path, 0, NULL, &g) == 0) {
+            snprintf(out, size, "%s", g.gl_pathv[0]);
+            globfree(&g);
+            return true;
+        }
+        globfree(&g);
+    }
+    return false;
+}
+
+static void freebsd_casper_libs(char* out, size_t size) {
+    static const char* const names[] = { "casper", "cap_pwd", "cap_sysctl", "cap_net", "cap_dns" };
+    size_t len = 0, i;
+    bool have_net = false;
+    out[0] = '\0';
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char flag[300];
+        if (!strcmp(names[i], "cap_dns") && have_net) continue;
+        if (!casper_lib_flag(names[i], flag, sizeof(flag))) continue;
+        if (!strcmp(names[i], "cap_net")) have_net = true;
+        if (len + strlen(flag) + 2 > size) break;
+        len += (size_t)snprintf(out + len, size - len, "%s%s", len ? " " : "", flag);
+    }
+}
+#endif
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -5664,8 +5720,10 @@ void build_gcc_cmd(char* cmd, size_t size,
     // libcasper + cap_* services — std.casper delegates DNS / passwd /
     // sysctl past Capsicum capability mode. FreeBSD-only; empty on
     // every other platform, where std.casper links its stub path.
-#ifdef AETHER_CASPER_LIBS
-    const char* casper_libs = AETHER_CASPER_LIBS;
+#ifdef __FreeBSD__
+    char casper_libs_buf[1024];
+    freebsd_casper_libs(casper_libs_buf, sizeof(casper_libs_buf));
+    const char* casper_libs = casper_libs_buf;
 #else
     const char* casper_libs = "";
 #endif

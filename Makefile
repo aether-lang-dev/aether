@@ -823,6 +823,10 @@ CFLAGS = -O2 -Wall -Wextra -Wstrict-prototypes -Wno-unused-parameter -Wno-unused
 # e.g. GhostBSD) or hardcoding a soname version (libcap_sysctl is at
 # .so.2 while its siblings are at .so.1). Empty if the libs aren't
 # present — std.casper then links its non-FreeBSD stub path.
+# This is for the programs this Makefile links (the C tests). `ae build`
+# does not take it from here: tools/ae.c finds the libraries itself when it
+# links a program (freebsd_casper_libs), so a release ae built on Linux, with
+# no host to glob, links std.casper on FreeBSD all the same.
 CASPER_LDFLAGS :=
 ifeq ($(shell uname -s),FreeBSD)
   CASPER_LDFLAGS := $(firstword $(wildcard /lib/libcasper.so.* /usr/lib/libcasper.so.*)) \
@@ -984,7 +988,6 @@ TOOLS_CFLAGS = -O2 -Itools -MMD -MP \
     -DAETHER_NGHTTP2_LIBS='"$(NGHTTP2_LDFLAGS)"' \
     -DAETHER_PCRE2_LIBS='"$(PCRE2_LDFLAGS)"' \
     -DAETHER_YAML_LIBS='"$(YAML_LDFLAGS)"' \
-    -DAETHER_CASPER_LIBS='"$(CASPER_LDFLAGS)"' \
     -DAETHER_AUDIO_LIBS='"$(AUDIO_LDFLAGS)"' \
     -DAETHER_BROTLI_LIBS='"$(BROTLI_LDFLAGS)"' \
     -DAETHER_ZSTD_LIBS='"$(ZSTD_LDFLAGS)"' \
