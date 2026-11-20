@@ -7639,8 +7639,11 @@ static void emit_global_rebind_trailing(CodeGenerator* gen, ASTNode* stmt) {
         for (int bi = 0; bi < trailing->child_count; bi++) {
             if (trailing->children[bi] && trailing->children[bi]->type == AST_BLOCK) {
                 print_indent(gen);
+                /* The variable as it is declared and read: safe_c_name is
+                 * the spelling of a FUNCTION named after libc (#1366), and a
+                 * variable named `open` stays `open`. */
                 fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)%s);\n",
-                        safe_c_name(stmt->value));
+                        stmt->value);
                 emit_trailing_block_body(gen, trailing->children[bi]);
                 return;
             }
@@ -10962,8 +10965,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     for (int bi = 0; bi < trailing->child_count; bi++) {
                                         if (trailing->children[bi] && trailing->children[bi]->type == AST_BLOCK) {
                                             print_indent(gen);
+                                            /* The variable as declared, not
+                                             * safe_c_name's function spelling. */
                                             fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)%s);\n",
-                                                    safe_c_name(stmt->value));
+                                                    stmt->value);
                                             emit_trailing_block_body(gen, trailing->children[bi]);
                                             break;
                                         }
@@ -11444,8 +11449,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             trailing->children[bi]->type == AST_BLOCK) {
                                             // Push the variable's value as builder context
                                             print_indent(gen);
+                                            /* The variable as declared, not
+                                             * safe_c_name's function spelling. */
                                             fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)%s);\n",
-                                                    safe_c_name(stmt->value));
+                                                    stmt->value);
                                             emit_trailing_block_body(gen, trailing->children[bi]);
                                             break;
                                         }

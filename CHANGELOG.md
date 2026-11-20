@@ -14,6 +14,80 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.926.0]
+
+### Fixed
+
+- **A variable named after a libc function can be bound to a call with a
+  trailing block.** `open = sandbox.new("open") { grant_env("X") }`
+  declared `open` and pushed `ae_open` as the block's context: the push
+  spelt the variable as a function named after libc is spelt (#1366), and
+  the generated C did not compile. The same for a reassignment and a store
+  to a module variable, and for every name on that list (`abs`, `remove`,
+  `index`, `read`, `time`, ...). The push now names the variable as its
+  declaration does.
+
+- **`seal except` and `hide` no longer change the code they guard.** A
+  struct the list did not name lost its field types inside the sealed body,
+  with no diagnostic: `b.app_dir == ""` on a `*Browser` parameter compiled
+  to a pointer comparison, `d = b.app_dir` made an `int` local the function
+  did not own, a closure stored in a field went unretained, and a local
+  bound from a call returning such a struct was refused as "of a type the
+  program does not define" (E0302). A value now keeps its type; the list
+  restricts the names the body writes. Names on the list also stopped
+  counting as uses: a listed function was marked as a function value (its
+  string returns wrapped in `aether_fnptr_give`), a listed local's last use
+  copied instead of moving, a listed constant or slice parameter read as a
+  binding of it, a listed slice or `Isolated` parameter as used or moved
+  before the body's own move of it (E0906, E0200). The checker now drops
+  the directives once the program has checked, so a body that compiles with
+  and without a seal compiles to the same C.
+
+- **A closure passed to another module's function sees its sealed
+  function's locals.** Under `seal except`, `mm.run_it(|| { ... ctx ... })`
+  failed with E0300 `Undefined variable 'ctx'` for a local `ctx` of the
+  sealed function, while the same closure passed to a function of the same
+  file compiled. The closure of a member call also resolves names through
+  the module as a DSL receiver, and the seal ended that whole lookup instead
+  of only the search for the module's member.
+
+- **`seal except mm` admits the module's constants.** `mm.K`, an exported
+  constant of a listed module, was refused as "module 'mm' has no export
+  'K'", and no spelling on the list helped; `mm.bump(p)` beside it compiled.
+  The constant's merged name `mm_K` was looked up through the seal; it is
+  now looked up past it once the prefix `mm` has passed, as a call is.
+
+- **A `seal except` on a function's body admits the function's own
+  parameters and hoisted locals.** Each parameter had to be listed
+  (`seal except p, argv, ...`, else E0304), and a local an `if` arm binds
+  and the body reads after it was refused, while a closure's seal always
+  admitted its own parameters. A seal on a block nested deeper in the
+  function still refuses them, and `hide p` still hides a parameter.
+
+### Security
+
+- **The std calls that still reached a file, a library or a variable
+  unchecked inside a sandbox level are now checked.** #3743 checked listing,
+  globbing, `mtime`, `statvfs`, `block_info` and the directory calls; the
+  rest of an audit of every std call that touches the file system found
+  `fs.walk` entering directories below its root, a `**` glob doing the same,
+  the mount table off Linux, the parent directories `mkdir_p` made, a hard
+  link's target, the source of a `rename` or `move`, the whole of `std.io`
+  (files, descriptors and the environment, so `std.tar` and `std.zip`
+  reached files through it unchecked), `log.init`'s file, `dl.open`,
+  `http.serve_file`/`serve_static`, an HTTP server's TLS files and access
+  log, and a child's working directory in `os.run_stdio`. Each is checked
+  where `fs.read` is, on the resolved path, and recorded in the audit ring:
+  a read or a listing as `fs_read`, a change as `fs_write`, a chdir as `fs`,
+  a library load as `native`; `docs/containment-sandbox.md` lists them.
+  **Behaviour changes** for code that runs inside a level: `rename`/`move`
+  need `fs_read` on the source; `hard_link` needs `fs_read` and `fs_write`
+  on the target; `mkdir_p` needs `fs_write` on each directory it makes;
+  the mount table needs `fs_read "/proc/self/mountinfo"` on every platform;
+  `std.io`'s file and environment calls need the grants `std.fs` and
+  `os.getenv` need; a refused `serve_file` is 403 whether or not the file
+  exists.
+
 ## [0.925.0]
 
 ### Added

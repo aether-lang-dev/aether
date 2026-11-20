@@ -1035,7 +1035,7 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                 // straight off its AST_BITSTRUCT_FIELD node. The definition is
                 // stashed on the bitstruct's global symbol at registration.
                 else if (base_type && base_type->kind == TYPE_BITSTRUCT && ctx->symbols) {
-                    Symbol* bs = lookup_symbol(ctx->symbols, base_type->struct_name);
+                    Symbol* bs = lookup_type_symbol(ctx->symbols, base_type->struct_name);
                     if (bs && bs->node) {
                         for (int i = 0; i < bs->node->child_count; i++) {
                             ASTNode* f = bs->node->children[i];
@@ -1051,7 +1051,7 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                 // Handle struct type member access
                 else if (base_type && base_type->kind == TYPE_STRUCT && ctx->symbols) {
                     // Look up the struct definition
-                    Symbol* struct_sym = lookup_symbol(ctx->symbols, base_type->struct_name);
+                    Symbol* struct_sym = lookup_type_symbol(ctx->symbols, base_type->struct_name);
                     
                     if (struct_sym && struct_sym->node) {
                         ASTNode* struct_def = struct_sym->node;

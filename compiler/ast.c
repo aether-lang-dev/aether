@@ -422,6 +422,28 @@ int ast_names_without_binding(const ASTNode* n) {
     }
 }
 
+/* `hide` and `seal except` decide which names a block may reach, and the
+ * type checker has asked them all it needs once the program has checked:
+ * after that they say nothing about the code. Codegen walks the tree in
+ * many places that count a name's uses or bindings, and a directive's list
+ * read to each of them as one (a function listed was taken as a value, a
+ * local listed was used again, a parameter listed was bound again), so a
+ * seal changed the C of the body it sealed. Taken out, it cannot. */
+void ast_drop_scope_directives(ASTNode* n) {
+    if (!n) return;
+    int kept = 0;
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* c = n->children[i];
+        if (c && (c->type == AST_HIDE_DIRECTIVE || c->type == AST_SEAL_DIRECTIVE)) {
+            free_ast_node(c);
+            continue;
+        }
+        ast_drop_scope_directives(c);
+        n->children[kept++] = c;
+    }
+    n->child_count = kept;
+}
+
 int ast_binds_name(const ASTNode* n, const char* name) {
     if (!n || !name) return 0;
     if (n->value && !ast_names_without_binding(n) && strcmp(n->value, name) == 0) return 1;

@@ -730,6 +730,9 @@ int ast_names_without_binding(const ASTNode* n);
  * program-level constant of that name is not what the subtree's references
  * to it read, as codegen decides when it renames constants. */
 int ast_binds_name(const ASTNode* n, const char* name);
+/* Remove every `hide` / `seal except` directive from `n`'s subtree: once the
+ * program has type-checked they have no say in the code generated. */
+void ast_drop_scope_directives(ASTNode* n);
 /* #2297: `type` as Aether source that parse_type reads back to the same
  * type. Returns 0 (and an empty buf) when it has no faithful spelling. */
 int type_to_aether_source(const Type* type, char* buf, size_t cap);

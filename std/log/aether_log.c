@@ -1,5 +1,6 @@
 #include "aether_log.h"
 #include "../../runtime/utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
+#include "../../runtime/aether_sandbox.h"   /* the log file is a file written */
 #include <time.h>
 #include <string.h>
 #include <stdlib.h>
@@ -92,7 +93,8 @@ int log_init_raw(const char* filename, LogLevel min_level) {
     }
 
     if (filename && filename[0] && strcmp(filename, "-") != 0) {
-        g_log.config.output_file = fopen(filename, "a");
+        g_log.config.output_file = aether_sandbox_check("fs_write", filename)
+                                       ? fopen(filename, "a") : NULL;
         if (!g_log.config.output_file) {
             g_log.config.output_file = stderr;
             ok = 0;

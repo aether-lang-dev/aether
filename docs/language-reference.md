@@ -2064,7 +2064,8 @@ nested blocks, with no way to un-hide deeper in. It does not reach through call
 boundaries, though: a visible function can still use hidden names via its own
 lexical chain, since this is name-resolution denial, not an effect system. Local
 bindings created inside the block stay visible, because directives only affect
-lookups that walk out to parent scopes. Qualified names are covered too, so
+lookups that walk out to parent scopes, and a seal on a function's body admits
+the function's parameters. Qualified names are covered too, so
 `hide http` also blocks `http.get(url)`. `hide http.get` blocks that one member
 and leaves the rest of `http` visible, and `import http hiding (get)` does that
 for every body in the file. The directives work inside actor receive

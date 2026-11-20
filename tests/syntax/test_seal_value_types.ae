@@ -1,0 +1,53 @@
+// Test: a value keeps its type in a body sealed without its type's name.
+// `seal except` restricts the names a body writes, not the types of the
+// values it holds: `t` below is a `*T` whether or not `T` is listed, so
+// `t.name` is a string and `==` compares strings. Through 0.923.0 an
+// unlisted `T` lost its field types with no diagnostic, and the compare
+// went by pointer (false for equal strings); `hide T` did the same.
+
+struct T { name: string }
+
+new_t() -> *T {
+    t = heap.new(T)
+    t.name = "abc"
+    return t
+}
+
+sealed_unlisted(p: int) -> int {
+    seal except p, new_t
+    t = new_t()
+    s = "ab"
+    r = 0
+    if t.name == "${s}c" { r = 1 }
+    heap.free(t)
+    return r
+}
+
+sealed_listed(p: int) -> int {
+    seal except p, new_t, T
+    t = new_t()
+    s = "ab"
+    r = 0
+    if t.name == "${s}c" { r = 1 }
+    heap.free(t)
+    return r
+}
+
+hidden(p: int) -> int {
+    hide T
+    t = new_t()
+    s = "ab"
+    r = 0
+    if t.name == "${s}c" { r = 1 }
+    heap.free(t)
+    return r
+}
+
+main() {
+    got = "${sealed_unlisted(0)}${sealed_listed(0)}${hidden(0)}"
+    if got != "111" {
+        println("FAIL: sealed/listed/hidden compares gave ${got}, want 111")
+        exit(1)
+    }
+    println("PASS seal keeps value types")
+}

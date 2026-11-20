@@ -970,6 +970,17 @@ int64_t file_mtime_raw(const char* path) {
     return (int64_t)st.st_mtime;
 }
 
+/* A hard link is a second name for the target's contents: whatever may be
+ * done through `link_path` can then be done to the target, so the target is
+ * checked for both reading and writing, and the new name for writing. (A
+ * symbolic link needs no check on its target: every later use of the link
+ * is checked where it leads.) */
+static int fs_hard_link_allowed(const char* target, const char* link_path) {
+    return aether_sandbox_check("fs_write", link_path) &&
+           aether_sandbox_check("fs_read", target) &&
+           aether_sandbox_check("fs_write", target);
+}
+
 // Directory operations
 int dir_exists(const char* path) {
     if (!path) return 0;
@@ -1105,11 +1116,19 @@ int fs_mkdir_p_raw(const char* path) {
         if (buf[i] == '/' || buf[i] == '\\') {
             char saved = buf[i];
             buf[i] = '\0';
-            if (mkdir(buf, 0755) != 0) {
-                // Tolerate already-exists. Anything else is a real failure.
-                if (errno != EEXIST) return 0;
-                struct stat st;
-                if (stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+            // A parent that is already a directory is walked through; one
+            // that has to be made is a write of its own, checked as one:
+            // the check on `path` above covers only the last component.
+            struct stat st;
+            if (stat(buf, &st) == 0) {
+                if (!S_ISDIR(st.st_mode)) return 0;
+            } else {
+                if (!aether_sandbox_check("fs_write", buf)) { errno = EACCES; return 0; }
+                if (mkdir(buf, 0755) != 0) {
+                    // Tolerate already-exists. Anything else is a real failure.
+                    if (errno != EEXIST) return 0;
+                    if (stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+                }
             }
             buf[i] = saved;
         }
@@ -1826,7 +1845,12 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
 int fs_rename_raw(const char* from, const char* to) {
     if (!from || !to) { errno = 0; return 0; }
     // Both names are checked themselves (a symlink is moved, not what it
-    // leads to), and on POSIX renamed as checked (#3751).
+    // leads to), and on POSIX renamed as checked (#3751). The source is read
+    // as well as removed: its contents go on to be readable at `to`.
+    if (!aether_sandbox_check_entry("fs_read", from)) {
+        errno = EACCES;
+        return 0;
+    }
 #ifdef _WIN32
     if (aether_sandbox_levels_here() > 0) return aether_sandbox_rename(from, to) == 0 ? 1 : 0;
     if (!aether_sandbox_check_entry("fs_write", from) || !aether_sandbox_check_entry("fs_write", to)) {
@@ -2063,8 +2087,13 @@ static void fs_mountinfo_unescape(char* s) {
 
 int fs_try_mounts(void) {
     fs_release_mounts();
+    /* The mount table is checked as the file Linux reads it from, on every
+     * platform, so the one grant (fs_read "/proc/self/mountinfo") lets a
+     * program read it wherever it runs; getmntinfo and the drive list
+     * were not checked at all. */
+    if (!aether_sandbox_check("fs_read", "/proc/self/mountinfo")) return -1;
 #if defined(__linux__)
-    FILE* fp = (FILE*)aether_sandbox_fopen("/proc/self/mountinfo", "r");   /* fs_read, #3743 */
+    FILE* fp = (FILE*)aether_sandbox_fopen("/proc/self/mountinfo", "r");   /* opened as checked, #3751 */
     if (!fp) return -1;
     char line[4096];
     while (fgets(line, sizeof(line), fp)) {
@@ -3126,6 +3155,11 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot remove src");
     }
+    /* What is moved goes on to be readable at dst: the source is read. */
+    if (!aether_sandbox_check_entry("fs_read", src)) {
+        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
+                                 "sandbox: cannot read src");
+    }
     if (!aether_sandbox_check_entry("fs_write", dst)) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot write dst");
@@ -4101,8 +4135,11 @@ static int win_fnmatch(const char* pattern, const char* name) {
     return *p == '\0';
 }
 
-// Recursive walk for ** patterns (Windows).
-static void walk_recursive(const char* dir, const char* suffix_pattern, DirList* result) {
+// Recursive walk for ** patterns (Windows). Each directory below the first
+// is checked for reading before it is listed (the first was, by fs_glob_raw).
+static void walk_recursive(const char* dir, const char* suffix_pattern, DirList* result,
+                           int check) {
+    if (check && !aether_sandbox_check("fs_read", dir)) return;
     char search[MAX_PATH];
     snprintf(search, sizeof(search), "%s\\*", dir);
 
@@ -4124,7 +4161,7 @@ static void walk_recursive(const char* dir, const char* suffix_pattern, DirList*
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             // Skip dot-prefixed directories (.git, .aeb, .vscode, …)
             if (fd.cFileName[0] == '.') continue;
-            walk_recursive(fullpath, suffix_pattern, result);
+            walk_recursive(fullpath, suffix_pattern, result, 1);
         } else {
             if (win_fnmatch(suffix_pattern, fd.cFileName)) {
                 dirlist_add(result, fullpath);
@@ -4164,7 +4201,11 @@ static void walk_recursive_verified(const char* dir, void* d, const char* suffix
 // from recursion — but matches dot-prefixed FILES against the suffix pattern.
 // Without this, patterns like "**/.build.ae" or "**/.*.ae" would never find
 // dot-prefixed config files.
-static void walk_recursive(const char* dir, const char* suffix_pattern, DirList* result) {
+static void walk_recursive(const char* dir, const char* suffix_pattern, DirList* result,
+                           int check) {
+    // Each directory below the first is checked for reading before it is
+    // listed (the first was, by fs_glob_raw).
+    if (check && !aether_sandbox_check("fs_read", dir)) return;
     /* Inside an enforce block each directory is opened as checked, its path
      * walked with no link followed, so a symlink swapped in at any level is
      * refused there instead of listed (#3751). */
@@ -4191,7 +4232,7 @@ static void walk_recursive(const char* dir, const char* suffix_pattern, DirList*
             // recursion. Most build/config systems keep these as opaque
             // metadata, and the existing aeb scan excluded them too.
             if (entry->d_name[0] == '.') continue;
-            walk_recursive(fullpath, suffix_pattern, result);
+            walk_recursive(fullpath, suffix_pattern, result, 1);
         } else {
             // Match suffix pattern against the file name. Use FNM_PERIOD
             // to require explicit leading-dot matching for dot-prefixed
@@ -4386,7 +4427,7 @@ DirList* fs_glob_raw(const char* pattern) {
             void* d = aether_sandbox_win_opendir(dir, NULL);
             if (d) walk_recursive_verified(dir, d, suffix, result);
         } else {
-            walk_recursive(dir, suffix, result);
+            walk_recursive(dir, suffix, result, 0);   /* dir: fs_glob_allowed, above */
         }
     } else if (aether_sandbox_levels_here() > 0) {
         // Simple glob inside an enforce block (#3751): the pattern's
@@ -4483,7 +4524,7 @@ DirList* fs_glob_raw(const char* pattern) {
         // covers the zero-depth case on its own. A separate base-dir glob
         // here would re-emit every root-level match (issue #1279), so we
         // rely solely on the walk.
-        walk_recursive(dir, suffix, result);
+        walk_recursive(dir, suffix, result, 0);   /* dir: fs_glob_allowed, above */
     } else if (aether_sandbox_levels_here() > 0) {
         /* glob(3) reads each directory by name, so inside an enforce block
          * it is expanded here a component at a time, each directory opened
@@ -4854,6 +4895,11 @@ static int fs_walk_stat_kind(const char* path) {
 static int fs_walk_recurse(char* buf, size_t len, int depth,
                            int (*cb)(void*, const char*, int, int), void* env,
                            int* count, int parent_fd) {
+    /* Each directory is a listing, checked for reading before it is read:
+     * the root's check in fs_walk_raw covers depth 1, and a directory below
+     * it that is refused is reported (its parent's listing named it) but
+     * not entered. */
+    if (depth > 1 && !aether_sandbox_check("fs_read", buf)) return 0;
 #ifdef _WIN32
     (void)parent_fd;
     /* Build the search pattern in the shared path buffer (append the

@@ -670,6 +670,9 @@ static void pattern_names(const ASTNode* stmt, StrMap* out) {
 /* Every identifier name under `n` (closures included: any use counts). */
 static void identifier_names(const ASTNode* n, StrMap* out) {
     if (!n) return;
+    /* A `hide` / `seal except` list reads nothing: counted, listing an
+     * arm's local at the top of the body hoisted it. */
+    if (n->type == AST_HIDE_DIRECTIVE || n->type == AST_SEAL_DIRECTIVE) return;
     if (n->type == AST_IDENTIFIER && n->value) strmap_put(out, n->value, (void*)1);
     for (int i = 0; i < n->child_count; i++) identifier_names(n->children[i], out);
 }

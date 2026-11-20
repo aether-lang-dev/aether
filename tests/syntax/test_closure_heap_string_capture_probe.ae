@@ -75,4 +75,14 @@ main() {
     build_heap(saved)
     // Every closure is fired AFTER its defining function returned.
     fire_all(saved)
+    // Each box holds a reference of its own (release_closure gives it back),
+    // and the list is freed: nothing is left for a leak check to report.
+    n = list.size(saved)
+    j = 0
+    while j < n {
+        p, _ = list.get(saved, j)
+        release_closure(p)
+        j = j + 1
+    }
+    list.free(saved)
 }
