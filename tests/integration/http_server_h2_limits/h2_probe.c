@@ -361,11 +361,26 @@ int main(int argc, char** argv) {
     closed = 0;
     long long goaway_at = -1;
     unsigned next_stream = 1;
-    /* A POST begun just before the age and finished after the GOAWAY: the
-     * GOAWAY lets open streams finish, so it is answered. */
+    /* A POST begun before the age and finished after the GOAWAY: the GOAWAY
+     * lets open streams finish, so it is answered. Begun a whole second
+     * before, whatever the loop is doing: the age counts from the server's
+     * accept, before this clock starts, and a POST begun 400 ms before it,
+     * in a quiet moment between answers, missed it on a slow runner (macOS
+     * x86), when the server rightly closed a connection with no stream open.
+     * 2000 bytes sent at once buy the body 2 s of its budget (1 s and 1 s a
+     * 1000 bytes), so it is still alive when the last byte goes after the
+     * GOAWAY. */
+    static unsigned char post_body[2000];
+    memset(post_body, 'x', sizeof(post_body));
     unsigned post_stream = 0;
     int post_answered = 0;
     while (now_ms() - t0 < 7000 && !closed) {
+        if (!goaway && !post_stream && now_ms() - t0 >= 2000) {
+            post_stream = next_stream;
+            next_stream += 2;
+            send_post_headers(s, post_stream, "/len");
+            send_frame(s, 0x0, 0, post_stream, post_body, sizeof(post_body));
+        }
         if (readable(s, 300)) {
             n = read_frame(s, &type, &flags, &stream, buf, sizeof(buf));
             if (n < 0) { closed = 1; break; }
@@ -374,17 +389,12 @@ int main(int argc, char** argv) {
                 goaway_at = now_ms() - t0;
                 if (post_stream) send_frame(s, 0x0, 0x1 /* END_STREAM */, post_stream, body, 1);
             }
-            if (type == 0x0 && post_stream && stream == post_stream && n == 7 &&
-                memcmp(buf, "len=101", 7) == 0)
+            if (type == 0x0 && post_stream && stream == post_stream && n == 8 &&
+                memcmp(buf, "len=2001", 8) == 0)
                 post_answered = 1;
             continue;
         }
-        if (!goaway && !post_stream && now_ms() - t0 >= 2600) {
-            post_stream = next_stream;
-            next_stream += 2;
-            send_post_headers(s, post_stream, "/len");
-            send_frame(s, 0x0, 0, post_stream, body, 100);
-        } else if (!goaway) {
+        if (!goaway) {
             send_headers(s, next_stream, "GET", "/ping", 1);
             next_stream += 2;
         }
