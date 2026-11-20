@@ -234,6 +234,71 @@ static void mark_handled(LMarks* m, ASTNode* program, ASTNode* n, ASTNode* fn, A
     for (int i = 0; i < n->child_count; i++) mark_handled(m, program, n->children[i], fn, site);
 }
 
+/* The struct a pointer-to-struct value points at: a `*S` expression or
+ * `heap.new(S)`; NULL for anything else. */
+static const char* struct_pointer_value(ASTNode* n) {
+    if (!n) return NULL;
+    if (n->type == AST_HEAP_NEW) return n->value;
+    const Type* t = n->node_type;
+    if (t && t->kind == TYPE_PTR && t->element_type && t->element_type->kind == TYPE_STRUCT)
+        return t->element_type->struct_name;
+    return NULL;
+}
+
+/* An untyped `ptr`: a pointer whose type says nothing of what it points at. */
+static int is_untyped_ptr(const Type* t) {
+    return t && t->kind == TYPE_PTR && !(t->element_type && t->element_type->kind == TYPE_STRUCT);
+}
+
+/* The parameter type a call hands argument `pos` to, when the callee is a
+ * function or extern of the program; NULL when it is not known. */
+static Type* callee_param_type(CodeGenerator* gen, ASTNode* program, ASTNode* call, int pos) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || !c->value || strcmp(c->value, call->value) != 0) continue;
+        if (c->type == AST_EXTERN_FUNCTION)
+            return pos < c->child_count && c->children[pos] ? c->children[pos]->node_type : NULL;
+        if (c->type == AST_FUNCTION_DEFINITION)
+            return pos < fn_param_count(c) ? fn_param_type_at(gen, c, pos) : NULL;
+    }
+    return NULL;
+}
+
+/* A `*S` that becomes an untyped `ptr` can reach C that reads S's bytes
+ * at offsets of its own (`fwrite(h as ptr, ...)`), which no type follows.
+ * So S is refused, conservatively, when such a value is cast to `ptr`,
+ * stored where a `ptr` is declared, or passed to a parameter that is not
+ * `*S` itself; freeing it (`free`, `heap.free`) reads nothing. */
+static void mark_untyped(CodeGenerator* gen, LMarks* m, ASTNode* program, ASTNode* n) {
+    if (!n) return;
+    if (is_untyped_ptr(n->node_type) && n->type != AST_FUNCTION_CALL) {
+        for (int i = 0; i < n->child_count; i++) {
+            const char* s = struct_pointer_value(n->children[i]);
+            if (s && !marks_get(m, s))
+                mark_struct(m, program, s,
+                            aether_internf("conservative: a *%s becomes an untyped ptr (line %d), "
+                                           "which C may read at offsets of its own", s,
+                                           n->children[i]->line), 0);
+        }
+    }
+    if (n->type == AST_FUNCTION_CALL && n->value && strcmp(n->value, "free") != 0 &&
+        strcmp(n->value, "heap.free") != 0 && strcmp(n->value, "heap_free") != 0) {
+        for (int i = 0; i < n->child_count; i++) {
+            const char* s = struct_pointer_value(n->children[i]);
+            if (!s || marks_get(m, s)) continue;
+            Type* p = callee_param_type(gen, program, n, i);
+            if (p && p->kind == TYPE_PTR && p->element_type &&
+                p->element_type->kind == TYPE_STRUCT && p->element_type->struct_name &&
+                strcmp(p->element_type->struct_name, s) == 0) continue;
+            mark_struct(m, program, s,
+                        aether_internf("conservative: a *%s is passed to %s (line %d), which "
+                                       "takes it as something other than *%s", s, n->value,
+                                       n->line, s), 0);
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) mark_untyped(gen, m, program, n->children[i]);
+}
+
 static void collect_marks(CodeGenerator* gen, ASTNode* program, const char* path, LMarks* m) {
     /* Order matters only for which reason a struct reports: its own
      * annotation first, then what C declares, then what C is handed. */
@@ -305,6 +370,11 @@ static void collect_marks(CodeGenerator* gen, ASTNode* program, const char* path
             if (own && (c->type == AST_FUNCTION_DEFINITION || c->type == AST_MAIN_FUNCTION))
                 mark_handled(m, program, c, c, own);
         }
+    }
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (is_local(c, path) && c->type != AST_EXTERN_FUNCTION && c->type != AST_STRUCT_DEFINITION)
+            mark_untyped(gen, m, program, c);
     }
 }
 
@@ -679,10 +749,19 @@ static void print_json(FILE* out, const LRec* r, int first) {
     fputc('}', out);
 }
 
+/* A struct's name as its own file spells it: the display name without the
+ * `module.` a program that imports it sees it under. */
+static const char* source_struct_name(const char* cname) {
+    const char* d = ast_struct_display_name(cname);
+    const char* dot = d ? strrchr(d, '.') : NULL;
+    return dot ? dot + 1 : d;
+}
+
 static void print_plan(FILE* out, const LRec* r) {
     if (r->kind != LK_STRUCT || !r->reorderable || saving_of(r) <= 0) return;
-    fprintf(out, "fix\t%s\t%d\t%d\t%s\t%lld\t%lld\t", r->file, r->line, r->col, r->name, r->size,
-            r->sug_size);
+    /* The name as the source spells it, which is what --fix looks for. */
+    fprintf(out, "fix\t%s\t%d\t%d\t%s\t%lld\t%lld\t", r->file, r->line, r->col,
+            source_struct_name(r->name), r->size, r->sug_size);
     for (int i = 0; i < r->nf; i++) fprintf(out, "%s%s", i ? "," : "", r->f[i].name);
     fputc('\t', out);
     for (int i = 0; i < r->nf; i++) fprintf(out, "%s%s", i ? "," : "", r->f[r->sug[i]].name);
@@ -787,9 +866,41 @@ int codegen_layout_report(CodeGenerator* gen, ASTNode* program, const char* path
             json_str(out, largest_name ? largest_name : "");
             fprintf(out, ", \"all_saving\": %lld}}\n", all_saving);
             break;
-        case LAYOUT_REPORT_PLAN:
+        case LAYOUT_REPORT_PLAN: {
+            /* `ae pad --fix` decides over every file of a run: a struct a
+             * module declares may be one a program that imports it hands
+             * to C. So the plan also says whether this file is a program,
+             * which other files' declarations it sees, and every struct it
+             * refuses, wherever that struct is declared. */
+            int has_main = 0;
+            for (int i = 0; i < program->child_count; i++) {
+                ASTNode* c = program->children[i];
+                if (c && is_local(c, path) &&
+                    (c->type == AST_MAIN_FUNCTION ||
+                     (c->type == AST_FUNCTION_DEFINITION && c->value && !strcmp(c->value, "main"))))
+                    has_main = 1;
+            }
+            fprintf(out, "file\t%s\t%d\n", path ? path : "", has_main);
+            for (int i = 0; i < program->child_count; i++) {
+                ASTNode* c = program->children[i];
+                if (!c || !c->source_file || is_local(c, path)) continue;
+                int seen = 0;
+                for (int j = 0; j < i && !seen; j++) {
+                    ASTNode* d = program->children[j];
+                    seen = d && d->source_file && !is_local(d, path) &&
+                           strcmp(d->source_file, c->source_file) == 0;
+                }
+                if (!seen) fprintf(out, "uses\t%s\n", c->source_file);
+            }
+            for (int i = 0; i < marks.n; i++) {
+                ASTNode* sd = def_named(program, AST_STRUCT_DEFINITION, marks.v[i].name);
+                const char* file = sd && sd->source_file ? sd->source_file : (path ? path : "");
+                fprintf(out, "refuse\t%s\t%s\t%s\n", file, source_struct_name(marks.v[i].name),
+                        marks.v[i].reason);
+            }
             for (int i = 0; i < n; i++) print_plan(out, &recs[i]);
             break;
+        }
         case LAYOUT_REPORT_ASSERTS:
             fprintf(out, "\n/* ae pad --verify: the layout aetherc --emit=layout reports for %s "
                          "(target %s), checked against this C compiler. */\n",

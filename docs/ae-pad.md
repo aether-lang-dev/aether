@@ -89,8 +89,8 @@ reported as unknown, never guessed.
 
 A message is laid out as codegen emits it: the 4-byte `_message_id` first,
 then its fields by alignment (#3773); the lone `int` of a message with no
-other field is an `intptr_t`. An actor is ActorBase (1720 bytes on a 64-bit
-target with the default 32-slot mailbox), its state in declaration order (a
+other field is an `intptr_t`. An actor is ActorBase (952 bytes on a 64-bit
+target with the default 16-slot mailbox), its state in declaration order (a
 state field used as a pointer is a `void*`), and, when it has receive arms,
 the 32-byte `AetherMsgInline` copy last; the struct is aligned to 64. ActorBase
 is modelled for 64-bit targets only, so `--ptr=4` reports an actor as unknown.
@@ -116,13 +116,31 @@ comment lines right above it and the comment after it on its line; a blank
 line stays where it was, and so does each line's separator (`,`, `;` or
 none), so the struct reads as before with its fields in another order. A
 struct written on one line (`struct P { a: byte, b: long }`) has its fields
-moved and its gaps kept. The file is compiled again after the rewrite and put
-back as it was if it no longer compiles. A second `--fix` changes nothing:
-a rewritten struct is already in its smallest order.
+moved and its gaps kept. A second `--fix` changes nothing: a rewritten
+struct is already in its smallest order.
+
+A run decides over all of its files before it rewrites any. A struct a module
+declares may be one a program that imports it hands to C, so the compiler's
+plan for each file lists every struct that file refuses, wherever it is
+declared, and no file of the run rewrites a struct another file refused (the
+line says which file: `not rewritten: passed to extern fn draw (line 3),
+which C implements (seen from src/main.ae)`). A module that no program of the
+run imports is not rewritten at all: who else uses it is not known. Run
+`ae pad --fix` over the whole project, `ae pad --fix src`, not over a module
+alone. After a file is rewritten it is compiled again, with every program of
+the run that imports it, and put back as it was if one of them no longer
+compiles; only the rewrites that stand are reported and counted.
 
 A body `--fix` cannot follow is left as it is, named, and the run exits
-non-zero: two fields on one line of a multi-line body, a field written over
-several lines, a field in the C-style `int x` form.
+non-zero: two fields on one line of a multi-line body, a field on the line
+of the opening or the closing brace, a field written over several lines, a
+block comment over several lines, a field in the C-style `int x` form. So is
+a file `--fix` cannot replace safely: a symbolic link (the file it names is
+the one to rewrite) and a file holding a NUL byte. A rewritten file keeps its
+mode, and the temporary it is written through is created afresh, never one
+that is already there. `--json` is the report alone and is refused with
+`--fix` or `--verify`. A directory reached through a symbolic link is not
+walked.
 
 Struct literals and field access name their fields, so moving a field
 changes no Aether code. What reads the order from outside the source is what
@@ -138,9 +156,10 @@ changes no Aether code. What reads the order from outside the source is what
 | `@derive(schema)` | the schema table lists the fields in declaration order |
 | `@observable` | observers are told the index of the field that changed |
 | a struct reached through a pointer in a file that reads raw offsets with `std.mem` | a hard-coded offset would go stale |
+| a struct whose pointer becomes an untyped `ptr` (`h as ptr`, a `ptr` parameter) | C may read its bytes at offsets of its own (`fwrite(h as ptr, ...)`) |
 
-Each refusal follows a struct into the structs it holds or points at. Two of
-them are conservative, and say so where they are approximate:
+Each refusal follows a struct into the structs it holds or points at. Three
+of them are conservative, and say so where they are approximate:
 
 - `ae pad` cannot know how a file is built, so the `--emit=lib` rule applies
   to every file: a struct in the signature of a function that such a build
@@ -153,6 +172,10 @@ them are conservative, and say so where they are approximate:
   reaches through a pointer (`*S`, `p as *S`, `heap.new(S)`), and every struct
   a function doing such an access handles at all, is refused, the reason
   starting `conservative:`.
+- Where an untyped `ptr` goes is not followed either. A `*S` or `heap.new(S)`
+  cast to `ptr`, stored where a `ptr` is declared, or passed to any parameter
+  that is not `*S` itself refuses S. Freeing it (`free`, `heap.free`) does
+  not: that reads no field.
 
 A struct a binary-imported module was compiled with is that module's, so it
 is not in this file's report at all.

@@ -15,10 +15,19 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 
 void ae_pad_usage(FILE* out) {
     fprintf(out,
@@ -42,7 +51,10 @@ void ae_pad_usage(FILE* out) {
         "  --fix           Rewrite each reorderable struct to its smallest order, keeping\n"
         "                  each field's comments with it; a second run changes nothing.\n"
         "                  Messages, actor state and any struct C may see are never\n"
-        "                  rewritten (docs/ae-pad.md lists the reasons)\n");
+        "                  rewritten (docs/ae-pad.md lists the reasons). Run it over the\n"
+        "                  whole project: what any file of the run refuses, no file\n"
+        "                  rewrites, and a module no program of the run imports is left\n"
+        "                  as it is\n");
 }
 
 /* ---- the files ---- */
@@ -76,8 +88,40 @@ static int pad_cmp(const void* a, const void* b) {
     return strcmp(*(char* const*)a, *(char* const*)b);
 }
 
-/* The .ae files under `path`, hidden directories left out. 0 when the path
- * does not exist. */
+/* Whether `path` is a symbolic link (on Windows, any reparse point: a
+ * symlink or a junction). */
+static int pad_is_link(const char* path) {
+#ifdef _WIN32
+    DWORD a = GetFileAttributesA(path);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+#endif
+}
+
+/* `path` as one spelling per file, for telling whether the path a plan
+ * names and the path the run walked are the same file. A string the caller
+ * frees. */
+static char* pad_canon(const char* path) {
+#ifdef _WIN32
+    char* c = _fullpath(NULL, path, 0);
+    if (!c) c = strdup(path);
+    for (char* p = c; p && *p; p++) {
+        if (*p == '\\') *p = '/';
+        *p = (char)tolower((unsigned char)*p);
+    }
+    return c;
+#else
+    char* c = realpath(path, NULL);
+    return c ? c : strdup(path);
+#endif
+}
+
+/* The .ae files under `path`, hidden directories left out. A directory
+ * reached through a symbolic link is not entered, as find does not by
+ * default: a link back up the tree would walk forever. 0 when the path does
+ * not exist. */
 static int pad_walk(const char* path, PadList* out) {
     struct stat st;
     if (stat(path, &st) != 0) return 0;
@@ -98,7 +142,9 @@ static int pad_walk(const char* path, PadList* out) {
         snprintf(child, need, "%s%s%s", path,
                  pl && (path[pl - 1] == '/' || path[pl - 1] == '\\') ? "" : "/", e->d_name);
         struct stat cst;
-        if (stat(child, &cst) == 0 && (S_ISDIR(cst.st_mode) || pad_has_ae_ext(e->d_name)))
+        if (stat(child, &cst) == 0 &&
+            ((S_ISDIR(cst.st_mode) && !pad_is_link(child)) ||
+             (!S_ISDIR(cst.st_mode) && pad_has_ae_ext(e->d_name))))
             pad_list_add(&here, child);
         free(child);
     }
@@ -135,16 +181,33 @@ static char* pad_read_file(const char* path, size_t* len) {
     return buf;
 }
 
-/* Writes `data` beside `path` and moves it over `path`. */
+/* Writes `data` beside `path` and moves it over `path`, keeping the file's
+ * mode. The temporary is created exclusively under a name of this process,
+ * so no file that happens to be there is truncated or replaced. */
 static int pad_write_file(const char* path, const char* data, size_t len) {
-    size_t need = strlen(path) + 16;
+    struct stat st;
+    int have_mode = stat(path, &st) == 0;
+    int mode = have_mode ? (int)(st.st_mode & 07777) : 0644;
+    size_t need = strlen(path) + 48;
     char* tmp = (char*)malloc(need);
     if (!tmp) return -1;
-    snprintf(tmp, need, "%s.pad-tmp", path);
-    FILE* f = fopen(tmp, "wb");
-    if (!f) { free(tmp); return -1; }
-    int ok = fwrite(data, 1, len, f) == len;
-    if (fclose(f) != 0) ok = 0;
+    static unsigned seq = 0;
+    int fd = -1;
+    for (int tries = 0; tries < 100 && fd < 0; tries++) {
+        snprintf(tmp, need, "%s.pad-%ld-%u", path, (long)getpid(), seq++);
+        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, mode);
+        if (fd < 0 && errno != EEXIST) break;
+    }
+    if (fd < 0) { free(tmp); return -1; }
+    int ok = 1;
+    for (size_t done = 0; ok && done < len;) {
+        long w = (long)write(fd, data + done, (unsigned)(len - done > 1u << 30 ? 1u << 30 : len - done));
+        if (w <= 0) ok = 0;
+        else done += (size_t)w;
+    }
+    if (close(fd) != 0) ok = 0;
+    /* open() applied the umask; the file gets the mode it had. */
+    if (ok && have_mode && chmod(tmp, mode) != 0) ok = 0;
     if (!ok || ae_replace_file(tmp, path) != 0) {
         remove(tmp);
         free(tmp);
@@ -229,6 +292,7 @@ typedef struct {
     size_t n;
     char* kind;   /* 'c' code, '/' comment, '"' string */
     int* depth;
+    int block_lines;  /* a block comment spans lines, or does not close */
 } PadBody;
 
 static int pad_classify(PadBody* b) {
@@ -244,10 +308,17 @@ static int pad_classify(PadBody* b) {
             continue;
         }
         if (c == '/' && i + 1 < b->n && b->s[i + 1] == '*') {
-            size_t j = i;
+            /* As the lexer reads one (skip_comment): the closing `*` and `/`
+             * are looked for after the opening pair, so `/*` followed by `/`
+             * is still open. */
+            b->kind[i] = '/'; b->depth[i] = depth;
+            b->kind[i + 1] = '/'; b->depth[i + 1] = depth;
+            size_t j = i + 2;
             while (j < b->n && !(b->s[j] == '*' && j + 1 < b->n && b->s[j + 1] == '/')) {
+                if (b->s[j] == '\n') b->block_lines = 1;
                 b->kind[j] = '/'; b->depth[j] = depth; j++;
             }
+            if (j >= b->n) b->block_lines = 1;   /* not closed inside the body */
             for (size_t k = j; k < j + 2 && k < b->n; k++) { b->kind[k] = '/'; b->depth[k] = depth; }
             i = j + 1;
             continue;
@@ -375,7 +446,7 @@ static char* pad_rewrite(const char* src, size_t len, int line, const char* name
     }
     if (open >= len) { *why = "its body was not found"; return NULL; }
     /* The matching brace, past strings and comments. */
-    PadBody all = { src + open + 1, len - open - 1, NULL, NULL };
+    PadBody all = { src + open + 1, len - open - 1, NULL, NULL, 0 };
     if (!pad_classify(&all)) { *why = "out of memory"; return NULL; }
     size_t close = (size_t)-1;
     for (size_t i = 0; i < all.n; i++)
@@ -384,7 +455,7 @@ static char* pad_rewrite(const char* src, size_t len, int line, const char* name
     free(all.depth);
     if (close == (size_t)-1) { *why = "its closing brace was not found"; return NULL; }
 
-    PadBody b = { src + open + 1, close, NULL, NULL };
+    PadBody b = { src + open + 1, close, NULL, NULL, 0 };
     size_t* s_at = (size_t*)calloc((size_t)n + 1, sizeof(size_t));
     size_t* e_at = (size_t*)calloc((size_t)n + 1, sizeof(size_t));
     size_t* sep_at = (size_t*)calloc((size_t)n + 1, sizeof(size_t));
@@ -396,6 +467,9 @@ static char* pad_rewrite(const char* src, size_t len, int line, const char* name
         *why = "out of memory";
         goto done;
     }
+    /* A block comment over several lines has no one field to go with, and
+     * cutting the body between fields would cut it too. */
+    if (b.block_lines) { *why = "a block comment spans lines"; goto done; }
     for (int i = 0; i < n; i++) {
         size_t from = i == 0 ? 0 : s_at[i - 1] + strlen(decl[i - 1]);
         s_at[i] = pad_find_field(&b, from, decl[i]);
@@ -451,6 +525,12 @@ static char* pad_rewrite(const char* src, size_t len, int line, const char* name
                 goto done;
             }
             v_at[i] = pad_line_end(&b, e_at[i]);
+            /* `    c: int }`: moved up, that line would put the next field on
+             * the same line as this one. */
+            if (v_at[i] == b.n && (b.n == 0 || b.s[b.n - 1] != '\n')) {
+                *why = "a field shares its line with the closing brace";
+                goto done;
+            }
             size_t after = sep_at[i] != (size_t)-1 ? sep_at[i] + 1 : e_at[i];
             if (!pad_only_comments(&b, after, v_at[i])) { *why = "two fields share a line"; goto done; }
         }
@@ -540,93 +620,270 @@ static int pad_index_of(char** names, int n, const char* name) {
     return -1;
 }
 
-/* `--fix` on one file: the compiler's plan, then each struct rewritten.
- * The file is compiled again afterwards; a rewrite that does not compile is
- * undone. */
-static int pad_fix_file(const char* path, const PadOpts* o, int* fixed) {
+/* ---- --fix over the whole run ---- */
+
+/* What one file's plan (`aetherc --emit=layout --layout-plan`) says:
+ * whether the file is a program, which files' declarations it sees, and
+ * its proposed rewrites; its refusals go to the run's list. */
+typedef struct {
+    char* path;       /* as walked */
+    char* canon;
+    char* plan;       /* NULL when the file does not compile */
+    int has_main;
+    char** uses;      /* canonical paths of the files it imports */
+    int nuses;
+} PadPlan;
+
+typedef struct {
+    char* canon;      /* the file that declares the struct */
+    char* name;
+    char* reason;
+    const char* from; /* the file whose plan refused it */
+} PadRefusal;
+
+typedef struct {
+    PadPlan* plans;
+    int nplans;
+    PadRefusal* refs;
+    int nrefs;
+    int refcap;
+} PadRun;
+
+/* The next line of `*cur` (cut in place, '\r' dropped), or NULL. */
+static char* pad_next_line(char** cur) {
+    char* line = *cur;
+    if (!line || !*line) return NULL;
+    char* nl = strchr(line, '\n');
+    if (nl) { *nl = '\0'; *cur = nl + 1; } else { *cur = line + strlen(line); }
+    size_t ll = strlen(line);
+    if (ll && line[ll - 1] == '\r') line[ll - 1] = '\0';
+    return line;
+}
+
+/* Splits a tab-separated line in place into at most `cap` fields. */
+static int pad_tabs(char* line, char** f, int cap) {
+    int n = 0;
+    while (n < cap) {
+        f[n++] = line;
+        char* tab = strchr(line, '\t');
+        if (!tab) break;
+        *tab = '\0';
+        line = tab + 1;
+    }
+    return n;
+}
+
+/* Phase one: every file's plan, and every struct any of them refuses. */
+static void pad_plan_run(PadRun* run, const PadList* files, const PadOpts* o, int* bad) {
     char flags[600];
     snprintf(flags, sizeof(flags), "--emit=layout --layout-plan%s", o->layout_flags);
-    char* plan = NULL;
-    if (aetherc_capture_stdout_whole(flags, path, NULL, &plan) != 0) {
-        fprintf(stderr, "ae pad: %s does not compile; nothing rewritten\n", path);
-        free(plan);
+    run->plans = (PadPlan*)calloc((size_t)(files->n > 0 ? files->n : 1), sizeof(PadPlan));
+    if (!run->plans) return;
+    run->nplans = files->n;
+    for (int i = 0; i < files->n; i++) {
+        PadPlan* p = &run->plans[i];
+        p->path = files->v[i];
+        p->canon = pad_canon(p->path);
+        char* text = NULL;
+        if (aetherc_capture_stdout_whole(flags, p->path, NULL, &text) != 0) {
+            fprintf(stderr, "ae pad: %s does not compile; nothing rewritten\n", p->path);
+            free(text);
+            *bad = 1;
+            continue;
+        }
+        p->plan = text;
+        char* copy = strdup(text);
+        char* cur = copy;
+        char* line;
+        while (copy && (line = pad_next_line(&cur)) != NULL) {
+            char* f[4];
+            int nf = pad_tabs(line, f, 4);
+            if (nf >= 3 && strcmp(f[0], "file") == 0) {
+                p->has_main = atoi(f[2]);
+            } else if (nf >= 2 && strcmp(f[0], "uses") == 0) {
+                char** nv = (char**)realloc(p->uses, (size_t)(p->nuses + 1) * sizeof(char*));
+                if (!nv) continue;
+                p->uses = nv;
+                p->uses[p->nuses++] = pad_canon(f[1]);
+            } else if (nf == 4 && strcmp(f[0], "refuse") == 0) {
+                if (run->nrefs == run->refcap) {
+                    int cap = run->refcap ? run->refcap * 2 : 64;
+                    PadRefusal* nr = (PadRefusal*)realloc(run->refs, (size_t)cap * sizeof(PadRefusal));
+                    if (!nr) continue;
+                    run->refs = nr;
+                    run->refcap = cap;
+                }
+                PadRefusal* r = &run->refs[run->nrefs++];
+                r->canon = pad_canon(f[1]);
+                r->name = strdup(f[2]);
+                r->reason = strdup(f[3]);
+                r->from = p->path;
+            }
+        }
+        free(copy);
+    }
+}
+
+static void pad_run_free(PadRun* run) {
+    for (int i = 0; i < run->nplans; i++) {
+        PadPlan* p = &run->plans[i];
+        free(p->canon);
+        free(p->plan);
+        for (int k = 0; k < p->nuses; k++) free(p->uses[k]);
+        free(p->uses);
+    }
+    free(run->plans);
+    for (int i = 0; i < run->nrefs; i++) {
+        free(run->refs[i].canon);
+        free(run->refs[i].name);
+        free(run->refs[i].reason);
+    }
+    free(run->refs);
+}
+
+/* Whether plan `j` imports the file `canon`. */
+static int pad_plan_uses(const PadPlan* p, const char* canon) {
+    for (int k = 0; k < p->nuses; k++)
+        if (strcmp(p->uses[k], canon) == 0) return 1;
+    return 0;
+}
+
+/* Why no rewrite of struct `name` in plan `p`'s file may stand, from what
+ * the other files of the run see; NULL when none says so. `from` gets the
+ * file that refused it. */
+static const char* pad_run_refusal(const PadRun* run, const PadPlan* p, const char* name,
+                                   const char** from) {
+    for (int i = 0; i < run->nrefs; i++) {
+        const PadRefusal* r = &run->refs[i];
+        if (strcmp(r->name, name) == 0 && strcmp(r->canon, p->canon) == 0) {
+            *from = r->from;
+            return r->reason;
+        }
+    }
+    if (!p->has_main) {
+        for (int j = 0; j < run->nplans; j++)
+            if (run->plans[j].plan && run->plans[j].has_main && pad_plan_uses(&run->plans[j], p->canon))
+                return NULL;
+        *from = NULL;
+        return "a module's users outside this run are not known (no program in the run imports it)";
+    }
+    return NULL;
+}
+
+/* Phase two on one file: the rewrites its plan proposes that no file of the
+ * run refuses. The file and every program of the run that imports it are
+ * compiled again afterwards; when one does not, the file is put back. Only
+ * rewrites that stand are reported and counted. */
+static int pad_fix_file(PadRun* run, int idx, const PadOpts* o, int* fixed) {
+    PadPlan* p = &run->plans[idx];
+    const char* path = p->path;
+    if (!p->plan || !strstr(p->plan, "fix\t")) return 0;
+    if (pad_is_link(path)) {
+        fprintf(stderr, "ae pad: %s is a symbolic link; --fix rewrites the file it names, not "
+                        "the link\n", path);
         return 1;
     }
-    if (!strstr(plan, "fix\t")) { free(plan); return 0; }
     size_t len = 0;
     char* src = pad_read_file(path, &len);
-    if (!src) { fprintf(stderr, "ae pad: cannot read %s\n", path); free(plan); return 1; }
+    if (!src) { fprintf(stderr, "ae pad: cannot read %s\n", path); return 1; }
+    if (memchr(src, '\0', len)) {
+        fprintf(stderr, "ae pad: %s holds a NUL byte; nothing rewritten\n", path);
+        free(src);
+        return 1;
+    }
     char* orig = (char*)malloc(len + 1);
-    if (!orig) { free(src); free(plan); return 1; }
+    if (!orig) { free(src); return 1; }
     memcpy(orig, src, len + 1);
     size_t orig_len = len;
-    int rc = 0, changed = 0;
-    char* line = plan;
-    while (line && *line) {
-        char* next = strchr(line, '\n');
-        if (next) *next++ = '\0';
-        size_t ll = strlen(line);
-        if (ll && line[ll - 1] == '\r') line[ll - 1] = '\0';
+    int rc = 0, pending = 0;
+    PadBuf done_msgs = { NULL, 0, 0 };
+    char* copy = strdup(p->plan);
+    char* cur = copy;
+    char* line;
+    while (copy && (line = pad_next_line(&cur)) != NULL) {
         /* fix <file> <line> <column> <name> <size> <new size> <fields> <order> */
         char* f[9];
-        int nf = 0;
-        if (strncmp(line, "fix\t", 4) == 0) {
-            char* p = line;
-            while (nf < 9) {
-                f[nf++] = p;
-                char* tab = strchr(p, '\t');
-                if (!tab) break;
-                *tab = '\0';
-                p = tab + 1;
-            }
+        if (strncmp(line, "fix\t", 4) != 0 || pad_tabs(line, f, 9) != 9) continue;
+        int sline = atoi(f[2]);
+        const char* name = f[4];
+        const char* from = NULL;
+        const char* refused = pad_run_refusal(run, p, name, &from);
+        if (refused) {
+            printf("%s:%d: struct %s not rewritten: %s%s%s%s\n", path, sline, name, refused,
+                   from ? " (seen from " : "", from ? from : "", from ? ")" : "");
+            continue;
         }
-        if (nf == 9) {
-            int sline = atoi(f[2]);
-            const char* name = f[4];
-            char* decl[1024];
-            char* sugn[1024];
-            int nd = pad_split(f[7], decl, 1024);
-            int ns = pad_split(f[8], sugn, 1024);
-            int* sug = (int*)malloc((size_t)(nd > 0 ? nd : 1) * sizeof(int));
-            int ok = sug && nd == ns && nd > 0;
-            for (int i = 0; ok && i < ns; i++) {
-                sug[i] = pad_index_of(decl, nd, sugn[i]);
-                if (sug[i] < 0) ok = 0;
-            }
-            const char* why = "the compiler's plan does not name its fields";
-            char* out = ok ? pad_rewrite(src, len, sline, name, decl, sug, nd, &why) : NULL;
-            if (out) {
-                free(src);
-                src = out;
-                len = strlen(src);
-                changed = 1;
-                (*fixed)++;
-                printf("%s:%d: struct %s reordered to ", path, sline, name);
-                for (int i = 0; i < ns; i++) printf("%s%s", i ? ", " : "", sugn[i]);
-                printf(" (%s -> %s bytes)\n", f[5], f[6]);
-            } else {
-                fprintf(stderr, "ae pad: %s:%d: struct %s left as it is: %s\n", path, sline,
-                        name, why);
-                rc = 1;
-            }
-            free(sug);
+        char* decl[1024];
+        char* sugn[1024];
+        int nd = pad_split(f[7], decl, 1024);
+        int ns = pad_split(f[8], sugn, 1024);
+        int* sug = (int*)malloc((size_t)(nd > 0 ? nd : 1) * sizeof(int));
+        int ok = sug && nd == ns && nd > 0;
+        for (int i = 0; ok && i < ns; i++) {
+            sug[i] = pad_index_of(decl, nd, sugn[i]);
+            if (sug[i] < 0) ok = 0;
         }
-        line = next;
+        const char* why = "the compiler's plan does not name its fields";
+        char* out = ok ? pad_rewrite(src, len, sline, name, decl, sug, nd, &why) : NULL;
+        if (out) {
+            free(src);
+            src = out;
+            len = strlen(src);
+            pending++;
+            char msg[2048];
+            int m = snprintf(msg, sizeof(msg), "%s:%d: struct %s reordered to ", path, sline, name);
+            for (int i = 0; i < ns && m > 0 && (size_t)m < sizeof(msg); i++)
+                m += snprintf(msg + m, sizeof(msg) - (size_t)m, "%s%s", i ? ", " : "", sugn[i]);
+            if (m > 0 && (size_t)m < sizeof(msg))
+                snprintf(msg + m, sizeof(msg) - (size_t)m, " (%s -> %s bytes)\n", f[5], f[6]);
+            pad_put(&done_msgs, msg, strlen(msg));
+        } else {
+            fprintf(stderr, "ae pad: %s:%d: struct %s left as it is: %s\n", path, sline, name, why);
+            rc = 1;
+        }
+        free(sug);
     }
-    free(plan);
-    plan = NULL;
-    if (changed) {
+    free(copy);
+    if (pending > 0) {
+        char flags[600];
+        snprintf(flags, sizeof(flags), "--emit=layout --layout-plan%s", o->layout_flags);
+        int broke = 0;
         if (pad_write_file(path, src, len) != 0) {
-            fprintf(stderr, "ae pad: cannot write %s\n", path);
+            fprintf(stderr, "ae pad: cannot write %s; nothing rewritten\n", path);
             rc = 1;
-        } else if (aetherc_capture_stdout_whole(flags, path, NULL, &plan) != 0) {
-            /* Never leave a file that stopped compiling. */
-            fprintf(stderr, "ae pad: %s does not compile after the rewrite; it is restored\n", path);
-            pad_write_file(path, orig, orig_len);
-            rc = 1;
+            pending = 0;
+        } else {
+            /* Never leave the run with a file that stopped compiling: this
+             * one, or a program of the run built from it. */
+            const char* which = NULL;
+            char* text = NULL;
+            if (aetherc_capture_stdout_whole(flags, path, NULL, &text) != 0) which = path;
+            free(text);
+            for (int j = 0; j < run->nplans && !which; j++) {
+                PadPlan* q = &run->plans[j];
+                if (j == idx || !q->plan || !q->has_main || !pad_plan_uses(q, p->canon)) continue;
+                text = NULL;
+                if (aetherc_capture_stdout_whole(flags, q->path, NULL, &text) != 0) which = q->path;
+                free(text);
+            }
+            if (which) {
+                broke = 1;
+                rc = 1;
+                if (pad_write_file(path, orig, orig_len) != 0)
+                    fprintf(stderr, "ae pad: %s does not compile after the rewrite of %s, and %s "
+                                    "could not be put back: it holds the rewrite\n",
+                            which, path, path);
+                else
+                    fprintf(stderr, "ae pad: %s does not compile after the rewrite of %s; %s is "
+                                    "put back as it was\n", which, path, path);
+            }
         }
-        free(plan);
+        if (!broke && pending > 0) {
+            if (done_msgs.s) fputs(done_msgs.s, stdout);
+            *fixed += pending;
+        }
     }
+    free(done_msgs.s);
     free(src);
     free(orig);
     return rc;
@@ -731,6 +988,12 @@ int cmd_pad(int argc, char** argv) {
                         "--ptr=4|8, not --target=\n");
         return 2;
     }
+    if (o.json && (o.fix || o.verify)) {
+        /* Their lines are text; mixed into the JSON they would break it. */
+        fprintf(stderr, "ae pad: --json is the report alone; run --fix and --verify without "
+                        "it (--json --min-waste=N is a JSON report with the gate)\n");
+        return 2;
+    }
     if (paths.n == 0) {
         if (path_exists("aether.toml") && path_exists("src")) {
             pad_list_add(&paths, "src");
@@ -753,11 +1016,21 @@ int cmd_pad(int argc, char** argv) {
     int fixed = 0, asserts = 0, verified = 0;
     char flags[600];
     snprintf(flags, sizeof(flags), "--emit=layout%s%s", o.json ? " --json" : "", o.layout_flags);
+    if (o.fix) {
+        /* Two phases: what every file of the run refuses is known before
+         * any file is rewritten, so a module's struct that a program of the
+         * run hands to C stays as it is. */
+        PadRun run;
+        memset(&run, 0, sizeof(run));
+        pad_plan_run(&run, &files, &o, &bad);
+        for (int i = 0; i < run.nplans; i++)
+            if (pad_fix_file(&run, i, &o, &fixed) != 0) bad = 1;
+        pad_run_free(&run);
+    }
     if (report && o.json) printf("{\"files\": [");
     int first = 1;
     for (int i = 0; i < files.n; i++) {
         const char* path = files.v[i];
-        if (o.fix && pad_fix_file(path, &o, &fixed) != 0) bad = 1;
         if (o.verify) {
             if (pad_verify_file(path, &o, &asserts) != 0) bad = 1;
             else verified++;
