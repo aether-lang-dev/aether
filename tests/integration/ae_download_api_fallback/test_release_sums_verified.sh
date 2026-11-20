@@ -36,9 +36,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/portable.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
+. "$ROOT/tests/lib/sweep_timeout.sh"
 AE="$ROOT/build/ae"
 [ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT"
 NAME=release_sums_verified
+# Each install is bounded, so one that hangs fails by its case instead of
+# the whole test being killed with nothing said (macOS, CI).
+sweep_timeout_bound AE_TIMEOUT "$ROOT" 90
 
 [ -x "$AE" ] || [ -x "$AE.exe" ] || { echo "  [SKIP] $NAME: ae not built"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "  [SKIP] $NAME: python3 needed for the mock"; exit 0; }
@@ -208,8 +212,9 @@ start_mock() {   # $1 = mode
 }
 
 run_install() {   # $1 = case name
+    echo "    case $1"
     H="$TMP/home_$1"; mkdir -p "$H"
-    ( env -u GITHUB_TOKEN -u GH_TOKEN PATH="$RUN_PATH" HOME="$H" USERPROFILE="$(native_path "$H")" \
+    ( $AE_TIMEOUT env -u GITHUB_TOKEN -u GH_TOKEN PATH="$RUN_PATH" HOME="$H" USERPROFILE="$(native_path "$H")" \
         AE_GITHUB_WEB_BASE="$BASE" AE_GITHUB_API_BASE="$BASE" \
         "$AE" version install "$TAG" ) >"$TMP/$1.log" 2>&1
 }
