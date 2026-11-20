@@ -409,7 +409,7 @@ static int gh_download_via_api(const char* owner, const char* repo, const char* 
  * job fails a release that disagrees with it. Equal to SIGNED_SINCE in
  * get.sh and signed_since in scripts/verify-release-asset.sh
  * (tests/scripts/check_signing_floor.sh, in make check-tests). */
-#define AE_SIGNED_SINCE "0.926.0"
+#define AE_SIGNED_SINCE "0.927.0"
 
 /* The first three numbers of a version ("v" optional, anything after the
  * third ignored) into v[3]. 0 when it does not start X.Y.Z. */

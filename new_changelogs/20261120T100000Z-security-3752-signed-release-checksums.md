@@ -11,7 +11,7 @@
   release workflow run from main or from the release's own tag, and no
   other ref. `SHA256SUMS` is fetched from the release URL, so a spent
   API rate limit no longer blocks an install of a signed release. Releases
-  from before 0.926.0, the first signed one, are checked by GitHub's
+  from before 0.927.0, the first signed one, are checked by GitHub's
   digest, as before; one at or above it without `SHA256SUMS`, or without
   its signature when `cosign` is installed, is refused, so whoever can edit
   a release cannot delete them and have its archive taken on the digest

@@ -58,7 +58,7 @@ REPO="aether-lang-dev/aether"
 # job fails a release that disagrees with it. Equal to AE_SIGNED_SINCE in
 # tools/ae_version.c and signed_since in scripts/verify-release-asset.sh
 # (tests/scripts/check_signing_floor.sh, in make check-tests).
-SIGNED_SINCE="0.926.0"
+SIGNED_SINCE="0.927.0"
 PREFIX="${PREFIX:-$HOME/.local}"
 CC="${CC:-cc}"
 FROM_SOURCE="${AETHER_FROM_SOURCE:-0}"

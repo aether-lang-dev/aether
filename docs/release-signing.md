@@ -62,7 +62,7 @@ against the sha256 digest GitHub's API lists (#3748), as before, and the
 installer says that the release predates signed checksums. Every older version
 still installs.
 
-Which releases those are is fixed by the **signing floor**, 0.926.0, the first
+Which releases those are is fixed by the **signing floor**, 0.927.0, the first
 release published by a `release.yml` with the `sign` job. A release at or above
 it without `SHA256SUMS` is refused, and so is one without
 `SHA256SUMS.sigstore.json` when `cosign` is installed: whether a release is

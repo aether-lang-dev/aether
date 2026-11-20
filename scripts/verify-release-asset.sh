@@ -31,7 +31,7 @@ set -eu
 # release that disagrees with it. Equal to SIGNED_SINCE in get.sh and
 # AE_SIGNED_SINCE in tools/ae_version.c (tests/scripts/check_signing_floor.sh,
 # in make check-tests).
-signed_since=0.926.0
+signed_since=0.927.0
 
 [ $# -eq 3 ] || { echo "usage: $0 REPO TAG FILE" >&2; exit 2; }
 repo="$1"; tag="$2"; file="$3"
