@@ -119,5 +119,7 @@ main() {
         "3c2100000000000000115d5d3e3c612f3e")
     hex_seed(dir, "crash_text_del",
         "3c613e266c743b622667743b2022616dffffffffffffffffffff7fcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfc7cfcfcfcfcfcfcfcfcfcf286c696e6520cfcfcfcfcfcfcfcfcfcfcf2f3ecfcfcfcfcfcfcfcfcfcf2f613e")
+    hex_seed(dir, "crash_message_quotes_line",
+        "3c6120783d22300a792220286c696e6520200a0d3d22093c792220286c696e6520200a0d3d22093c636f")
     seed(dir, "name_quote_amp", "<a><b\"c/><d&e/></a>")
 }

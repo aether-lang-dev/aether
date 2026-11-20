@@ -181,7 +181,11 @@ static void read_doc(const char* data, size_t len, Trace* t) {
         } else {
             const char* msg = xml_parser_error(p);
             CHECK(msg && *msg, "an error with no message");
-            const char* at = strstr(msg, "(line ");
+            /* The position ends the message, so it is the last "(line ": the
+             * message may quote a name of the document's own that holds the
+             * same text ("attribute (line appears twice ..."). */
+            const char* at = NULL;
+            for (const char* s = strstr(msg, "(line "); s; s = strstr(s + 1, "(line ")) at = s;
             unsigned long line = 0, col = 0, byte = 0;
             CHECK(at && sscanf(at, "(line %lu, column %lu, byte %lu)", &line, &col, &byte) == 3,
                   "the message '%s' does not say where", msg);
