@@ -53,8 +53,10 @@ import std.string
 exports(
     runtime, dispose, last_error, handles, memory_used,
     now_ns, set_deadline_ns, clear_deadline, deadline_ns, set_cancel_cell, set_stop_cell,
+    set_poll_budget, clear_poll_budget, poll_budget,
     interrupted, clear_interrupted,
-    INTERRUPTED_NONE, INTERRUPTED_DEADLINE, INTERRUPTED_CANCEL, INTERRUPTED_STOP,
+    INTERRUPTED_NONE, INTERRUPTED_DEADLINE, INTERRUPTED_CANCEL, INTERRUPTED_STOP, INTERRUPTED_BUDGET,
+    last_exception,
     eval, eval_async, eval_module, call, run_jobs,
     function, throw_error, rethrow, set_global, get_global,
     release, dup, global, new_undefined, new_null, new_bool, new_int, new_float, new_string, new_object, new_array,
@@ -73,6 +75,9 @@ extern qjs_set_deadline_ns(q: ptr, ns: long)
 extern qjs_deadline_ns(q: ptr) -> long
 extern qjs_set_cancel_cell(q: ptr, cell: ptr)
 extern qjs_set_stop_cell(q: ptr, cell: ptr)
+extern qjs_set_poll_budget(q: ptr, polls: long)
+extern qjs_poll_budget(q: ptr) -> long
+extern qjs_last_exception(q: ptr) -> int
 extern qjs_interrupted(q: ptr) -> int
 extern qjs_clear_interrupted(q: ptr)
 extern qjs_error_data(q: ptr) -> ptr
@@ -135,9 +140,11 @@ dispose(q: ptr) { qjs_free(q) }
 // meets one is stopped with "InternalError: interrupted", which a script
 // cannot catch, whatever entered it: an eval, a call, run_jobs, or a
 // conversion that runs a getter, valueOf or toString (to_string, to_int,
-// get, ...). The runtime stays usable. QuickJS checks every few thousand
-// operations, so a busy loop stops within microseconds of a cell being set;
-// a single long native call (a huge regexp, say) is not interrupted midway.
+// get, ...). The runtime stays usable. QuickJS checks every 10,000 counted
+// steps (set_poll_budget says which), so a busy loop stops within
+// microseconds of a cell being set; a regexp checks on its own counter, so a
+// runaway one is stopped too. One long native call that does not iterate in
+// the engine (a huge String.prototype.repeat, say) is not interrupted midway.
 //
 // Threads: the cells may be set from any thread (Esc, SIGINT, a watchdog);
 // they are read with an acquire load. Everything else here, the deadline
@@ -148,6 +155,7 @@ const INTERRUPTED_NONE = 0
 const INTERRUPTED_DEADLINE = 1
 const INTERRUPTED_CANCEL = 2
 const INTERRUPTED_STOP = 3
+const INTERRUPTED_BUDGET = 4
 
 // Monotonic nanoseconds, the clock set_deadline_ns is on: the same clock as
 // std.os's now_monotonic_ns (CLOCK_MONOTONIC; QueryPerformanceCounter on
@@ -179,11 +187,34 @@ set_cancel_cell(q: ptr, cell: ptr) { qjs_set_cancel_cell(q, cell) }
 // cell is.
 set_stop_cell(q: ptr, cell: ptr) { qjs_set_stop_cell(q, cell) }
 
+// A budget of work rather than time: stop JavaScript after `polls` more of
+// the engine's interrupt polls, in this entry and every later one, until the
+// host sets it again or calls clear_poll_budget. quickjs-ng polls once every
+// 10,000 counted steps, where a step is a JavaScript function call, a jump
+// the interpreter takes or tests (each loop iteration, each `if`), an element
+// step of an iterating built-in (Array.prototype.find, map, sort, ...) or a
+// step of a proxy chain; a regexp polls once every 10,000 of its own
+// backtracking steps. So a budget of n stops JavaScript at its nth poll from
+// now, after between (n - 1) * 10000 and n * 10000 counted steps (exactly
+// (n - 1) * 10000 in a fresh runtime, which polls at its first step), the
+// same on a fast machine and a slow one. Straight-line code with no call or
+// jump is not counted, and is finite. Stopped as for the deadline
+// ("InternalError: interrupted"), reported as INTERRUPTED_BUDGET. 0 means
+// spent (the next poll stops); a negative value is no budget.
+set_poll_budget(q: ptr, polls: long) { qjs_set_poll_budget(q, polls) }
+
+// No poll budget.
+clear_poll_budget(q: ptr) { qjs_set_poll_budget(q, -1 as long) }
+
+// The polls left of the budget: 0 when it is spent, -1 when there is none.
+poll_budget(q: ptr) -> long { return qjs_poll_budget(q) }
+
 // Why JavaScript was first stopped since the runtime was made or
 // clear_interrupted: INTERRUPTED_NONE (0), INTERRUPTED_DEADLINE (1),
-// INTERRUPTED_CANCEL (2) or INTERRUPTED_STOP (3). When several hold at once
-// a cancel is reported over a deadline, and both over a stop. It stays put
-// while the host reads errors and values afterwards.
+// INTERRUPTED_CANCEL (2), INTERRUPTED_STOP (3) or INTERRUPTED_BUDGET (4).
+// When several hold at once a cancel is reported over a deadline, a deadline
+// over a spent budget, and all three over a stop. It stays put while the
+// host reads errors and values afterwards.
 interrupted(q: ptr) -> int { return qjs_interrupted(q) }
 
 // Forget the reason, before reusing the runtime for the next piece of work.
@@ -197,6 +228,18 @@ clear_interrupted(q: ptr) { qjs_clear_interrupted(q) }
 // cannot be split back into message and stack reliably; last_exception gives
 // the value to read them from.
 last_error(q: ptr) -> string { return err_(q) }
+
+// The value the last failure threw (an eval, eval_async, eval_module, call,
+// run_jobs, parse_json, or a conversion that ran JavaScript), as a NEW handle:
+// the caller releases it (or returns it from a host function, which hands it
+// to the engine; dispose frees it otherwise). Read the parts from it:
+// get(q, e, "message"), get(q, e, "name"), get(q, e, "stack") for an Error;
+// a thrown 42 is 42. A later failure does not change a handle already taken,
+// only what the next call returns. 0 when the last failure had no value
+// behind it: the host's own refusal ("TypeError: not a function", a filename
+// holding a NUL) or a heap too full to make the error. last_error is the same
+// failure as text. Runs no JavaScript.
+last_exception(q: ptr) -> int { return qjs_last_exception(q) }
 
 // The last failure's text, by its length (qjs_error_data holds NULs too).
 err_(q: ptr) -> string { return string_new_with_length(qjs_error_data(q), qjs_error_len(q)) }

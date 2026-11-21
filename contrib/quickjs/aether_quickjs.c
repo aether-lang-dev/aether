@@ -43,8 +43,8 @@
  *
  * Interrupts are the host's: each runtime holds an absolute deadline on the
  * monotonic clock (qjs_now_ns), which the host sets and moves itself and
- * which no entry resets, and up to two std.sync cells, cancel and stop, that
- * any thread may set. QuickJS polls interrupt_ while JavaScript runs, on the
+ * which no entry resets, a budget of interrupt polls (work, not time), and up
+ * to two std.sync cells, cancel and stop, that any thread may set. QuickJS polls interrupt_ while JavaScript runs, on the
  * runtime's own thread; it reads only this runtime's fields, the cells with
  * an acquire load. There is no process-wide state.
  */
@@ -70,7 +70,8 @@ extern void aether_closure_env_free(void *env);
 extern int64_t aether_sync_atomic_load(void *cell);
 
 /* qjs_interrupted's answers: why JavaScript was stopped. */
-enum { QJS_INTERRUPT_NONE = 0, QJS_INTERRUPT_DEADLINE = 1, QJS_INTERRUPT_CANCEL = 2, QJS_INTERRUPT_STOP = 3 };
+enum { QJS_INTERRUPT_NONE = 0, QJS_INTERRUPT_DEADLINE = 1, QJS_INTERRUPT_CANCEL = 2, QJS_INTERRUPT_STOP = 3,
+       QJS_INTERRUPT_BUDGET = 4 };
 
 typedef struct AeQjs {
     JSRuntime *rt;
@@ -86,6 +87,7 @@ typedef struct AeQjs {
     int64_t deadline_ns;    /* absolute, on qjs_now_ns's clock; 0 = none */
     void *cancel_cell;      /* std.sync cell, the host's; nonzero stops JS */
     void *stop_cell;        /* likewise, reported apart from a cancel */
+    int64_t budget;         /* interrupt polls left; -1 = no budget */
     int interrupted;        /* the first QJS_INTERRUPT_* since cleared */
     char *err;              /* the last exception, as text (NUL-terminated, may hold NULs) */
     size_t err_len;         /* ... and its byte count */
@@ -111,15 +113,28 @@ int64_t qjs_now_ns(void) {
 #endif
 }
 
-/* QuickJS's interrupt poll (every few thousand operations, on the thread
- * running the JavaScript). A cancel is reported over a passed deadline, and
- * both over a stop; the first reason sticks until qjs_clear_interrupted. */
+/* QuickJS's interrupt poll, on the thread running the JavaScript. quickjs-ng
+ * (0.18.0) calls it when its per-context counter, JS_INTERRUPT_COUNTER_INIT
+ * (10000), runs out: the counter is decremented at every JavaScript function
+ * call, every jump the interpreter takes or tests (a loop's back edge, an
+ * `if`), every element step of the built-ins that iterate (Array.prototype's
+ * find, map, sort, ...) and every step of a proxy chain; the regexp engine
+ * polls on its own counter of 10000 backtracking steps. Each call here spends
+ * one of the poll budget's polls. A cancel is reported over a passed deadline,
+ * a deadline over a spent budget, and all three over a stop; the first reason
+ * sticks until qjs_clear_interrupted. */
 static int interrupt_(JSContext *ctx, void *opaque) {
     AeQjs *q = (AeQjs *)opaque;
     int why = QJS_INTERRUPT_NONE;
+    int spent = 0;
     (void)ctx;
+    if (q->budget >= 0) {
+        if (q->budget > 0) q->budget--;
+        spent = q->budget == 0;
+    }
     if (q->cancel_cell && aether_sync_atomic_load(q->cancel_cell) != 0) why = QJS_INTERRUPT_CANCEL;
     else if (q->deadline_ns != 0 && qjs_now_ns() >= q->deadline_ns) why = QJS_INTERRUPT_DEADLINE;
+    else if (spent) why = QJS_INTERRUPT_BUDGET;
     else if (q->stop_cell && aether_sync_atomic_load(q->stop_cell) != 0) why = QJS_INTERRUPT_STOP;
     if (why == QJS_INTERRUPT_NONE) return 0;
     if (q->interrupted == QJS_INTERRUPT_NONE) q->interrupted = why;
@@ -315,6 +330,7 @@ void *qjs_new(int memory_kb, int stack_kb) {
     q->ctx = JS_NewContext(q->rt);
     if (!q->ctx) { JS_FreeRuntime(q->rt); free(q); return NULL; }
     JS_SetContextOpaque(q->ctx, q);
+    q->budget = -1;
     q->err = strdup("");
     return q;
 }
@@ -350,6 +366,16 @@ int64_t qjs_deadline_ns(void *qp) { return ((AeQjs *)qp)->deadline_ns; }
 void qjs_set_cancel_cell(void *qp, void *cell) { ((AeQjs *)qp)->cancel_cell = cell; }
 void qjs_set_stop_cell(void *qp, void *cell) { ((AeQjs *)qp)->stop_cell = cell; }
 
+/* A budget of interrupt polls: each poll spends one, and the poll that leaves
+ * none stops JavaScript (QJS_INTERRUPT_BUDGET), in this entry and every later
+ * one, until the host sets it again or clears it (-1). A budget of n stops
+ * JavaScript at its nth poll from now: after between (n - 1) * 10000 and
+ * n * 10000 of the counted steps interrupt_ describes (a fresh runtime polls
+ * at its first step, so exactly (n - 1) * 10000 then). 0 is spent: the next
+ * poll stops. Below 0, no budget. Set by the runtime's thread. */
+void qjs_set_poll_budget(void *qp, int64_t polls) { ((AeQjs *)qp)->budget = polls < 0 ? -1 : polls; }
+int64_t qjs_poll_budget(void *qp) { return ((AeQjs *)qp)->budget; }
+
 /* Why JavaScript was first interrupted since the last clear: a QJS_INTERRUPT_*. */
 int qjs_interrupted(void *qp) { return ((AeQjs *)qp)->interrupted; }
 void qjs_clear_interrupted(void *qp) { ((AeQjs *)qp)->interrupted = QJS_INTERRUPT_NONE; }
@@ -361,6 +387,17 @@ int qjs_error_len(void *qp) {
     AeQjs *q = (AeQjs *)qp;
     if (!q || !q->err) return 0;
     return q->err_len > (size_t)0x7fffffff ? 0x7fffffff : (int)q->err_len;
+}
+
+/* The value the last failure threw (an eval, call, run_jobs or conversion),
+ * as a NEW handle the caller releases; it stays valid after later failures,
+ * which only change what the next call returns. 0 when the last failure had
+ * no value behind it: a host-side refusal (set_err_), or a heap too full to
+ * make the error. Runs no JavaScript. */
+int qjs_last_exception(void *qp) {
+    AeQjs *q = (AeQjs *)qp;
+    if (!q || !q->has_exc) return 0;
+    return put_(q, JS_DupValue(q->ctx, q->exc));
 }
 
 /* Handles currently held: 0 once a host has released everything it took. */
