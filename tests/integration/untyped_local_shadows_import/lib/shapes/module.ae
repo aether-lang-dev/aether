@@ -1,0 +1,5 @@
+exports(LIMIT, width)
+
+const LIMIT = "limit"
+
+width(n: int) -> string { return "w${n}" }

@@ -293,6 +293,27 @@ main() {
 AE
 refused result_arm 2:30 "'f' returns int!, and this value is string, not int"
 
+# The shape that once returned a stale value (worked around in OpenDisk-ae's
+# native_capacity): an early `return 0, 0, 0` ahead of the real multi-value
+# return of 64-bit values. The result was typed from the first return, and
+# the 64-bit values were cut to it with no diagnostic. It is the narrowing
+# error now; the written result type that keeps them is
+# tests/regression/test_tuple_early_return_written_result.ae.
+cat > "$TMP/tuple_early_return.ae" <<'AE'
+total() -> long { return 245000000000 }
+
+capacity(ok: int) -> {
+    if ok != 1 { return 0, 0, 0 }
+    return total(), total(), 1
+}
+
+main() {
+    t, a, k = capacity(1)
+    println("${t} ${a} ${k}")
+}
+AE
+refused tuple_early_return 5:12 "narrowing return from 'capacity': its result type was inferred as int from its first \`return\`, but this \`return\` gives a 64-bit value"
+
 if [ "$fails" -ne 0 ]; then
     echo "  [FAIL] return_type_check: $fails case(s)"
     exit 1

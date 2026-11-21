@@ -1,0 +1,19 @@
+// The minimal repro, as found beside #3797: `f = list.get(xs, 0)` (a
+// (ptr, string) tuple the early inference pass cannot type on its first
+// walk) did not shadow the program's `const f`, so `g = f` was declared a
+// string and refused with E0200. The name records the bug; see
+// test_untyped_local_shadows_const.ae for the variants.
+
+const f = "text"
+import std.list
+blk(xs: ptr) -> int {
+    f = list.get(xs, 0)
+    g = f
+    return 1
+}
+main() {
+    xs = list.new()
+    list.add(xs, xs)
+    if blk(xs) != 1 { exit(1) }
+    println("ok")
+}

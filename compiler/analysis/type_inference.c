@@ -26,7 +26,7 @@ static const char* infer_dotted_as_c_name(const char* name) {
 }
 
 // Create inference context
-InferenceContext* create_inference_context(SymbolTable* table) {
+InferenceContext* create_inference_context(SymbolTable* table, const StrMap* module_vars) {
     InferenceContext* ctx = (InferenceContext*)malloc(sizeof(InferenceContext));
     ctx->constraints = NULL;
     ctx->constraint_count = 0;
@@ -37,6 +37,7 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->walk_id = 0;
     ctx->dsl_depth = 0;
     strmap_init(&ctx->hoist_joins);
+    ctx->module_vars = module_vars;
     return ctx;
 }
 
@@ -495,6 +496,62 @@ static void add_walk_symbol(InferenceContext* ctx, const char* name, Type* type)
     if (ctx->symbols->symbols) ctx->symbols->symbols->walk_id = ctx->walk_id;
 }
 
+/* The value module_var_names stores for a `var` of the program's own, which
+ * a module's code never reaches, and for a `var` of an imported module. */
+#define PROGRAM_OWN_VAR ((void*)1)
+#define MODULE_OWN_VAR  ((void*)2)
+
+/* Is `name` a module-level `var` that a bare binding of the name writes, in
+ * code merged from a module (`in_module`) or the program's own? A module's
+ * code never reaches the program's own vars, as the checker's lookup and
+ * codegen hide them from it (aether-ui
+ * asks/aether-program-global-leaks-into-module-scope.md): there the binding
+ * is the function's local. */
+static int var_reached(const StrMap* vars, const char* name, int in_module) {
+    if (!vars || !name || !strmap_has(vars, name)) return 0;
+    return !(in_module && strmap_get(vars, name) == PROGRAM_OWN_VAR);
+}
+
+static int names_module_var(InferenceContext* ctx, const char* name) {
+    return var_reached(ctx->module_vars, name, ctx->symbols && ctx->symbols->merged_from);
+}
+
+/* Is `node` a bare `name = value` that writes a module-level `var`: in a
+ * walk that has no binding of the name, of a name the program has a `var`
+ * of (the checker's rebound_global_var)? */
+static int writes_module_var(InferenceContext* ctx, ASTNode* node) {
+    if (!ctx->symbols || ctx->walk_id == 0 || node->type != AST_VARIABLE_DECLARATION ||
+        !node->type_inferred || !names_module_var(ctx, node->value))
+        return 0;
+    Symbol* existing = lookup_symbol_local(ctx->symbols, node->value);
+    return !(existing && rebindable_symbol(ctx, existing));
+}
+
+/* A binding in the walk whose value this pass cannot type yet (`f =
+ * list.get(xs, 0)`, `f = ctx.h5` through a pointer, a call whose result is
+ * inferred from its body) binds its name all the same, from here on, as the
+ * checker's scope does. It used to bind nothing until it was typed, so a
+ * read of the name fell through to whatever the program had of that name:
+ * with `const f = "text"` above, `g = f` declared `g` a string, the next
+ * pass could not retype `g`, and the checker refused `g = f` as a type
+ * mismatch (a local of an actor's, a struct's or a message's name was
+ * declared of that type the same way). The binding gets an entry of
+ * unknown type, so the read stays untyped until the binding is typed.
+ *
+ * Which binding a name gets follows the language's rule (the checker's
+ * rebound_global_var): a name the walk has bound already is that binding;
+ * a bare `name = value` of a module-level `var` writes the global, so its
+ * reads keep the global's entry; anything else is a new local of the walk,
+ * shadowing a constant, a function, a type or an import of the name. */
+static void bind_untyped_walk_local(InferenceContext* ctx, const char* name, int writes_module_var) {
+    if (!ctx->symbols || ctx->walk_id == 0 || !name || strcmp(name, "_") == 0) return;
+    Symbol* existing = lookup_symbol_local(ctx->symbols, name);
+    if (existing && rebindable_symbol(ctx, existing)) return;
+    if (writes_module_var && names_module_var(ctx, name)) return;
+    add_walk_symbol(ctx, name, create_type(TYPE_UNKNOWN));
+    ctx->symbols->symbols->inferred_in = ctx->scope_owner;
+}
+
 /* Walk ids are never reused, so a stamp left by an earlier pass over the
  * same function (whose symbols that pass's unwind removed anyway) can never
  * be mistaken for the current walk's. */
@@ -744,6 +801,26 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             if (node->child_count > 0) {
                 collect_constraints(node->children[0], ctx);
 
+                /* A bare `name = value` of a module-level `var`, in a walk
+                 * that has no binding of the name, writes the global: it is
+                 * no local, and it has the global's type, as a re-bind of a
+                 * local has the local's. It used to be entered as a local of
+                 * the value's type, so after `f = 2` on a `var f: float` the
+                 * read `g = f` declared `g` an int, and the 2.0 the global
+                 * held was cut to 2. A value the global's type does not take
+                 * as it is (a string into a `ptr` var, which C converts) keeps
+                 * the value's type and its local, as before, for the checker
+                 * to judge as it always has. */
+                if (writes_module_var(ctx, node) && is_type_inferrable(node->node_type)) {
+                    Symbol* global = lookup_symbol_local(ctx->symbols, node->value);
+                    Type* value = node->children[0]->node_type;
+                    if (global && global->type && global->type->kind != TYPE_UNKNOWN &&
+                        value && value->kind != TYPE_UNKNOWN && is_assignable(value, global->type)) {
+                        free_type(node->node_type);
+                        node->node_type = clone_type(global->type);
+                    }
+                }
+
                 // If declaration type is unknown, infer it from initializer
                 if (is_type_inferrable(node->node_type)) {
                     Type* init_type = node->children[0]->node_type;
@@ -767,6 +844,14 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                         }
                     }
                 }
+            }
+            /* Typed as the global above (on this pass or an earlier one): no
+             * local, so the reads that follow keep the global's entry. */
+            if (writes_module_var(ctx, node)) {
+                Symbol* global = lookup_symbol_local(ctx->symbols, node->value);
+                if (global && global->type && node->node_type &&
+                    types_equal(node->node_type, global->type))
+                    break;
             }
             /* #3064: the body's join of this name (below) reads it typed. */
             if (node->type == AST_VARIABLE_DECLARATION && node->value && ctx->scope_owner)
@@ -836,6 +921,8 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                     }
                     bound->inferred_closure = lit ? lit : &g_closure_disagrees;
                 }
+            } else if (node->value && node->type == AST_VARIABLE_DECLARATION) {
+                bind_untyped_walk_local(ctx, node->value, node->type_inferred);
             }
             break;
 
@@ -853,8 +940,17 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                 collect_constraints(rhs, ctx);
 
                 Type* rhs_type = rhs ? rhs->node_type : NULL;
-                if (rhs_type && rhs_type->kind == TYPE_TUPLE &&
-                    rhs_type->tuple_count == var_count) {
+                int typed_tuple = rhs_type && rhs_type->kind == TYPE_TUPLE &&
+                                  rhs_type->tuple_count == var_count;
+                /* A slot this pass cannot type yet still binds its name;
+                 * a slot of a module `var` writes the global. */
+                for (int j = 0; j < var_count; j++) {
+                    ASTNode* var = node->children[j];
+                    Type* slot = typed_tuple ? rhs_type->tuple_types[j] : NULL;
+                    if (var && (!slot || slot->kind == TYPE_UNKNOWN))
+                        bind_untyped_walk_local(ctx, var->value, 1);
+                }
+                if (typed_tuple) {
                     // Bind each lvalue's slot type onto the corresponding
                     // AST_VARIABLE_DECLARATION node and into the symbol table.
                     for (int j = 0; j < var_count; j++) {
@@ -869,7 +965,10 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                         if (var->value && strcmp(var->value, "_") != 0 && ctx->symbols) {
                             Symbol* existing = lookup_symbol_local(ctx->symbols, var->value);
                             if (existing && !rebindable_symbol(ctx, existing)) existing = NULL;
-                            if (existing) {
+                            /* A slot of a module `var` writes the global. */
+                            if (!existing && ctx->walk_id != 0 && names_module_var(ctx, var->value)) {
+                                continue;
+                            } else if (existing) {
                                 if (existing->type) free_type(existing->type);
                                 existing->type = clone_type(slot);
                             } else {
@@ -2181,7 +2280,45 @@ static void merge_tuple_returns(ASTNode* node, Type* merged) {
     }
 }
 
-void infer_function_return_types(ASTNode* program, SymbolTable* table) {
+/* Enter, in `scope`, every name a function binds itself under `n`: its
+ * locals, destructured slots, loop and pattern variables, not a nested
+ * closure's. A bare binding of a module `var` writes the global and binds
+ * nothing (bind_untyped_walk_local's rule). */
+static void add_own_bindings(ASTNode* n, SymbolTable* scope, const StrMap* module_vars,
+                             int in_module) {
+    if (!n || ast_is_own_function(n)) return;
+    if ((n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE) &&
+        n->value && strcmp(n->value, "_") != 0 && !lookup_symbol_local(scope, n->value)) {
+        int writes_global = n->type == AST_VARIABLE_DECLARATION && n->type_inferred &&
+                            var_reached(module_vars, n->value, in_module);
+        if (!writes_global) add_symbol(scope, n->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
+    }
+    for (int i = 0; i < n->child_count; i++)
+        add_own_bindings(n->children[i], scope, module_vars, in_module);
+}
+
+/* The scope a function's returns are typed in after its walk: the
+ * program's table beneath an entry of unknown type for each name the
+ * function binds itself. The walk's own symbols are unwound by then, so a
+ * `return f` the walk left untyped (`f` bound from a value it could not
+ * type yet, or an untyped parameter) was looked up in the program's table
+ * and took a constant's type, or anything else the program has of the
+ * name: the function returned a string. A name of the function's own is
+ * the function's, typed or not. */
+static SymbolTable* own_bindings_scope(ASTNode* fn, SymbolTable* table, const StrMap* module_vars) {
+    SymbolTable* scope = create_symbol_table(table);
+    int body_index = fn->child_count - 1;
+    for (int i = 0; i < body_index; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && p->value && strcmp(p->value, "_") != 0 && !lookup_symbol_local(scope, p->value))
+            add_symbol(scope, p->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
+    }
+    if (body_index >= 0)
+        add_own_bindings(fn->children[body_index], scope, module_vars, fn->origin_module != NULL);
+    return scope;
+}
+
+void infer_function_return_types(ASTNode* program, SymbolTable* table, const StrMap* module_vars) {
     if (!program) return;
 
     for (int i = 0; i < program->child_count; i++) {
@@ -2215,7 +2352,9 @@ void infer_function_return_types(ASTNode* program, SymbolTable* table) {
                 node->node_type->kind == TYPE_UNKNOWN ||
                 node->node_type->kind == TYPE_VOID ||
                 has_unknown_tuple_slot) {
-                Type* return_type = infer_return_type_from_body(node->children[body_index], table);
+                SymbolTable* own = own_bindings_scope(node, table, module_vars);
+                Type* return_type = infer_return_type_from_body(node->children[body_index], own);
+                free_symbol_table(own);
                 /* #3068: a function that returns `none` on one path and a
                  * `T` on another returns `T?`, as a clause set with a
                  * `none` clause (#3063) and an if-expression with a `none`
@@ -2515,6 +2654,22 @@ static void settle_clause_sets(ASTNode* program, SymbolTable* table, const StrMa
     free(nodes);
 }
 
+/* The program's module-level `var`s (`var x = 0`, `export var x = 0`),
+ * merged modules' included, as the checker's module_var_named finds them. */
+static void module_var_names(ASTNode* program, StrMap* out) {
+    strmap_init(out);
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
+        if (c && c->type == AST_CONST_DECLARATION && c->value &&
+            c->annotation && strcmp(c->annotation, "global_var") == 0)
+            /* A module's var of the name, where the program has one too,
+             * is the one a module's code reaches. */
+            if (c->origin_module || !strmap_has(out, c->value))
+                strmap_put(out, c->value, c->origin_module ? MODULE_OWN_VAR : PROGRAM_OWN_VAR);
+    }
+}
+
 // Main inference function
 int infer_all_types(ASTNode* program, SymbolTable* table) {
     if (!program) return 0;
@@ -2522,7 +2677,10 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
     StrMap clause_sets;
     clause_set_names(program, &clause_sets);
 
-    InferenceContext* ctx = create_inference_context(table);
+    StrMap module_vars;
+    module_var_names(program, &module_vars);
+
+    InferenceContext* ctx = create_inference_context(table, &module_vars);
     
     // Phase 1: Collect constraints from the entire program
     collect_constraints(program, ctx);
@@ -2556,7 +2714,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
         // not VOID/UNKNOWN) before incrementing `changed` — otherwise a
         // function whose body genuinely returns void would loop forever
         // re-syncing the same VOID.
-        infer_function_return_types(program, table);
+        infer_function_return_types(program, table, &module_vars);
         settle_clause_sets(program, table, &clause_sets);   /* #3061 review */
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* child = program->children[i];
@@ -2597,7 +2755,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
         }
 
         free_inference_context(ctx);
-        ctx = create_inference_context(table);
+        ctx = create_inference_context(table, &module_vars);
         collect_constraints(program, ctx);
         success = solve_constraints(ctx);
 
@@ -2605,7 +2763,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
     }
 
     // Phase 6: Infer function return types (now that return expressions have types)
-    infer_function_return_types(program, table);
+    infer_function_return_types(program, table, &module_vars);
     settle_clause_sets(program, table, &clause_sets);   /* #3061 review */
 
     // Phase 7: Widen `out = 0` locals to ptr when a later assignment in
@@ -2616,6 +2774,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
 
     free_inference_context(ctx);
     strmap_free(&clause_sets);
+    strmap_free(&module_vars);
 
     return success;
 }

@@ -1,0 +1,163 @@
+// A local named like a program `const` is that local, whether or not the
+// early inference pass can type its value yet.
+//
+// The language's rule (docs/language-reference.md, "Constants"): a bare
+// `name = value` in a function, with a top-level `const name` in the
+// program, declares a local that shadows the constant; only a module-level
+// `var` is written by such a binding. The early inference walk bound a
+// local only once it had a type for the value. A value it cannot type on
+// its first pass (a call whose result is inferred from its body, a field
+// read through a pointer, a tuple slot of such a call, an if- or match-
+// expression over such calls) left the name unbound in the walk, so the
+// next read fell through to the constant: `g = f` declared `g` a string,
+// later passes could not retype it, and the checker refused `g = f` with
+// E0200 "Type mismatch in variable initialization". Each function below
+// was refused before the fix. The last few are guards: a parameter, a
+// range-for variable, a C-style for init, an argument and a field read,
+// which already shadowed.
+
+import std.list
+
+extern exit(code: int)
+
+const f = "text"
+
+struct Box {
+    v: int
+    name: string
+}
+
+// Inferred results: this pass types neither call before their bodies.
+pick(xs: ptr) { return list.at(xs, 0) }
+
+pick2(xs: ptr) { return list.at(xs, 0), "" }
+
+boxat(xs: ptr) -> *Box { return list.at(xs, 0) }
+
+// The minimal shape: the value is the (ptr, string) tuple list.get gives.
+from_get(xs: ptr) -> int {
+    f = list.get(xs, 0)
+    g = f
+    return 1
+}
+
+copy(xs: ptr) -> int {
+    f = pick(xs)
+    g = f
+    let bb: *Box = g
+    return bb.v
+}
+
+destructured(xs: ptr) -> int {
+    f, err = pick2(xs)
+    g = f
+    let bb: *Box = g
+    if err != "" { return 0 }
+    return bb.v
+}
+
+from_if(xs: ptr) -> int {
+    f = if list.size(xs) > 0 { pick(xs) } else { pick(xs) }
+    g = f
+    let bb: *Box = g
+    return bb.v
+}
+
+from_match(xs: ptr) -> int {
+    n = list.size(xs)
+    f = match n {
+        1 -> pick(xs)
+        _ -> pick(xs)
+    }
+    g = f
+    let bb: *Box = g
+    return bb.v
+}
+
+// A field read through a pointer, of another type than the constant's.
+field_through_ptr(xs: ptr) -> string {
+    bp = boxat(xs)
+    f = bp.name
+    g = f
+    return g
+}
+
+in_closure(xs: ptr) -> int {
+    c = || {
+        f = pick(xs)
+        g = f
+        let bb: *Box = g
+        return bb.v
+    }
+    return c()
+}
+
+// Guards, which shadowed before the fix too.
+param_named(f) {
+    g = f
+    let bb: *Box = g
+    return bb.v
+}
+
+use(p: *Box) -> int { return p.v }
+
+as_argument(xs: ptr) -> int {
+    f = pick(xs)
+    return use(f)
+}
+
+field_of_local(xs: ptr) -> int {
+    f = boxat(xs)
+    return f.v
+}
+
+range_for() -> int {
+    t = 0
+    for f in 0..3 {
+        g = f
+        t = t + g
+    }
+    return t
+}
+
+c_for() -> int {
+    t = 0
+    for (f = 0; f < 3; f = f + 1) {
+        g = f
+        t = t + g
+    }
+    return t
+}
+
+check(what: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: ${what}: got ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+main() {
+    xs = list.new()
+    b = Box { v: 3, name: "n" }
+    list.add(xs, &b)
+    check("list.get tuple", from_get(xs), 1)
+    check("copy", copy(xs), 3)
+    check("destructured", destructured(xs), 3)
+    check("if-expression", from_if(xs), 3)
+    check("match-expression", from_match(xs), 3)
+    if field_through_ptr(xs) != "n" {
+        println("FAIL: field through pointer")
+        exit(1)
+    }
+    check("closure", in_closure(xs), 3)
+    check("parameter", param_named(pick(xs)), 3)
+    check("argument", as_argument(xs), 3)
+    check("field of local", field_of_local(xs), 3)
+    check("range for", range_for(), 3)
+    check("c for", c_for(), 3)
+    if f != "text" {
+        println("FAIL: the constant changed")
+        exit(1)
+    }
+    println("PASS: an untyped local shadows a constant of its name")
+}

@@ -39,13 +39,18 @@ typedef struct InferenceContext {
      * HoistJoins per function, main or closure (by its node), built on the
      * first name bound again there and kept for the walk. */
     StrMap hoist_joins;
+    /* The program's module-level `var`s, by name (values unused): a bare
+     * binding of one in a function writes the global rather than declaring
+     * a local (see bind_untyped_walk_local). Built once by infer_all_types
+     * and shared by each pass's context; not owned here. */
+    const StrMap* module_vars;
 } InferenceContext;
 
 // Main API
 int infer_all_types(ASTNode* program, SymbolTable* table);
 
 // Internal functions
-InferenceContext* create_inference_context(SymbolTable* table);
+InferenceContext* create_inference_context(SymbolTable* table, const StrMap* module_vars);
 void free_inference_context(InferenceContext* ctx);
 
 void collect_constraints(ASTNode* node, InferenceContext* ctx);

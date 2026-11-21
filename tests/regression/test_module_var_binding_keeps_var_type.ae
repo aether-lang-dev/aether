@@ -1,0 +1,67 @@
+// A bare binding of a module-level `var` in a function writes the global,
+// and has the global's type, as a re-bind of a local has the local's.
+//
+// The early inference walk entered `f = 2` on a `var f: float` as a local
+// of the value's type, int, so the read `g = f` after it declared `g` an
+// int: C took `int g = f` and cut the 2.0 the global held to 2, and `g / 4`
+// was 0 where the answer is 0.5, with no diagnostic. A destructured slot of
+// the global was entered the same way. Both fail on origin/main; the
+// string and optional globals are guards.
+
+extern exit(code: int)
+
+var f: float = 0.5
+var total: long = 0
+var label = "none"
+var maybe: int? = none
+
+pair() -> (int, string) { return 3, "three" }
+
+quarter() -> float {
+    f = 2
+    g = f
+    return g / 4
+}
+
+from_slot() -> float {
+    f, s = pair()
+    g = f
+    if s != "three" { return -1.0 }
+    return g / 2
+}
+
+widen() -> long {
+    total = 7
+    t = total
+    return t * 1000000000
+}
+
+guards() -> string {
+    label = "set"
+    maybe = 4
+    l = label
+    m = maybe ?? -1
+    return "${l} ${m}"
+}
+
+main() {
+    q = quarter()
+    if q != 0.5 {
+        println("FAIL: quarter() is ${q}, want 0.5")
+        exit(1)
+    }
+    h = from_slot()
+    if h != 1.5 {
+        println("FAIL: from_slot() is ${h}, want 1.5")
+        exit(1)
+    }
+    if widen() != 7000000000 {
+        println("FAIL: widen() is ${widen()}")
+        exit(1)
+    }
+    if guards() != "set 4" || f != 3.0 {
+        println("FAIL: guards() is ${guards()}, f is ${f}")
+        exit(1)
+    }
+    println("PASS: a module var's binding keeps the var's type")
+}
