@@ -5205,7 +5205,7 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
  * process in the job cannot leave it (no BREAKAWAY_OK), so this covers the
  * whole tree. The token is the process table's, as for os_spawn_to_raw. */
 typedef struct { void* _0; const char* _1; } _tuple_ptr_string_tree;
-typedef struct { int token; int pid; HANDLE job; } AetherTree;
+typedef struct { int token; int pid; HANDLE job; int asked; } AetherTree;
 
 _tuple_ptr_string_tree os_spawn_tree_to_raw(const char* prog, void* argv_list, void* env_list,
                                             const char* out_path, int grace_ms) {
@@ -5215,6 +5215,7 @@ _tuple_ptr_string_tree os_spawn_tree_to_raw(const char* prog, void* argv_list, v
     if (!t) { out._1 = "out of memory"; return out; }
     t->job = NULL;
     t->pid = -1;
+    t->asked = 0;
     _tuple_int_string r = win_spawn_to_job(prog, argv_list, env_list, out_path, 1, &t->pid, &t->job);
     if (r._0 < 0) {
         free(t);
@@ -5233,9 +5234,11 @@ int os_tree_pid_raw(void* tree) { return tree ? ((AetherTree*)tree)->pid : -1; }
  * ended by SIGTERM reads. */
 int os_tree_kill_raw(void* tree) {
     AetherTree* t = (AetherTree*)tree;
-    if (!t || !t->job) return -1;
+    if (!t || !t->job || t->asked) return -1;
     if (!aether_sandbox_check("exec", "kill")) return -1;
-    return TerminateJobObject(t->job, 128 + 15) ? 0 : -1;
+    if (!TerminateJobObject(t->job, 128 + 15)) return -1;
+    t->asked = 1;
+    return 0;
 }
 
 void os_tree_free_raw(void* tree) {

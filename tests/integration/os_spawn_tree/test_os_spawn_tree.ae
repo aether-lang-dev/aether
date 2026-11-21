@@ -217,7 +217,14 @@ main() {
         code4, _w4 = os.wait(os.tree_token(t4))
         esc4 = read_pid("${b4}.esc")
         fails = fails + check("leaf exits: the token reads its exit code (got ${code4})", code4 == 0)
-        fails = fails + check("leaf exits: the escaper it left was ended by the reap", esc4 > 0 && tree_test_alive(esc4) == 0)
+        // Windows signals a terminated process's handle a moment after
+        // TerminateJobObject returns (the job already counts none active), so
+        // there a short wait; elsewhere the reap itself is the proof.
+        ended4 = tree_test_alive(esc4) == 0
+        if !ended4 && os.platform() == "windows" {
+            ended4 = gone_within(esc4, 2000)
+        }
+        fails = fails + check("leaf exits: the escaper it left was ended by the reap", esc4 > 0 && ended4)
         os.tree_free(t4)
     }
 
