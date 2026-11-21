@@ -496,10 +496,24 @@ static void add_walk_symbol(InferenceContext* ctx, const char* name, Type* type)
     if (ctx->symbols->symbols) ctx->symbols->symbols->walk_id = ctx->walk_id;
 }
 
-/* Is `name` a module-level `var` of the program, which a bare binding of
- * the name in a function writes (the checker's module_var_named)? */
+/* The value module_var_names stores for a `var` of the program's own, which
+ * a module's code never reaches, and for a `var` of an imported module. */
+#define PROGRAM_OWN_VAR ((void*)1)
+#define MODULE_OWN_VAR  ((void*)2)
+
+/* Is `name` a module-level `var` that a bare binding of the name writes, in
+ * code merged from a module (`in_module`) or the program's own? A module's
+ * code never reaches the program's own vars, as the checker's lookup and
+ * codegen hide them from it (aether-ui
+ * asks/aether-program-global-leaks-into-module-scope.md): there the binding
+ * is the function's local. */
+static int var_reached(const StrMap* vars, const char* name, int in_module) {
+    if (!vars || !name || !strmap_has(vars, name)) return 0;
+    return !(in_module && strmap_get(vars, name) == PROGRAM_OWN_VAR);
+}
+
 static int names_module_var(InferenceContext* ctx, const char* name) {
-    return ctx->module_vars && name && strmap_has(ctx->module_vars, name);
+    return var_reached(ctx->module_vars, name, ctx->symbols && ctx->symbols->merged_from);
 }
 
 /* Is `node` a bare `name = value` that writes a module-level `var`: in a
@@ -787,11 +801,21 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             if (node->child_count > 0) {
                 collect_constraints(node->children[0], ctx);
 
-                /* A module `var`'s bare binding takes the global's type (see
-                 * writes_module_var below), not a constraint from the value. */
+                /* A bare `name = value` of a module-level `var`, in a walk
+                 * that has no binding of the name, writes the global: it is
+                 * no local, and it has the global's type, as a re-bind of a
+                 * local has the local's. It used to be entered as a local of
+                 * the value's type, so after `f = 2` on a `var f: float` the
+                 * read `g = f` declared `g` an int, and the 2.0 the global
+                 * held was cut to 2. A value the global's type does not take
+                 * as it is (a string into a `ptr` var, which C converts) keeps
+                 * the value's type and its local, as before, for the checker
+                 * to judge as it always has. */
                 if (writes_module_var(ctx, node) && is_type_inferrable(node->node_type)) {
                     Symbol* global = lookup_symbol_local(ctx->symbols, node->value);
-                    if (global && global->type && global->type->kind != TYPE_UNKNOWN) {
+                    Type* value = node->children[0]->node_type;
+                    if (global && global->type && global->type->kind != TYPE_UNKNOWN &&
+                        value && value->kind != TYPE_UNKNOWN && is_assignable(value, global->type)) {
                         free_type(node->node_type);
                         node->node_type = clone_type(global->type);
                     }
@@ -821,13 +845,14 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                     }
                 }
             }
-            /* A bare `name = value` of a module-level `var`, in a walk that
-             * has no binding of the name, writes the global: it is no local,
-             * and it has the global's type, as a re-bind of a local has the
-             * local's. It used to be entered as a local of the value's type,
-             * so after `f = 2` on a `var f: float` the read `g = f` declared
-             * `g` an int, and the 2.0 the global held was cut to 2. */
-            if (writes_module_var(ctx, node)) break;
+            /* Typed as the global above (on this pass or an earlier one): no
+             * local, so the reads that follow keep the global's entry. */
+            if (writes_module_var(ctx, node)) {
+                Symbol* global = lookup_symbol_local(ctx->symbols, node->value);
+                if (global && global->type && node->node_type &&
+                    types_equal(node->node_type, global->type))
+                    break;
+            }
             /* #3064: the body's join of this name (below) reads it typed. */
             if (node->type == AST_VARIABLE_DECLARATION && node->value && ctx->scope_owner)
                 hoist_joins_typed(body_joins(ctx, ctx->scope_owner), node);
@@ -2259,16 +2284,17 @@ static void merge_tuple_returns(ASTNode* node, Type* merged) {
  * locals, destructured slots, loop and pattern variables, not a nested
  * closure's. A bare binding of a module `var` writes the global and binds
  * nothing (bind_untyped_walk_local's rule). */
-static void add_own_bindings(ASTNode* n, SymbolTable* scope, const StrMap* module_vars) {
+static void add_own_bindings(ASTNode* n, SymbolTable* scope, const StrMap* module_vars,
+                             int in_module) {
     if (!n || ast_is_own_function(n)) return;
     if ((n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE) &&
         n->value && strcmp(n->value, "_") != 0 && !lookup_symbol_local(scope, n->value)) {
         int writes_global = n->type == AST_VARIABLE_DECLARATION && n->type_inferred &&
-                            module_vars && strmap_has(module_vars, n->value);
+                            var_reached(module_vars, n->value, in_module);
         if (!writes_global) add_symbol(scope, n->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
     }
     for (int i = 0; i < n->child_count; i++)
-        add_own_bindings(n->children[i], scope, module_vars);
+        add_own_bindings(n->children[i], scope, module_vars, in_module);
 }
 
 /* The scope a function's returns are typed in after its walk: the
@@ -2287,7 +2313,8 @@ static SymbolTable* own_bindings_scope(ASTNode* fn, SymbolTable* table, const St
         if (p && p->value && strcmp(p->value, "_") != 0 && !lookup_symbol_local(scope, p->value))
             add_symbol(scope, p->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
     }
-    if (body_index >= 0) add_own_bindings(fn->children[body_index], scope, module_vars);
+    if (body_index >= 0)
+        add_own_bindings(fn->children[body_index], scope, module_vars, fn->origin_module != NULL);
     return scope;
 }
 
@@ -2636,7 +2663,10 @@ static void module_var_names(ASTNode* program, StrMap* out) {
         if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
         if (c && c->type == AST_CONST_DECLARATION && c->value &&
             c->annotation && strcmp(c->annotation, "global_var") == 0)
-            strmap_put(out, c->value, NULL);
+            /* A module's var of the name, where the program has one too,
+             * is the one a module's code reaches. */
+            if (c->origin_module || !strmap_has(out, c->value))
+                strmap_put(out, c->value, c->origin_module ? MODULE_OWN_VAR : PROGRAM_OWN_VAR);
     }
 }
 
