@@ -27,6 +27,7 @@
 #include "../../runtime/aether_version.h"
 #include "../../runtime/aether_rv_mark.h"
 #include "../../runtime/aether_slice.h"
+#include "../../runtime/actors/aether_panic.h"   /* AetherJmpFrame */
 #include "../../runtime/scheduler/multicore_scheduler.h"   /* ActorBase, Mailbox */
 #include <stddef.h>
 #include <string.h>
@@ -267,13 +268,26 @@ TEST_CATEGORY(abi_rv_mark_finds_the_program, TEST_CATEGORY_RUNTIME) {
 /* ---- The runtime ABI ---- */
 
 TEST_CATEGORY(abi_runtime_identity, TEST_CATEGORY_RUNTIME) {
-    ASSERT_EQ(4, AETHER_RUNTIME_ABI_REV);
+    ASSERT_EQ(5, AETHER_RUNTIME_ABI_REV);
     /* The runtime reports what it was built with, and what generated C
      * compiled with these headers compares it with. */
     ASSERT_STREQ(AETHER_RUNTIME_ABI_ID, aether_runtime_abi());
     char want[128];
     snprintf(want, sizeof(want), "%s/abi%d%s", AETHER_VERSION, AETHER_RUNTIME_ABI_REV, AETHER_ABI_FLAGS);
     ASSERT_STREQ(want, aether_runtime_abi());
+}
+
+/* ---- An execution frame's way back (runtime ABI revision 5) ----
+ *
+ * aether_exec_enter_at takes the stub's own __builtin_longjmp beside its
+ * buffer, and the frame keeps it after exec_buf: the runtime never reads a
+ * __builtin_setjmp buffer itself, whose layout -fcf-protection changes. The
+ * fields before keep their offsets. */
+
+TEST_CATEGORY(abi_exec_frame_jump, TEST_CATEGORY_RUNTIME) {
+    ASSERT_EQ(5, AETHER_RUNTIME_ABI_REV);
+    ASSERT_TRUE(offsetof(AetherJmpFrame, exec_jump) > offsetof(AetherJmpFrame, exec_buf));
+    ASSERT_EQ(sizeof(void (*)(void**)), sizeof(((AetherJmpFrame*)0)->exec_jump));
 }
 
 /* ---- An actor's base (runtime ABI revision 4, #3776) ----
@@ -283,7 +297,7 @@ TEST_CATEGORY(abi_runtime_identity, TEST_CATEGORY_RUNTIME) {
  * them the ring. A build with another -DMAILBOX_SIZE has another ABI id. */
 
 TEST_CATEGORY(abi_actor_base_layout, TEST_CATEGORY_RUNTIME) {
-    ASSERT_EQ(4, AETHER_RUNTIME_ABI_REV);
+    ASSERT_EQ(5, AETHER_RUNTIME_ABI_REV);
     ASSERT_EQ(16, MAILBOX_SIZE);
     ASSERT_EQ(sizeof(Message) * MAILBOX_SIZE, sizeof(((Mailbox*)0)->messages));
     if (sizeof(void*) == 8) ASSERT_EQ(952, sizeof(ActorBase));
@@ -308,7 +322,7 @@ typedef struct {
 } SliceBuf_R3;
 
 TEST_CATEGORY(abi_slice_layouts, TEST_CATEGORY_RUNTIME) {
-    ASSERT_EQ(4, AETHER_RUNTIME_ABI_REV);
+    ASSERT_EQ(5, AETHER_RUNTIME_ABI_REV);
     ASSERT_EQ(sizeof(Slice_R3), sizeof(AetherSlice));
     SAME_MEMBER(AetherSlice, Slice_R3, ptr);
     SAME_MEMBER(AetherSlice, Slice_R3, len);

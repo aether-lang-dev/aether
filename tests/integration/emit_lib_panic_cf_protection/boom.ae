@@ -1,0 +1,8 @@
+// The library of the emit_lib_panic_cf_protection test: one export that
+// panics, so a call from a C host jumps back to its stub's saved context.
+boom(n: int) -> int {
+    if n > 0 {
+        panic("boom ${n}")
+    }
+    return n + 1
+}

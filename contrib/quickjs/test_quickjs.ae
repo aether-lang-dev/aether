@@ -94,6 +94,43 @@ eval_string(q: ptr, code: string) -> string {
     return s
 }
 
+// Runs `method` (find or findLast, a callback that never matches) over an
+// array of n objects until a 20 ms deadline stops it, in a runtime of its
+// own, then checks every element is still the object the array holds: the
+// index of the first that is not, -1 when all are, or -2 when a step failed.
+// quickjs-ng 0.18.0's js_array_find released the previous step's element a
+// second time when the interrupt stopped it at the top of a step (fixed
+// upstream by e22ce4de43; contrib/quickjs/patches/ carries it). A find step
+// polls the interrupt twice, at its own top and at the callback's entry, and
+// every count between two clock reads is even, so which of the two the
+// deadline lands on is fixed by the parity of the polls before it, which
+// n decides: the case runs an even and an odd n so one of them lands on
+// find's own poll.
+interrupted_find_leaves_array_whole(method: string, n: int) -> int {
+    r = quickjs.runtime(65536, 0)
+    if r == null { return -2 }
+    s, e1 = quickjs.eval(r, "var a = []; for (var i = 0; i < ${n}; i++) a.push({ n: i }); 0", "setup.js")
+    if e1 != "" {
+        quickjs.dispose(r)
+        return -2
+    }
+    quickjs.release(r, s)
+    quickjs.set_deadline_ns(r, quickjs.now_ns() + 20000000)
+    _f, e2 = quickjs.eval(r, "for (;;) a.${method}(function (o) { return o.n < 0; })", "find.js")
+    stopped = string.contains(e2, "interrupted") != 0
+    quickjs.clear_deadline(r)
+    quickjs.clear_interrupted(r)
+    // Fresh objects take a freed element's memory, then each element is read.
+    v, e3 = quickjs.eval(r, "var fresh = []; for (var j = 0; j < 1000; j++) fresh.push({ n: -1 }); var bad = -1; for (var i = 0; i < a.length; i++) { if (a[i].n !== i) { bad = i; break; } } bad", "check.js")
+    bad = -2
+    if e3 == "" && stopped {
+        bad = quickjs.to_int(r, v)
+        quickjs.release(r, v)
+    }
+    quickjs.dispose(r)
+    return bad
+}
+
 main() {
     fw = spec.init()
     q = quickjs.runtime(16384, 0)
@@ -282,6 +319,12 @@ main() {
             quickjs.clear_interrupted(q)
             spec.assert_eq(quickjs.deadline_ns(q), 0, "until cleared")
             spec.assert_str_eq(eval_string(q, "'runs'"), "runs", "after which entries run")
+        }
+        spec.it("a find the deadline stopped between two elements leaves its array whole") callback {
+            spec.assert_eq(interrupted_find_leaves_array_whole("find", 200000), -1, "find, an even length")
+            spec.assert_eq(interrupted_find_leaves_array_whole("find", 200001), -1, "find, an odd length")
+            spec.assert_eq(interrupted_find_leaves_array_whole("findLast", 200000), -1, "findLast, an even length")
+            spec.assert_eq(interrupted_find_leaves_array_whole("findLast", 200001), -1, "findLast, an odd length")
         }
         spec.it("a deadline in the past stops the next entry, an eval or a call") callback {
             f, _fe = quickjs.eval(q, "() => { for (;;) {} }", "f.js")

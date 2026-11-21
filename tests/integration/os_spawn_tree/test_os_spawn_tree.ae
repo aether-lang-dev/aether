@@ -1,0 +1,234 @@
+// os.spawn_tree_to: a child whose whole process tree ends with the process
+// that started it, and when that process asks (selaenium
+// asks/aether-spawn-tree-dies-with-parent.md). Each case starts a "leaf"
+// (this program, re-run with a flag) that starts an "escaper" which leaves
+// the leaf's process group with setsid, as Chromium's crash handler and
+// daemonising helpers do. Both write their pids to files; the case then
+// asserts by those pids that nothing survives:
+//   - the parent exits normally without stopping the tree;
+//   - the parent is killed with SIGKILL (a test runner's timeout);
+//   - tree_kill ends the tree, setsid'd escaper included, and the token
+//     reads the leaf's SIGTERM (143);
+//   - the leaf exits on its own: the escaper it left behind is ended before
+//     the token reaps.
+// And a control: spawn_proc_to's os.kill ends the group and misses the
+// escaper, so the cases above measure something.
+// sweep-ok: the 300 s sleeps are the leaves', each ended by its case.
+@source("tree_helpers.c")
+import std.os
+import std.fs
+import std.list
+import std.string
+
+extern tree_test_setsid() -> int
+extern tree_test_alive(pid: int) -> int
+extern exit(code: int)
+
+check(label: string, ok: bool) -> int {
+    if ok {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    return 1
+}
+
+argv2(a: string, b: string) -> ptr {
+    l = list.new()
+    _a = list.add(l, a)
+    _b = list.add(l, b)
+    return l
+}
+
+write_pid(path: string) {
+    _w = fs.write("${path}.tmp", "${os.getpid()}")
+    _r = fs.rename("${path}.tmp", path)
+}
+
+read_pid(path: string) -> int {
+    text, err = fs.read(path)
+    if err != "" {
+        return 0
+    }
+    n, _e = string.to_int(string.trim(text))
+    return n
+}
+
+// The pid in `path` once it is there, or 0 after 10 s.
+await_pid(path: string) -> int {
+    limit = os.now_monotonic_ms() + 10000
+    while os.now_monotonic_ms() < limit {
+        p = read_pid(path)
+        if p > 0 {
+            return p
+        }
+        sleep(20)
+    }
+    return 0
+}
+
+// Whether `pid` is gone within `ms`.
+gone_within(pid: int, ms: int) -> bool {
+    limit = os.now_monotonic_ms() + ms
+    while tree_test_alive(pid) != 0 {
+        if os.now_monotonic_ms() >= limit {
+            return false
+        }
+        sleep(20)
+    }
+    return true
+}
+
+// The child modes.
+child(mode: string) -> int {
+    base = os.args_get(2)
+    if mode == "--escaper" {
+        _s = tree_test_setsid()
+        write_pid("${base}.esc")
+        sleep(300000)
+        return 0
+    }
+    if mode == "--leaf" || mode == "--leaf-exits" {
+        a = argv2("--escaper", base)
+        _t, err = os.spawn_proc(os.argv0(), a, null)
+        list.free(a)
+        if err != "" {
+            println("could not start the escaper: ${err}")
+            return 2
+        }
+        if await_pid("${base}.esc") == 0 {
+            return 2
+        }
+        write_pid("${base}.leaf")
+        if mode == "--leaf-exits" {
+            // Long enough for macOS's supervisor, which has no subreaper, to
+            // have listed the escaper (it lists every 50 ms).
+            sleep(300)
+            return 0
+        }
+        sleep(300000)
+        return 0
+    }
+    if mode == "--parent-exits" || mode == "--parent-waits" {
+        a = argv2("--leaf", base)
+        tree, err = os.spawn_tree_to(os.argv0(), a, null, "${base}.out", 500)
+        list.free(a)
+        if err != "" {
+            println("could not start the tree: ${err}")
+            return 2
+        }
+        _p = await_pid("${base}.leaf")
+        if mode == "--parent-waits" {
+            write_pid("${base}.parent")
+            sleep(300000)
+        }
+        // Returns, and main exits, without tree_kill, tree_free or a wait.
+        if os.tree_pid(tree) <= 0 {
+            return 2
+        }
+        return 0
+    }
+    return 3
+}
+
+// Starts `mode` of this program as a parent of a tree, then checks the
+// leaf and its escaper both end once the parent has.
+parent_case(label: string, mode: string, base: string, sigkill: bool) -> int {
+    a = argv2(mode, base)
+    tok, err = os.spawn_proc(os.argv0(), a, null)
+    list.free(a)
+    if err != "" {
+        return check("${label}: started (${err})", false)
+    }
+    leaf = await_pid("${base}.leaf")
+    esc = read_pid("${base}.esc")
+    fails = check("${label}: the leaf and the escaper started", leaf > 0 && esc > 0)
+    if sigkill {
+        _pp = await_pid("${base}.parent")
+        _k = os.kill(tok, 9)
+    }
+    _code, _we = os.wait(tok)
+    fails = fails + check("${label}: the leaf ended", gone_within(leaf, 10000))
+    fails = fails + check("${label}: the escaper that left its group ended", gone_within(esc, 10000))
+    return fails
+}
+
+main() {
+    if os.args_count() >= 3 {
+        exit(child(os.args_get(1)))
+    }
+    if os.platform() == "windows" {
+        // tree_helpers.c has no setsid there, and the job holds every process.
+        println("note: on Windows the escaper does not leave the job; the cases still run")
+    }
+    dir = "${os.temp_dir()}/aether_spawn_tree_${os.getpid()}"
+    _m = fs.mkdir_p(dir)
+    fails = 0
+
+    // The control: spawn_proc_to's group kill misses the escaper. Not on
+    // Windows, where the job holds it.
+    if os.platform() != "windows" {
+        b0 = "${dir}/control"
+        a0 = argv2("--leaf", b0)
+        t0, e0 = os.spawn_proc_to(os.argv0(), a0, null, "${b0}.out")
+        list.free(a0)
+        leaf0 = await_pid("${b0}.leaf")
+        esc0 = read_pid("${b0}.esc")
+        _k0 = os.kill(t0, 15)
+        _c0, _w0 = os.wait(t0)
+        fails = fails + check("control: spawn_proc_to started (${e0})", leaf0 > 0 && esc0 > 0)
+        fails = fails + check("control: os.kill ended the leaf", gone_within(leaf0, 5000))
+        survived = !gone_within(esc0, 1000)
+        fails = fails + check("control: the setsid'd escaper survived the group kill", survived)
+        if survived {
+            _ke = os.kill(esc0, 9)
+        }
+    }
+
+    fails = fails + parent_case("parent exits", "--parent-exits", "${dir}/exits", false)
+    fails = fails + parent_case("parent killed by SIGKILL", "--parent-waits", "${dir}/killed", true)
+
+    // tree_kill ends the tree.
+    b3 = "${dir}/treekill"
+    a3 = argv2("--leaf", b3)
+    t3, e3 = os.spawn_tree_to(os.argv0(), a3, null, "${b3}.out", 500)
+    list.free(a3)
+    fails = fails + check("tree_kill: started (${e3})", e3 == "" && t3 != null)
+    if t3 != null {
+        leaf3 = await_pid("${b3}.leaf")
+        esc3 = read_pid("${b3}.esc")
+        fails = fails + check("tree_kill: the leaf is the program", os.tree_pid(t3) == leaf3)
+        fails = fails + check("tree_kill: asked", os.tree_kill(t3) == 0)
+        fails = fails + check("tree_kill: asking twice is refused", os.tree_kill(t3) == -1)
+        code3, we3 = os.wait(os.tree_token(t3))
+        fails = fails + check("tree_kill: the token reads the leaf's SIGTERM (got ${code3} ${we3})", code3 == 143)
+        fails = fails + check("tree_kill: the leaf ended", tree_test_alive(leaf3) == 0)
+        fails = fails + check("tree_kill: the setsid'd escaper ended", gone_within(esc3, 1000))
+        os.tree_free(t3)
+    }
+
+    // The leaf exits on its own; what it left running ends before the reap.
+    b4 = "${dir}/leafexits"
+    a4 = argv2("--leaf-exits", b4)
+    t4, e4 = os.spawn_tree_to(os.argv0(), a4, null, "${b4}.out", 500)
+    list.free(a4)
+    fails = fails + check("leaf exits: started (${e4})", e4 == "" && t4 != null)
+    if t4 != null {
+        code4, _w4 = os.wait(os.tree_token(t4))
+        esc4 = read_pid("${b4}.esc")
+        fails = fails + check("leaf exits: the token reads its exit code (got ${code4})", code4 == 0)
+        fails = fails + check("leaf exits: the escaper it left was ended by the reap", esc4 > 0 && tree_test_alive(esc4) == 0)
+        os.tree_free(t4)
+    }
+
+    // A program that cannot start fails the spawn, with no handle.
+    t5, e5 = os.spawn_tree_to("${dir}/no-such-program", list.new(), null, "${dir}/none.out")
+    fails = fails + check("a missing program fails the spawn (${e5})", t5 == null && e5 == "program not found")
+
+    _rm = fs.remove_tree(dir)
+    if fails > 0 {
+        println("${fails} failed")
+        exit(1)
+    }
+    println("all passed")
+}

@@ -64,13 +64,15 @@
  * with the executions and the allocation journal. */
 
 /* To the frame a panic was raised for: an execution frame by the
- * __builtin_setjmp buffer in its export stub, any other by its own. */
+ * __builtin_setjmp buffer in its export stub, through the stub's own
+ * __builtin_longjmp (aether_panic.h: the buffer's layout is the stub's
+ * compiler's), any other by its own. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noreturn))
 #endif
 static void aether_jump_to(AetherJmpFrame* f) {
 #if AETHER_EXEC_BUILTIN_SJLJ
-    if (f->exec_buf) __builtin_longjmp(f->exec_buf, 1);
+    if (f->exec_buf) f->exec_jump(f->exec_buf);
 #endif
     AETHER_SIGLONGJMP(f->buf, 1);
 #if !(defined(__GNUC__) || defined(__clang__))

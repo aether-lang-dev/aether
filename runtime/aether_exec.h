@@ -53,15 +53,18 @@ void aether_exec_failed(void);
 
 #if AETHER_EXEC_BUILTIN_SJLJ
 /* The stub's form where the compiler has __builtin_setjmp (aether_panic.h):
- * the context saved in the stub's own `void* buf[5]`, before entering.
+ * the context saved in the stub's own `void* buf[5]`, before entering, and
+ * the function that jumps back to it, defined beside the stub so that the
+ * same compiler and flags lay out the buffer and read it.
  *
+ *     static void jump(void** b) { __builtin_longjmp(b, 1); }
  *     void* b[5];
  *     if (__builtin_setjmp(b)) { aether_exec_failed(); return zero; }
- *     aether_exec_enter_at(b);
+ *     aether_exec_enter_at(b, jump);
  *     r = f(args);
  *     aether_exec_leave();
  */
-void aether_exec_enter_at(void** buf);
+void aether_exec_enter_at(void** buf, void (*jump)(void** buf));
 #endif
 
 /* Executions running on this thread (0 outside any). */

@@ -3641,10 +3641,17 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             "extern void aether_exec_ok(void);\n"
             "#ifndef AETHER_EXEC_STUB_ENTER\n"
             "#if AETHER_EXEC_BUILTIN_SJLJ\n"
-            "extern void aether_exec_enter_at(void** buf);\n"
+            "extern void aether_exec_enter_at(void** buf, void (*jump)(void** buf));\n"
+            /* The panic's way back, defined here so that this compiler and
+             * its flags both lay out the buffer and read it: the layout
+             * depends on -fcf-protection, which the runtime may have been
+             * built with and this C not, or the reverse (aether_panic.h). */
+            "__attribute__((noinline, noreturn, unused)) static void _aether_xjump(void** b) {\n"
+            "    __builtin_longjmp(b, 1);\n"
+            "}\n"
             "#define AETHER_EXEC_STUB_ENTER(fail) void* _aether_xb[5]; \\\n"
             "    if (__builtin_setjmp(_aether_xb)) { aether_exec_failed(); fail; } \\\n"
-            "    aether_exec_enter_at(_aether_xb)\n"
+            "    aether_exec_enter_at(_aether_xb, _aether_xjump)\n"
             "#else\n"
             "#define AETHER_EXEC_STUB_ENTER(fail) AetherJmpFrame* _aether_x = aether_exec_enter(); \\\n"
             "    if (AETHER_SIGSETJMP(_aether_x->buf, 1)) { aether_exec_failed(); fail; }\n"

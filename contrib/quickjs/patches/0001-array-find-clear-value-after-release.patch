@@ -1,0 +1,28 @@
+Clear Array.find value ownership after release
+
+quickjs-ng's own fix, upstream commit e22ce4de4362dc5fd4794cfa3c03fc7fdba5f015
+"Clear Array.find value ownership after release (#1826)", by Qi Deng,
+2026-11-02, on quickjs-ng master after v0.18.0 (MIT, as the engine is).
+Rebased by line number onto the v0.18.0 release amalgamation that
+contrib/quickjs/amalgamation.lock pins; the change itself is the upstream
+one line.
+
+js_array_find (behind find, findIndex, findLast and findLastIndex) released
+the step's element at the end of each step without clearing `val`. When the
+interrupt poll at the top of the next step stopped JavaScript (a deadline, a
+cancel or a stop cell), the exception path released the previous element a
+second time, which frees an object the array still points at.
+
+Drop this file when the lock pins a quickjs-ng release that contains
+e22ce4de43 (none did as of 2026-11-21; the latest release was v0.18.0).
+
+--- a/quickjs-amalgam.c
++++ b/quickjs-amalgam.c
+@@ -56505,6 +56505,7 @@
+             }
+         }
+         JS_FreeValue(ctx, val);
++        val = JS_UNDEFINED;
+         JS_FreeValue(ctx, index_val);
+     }
+     JS_FreeValue(ctx, obj);

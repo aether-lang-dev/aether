@@ -140,7 +140,7 @@ void aether_exec_set_next_deadline(int64_t ms) {
     if (ms > 0) atomic_store_explicit(&aether_caps_armed, 1, memory_order_relaxed);
 }
 
-static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
+static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf, void (*jump)(void** buf)) {
     if (F->depth >= AETHER_PANIC_MAX_DEPTH) {
         aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
         fprintf(stderr, "aether: try/catch and executions nested deeper than %d on one thread, aborting\n",
@@ -216,16 +216,17 @@ static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
      * this frame, before it jumps (aether_panic.c); nothing else reads
      * them. */
     f->exec_buf = buf;
+    f->exec_jump = jump;
     return f;
 }
 
 AetherJmpFrame* aether_exec_enter(void) {
-    return exec_push(aether_frames_here(), NULL);
+    return exec_push(aether_frames_here(), NULL, NULL);
 }
 
 #if AETHER_EXEC_BUILTIN_SJLJ
-void aether_exec_enter_at(void** buf) {
-    (void)exec_push(aether_frames_here(), buf);
+void aether_exec_enter_at(void** buf, void (*jump)(void** buf)) {
+    (void)exec_push(aether_frames_here(), buf, jump);
 }
 #endif
 
