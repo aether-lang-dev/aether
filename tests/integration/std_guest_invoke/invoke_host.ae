@@ -103,7 +103,7 @@ main() {
     fs.write(log, "")
     fw = spec.init()
     spec.describe(fw, "std.guest: the host calls the guest") {
-        spec.it("notify, then fetch: the guest is told a transaction id and fetches the details through a host function") callback {
+        spec.it("guest-export-called, notify then fetch: the guest is told a transaction id and fetches the details through a host function") callback {
             g = begin(stub, "txn", log)
             guest.mount(&g, "begin_lookup", 1, 1)
             guest.mount(&g, "txn_details", 1, 1)

@@ -76,6 +76,10 @@ guest.py`, with `grant_runtime("python3")` and read access to the script).
 | `DONE` | `code`, the script's exit code | the worker has been reaped |
 | `ERROR` | `text`, the worker's message | the worker has been reaped |
 | `KILLED` | `text`, why the host hung up | the worker has been killed |
+| `READY` | `text`, the exported names as a JSON array (also `g.exported`) | the script has ended and the guest serves: `invoke` it, or `end` it |
+| `RETURN` | `text`, the invoked function's JSON value | the guest serves again (`result(e)` gives `(value, "")`) |
+| `RAISE` | `text`, the invoked function's error | the guest still serves (`result(e)` gives `("", error)`) |
+| `IDLE` | | `next` was called on a serving guest: nothing was read, and no deadline ran |
 
 `grant_file(&g, name, path)` answers a call with the file at `path` as an
 open descriptor; the worker reads it and the script gets
@@ -95,6 +99,117 @@ up on and killed (`KILLED no answer to CANCEL within N ms`). A frame over
 refused the same way: `KILLED frame refused: ...`. `guest.cancel(&g, why)`
 cancels at any time. `guest.close(&g)` hangs up and kills early, and is safe
 after the end.
+
+`guest.run_script(&g, source, handler)` writes that loop once: it starts the
+script and hands every `SAY`, `LOG` and `CALL` to `handler`, a function of
+`(*Guest, Event)` that answers the calls (one it leaves unanswered is
+failed for it), and returns the event that ended the script: `READY`,
+`DONE`, `ERROR` or `KILLED`.
+
+## The host calls the guest
+
+A script can leave functions behind for the host to call later: an event
+handler, a callback for a transaction it started, a comparator. It ends
+with `READY` and their names instead of `DONE`, and the guest *serves*: it
+sits idle until the host invokes one of them by name or ends it. Host and
+guest strictly alternate. The host invokes only an idle guest, one
+invocation at a time; inside an invocation the guest may call the host's
+mounted functions as a script does, and the host answers them as usual.
+A script that exports nothing ends with `DONE`, exactly as before. The
+design, the options that lost and the questions still open are in
+[docs/design/guest-host-calls-guest.md](../../docs/design/guest-host-calls-guest.md).
+
+The shape it is meant for is **notify, then fetch**. The guest asks the
+host to start something through a mounted function that answers at once
+with an id; its script ends and it serves. Later, on the host's schedule,
+the host invokes the guest's export with only the id, and inside it the
+guest fetches the details through another mounted function, which the host
+may refuse. The `INVOKE` frame stays small, the host keeps the say over
+what the guest reads, and the audit log shows the notification and the
+fetch apart.
+
+The example **compiles but is not run** in CI: it needs a worker program
+(`tests/integration/std_guest_invoke` runs the same exchange against the
+test worker).
+
+```aether
+import std.guest
+import std.sandbox
+
+main() {
+    perms = sandbox.new("worker") {}
+    g, err = guest.launch(perms, "build/my-worker", null, "txn", "build/audit.log")
+    if err != "" {
+        println("not started: ${err}")
+        return
+    }
+    guest.mount(&g, "begin_lookup", 1, 1)       // answers a transaction id at once
+    guest.mount(&g, "txn_details", 1, 1)        // the details, if the host agrees
+    e = guest.run_script(&g, "...the script...") callback | h: *guest.Guest, ev: guest.Event | {
+        if ev.kind == "CALL" && ev.name == "begin_lookup" {
+            guest.answer(h, guest.json_string("123456"))
+        }
+    }
+    if e.kind != "READY" {                      // DONE: it exported nothing
+        println("${e.kind} ${guest.printable(e.text)}")
+        return
+    }
+    // Later: the lookup has finished. Tell the guest, with the id alone.
+    v, verr = guest.call_export(&g, "on_txn", "[\"123456\"]") callback | h: *guest.Guest, ev: guest.Event | {
+        if ev.kind == "CALL" && ev.name == "txn_details" && ev.text == "[\"123456\"]" {
+            guest.audit(h, "FETCH txn 123456")
+            guest.answer(h, "{\"who\":\"alice\",\"amount\":12}")
+        } else if ev.kind == "CALL" {
+            guest.fail(h, "unknown txn")
+        }
+    }
+    if verr != "" { println("on_txn raised: ${guest.printable(verr)}") } else { println(v) }
+    guest.end(&g)                               // END; the guest answers DONE 0
+    e = guest.next(&g)
+}
+```
+
+The same with the loop written out: `guest.invoke(&g, name, args_json)`
+sends `INVOKE`; then `guest.next(&g)` returns the invocation's `SAY`,
+`LOG` and `CALL` events (answer each) and ends with `RETURN` or `RAISE`,
+which `guest.result(e)` turns into Aether's `(value, err)`.
+
+| Host | |
+|---|---|
+| `invoke(&g, name, args)` | `""`, or why nothing was sent: the guest is not serving (its script, an invocation or a host call it waits on is still running, or it is ending or over), it did not export `name`, `args` is not a JSON array |
+| `call_export(&g, name, args, handler)` | `invoke`, then the events to `handler` until `RETURN` (`(value, "")`) or `RAISE`, a refused invoke, or the guest's end (`("", why)`) |
+| `end(&g)` | `END`; `next` then returns `DONE 0` and the worker is reaped |
+| `result(e)` | `(value, err)` from the event that ended an invocation |
+| `is_exported(&g, name)`, `g.exported` | what `READY` announced, a JSON array written `["a","b"]` |
+| `is_serving(&g)`, `g.phase` | `SCRIPT`, `SERVING`, `INVOKING`, `ENDING` or `CANCELLED` |
+
+What holds a serving guest:
+
+- `READY` is checked: a JSON array of 1 to 256 (`MAX_EXPORTS`) distinct
+  names of letters, digits, `_` and `.`, at most 128 bytes each
+  (`MAX_EXPORT_NAME`). Any other list hangs up: `KILLED protocol: READY
+  ...`.
+- Inside an invocation every exchange has the script's deadline,
+  `deadline_ms`, then `CANCEL`, then `grace_ms`, then the kill; `max_frame`
+  bounds `RETURN` and `RAISE` as every frame. A cancel ends the guest, not
+  only the invocation.
+- An idle guest has no deadline. `next` on it returns `IDLE` without
+  waiting, and a frame it sends while idle (found by `next`, `invoke` or
+  `end`) is unsolicited: the host hangs up. A `RETURN` or `RAISE` with no
+  `INVOKE`, a second `READY`, and anything but `DONE` after `END` hang up
+  too. A guest never sends `INVOKE`.
+- `invoke` and `end` are refused, and send nothing, unless the guest
+  serves: so a host function's handler cannot invoke the guest that is
+  calling it.
+- An invoked function reaches only what the host mounted: being callable
+  gives the guest nothing new.
+
+**The pull pattern** does the same with no protocol at all: the guest's
+script loops on a mounted host function, `next_event`, whose answer says
+what to run; the outcome rides on the next call. It suits one application
+with its own event shape. The verb suits a surface shared across languages
+and applications, with the errors, the idle state and the audit lines
+written once. The design note has both, worked, and when to use which.
 
 ## The worker
 
@@ -147,6 +262,9 @@ runs `h.source`. Everything else is a call the engine makes:
 | ends | `done(h, code)` or `error(h, why)` |
 | looks for a cancel | `poll(h)`, without waiting: `""`, or the reason, also in `h.cancel` |
 | sets up | `h.source`, `mount_count(h)`, `mount_at(h, i)` (name and arity), `is_mounted(h, name)`, `h.probe`, `h.log_level` |
+| ends a script that left functions behind | `ready(h, names_json)` instead of `done`, then serves |
+| serves | `serve(h)` waits, with no deadline, and returns an `Invocation`: `INVOKE` (`name`, `args` a JSON array, also `h.invoked`), `END` (answer `done(h, 0)`) or `CANCEL` (`args` the reason: answer `error`) |
+| answers an invocation | `returned(h, json)` or `raised(h, why)`; the guest serves on after either |
 | is done with the Host | `free(h)`: the Host, its mounts and its strings; the channel stays open |
 
 Two kinds of engine meet the cancel two ways. One that runs a script in
@@ -163,6 +281,37 @@ own sandbox refused since the last report, as `AUDIT <name> sandbox refused
 the script did next. With `PROBE`, `run` also tries `fs.read("/etc/passwd")`
 and `tcp.connect("1.1.1.1", 443)` from inside the lockdown and reports both;
 an engine can add probes of its own in its block when `h.probe` is 1.
+
+A worker serves after its script like this; inside an invocation it calls
+the host and polls exactly as inside a script:
+
+```aether,fragment
+child.ready(h, "[\"on_txn\"]")
+while true {
+    inv = child.serve(h)
+    if inv.kind == "END" {
+        child.done(h, 0)
+        break
+    }
+    if inv.kind == "CANCEL" {
+        child.error(h, "cancelled by host: ${inv.args}")
+        break
+    }
+    // INVOKE: run inv.name with inv.args in the engine. Here, fetch the
+    // transaction's details from the host and give them back.
+    r = child.call_host(h, "txn_details", inv.args)
+    if r.kind == "CANCEL" {
+        child.error(h, "cancelled by host: ${r.text}")
+        break
+    }
+    if r.kind == "FAIL" { child.raised(h, r.text) } else { child.returned(h, r.text) }
+}
+```
+
+`serve` answers an `INVOKE` of a name `ready` did not announce with
+`RAISE` itself. A function that raises leaves the guest serving; a cancel,
+heard by `poll` or in place of a reply inside an invocation, ends it with
+`error`, as in a script.
 
 The host is the worker's only way out, so when the channel breaks (the host
 has gone, or sent a frame the worker cannot read) nobody is left to report
@@ -184,7 +333,9 @@ speaks it with a socket and nothing else.
 | `REPLY <json>` | answers a `CALL` | the function's value |
 | `FAIL <message>` | answers a `CALL` | the function failed (`host function failed` when empty) |
 | `FILE` | answers a `CALL` | then a descriptor on the next byte (`ipc.send_fd`); the value is `{"granted":true,"text":...}`, at most 64 KiB (`MAX_FILE`) |
-| `CANCEL <reason>` | any time after `SCRIPT` | stop the script; answered with `ERROR cancelled by host: <reason>` |
+| `CANCEL <reason>` | any time after `SCRIPT` | stop the script, the invocation, or the serving guest; answered with `ERROR cancelled by host: <reason>`, and the worker exits |
+| `INVOKE <name> <json array>` | while the guest serves: after `READY`, and after the `RETURN` or `RAISE` of the last invocation | call the exported function `name`; answered with `RETURN` or `RAISE`, with `SAY`, `LOG`, `CALL` and `AUDIT` on the way |
+| `END` | while the guest serves | the host is finished; answered with `DONE 0`, and the worker exits |
 
 | Worker to host | | |
 |---|---|---|
@@ -194,12 +345,21 @@ speaks it with a socket and nothing else.
 | `AUDIT <text>` | no answer | for the host's audit log: the lockdown, the probes, what the worker's sandbox refused |
 | `DONE <code>` | then it exits | the script ended |
 | `ERROR <message>` | then it exits | the script failed or was cancelled, or the host broke the protocol before the script |
+| `READY <json array>` | instead of `DONE`, then it serves | the script ended and left these functions: 1 to 256 distinct names of letters, digits, `_` and `.`, at most 128 bytes each |
+| `RETURN <json>` | answers `INVOKE` | the function's value |
+| `RAISE <message>` | answers `INVOKE` | the function failed (`guest function failed` when empty); the guest still serves |
 
 Before `SCRIPT`, a verb other than the four above, a `MOUNT` that is not
 `name min max` or a `LOGLEVEL` out of range is refused with `ERROR
 protocol: ...`. While the script runs, any frame other than `CANCEL` and
 `LOGLEVEL` (or an answer to a pending `CALL`) breaks the protocol and
 cancels the script with `protocol: unexpected '<verb>' ...` as the reason.
+While the guest serves, any frame other than `INVOKE`, `END`, `CANCEL` and
+`LOGLEVEL` does the same. On the host's side, a frame from an idle guest,
+a `RETURN` or `RAISE` with no `INVOKE`, a second `READY`, a `READY` list
+out of bounds, anything after `END` but `AUDIT`, `DONE` and `ERROR`, and
+an `INVOKE` from the worker are protocol errors: the host hangs up and
+kills it.
 
 The host refuses descriptors sent up by a worker (`std.ipc`'s direction
 rule): a file only ever travels down.
