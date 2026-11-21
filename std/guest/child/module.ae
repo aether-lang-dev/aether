@@ -44,8 +44,8 @@
 //           // r.kind VALUE (r.text is JSON), FAIL, or CANCEL
 //           // nothing exported:
 //           child.done(h, 0)
-//           // or, the script left on_txn behind:
-//           child.ready(h, "[\"on_txn\"]")
+//           // or, the script left on_tick behind:
+//           child.ready(h, "[\"on_tick\"]")
 //           while true {
 //               inv = child.serve(h)
 //               if inv.kind == "END" { child.done(h, 0) break }

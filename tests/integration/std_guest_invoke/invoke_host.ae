@@ -8,12 +8,14 @@
 //
 //   invoke_host <stub_guest> <scratch dir>   (test_std_guest_invoke.sh builds both)
 //
-// The first spec is the shape the design recommends, notify then fetch:
-// the guest starts a lookup through a host function that answers with a
-// transaction id at once, and serves; later the host notifies it with only
-// that id, and the guest fetches the details through another host
-// function, which the host may refuse. The rest are the safety rows and
-// the types, both directions.
+// The verb is a general call, and these specs use it as one: the JSON
+// value grid passed directly as arguments and values, both ways, and the
+// safety rows. One spec is the notify-then-fetch pattern: the guest starts
+// a lookup through a host function that answers with a transaction id at
+// once, and serves; later the host invokes it with that id, and the guest
+// fetches the details through another host function, which the host may
+// refuse. It shows an export calling mounted host functions and keeping
+// state between invocations.
 
 import std.spec
 import std.fs
@@ -103,7 +105,7 @@ main() {
     fs.write(log, "")
     fw = spec.init()
     spec.describe(fw, "std.guest: the host calls the guest") {
-        spec.it("guest-export-called, notify then fetch: the guest is told a transaction id and fetches the details through a host function") callback {
+        spec.it("notify then fetch: the guest is told a transaction id and fetches the details through a host function") callback {
             g = begin(stub, "txn", log)
             guest.mount(&g, "begin_lookup", 1, 1)
             guest.mount(&g, "txn_details", 1, 1)
@@ -167,7 +169,7 @@ main() {
             spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "DONE")
             spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "finished", "nothing to invoke")
         }
-        spec.it("carries every JSON value both ways: as INVOKE's argument and RETURN's value, and through a CALL inside the export") callback {
+        spec.it("guest-export-called: every JSON value crosses both ways, as INVOKE's argument and RETURN's value, and through a CALL inside the export") callback {
             g = serving(stub, "types", log, "def echo\nreturn $args\nend\ndef relay\ncall! echo_host $args\nreturn $last\nend")
             values = grid()
             n = list.size(values)

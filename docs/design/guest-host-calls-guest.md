@@ -38,40 +38,27 @@ zero-change alternative beside it.
 Out of scope, deliberately: function handles, nested call-backs, request ids
 or asynchrony, reuse of a worker across scripts, streaming, a batch verb.
 
-## The recommended use: notify, then fetch
+## Ways of calling across the divide
 
-The shape the verb is meant for (Paul: "a host informs guest: call back txn
-123456 has details for you") is a **notification carrying a correlation
-id**, not a payload:
+The verb is a general call: an `INVOKE` carries whatever arguments the
+function takes, of any JSON type and of any size up to the frame limit,
+and a `RETURN` any value. How an application uses it is its own choice;
+three ways are set out here side by side, each with when it fits. They mix
+freely in one guest.
 
-1. The guest's script asks the host to start something through a mounted
-   function that answers at once with an id (`begin_lookup("alice")`
-   returns `"123456"`). The script ends, and the guest serves.
-2. Later, on the host's schedule, the host invokes an export with only the
-   id: `INVOKE on_txn ["123456"]`.
-3. Inside the export the guest fetches the details through an ordinary
-   mounted function (`txn_details("123456")`), does its work, and returns.
+### 1. A direct call, with its arguments
 
-Why this shape and not "push the details in the `INVOKE`":
+The host calls the export with everything it needs and takes its value.
+The simplest way, and the right one for small values and pure functions:
+a spreadsheet's user-defined function called per cell, a comparator, an
+event handler given the event.
 
-- **Small frames.** The notification is a few bytes whatever the details
-  weigh; large data crosses only when the guest asks for it, and through the
-  same bounded `CALL`/`REPLY` path everything else uses.
-- **The host keeps authority over what the guest reads.** The fetch is a
-  host function the host mounted and answers, so it can refuse an id the
-  guest has no business with, return less, or grant a file as a descriptor.
-  An `INVOKE` payload would be data the guest received without asking.
-- **The audit log shows both.** `INVOKE on_txn` is one line (std.guest
-  writes it), the fetch another (the host's function writes it with
-  `guest.audit`), so who was told what, and what they then read, are
-  separate facts.
-- **Nothing new in the protocol.** The id is application data, an ordinary
-  argument. The guest's fetch happens inside the invocation, so strict
-  alternation holds: the host is answering the guest's `CALL`, not waiting
-  on two things at once.
-
-The host, in Aether (`guest.run_script` and `guest.call_export` write the
-`next` loop once; the handler answers the guest's calls):
+The guest registers `on_tick` and a comparator; the host calls `on_tick`
+three times and sorts a list of its own with `compare`, all while the guest
+is idle between calls (the host's sort never runs inside a guest `CALL`,
+so this needs no nesting). The host, in Aether (`guest.run_script` and
+`guest.call_export` write the `next` loop once; the handler answers the
+guest's own calls to the host):
 
 ```aether
 import std.guest
@@ -79,65 +66,36 @@ import std.sandbox
 
 main() {
     perms = sandbox.new("worker") {}
-    g, err = guest.launch(perms, "build/my-worker", null, "txn", "build/audit.log")
+    g, err = guest.launch(perms, "build/my-worker", null, "ticks", "build/audit.log")
     if err != "" {
         println("not started: ${err}")
         return
     }
-    guest.mount(&g, "begin_lookup", 1, 1)
-    guest.mount(&g, "txn_details", 1, 1)
-    e = guest.run_script(&g, "...the script...") callback | h: *guest.Guest, ev: guest.Event | {
-        if ev.kind == "CALL" && ev.name == "begin_lookup" {
-            guest.answer(h, guest.json_string("123456"))
+    guest.mount(&g, "log", 1, 1)
+    on_call = | h: *guest.Guest, ev: guest.Event | {
+        if ev.kind == "CALL" && ev.name == "log" {
+            println("guest: ${guest.printable(ev.text)}")
+            guest.answer(h, "null")
         }
     }
-    if e.kind != "READY" { return }
-    // ... later, when the lookup has finished:
-    v, verr = guest.call_export(&g, "on_txn", "[\"123456\"]") callback | h: *guest.Guest, ev: guest.Event | {
-        if ev.kind == "CALL" && ev.name == "txn_details" && ev.text == "[\"123456\"]" {
-            guest.audit(h, "FETCH txn 123456")
-            guest.answer(h, "{\"who\":\"alice\",\"amount\":12}")
-        } else if ev.kind == "CALL" {
-            guest.fail(h, "unknown txn")
-        }
+    e = guest.run_script(&g, "...the script...", on_call)
+    if e.kind != "READY" { return }            // DONE: it exported nothing
+    n = 1
+    while n <= 3 {
+        v, verr = guest.call_export(&g, "on_tick", "[${n}]", on_call)
+        if verr != "" { println("on_tick raised: ${guest.printable(verr)}") } else { println("ticks: ${v}") }
+        n = n + 1
     }
-    if verr != "" { println("on_txn raised: ${verr}") } else { println(v) }
+    order, cerr = guest.call_export(&g, "compare", "[\"pear\",\"apple\"]", on_call)
+    if cerr == "" { println("compare: ${order}") }   // 1: pear sorts after apple
     guest.end(&g)
-    e = guest.next(&g)                        // DONE 0
+    e = guest.next(&g)                         // DONE 0
 }
 ```
 
-The guest, in Python, as a worker with an `export` decorator would read
-(the decorator and the serving loop are each worker's own, in
-aether-guest-languages; this is the shape, not a promise of its spelling):
-
-```python
-started = set()
-
-started.add(begin_lookup("alice"))         # a mounted host function
-
-@export
-def on_txn(txn):
-    if txn not in started:
-        raise KeyError("unknown txn %s" % txn)  # RAISE; the guest serves on
-    details = txn_details(txn)              # the fetch: the host may refuse it
-    log("txn %s: %s" % (txn, details["who"]))
-    return details["amount"]
-```
-
-`tests/integration/std_guest_invoke` runs exactly this exchange against
-aether's own test worker, contained on Linux: two lookups, two
-notifications in a row with the guest's state kept between them, a
-notification for a transaction the guest never started (it raises without
-fetching), and an id the host's fetch refuses (the failure surfaces as the
-guest's `RAISE`).
-
-### A second example: callbacks the host drives
-
-The guest registers `on_tick` and a comparator; the host calls `on_tick`
-three times and sorts a list of its own with `compare`, all while the guest
-is idle between calls (the host's sort never runs inside a guest `CALL`,
-so this needs no nesting):
+The guest, as each worker's export mark reads (the mark and the serving
+loop are each worker's own, in aether-guest-languages; this is the shape,
+not a promise of the spelling):
 
 ```python
 ticks = []
@@ -186,6 +144,133 @@ In JavaScript (Duktape, QuickJS) `export` is a reserved word, so a prelude
 there names it `export_fn`. Tcl exports `proc`s by name, Perl and Ruby a
 sub or method by name. The Go worker's script is `call NAME [JSON]` lines:
 it has nothing to export.
+
+### 2. Notify, then fetch
+
+A suggested pattern, borrowed from message-bus experience: after years of
+pushing full payloads, much of that world settled on sending the smallest
+notification that tells the recipient to phone home for more. Here the
+notification is an ordinary invocation whose argument is an id, and the
+guest phones home through a host function the host mounted:
+
+1. The guest's script asks the host to start something through a mounted
+   function that answers at once with an id (`begin_lookup("alice")`
+   returns `"123456"`). The script ends, and the guest serves.
+2. Later, on the host's schedule, the host invokes an export with the id:
+   `on_txn("123456")`.
+3. Inside the export the guest fetches the details through another
+   mounted function (`txn_details("123456")`), does its work, and returns.
+
+It fits when the details are large (the notification stays a few bytes,
+and the data crosses only if the guest asks for it); when the host wants to
+keep authority over what is read (the fetch is a host function, so it can
+refuse an id, return less, or grant a file as a descriptor); when a
+notification may be dropped or coalesced (several "something changed"
+notifications cost one fetch of the current state); and when the audit log
+should show the notification and the read apart (`INVOKE on_txn` is a line
+std.guest writes, the fetch one the host's function writes with
+`guest.audit`). It needs nothing from the protocol: the id is application
+data, an ordinary argument, and the fetch happens inside the invocation, so
+strict alternation holds. It costs a second round trip, which a direct call
+does not.
+
+The host's side of the notification and the fetch:
+
+```aether,fragment
+v, verr = guest.call_export(&g, "on_txn", "[\"123456\"]") callback | h: *guest.Guest, ev: guest.Event | {
+    if ev.kind == "CALL" && ev.name == "txn_details" && ev.text == "[\"123456\"]" {
+        guest.audit(h, "FETCH txn 123456")
+        guest.answer(h, "{\"who\":\"alice\",\"amount\":12}")
+    } else if ev.kind == "CALL" {
+        guest.fail(h, "unknown txn")          // the guest sees a failed call
+    }
+}
+```
+
+The guest's side, in Python:
+
+```python
+started = set()
+started.add(begin_lookup("alice"))         # a mounted host function
+
+@export
+def on_txn(txn):
+    if txn not in started:
+        raise KeyError("unknown txn %s" % txn)  # RAISE; the guest serves on
+    details = txn_details(txn)              # the fetch: the host may refuse it
+    return details["amount"]
+```
+
+`tests/integration/std_guest_invoke` runs this exchange against aether's
+own test worker (two notifications in a row with the guest's state kept,
+a transaction the guest never started, an id the host's fetch refuses),
+beside the direct calls of the value grid and the safety rows.
+
+### 3. The pull pattern, with no protocol change
+
+Before the verb existed a guest could already be driven by the host: its
+script loops on a mounted host function, `next_event`, that blocks until
+the host has something for it. Each answer says what to run; the outcome
+rides on the next call. The host keeps the guest's `next_event` `CALL`
+unanswered ("parked") until it has work.
+
+The guest (Python):
+
+```python
+handlers = {"on_tick": on_tick, "compare": compare}
+event = next_event()                        # parks until the host has work
+while event is not None:
+    try:
+        outcome = ["R", handlers[event["name"]](*event["args"])]
+    except Exception as e:
+        outcome = ["E", str(e)]
+    event = next_event(*outcome)
+```
+
+The host (Aether), one call: answer the parked `next_event` with what to
+run, then run until the guest parks again; its arguments are the outcome:
+
+```aether,fragment
+// The guest is parked in next_event (a CALL the host has not answered).
+guest.answer(&g, "{\"name\":\"on_tick\",\"args\":[1]}")
+while true {
+    e = guest.next(&g)
+    if e.kind == "CALL" && e.name == "next_event" { break }   // parked again: e.text is ["R", value] or ["E", why]
+    if e.kind == "CALL" { answer_host_function(&g, e) }       // its other host calls, as usual
+    if e.kind != "SAY" && e.kind != "LOG" && e.kind != "CALL" { break }
+}
+```
+
+While the guest is parked the host must not call `next`: the guest is
+waiting on the host, so the deadline would pass and cancel a healthy guest
+(the aether-child-sandboxing showcase's `rexx/stuck.rexx` is that case on
+purpose). With the verb, `next` on an idle guest returns `IDLE` instead.
+
+It fits when one application owns both ends and wants an event shape of
+its own (a stream of typed events rather than calls), when the worker in
+hand has not learnt to export yet, or in Rexx, where a call through an
+exported label still costs about three times a pull round trip (the
+measurements below).
+
+| | Pull (`next_event`) | The verb |
+|---|---|---|
+| Protocol change | none | five frames, the `Guest` phase |
+| The guest's author writes | the loop and the dispatch (seven lines of Python; an `IF` chain in Rexx) | the functions and an export mark |
+| The host's author writes | the parking, and must not call `next` while parked | `call_export`, or `invoke` and `next` to `RETURN`/`RAISE` |
+| Errors | a convention per application (`"R"`/`"E"` above) | `RAISE`, `guest.result` |
+| The host knows the guest's surface | no | `READY` |
+| Audit log | every notification looks like a `CALL next_event` | `READY`, `INVOKE`, `RAISE` and `END` are lines of their own |
+| Deadlines, cancel, frames | identical: the same frames underneath | identical |
+| Cost per call | the same in Python; cheaper in Rexx (below) | |
+
+**Choosing.** A direct call when the values are small and the function is
+pure or self-contained. Notify then fetch when the payload is large, the
+host should decide what is read, or notifications may be dropped or
+coalesced. Pull when no worker change is wanted, or the application wants
+its own event vocabulary. The verb, either way it is used, is the one to
+reach for when the guest's surface should be something the host, or the
+family, knows and shares: named entry points, errors that are errors, an
+audit log that reads as what happened.
 
 ## The protocol
 
@@ -327,67 +412,6 @@ need a reset story per engine, and a new worker is cheaper to reason about.
 Exports are fixed at `READY`. The host ends a serving guest with `END`;
 `close` still hangs up and kills at any time.
 
-## The zero-change alternative: the pull pattern
-
-Before the verb existed a guest could already be driven by the host, with
-no protocol change: its script loops on a mounted host function,
-`next_event`, that blocks until the host has something for it. Each answer
-says what to run; the outcome rides on the next call. The host keeps the
-guest's `next_event` `CALL` unanswered ("parked") until it has work.
-
-The guest (Python):
-
-```python
-handlers = {"on_txn": on_txn}
-event = next_event()                        # parks until the host has work
-while event is not None:
-    try:
-        outcome = ["R", handlers[event["name"]](*event["args"])]
-    except Exception as e:
-        outcome = ["E", str(e)]
-    event = next_event(*outcome)
-```
-
-The host (Aether), one call: answer the parked `next_event` with what to
-run, then run until the guest parks again; its arguments are the outcome:
-
-```aether,fragment
-// The guest is parked in next_event (a CALL the host has not answered).
-guest.answer(&g, "{\"name\":\"on_txn\",\"args\":[\"123456\"]}")
-while true {
-    e = guest.next(&g)
-    if e.kind == "CALL" && e.name == "next_event" { break }   // parked again: e.text is ["R", value] or ["E", why]
-    if e.kind == "CALL" { answer_host_function(&g, e) }       // its txn_details fetch, as usual
-    if e.kind != "SAY" && e.kind != "LOG" && e.kind != "CALL" { break }
-}
-```
-
-While the guest is parked the host must not call `next`: the guest is
-waiting on the host, so the deadline would pass and cancel a healthy guest
-(the aether-child-sandboxing showcase's `rexx/stuck.rexx` is that case on
-purpose). With the verb, `next` on an idle guest returns `IDLE` instead.
-
-| | Pull (`next_event`) | The verb |
-|---|---|---|
-| Protocol change | none | five frames, the `Guest` phase |
-| The guest's author writes | the loop and the dispatch (seven lines of Python; an `IF` chain in Rexx) | the functions and an export mark |
-| The host's author writes | the parking, and must not call `next` while parked | `call_export`, or `invoke` and `next` to `RETURN`/`RAISE` |
-| Errors | a convention per application (`"R"`/`"E"` above) | `RAISE`, `guest.result` |
-| The host knows the guest's surface | no | `READY` |
-| Audit log | every notification looks like a `CALL next_event` | `READY`, `INVOKE`, `RAISE` and `END` are lines of their own |
-| Deadlines, cancel, frames | identical: the same frames underneath | identical |
-| Cost per call | the same in Python; cheaper in Rexx (below) | |
-
-**When to use which.** Use the verb when the guest's surface is something
-the host, or the family, should know and share: named entry points a host
-calls on its schedule (transaction callbacks, plug-in commands, spreadsheet
-user-defined functions), errors that should be errors, an audit log that
-reads as what happened. Use the pull pattern when one application owns both
-ends and wants an event shape of its own (a stream of typed events rather
-than calls), when the worker in hand has not learnt to export yet, or in
-Rexx where a call through an exported label still costs about three times a
-pull round trip (the measurements below).
-
 ## Compatibility
 
 No negotiation and no back-compat. On the wire, a worker that exports
@@ -447,8 +471,8 @@ protocol (`CALL`/`OK`/`ERR`/`RESULT`), not `std.guest`'s, so it cannot
 carry these rows without learning `std.guest`'s frames: a change of medium
 size to the double every bridge depends on, not made with the verb. The
 rows are held in aether by name instead, as the spec names of
-`tests/integration/std_guest_invoke` (`guest-export-called` is the
-notify-then-fetch spec, then `guest-export-slow`, `-silent`, `-oversize`,
+`tests/integration/std_guest_invoke` (`guest-export-called`, the value
+grid called both ways, then `guest-export-slow`, `-silent`, `-oversize`,
 `-raises`, `guest-reenters-while-called`, `guest-export-flood`,
 `-malformed`, `guest-after-end`), each with the exact `KILLED`/`ERROR`
 text a host sees. For aether-guest-languages to hold its workers to them

@@ -52,7 +52,7 @@
 //       if ev.kind == "CALL" { guest.answer(h, guest.json_string("hi")) }
 //   }
 //   if e.kind == "READY" {
-//       v, verr = guest.call_export(&g, "on_txn", "[\"123456\"]") callback | h: *guest.Guest, ev: guest.Event | {
+//       v, verr = guest.call_export(&g, "on_tick", "[1]") callback | h: *guest.Guest, ev: guest.Event | {
 //           // the export's CALLs to the host's functions, answered here
 //       }
 //       guest.end(&g)

@@ -119,18 +119,12 @@ A script that exports nothing ends with `DONE`, exactly as before. The
 design, the options that lost and the questions still open are in
 [docs/design/guest-host-calls-guest.md](../../docs/design/guest-host-calls-guest.md).
 
-The shape it is meant for is **notify, then fetch**. The guest asks the
-host to start something through a mounted function that answers at once
-with an id; its script ends and it serves. Later, on the host's schedule,
-the host invokes the guest's export with only the id, and inside it the
-guest fetches the details through another mounted function, which the host
-may refuse. The `INVOKE` frame stays small, the host keeps the say over
-what the guest reads, and the audit log shows the notification and the
-fetch apart.
-
-The example **compiles but is not run** in CI: it needs a worker program
-(`tests/integration/std_guest_invoke` runs the same exchange against the
-test worker).
+The verb is a general call: an `INVOKE` carries whatever arguments the
+function takes, of any JSON type and size up to the frame limit, and a
+`RETURN` any value. The example **compiles but is not run** in CI: it needs
+a worker program (`tests/integration/std_guest_invoke` runs exchanges like
+it against the test worker). The script exports `on_tick` and `compare`;
+the host calls them directly with their arguments.
 
 ```aether
 import std.guest
@@ -138,36 +132,48 @@ import std.sandbox
 
 main() {
     perms = sandbox.new("worker") {}
-    g, err = guest.launch(perms, "build/my-worker", null, "txn", "build/audit.log")
+    g, err = guest.launch(perms, "build/my-worker", null, "ticks", "build/audit.log")
     if err != "" {
         println("not started: ${err}")
         return
     }
-    guest.mount(&g, "begin_lookup", 1, 1)       // answers a transaction id at once
-    guest.mount(&g, "txn_details", 1, 1)        // the details, if the host agrees
-    e = guest.run_script(&g, "...the script...") callback | h: *guest.Guest, ev: guest.Event | {
-        if ev.kind == "CALL" && ev.name == "begin_lookup" {
-            guest.answer(h, guest.json_string("123456"))
+    guest.mount(&g, "log", 1, 1)
+    on_call = | h: *guest.Guest, ev: guest.Event | {
+        if ev.kind == "CALL" && ev.name == "log" {
+            println("guest: ${guest.printable(ev.text)}")
+            guest.answer(h, "null")
         }
     }
+    e = guest.run_script(&g, "...the script...", on_call)
     if e.kind != "READY" {                      // DONE: it exported nothing
         println("${e.kind} ${guest.printable(e.text)}")
         return
     }
-    // Later: the lookup has finished. Tell the guest, with the id alone.
-    v, verr = guest.call_export(&g, "on_txn", "[\"123456\"]") callback | h: *guest.Guest, ev: guest.Event | {
-        if ev.kind == "CALL" && ev.name == "txn_details" && ev.text == "[\"123456\"]" {
-            guest.audit(h, "FETCH txn 123456")
-            guest.answer(h, "{\"who\":\"alice\",\"amount\":12}")
-        } else if ev.kind == "CALL" {
-            guest.fail(h, "unknown txn")
-        }
-    }
-    if verr != "" { println("on_txn raised: ${guest.printable(verr)}") } else { println(v) }
+    v, verr = guest.call_export(&g, "on_tick", "[1]", on_call)
+    if verr != "" { println("on_tick raised: ${guest.printable(verr)}") } else { println("ticks: ${v}") }
+    order, _ = guest.call_export(&g, "compare", "[\"pear\",\"apple\"]", on_call)
+    println("compare: ${order}")
     guest.end(&g)                               // END; the guest answers DONE 0
     e = guest.next(&g)
 }
 ```
+
+Applications call across the divide in more than one way, and they mix in
+one guest; the design note sets them side by side, each with an example:
+
+- **A direct call** with its arguments, as above: the simplest, right for
+  small values and pure functions (a spreadsheet's user-defined function,
+  a comparator, an event handler given its event).
+- **Notify, then fetch**, a suggested pattern borrowed from message-bus
+  practice: the host invokes with a small id, and the export phones home
+  for the details through a mounted host function (`txn_details`), which
+  the host may refuse. Good when payloads are large, when the host wants to
+  keep authority over what is read, or when a notification may be dropped
+  or coalesced; it costs a second round trip.
+- **The pull pattern**, with no protocol at all: the guest's script loops
+  on a mounted `next_event` whose answer says what to run. It suits one
+  application with its own event shape, or a worker that has not learnt to
+  export.
 
 The same with the loop written out: `guest.invoke(&g, name, args_json)`
 sends `INVOKE`; then `guest.next(&g)` returns the invocation's `SAY`,
@@ -203,13 +209,6 @@ What holds a serving guest:
   calling it.
 - An invoked function reaches only what the host mounted: being callable
   gives the guest nothing new.
-
-**The pull pattern** does the same with no protocol at all: the guest's
-script loops on a mounted host function, `next_event`, whose answer says
-what to run; the outcome rides on the next call. It suits one application
-with its own event shape. The verb suits a surface shared across languages
-and applications, with the errors, the idle state and the audit lines
-written once. The design note has both, worked, and when to use which.
 
 ## The worker
 
@@ -286,7 +285,7 @@ A worker serves after its script like this; inside an invocation it calls
 the host and polls exactly as inside a script:
 
 ```aether,fragment
-child.ready(h, "[\"on_txn\"]")
+child.ready(h, "[\"on_tick\",\"compare\"]")
 while true {
     inv = child.serve(h)
     if inv.kind == "END" {
@@ -297,14 +296,9 @@ while true {
         child.error(h, "cancelled by host: ${inv.args}")
         break
     }
-    // INVOKE: run inv.name with inv.args in the engine. Here, fetch the
-    // transaction's details from the host and give them back.
-    r = child.call_host(h, "txn_details", inv.args)
-    if r.kind == "CANCEL" {
-        child.error(h, "cancelled by host: ${r.text}")
-        break
-    }
-    if r.kind == "FAIL" { child.raised(h, r.text) } else { child.returned(h, r.text) }
+    // INVOKE: run inv.name with inv.args in the engine, which may call
+    // the host (child.call_host) and poll on the way. Here, an echo.
+    child.returned(h, inv.args)
 }
 ```
 

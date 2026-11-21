@@ -14,8 +14,8 @@
   guest, or one answering what was not asked, hangs up. The worker's side
   is `child.ready`, `child.serve`, `child.returned` and `child.raised`. A
   worker that exports nothing behaves exactly as before on the wire;
-  `guest.Guest` gains `phase`, `exported` and `pending`. The recommended
-  shape, notify then fetch (the host invokes with a transaction id and the
-  guest fetches the details through a host function the host can refuse),
-  the zero-change pull pattern beside it, and the questions still open are
-  in `docs/design/guest-host-calls-guest.md`.
+  `guest.Guest` gains `phase`, `exported` and `pending`. The ways of
+  calling across that divide (a direct call with its arguments, notify
+  then fetch as a suggested pattern, and the zero-change pull pattern),
+  side by side, and the questions still open are in
+  `docs/design/guest-host-calls-guest.md`.
