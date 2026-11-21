@@ -14,6 +14,165 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.934.0]
+
+### Added
+
+- **`os.spawn_tree_to`: a child whose whole process tree ends with the
+  process that started it.** `spawn_proc_to`'s child leads a process group and
+  `os.kill` signals the group, which ends the tree only while the parent lives
+  and asks, and misses a descendant that left the group with `setsid`. Asked
+  for at spawn time, `os.spawn_tree_to(prog, argv, env, out_path, grace_ms:
+  2000)` returns a handle the caller owns, and the tree ends when the caller's
+  process ends however it ends (SIGKILL included), when the handle asks
+  (`os.tree_kill`, or `os.tree_free` while it runs), and when the program
+  exits on its own, so once `os.tree_token(tree)` reaps nothing it started is
+  running: SIGTERM, the grace period, then SIGKILL until none is left. Linux
+  and FreeBSD use a supervisor process that is a child subreaper and watches a
+  pipe only the caller holds; macOS, which has no subreaper, lists the
+  descendants every 50 ms instead, so one that leaves the group and is
+  orphaned within a poll is missed; Windows uses a Job Object with
+  kill-on-close. The default spawns are unchanged. Asked for by selaenium,
+  which can drop its own supervisor.
+
+### Fixed
+
+- **`contrib.quickjs`: an interrupted `Array.prototype.find` no longer frees
+  an element twice.** In quickjs-ng 0.18.0, `find`, `findIndex`, `findLast` and
+  `findLastIndex` released each element at the end of a step without clearing
+  the variable, so when a deadline, cancel or stop interrupted the next step
+  the error path released it again: the array kept pointing at a freed
+  object, and the next garbage collection aborted in `gc_decref_child`. The
+  fetched amalgamation is now patched with quickjs-ng's own fix (e22ce4de43,
+  #1826, on its master after 0.18.0) from `contrib/quickjs/patches/`, applied
+  by `scripts/fetch-quickjs-amalgamation.sh` after the checksum, so a source
+  install, the release archives, CI and cross builds all get it. Reported by
+  sae.
+
+- **A local whose value the compiler types late still shadows a constant of
+  its name.** With `const f = "text"` in the program, a function binding
+  `f = list.get(xs, 0)` (or any value the early type-inference pass cannot
+  type on its first walk: a call whose result is inferred from its body, a
+  field read through a pointer, a destructured slot of such a call, an if-
+  or match-expression over one) and then reading `g = f` failed with E0200
+  "Type mismatch in variable initialization": the walk bound the local only
+  once it had a type, so the read took the constant's. A local named like a
+  struct, a message, an actor or a selectively imported constant failed the
+  same way (E0302 "Unknown type" for a struct or an actor). The walk now
+  binds the name as soon as it is bound, typed or not, except a bare binding
+  of a module-level `var`, which writes the global as it always did.
+
+- **A function returning its own untyped local or parameter no longer
+  returns a constant's type.** `same(f) { return f }` beside `const f = 7`
+  was inferred to return an int, so `same("word")` was refused ("'same'
+  returns int ..., but this value is string"), and `get(xs) { f = pick(xs);
+  return f }` beside `const f = "text"` returned a string. Return types are
+  inferred after a function's walk, when its own names are gone, and a
+  returned name the walk had left untyped was looked up among the
+  program's. They are now looked up beneath the function's own names.
+
+- **`ae build --emit=staticlib` archives the modules' `@source` C files and
+  the `--extra` files.** The static archive held the program's object and the
+  runtime's and nothing else, so a library importing `contrib.quickjs` left
+  every `qjs_*` symbol undefined and a consumer linking the archive without an
+  Aether toolchain failed, while `--emit=lib` linked the same files in. Each
+  source file is now compiled for the target with the program's flags and
+  archived beside it; an object is archived as it is; an archive named with
+  `--extra` cannot be a member of one, and the build says to link it beside
+  the result. Reported by servirtium-vcr, whose `core/embed.ae` archive had 15
+  undefined `qjs_*` symbols and now has none.
+
+- **A function's write to a module `var` keeps the var's type for the reads
+  after it.** With `var f: float = 0.5`, a function doing `f = 2` and then
+  `g = f` declared `g` an int, so C cut the 2.0 the global held to 2 and
+  `g / 4` was 0 where the answer is 0.5, with no diagnostic; a destructured
+  slot (`f, s = pair()`) did the same. The early type-inference pass took
+  the binding for a local of the value's type. It is the global, of the
+  global's type, so the reads are floats. A module's code still never
+  reaches the program's own vars: there the binding is the function's
+  local, as before.
+
+- **A refusal under the LD_PRELOAD sandbox on FreeBSD no longer recurses
+  until the stack runs out.** The library opened its log,
+  `aether-sandbox.log` in the working directory, with libc's `fopen`, and
+  FreeBSD's `fopen` opens through `_open`, which the library has wrapped
+  since 0.927.0. Where the grants did not cover the working directory, the
+  log line of a refused call asked to open the log, was refused, and logged
+  that, without end: every refused open under the default log faulted after
+  half a gigabyte of stack (eight `contrib_host_stunt` tests segfaulted), and
+  in a child started by `spawn_sandboxed` it ran for minutes before the
+  fault (`sandbox_preload_lookup` never finished). The log is now opened by
+  `openat` to the system call, unchecked, as `fopen` reached it on glibc;
+  writing a log line also leaves the refusal's `errno` as it was.
+
+- **The LD_PRELOAD sandbox holds FreeBSD 15's `renameat2`, `glob_b` and
+  `fts_open_b`.** FreeBSD 15 added `renameat2`, and its blocks forms of
+  `glob` and `fts_open` went to libc unchecked: under a policy, `renameat2`
+  moved a file from outside the grants into them, and `fts_open_b` walked a
+  directory the grants do not reach. Each is now checked as `renameat`,
+  `glob` and `fts_open` are. The coverage test that lists every path call of
+  the C library reads FreeBSD's public names, leaving out its private
+  `FBSDprivate_1.0` aliases (`_unlink`, `_rename`) as it leaves out glibc's
+  `GLIBC_PRIVATE`, and knows `link_ntoa_r` and POSIX.1-2024's
+  `posix_spawn_file_actions_addchdir` and `addfchdir`.
+
+- **A listing the LD_PRELOAD sandbox refuses reads as the kernel's own
+  `EACCES` in `glob`, `nftw` and `ftw` too.** `opendir`, `scandir` and the
+  opens already failed as an unreadable directory does, but a walk or a glob
+  of one did not: `nftw` and `ftw` returned -1 without calling the function,
+  where the kernel's refusal calls it with the directory as `FTW_DNR` and
+  returns its answer; `glob` returned `GLOB_ABORTED` without calling the
+  error function and whatever the flags, where the kernel's refusal calls it
+  with `EACCES` and goes on to `GLOB_NOMATCH` (or the pattern itself under
+  `GLOB_NOCHECK`) unless `GLOB_ERR` is set. A refused root is now handed to
+  the walk's function as the kernel's refusal hands it, and `glob` lists
+  every directory, not only the first, through the checked `opendir`
+  (`GLOB_ALTDIRFUNC`), so the C library answers a refusal exactly as it
+  answers the kernel's. A new test runs one program against a `chmod 000`
+  directory and under the preload and compares the two outputs byte for
+  byte.
+
+- **A panic in a library export no longer dies of SIGILL or SIGSEGV when the
+  library's C and the runtime were compiled differently for control-flow
+  protection.** On x86 an export stub saves its context with
+  `__builtin_setjmp` and a panic jumped back with `__builtin_longjmp` from the
+  runtime, but the builtins' buffer layout depends on `-fcf-protection`: with
+  it slot 2 holds the shadow-stack pointer and slot 3 the stack pointer. A
+  release runtime is built by Ubuntu's gcc, which protects by default, and a
+  library built with Arch's gcc 16 is not, so on CachyOS (an N100, which has
+  CET with shadow stacks off) the runtime read the stack pointer as a
+  shadow-stack pointer and ran `incsspq`, which faults: RexxAE's
+  `test_resource_cleanup.py` died of SIGILL. The other way round it loaded a
+  stack pointer of 0. The stub now defines the jump itself and hands it to
+  `aether_exec_enter_at` with the buffer, so one compiler with one set of flags
+  writes and reads it; nothing changes for the program's own CET settings.
+  Runtime ABI revision 5.
+
+- **`os.spawn_tree_to` no longer starts a tree it cannot end when a sandbox refuses the read of `/proc` (Linux).** Its supervisor finds the descendants that left the program's process group by reading `/proc`; inside a sandboxed child (`spawn_sandboxed`) with `grant_fork()` but no `grant_fs_read("/proc/*")`, that read was refused, so `tree_kill` ended the group, the token read 143, and a `setsid`'d descendant kept running. The spawn now probes the read first and fails with "cannot read /proc", naming the grant. `tests/integration/sandbox_spawn_tree` runs the three cases (no fork grant, no `/proc` grant, both), and `docs/containment-sandbox.md` says what the supervisor needs.
+
+- **`os.tree_kill` on Windows refuses a second ask, as on POSIX.** `spawn_tree_to`'s Windows handle ended the job on every call and returned 0 each time, where the POSIX handle returns -1 once the tree has been asked to end. The handle now records the first ask. Found by running `tests/integration/os_spawn_tree` on Windows 11 (MSYS2 UCRT64), where it had only been compile-checked; the test also tolerates the moment Windows takes to signal a terminated process's handle after `TerminateJobObject`.
+
+- **`os.spawn_tree_to` fails the spawn when the supervisor cannot become a reaper.** The Linux `PR_SET_CHILD_SUBREAPER` and FreeBSD `PROC_REAP_ACQUIRE` results were ignored, so a refusal (FreeBSD's Capsicum capability mode answers ECAPMODE) went on to a supervisor that could not find descendants that left the program's group. The error now reaches the caller. Under Capsicum the spawn already fails earlier, on opening the output file, so this closes the next door rather than changing what a Capsicum child sees today.
+
+- **The QuickJS engine's carried patches apply where neither `patch` nor
+  `git` is installed.** `scripts/fetch-quickjs-amalgamation.sh` applied
+  `contrib/quickjs/patches/*.patch` with `patch(1)`, or `git apply` without
+  it, and stopped where there was neither: a bare MSYS2 shell, which is
+  where the Windows jobs stage the release archive. It now falls back to
+  `scripts/apply-unified-patch.awk`, which applies a plain unified diff
+  exactly (a hunk fits at the line it names or the patch is refused and
+  nothing changes). The three ways write the same bytes.
+
+### Security
+
+- **The LD_PRELOAD sandbox holds `openat2` on glibc 2.42 and later.**
+  glibc 2.42 added `openat2` as a function that makes the system call
+  itself, so the sandbox's refusal of a raw `SYS_openat2` under a policy
+  never saw it, and a program on a current glibc read a file outside its
+  grants with it. It is now checked as `openat` is; with `RESOLVE_` flags the
+  file it opened is checked again where it is, and `RESOLVE_IN_ROOT`, which
+  the check cannot follow, is refused under a policy.
+
 ## [0.933.0]
 
 ### Fixed
