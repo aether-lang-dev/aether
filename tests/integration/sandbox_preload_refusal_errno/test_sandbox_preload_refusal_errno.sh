@@ -18,6 +18,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/same_bytes.sh"
 LIB="$ROOT/build/libaether_sandbox.so"
 
 case "$(uname -s 2>/dev/null)" in
@@ -49,6 +50,12 @@ chmod 000 "$TMP/kernel/d"
 printf 'fs_read:%s/elsewhere/*\n' "$TMP" > "$TMP/grants"
 fail=0
 
+# show_both KERNEL PRELOAD: the two outputs, one after the other.
+show_both() {
+    sed 's/^/    kernel:  /' "$1"
+    sed 's/^/    preload: /' "$2"
+}
+
 (cd "$TMP/kernel" && "$TMP/probe" "$TMP/kernel/d") > "$TMP/kernel.out" 2>&1
 # The default log (aether-sandbox.log in the working directory), in a
 # directory the grants do not reach.
@@ -59,21 +66,21 @@ if ! grep -q 'opendir: NULL errno=EACCES' "$TMP/kernel.out"; then
     sed 's/^/    /' "$TMP/kernel.out"
     exit 0
 fi
-if cmp -s "$TMP/kernel.out" "$TMP/preload.out"; then
+if same_bytes "$TMP/kernel.out" "$TMP/preload.out"; then
     echo "  [PASS] a refused listing reads as the kernel's EACCES, call for call"
 else
     echo "  [FAIL] a refused listing differs from the kernel's EACCES (kernel, then preload):"
-    diff "$TMP/kernel.out" "$TMP/preload.out" | sed 's/^/    /'
+    show_both "$TMP/kernel.out" "$TMP/preload.out"
     fail=1
 fi
 # With the log on stderr, the same, and every refusal logged.
 (cd "$TMP/preload" && LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/grants" AETHER_SANDBOX_LOG=stderr \
     "$TMP/probe" "$TMP/preload/d") > "$TMP/stderr.out" 2> "$TMP/stderr.err"
-if cmp -s "$TMP/kernel.out" "$TMP/stderr.out" && grep -q "AETHER_DENIED: fs_read $TMP/preload/d" "$TMP/stderr.err"; then
+if same_bytes "$TMP/kernel.out" "$TMP/stderr.out" && grep -q "AETHER_DENIED: fs_read $TMP/preload/d" "$TMP/stderr.err"; then
     echo "  [PASS] the same with the log on stderr, the refusal logged"
 else
     echo "  [FAIL] with the log on stderr (kernel, then preload):"
-    diff "$TMP/kernel.out" "$TMP/stderr.out" | sed 's/^/    /'
+    show_both "$TMP/kernel.out" "$TMP/stderr.out"
     sed 's/^/    /' "$TMP/stderr.err" | head -5
     fail=1
 fi
