@@ -36,5 +36,6 @@ main() {
         println("FAIL: the global was not written")
         exit(1)
     }
+    list.free(xs)
     println("PASS: an untyped binding of a module var writes the global")
 }

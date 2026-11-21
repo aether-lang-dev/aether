@@ -15,5 +15,6 @@ main() {
     xs = list.new()
     list.add(xs, xs)
     if blk(xs) != 1 { exit(1) }
+    list.free(xs)
     println("ok")
 }

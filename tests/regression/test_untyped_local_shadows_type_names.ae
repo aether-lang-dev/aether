@@ -97,5 +97,6 @@ main() {
         println("FAIL: the struct and function still work")
         exit(1)
     }
+    list.free(xs)
     println("PASS: an untyped local shadows a type or function of its name")
 }

@@ -31,5 +31,6 @@ main() {
         println("FAIL: blk")
         exit(1)
     }
+    list.free(xs)
     println("PASS: ${f}")
 }

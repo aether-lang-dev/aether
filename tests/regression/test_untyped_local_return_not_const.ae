@@ -42,5 +42,6 @@ main() {
         println("FAIL: same")
         exit(1)
     }
+    list.free(xs)
     println("PASS: ${f}")
 }

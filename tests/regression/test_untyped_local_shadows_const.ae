@@ -159,5 +159,6 @@ main() {
         println("FAIL: the constant changed")
         exit(1)
     }
+    list.free(xs)
     println("PASS: an untyped local shadows a constant of its name")
 }

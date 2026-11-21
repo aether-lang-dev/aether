@@ -33,6 +33,7 @@ actor Worker {
             g = f
             let bb: *Box = g
             seen = bb.v
+            list.free(xs)
             println("handler ${seen}")
         }
     }

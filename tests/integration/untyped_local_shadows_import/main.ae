@@ -32,4 +32,5 @@ main() {
     if const_name(xs) != 3 { exit(1) }
     if function_name(xs) != 3 { exit(2) }
     println("${const_name(xs)} ${function_name(xs)} ${LIMIT} ${width(1)}")
+    list.free(xs)
 }
