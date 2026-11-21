@@ -30,6 +30,14 @@ extern exit(code: int)
 
 const BIG = 33554432
 const READ_BUFFER = 16384
+// How long the client waits, with nothing arriving, for the server's close
+// to show: 100 ms polls. The server's own close is immediate once the drain
+// has failed, but the FIN travels behind the bytes still queued in the
+// server's send buffer, which a 16 KB receive window lets through only as
+// the client reads, so on a loaded runner (the macOS x86_64 release build
+// saw 3 s of silence before it, 0.933.0) the close can be seconds late. A
+// connection that is never closed still fails this: it just takes this long.
+const CLOSE_POLLS = 200
 
 handle_file(req: ptr, res: ptr, ud: ptr) {
     http.serve_file(res, http.get_header(req, "X-File"))
@@ -99,13 +107,13 @@ main() {
     tail = ""
     quiet = 0
     closed = 0
-    while quiet < 30 {
+    while quiet < CLOSE_POLLS {
         ready, _perr = tcp.poll(sock, 100)
         if ready {
             chunk, rerr = tcp.read(sock, 65536)
             if rerr != "" || string.length(chunk) == 0 {
                 closed = 1
-                quiet = 30
+                quiet = CLOSE_POLLS
             } else {
                 total = total + string.length(chunk)
                 // A status line split across two reads is counted once:
@@ -143,7 +151,7 @@ main() {
         println("  PASS cut short (${total} bytes)")
     }
     if closed != 1 {
-        println("  FAIL the connection was left open after a response cut short")
+        println("  FAIL the connection was left open after a response cut short (no close in ${CLOSE_POLLS / 10} s after the last of ${total} bytes)")
         bad = bad + 1
     } else {
         println("  PASS connection closed")
