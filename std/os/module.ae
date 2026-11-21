@@ -28,6 +28,8 @@ exports(
     os_run_stdio_raw, run_stdio, STDERR_INHERIT, STDERR_DISCARD, STDERR_FILE,
     spawn_proc, wait, wait_any, wait_any_timeout,
     os_spawn_to_raw, spawn_proc_to,
+    os_spawn_tree_to_raw, os_tree_token_raw, os_tree_pid_raw, os_tree_kill_raw, os_tree_free_raw,
+    spawn_tree_to, tree_token, tree_pid, tree_kill, tree_free,
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
@@ -192,6 +194,24 @@ extern os_spawn_raw(prog: string, argv: ptr, env: ptr) -> (int, string)
 // not ended. A program that cannot start is (-1, reason), as for
 // os_spawn_raw.
 extern os_spawn_to_raw(prog: string, argv: ptr, env: ptr, out_path: string) -> (int, string)
+
+// os_spawn_to_raw's child, with its whole tree bound to this process: the
+// tree ends when this process ends however it ends (SIGKILL included), when
+// the handle asks (os_tree_kill_raw, os_tree_free_raw), and when the program
+// exits on its own, so once the token reaps nothing the program started is
+// left running. Returns (tree, err): `tree` is a handle this process owns,
+// null with err set when the program could not start. spawn_tree_to below
+// has the contract in full.
+extern os_spawn_tree_to_raw(prog: string, argv: ptr, env: ptr, out_path: string, grace_ms: int) -> (ptr, string)
+// The token to reap with wait, wait_any, wait_any_timeout or wait_pid_timeout.
+extern os_tree_token_raw(tree: ptr) -> int
+// The program's own pid (on POSIX also its process group).
+extern os_tree_pid_raw(tree: ptr) -> int
+// End the whole tree now; reap the token afterwards. 0, or -1 when it was
+// already asked to end.
+extern os_tree_kill_raw(tree: ptr) -> int
+// Free the handle, ending the tree first if it is still running.
+extern os_tree_free_raw(tree: ptr)
 
 // Reap one token. Blocks until that child exits. Returns (exit_code,
 // err). err is non-empty only for a bad/unknown token or abnormal
@@ -474,6 +494,81 @@ spawn_proc(prog: string, argv: ptr, env: ptr) -> {
 // on POSIX). See os_spawn_to_raw.
 spawn_proc_to(prog: string, argv: ptr, env: ptr, out_path: string) -> {
     return os_spawn_to_raw(prog, argv, env, out_path)
+}
+
+// spawn_proc_to's child, with its whole process tree bound to this process.
+// Ask for it at spawn time when a child must not outlive you: a WebDriver
+// driver and the browser it starts, a server a test starts. The tree ends
+//   - when this process ends, however it ends: a crash, an exit that never
+//     stopped the child, SIGKILL from a test runner's timeout;
+//   - when you ask: tree_kill(tree), or tree_free(tree) while it runs;
+//   - when the program exits on its own: whatever it left running ends then.
+// Then the token reaps, so after os.wait(tree_token(tree)) nothing the
+// program started is running. A descendant that left the program's process
+// group (setsid, setpgid) is ended too. Ending is graceful first: SIGTERM to
+// the group and every descendant, up to `grace_ms` for them to go, then
+// SIGKILL until none is left.
+//
+//     tree, err = os.spawn_tree_to("chromedriver", argv, null, "driver.log")
+//     ...
+//     os.tree_kill(tree)
+//     code, _e = os.wait(os.tree_token(tree))
+//     os.tree_free(tree)
+//
+// The handle is yours: nothing else holds it, and freeing it ends the tree.
+// Reap the token once, as for any spawn; a SIGTERM, SIGINT or SIGHUP sent to
+// the token with os.kill ends the tree as tree_kill does, but SIGKILL to it
+// cannot be caught: use tree_kill. stdout and stderr go to `out_path`, stdin
+// is empty, as for spawn_proc_to. The exit code is the program's (143 when
+// the tree was ended while it ran and it died of the SIGTERM).
+//
+// How, and the limits, by platform:
+//   - Linux: a supervisor process (a fork of this one, no exec) is a child
+//     subreaper, so every descendant is re-parented to it rather than to
+//     init; it watches a pipe only this process holds the write end of, and
+//     it is the token. A supervisor killed by SIGKILL takes the program with
+//     it (its parent-death signal), not what the program started.
+//   - FreeBSD: the same, the reaper by procctl (PROC_REAP_ACQUIRE, and
+//     PROC_REAP_KILL to end it).
+//   - macOS: the same supervisor, but macOS has no subreaper. It lists the
+//     descendants every 50 ms while it watches and ends every one it listed
+//     (checked by start time), so a descendant that left the group is ended
+//     even after its parent exited, unless it left the group and was orphaned
+//     within one 50 ms poll (a double-forked daemon can be that quick): that
+//     one belongs to launchd and is not reached.
+//   - Windows: a Job Object with KILL_ON_JOB_CLOSE; this process holds its
+//     only handles, so the kernel ends the job when this process ends. No
+//     process can leave the job, so the whole tree is covered; there is no
+//     grace period (Windows has no SIGTERM).
+//   - Other POSIX systems: the program's process group only.
+// On POSIX the write end the supervisor watches is close-on-exec: an exec
+// of this process (os.execv) ends the tree, and a fork of this process that
+// does not exec keeps the tree alive while that fork lives.
+spawn_tree_to(prog: string, argv: ptr, env: ptr, out_path: string, grace_ms: int = 2000) -> (ptr, string) {
+    return os_spawn_tree_to_raw(prog, argv, env, out_path, grace_ms)
+}
+
+// The token of a spawn_tree_to child, for wait, wait_any, wait_any_timeout
+// and wait_pid_timeout.
+tree_token(tree: ptr) -> int {
+    return os_tree_token_raw(tree)
+}
+
+// The program's own pid: on POSIX also its process group id. Not the token.
+tree_pid(tree: ptr) -> int {
+    return os_tree_pid_raw(tree)
+}
+
+// End the whole tree now (SIGTERM, the grace period, then SIGKILL; on Windows
+// the job at once). Does not wait: reap the token after. 0, or -1 when it was
+// already asked to end.
+tree_kill(tree: ptr) -> int {
+    return os_tree_kill_raw(tree)
+}
+
+// Free the handle. A tree still running is ended first, as tree_kill ends it.
+tree_free(tree: ptr) {
+    os_tree_free_raw(tree)
 }
 
 // Reap a single spawned token. Blocks until it exits. Returns

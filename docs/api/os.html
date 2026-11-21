@@ -90,6 +90,16 @@
     <li><a href="#wait_any_timeout">wait_any_timeout</a></li>
     <li><a href="#spawn_to_raw">spawn_to_raw</a></li>
     <li><a href="#spawn_proc_to">spawn_proc_to</a></li>
+    <li><a href="#spawn_tree_to_raw">spawn_tree_to_raw</a></li>
+    <li><a href="#tree_token_raw">tree_token_raw</a></li>
+    <li><a href="#tree_pid_raw">tree_pid_raw</a></li>
+    <li><a href="#tree_kill_raw">tree_kill_raw</a></li>
+    <li><a href="#tree_free_raw">tree_free_raw</a></li>
+    <li><a href="#spawn_tree_to">spawn_tree_to</a></li>
+    <li><a href="#tree_token">tree_token</a></li>
+    <li><a href="#tree_pid">tree_pid</a></li>
+    <li><a href="#tree_kill">tree_kill</a></li>
+    <li><a href="#tree_free">tree_free</a></li>
     <li><a href="#kill_raw">kill_raw</a></li>
     <li><a href="#wait_pid_timeout_raw">wait_pid_timeout_raw</a></li>
     <li><a href="#run_supervised_raw">run_supervised_raw</a></li>
@@ -605,6 +615,66 @@
       <pre class="usage"><code>spawn_proc_to(prog, argv, env, out_path) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr, out_path: string</span></p>
       <p class="doc">Start a child without waiting, its stdout and stderr written to the file `out_path` (created or truncated). Returns (token, err) like spawn_proc; the token works with wait, wait_any and wait_any_timeout, and kill(token, sig) ends the child's whole tree (a Job Object on Windows, a process group on POSIX). See os_spawn_to_raw.</p>
+    </div>
+    <div class="function" id="spawn_tree_to_raw" data-name="spawn_tree_to_raw">
+      <h3 class="function-name">spawn_tree_to_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>spawn_tree_to_raw(prog, argv, env, out_path, grace_ms) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr, out_path: string, grace_ms: int</span></p>
+      <p class="doc">os_spawn_to_raw's child, with its whole tree bound to this process: the tree ends when this process ends however it ends (SIGKILL included), when the handle asks (os_tree_kill_raw, os_tree_free_raw), and when the program exits on its own, so once the token reaps nothing the program started is left running. Returns (tree, err): `tree` is a handle this process owns, null with err set when the program could not start. spawn_tree_to below has the contract in full.</p>
+    </div>
+    <div class="function" id="tree_token_raw" data-name="tree_token_raw">
+      <h3 class="function-name">tree_token_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>tree_token_raw(tree) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">tree: ptr</span></p>
+      <p class="doc">The token to reap with wait, wait_any, wait_any_timeout or wait_pid_timeout.</p>
+    </div>
+    <div class="function" id="tree_pid_raw" data-name="tree_pid_raw">
+      <h3 class="function-name">tree_pid_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>tree_pid_raw(tree) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">tree: ptr</span></p>
+      <p class="doc">The program's own pid (on POSIX also its process group).</p>
+    </div>
+    <div class="function" id="tree_kill_raw" data-name="tree_kill_raw">
+      <h3 class="function-name">tree_kill_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>tree_kill_raw(tree) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">tree: ptr</span></p>
+      <p class="doc">End the whole tree now; reap the token afterwards. 0, or -1 when it was already asked to end.</p>
+    </div>
+    <div class="function" id="tree_free_raw" data-name="tree_free_raw">
+      <h3 class="function-name">tree_free_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>tree_free_raw(tree)</code></pre>
+      <p class="signature"><span class="sig-params">tree: ptr</span></p>
+      <p class="doc">Free the handle, ending the tree first if it is still running.</p>
+    </div>
+    <div class="function" id="spawn_tree_to" data-name="spawn_tree_to">
+      <h3 class="function-name">spawn_tree_to <span class="kind">fn</span></h3>
+      <pre class="usage"><code>spawn_tree_to(prog, argv, env, out_path, grace_ms) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr, out_path: string, grace_ms: int = 2000</span></p>
+      <p class="doc">spawn_proc_to's child, with its whole process tree bound to this process. Ask for it at spawn time when a child must not outlive you: a WebDriver driver and the browser it starts, a server a test starts. The tree ends - when this process ends, however it ends: a crash, an exit that never stopped the child, SIGKILL from a test runner's timeout; - when you ask: tree_kill(tree), or tree_free(tree) while it runs; - when the program exits on its own: whatever it left running ends then. Then the token reaps, so after os.wait(tree_token(tree)) nothing the program started is running. A descendant that left the program's process group (setsid, setpgid) is ended too. Ending is graceful first: SIGTERM to the group and every descendant, up to `grace_ms` for them to go, then SIGKILL until none is left. tree, err = os.spawn_tree_to(&quot;chromedriver&quot;, argv, null, &quot;driver.log&quot;) ... os.tree_kill(tree) code, _e = os.wait(os.tree_token(tree)) os.tree_free(tree) The handle is yours: nothing else holds it, and freeing it ends the tree. Reap the token once, as for any spawn; a SIGTERM, SIGINT or SIGHUP sent to the token with os.kill ends the tree as tree_kill does, but SIGKILL to it cannot be caught: use tree_kill. stdout and stderr go to `out_path`, stdin is empty, as for spawn_proc_to. The exit code is the program's (143 when the tree was ended while it ran and it died of the SIGTERM). How, and the limits, by platform: - Linux: a supervisor process (a fork of this one, no exec) is a child subreaper, so every descendant is re-parented to it rather than to init; it watches a pipe only this process holds the write end of, and it is the token. A supervisor killed by SIGKILL takes the program with it (its parent-death signal), not what the program started. - FreeBSD: the same, the reaper by procctl (PROC_REAP_ACQUIRE, and PROC_REAP_KILL to end it). - macOS: the same supervisor, but macOS has no subreaper. It lists the descendants every 50 ms while it watches and ends every one it listed (checked by start time), so a descendant that left the group is ended even after its parent exited, unless it left the group and was orphaned within one 50 ms poll (a double-forked daemon can be that quick): that one belongs to launchd and is not reached. - Windows: a Job Object with KILL_ON_JOB_CLOSE; this process holds its only handles, so the kernel ends the job when this process ends. No process can leave the job, so the whole tree is covered; there is no grace period (Windows has no SIGTERM). - Other POSIX systems: the program's process group only. On POSIX the write end the supervisor watches is close-on-exec: an exec of this process (os.execv) ends the tree, and a fork of this process that does not exec keeps the tree alive while that fork lives.</p>
+    </div>
+    <div class="function" id="tree_token" data-name="tree_token">
+      <h3 class="function-name">tree_token <span class="kind">fn</span></h3>
+      <pre class="usage"><code>tree_token(tree) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">tree: ptr</span></p>
+      <p class="doc">The token of a spawn_tree_to child, for wait, wait_any, wait_any_timeout and wait_pid_timeout.</p>
+    </div>
+    <div class="function" id="tree_pid" data-name="tree_pid">
+      <h3 class="function-name">tree_pid <span class="kind">fn</span></h3>
+      <pre class="usage"><code>tree_pid(tree) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">tree: ptr</span></p>
+      <p class="doc">The program's own pid: on POSIX also its process group id. Not the token.</p>
+    </div>
+    <div class="function" id="tree_kill" data-name="tree_kill">
+      <h3 class="function-name">tree_kill <span class="kind">fn</span></h3>
+      <pre class="usage"><code>tree_kill(tree) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">tree: ptr</span></p>
+      <p class="doc">End the whole tree now (SIGTERM, the grace period, then SIGKILL; on Windows the job at once). Does not wait: reap the token after. 0, or -1 when it was already asked to end.</p>
+    </div>
+    <div class="function" id="tree_free" data-name="tree_free">
+      <h3 class="function-name">tree_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>tree_free(tree)</code></pre>
+      <p class="signature"><span class="sig-params">tree: ptr</span></p>
+      <p class="doc">Free the handle. A tree still running is ended first, as tree_kill ends it.</p>
     </div>
     <div class="function" id="kill_raw" data-name="kill_raw">
       <h3 class="function-name">kill_raw <span class="kind">extern</span></h3>
