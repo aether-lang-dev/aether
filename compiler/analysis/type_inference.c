@@ -502,6 +502,17 @@ static int names_module_var(InferenceContext* ctx, const char* name) {
     return ctx->module_vars && name && strmap_has(ctx->module_vars, name);
 }
 
+/* Is `node` a bare `name = value` that writes a module-level `var`: in a
+ * walk that has no binding of the name, of a name the program has a `var`
+ * of (the checker's rebound_global_var)? */
+static int writes_module_var(InferenceContext* ctx, ASTNode* node) {
+    if (!ctx->symbols || ctx->walk_id == 0 || node->type != AST_VARIABLE_DECLARATION ||
+        !node->type_inferred || !names_module_var(ctx, node->value))
+        return 0;
+    Symbol* existing = lookup_symbol_local(ctx->symbols, node->value);
+    return !(existing && rebindable_symbol(ctx, existing));
+}
+
 /* A binding in the walk whose value this pass cannot type yet (`f =
  * list.get(xs, 0)`, `f = ctx.h5` through a pointer, a call whose result is
  * inferred from its body) binds its name all the same, from here on, as the
@@ -776,6 +787,16 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             if (node->child_count > 0) {
                 collect_constraints(node->children[0], ctx);
 
+                /* A module `var`'s bare binding takes the global's type (see
+                 * writes_module_var below), not a constraint from the value. */
+                if (writes_module_var(ctx, node) && is_type_inferrable(node->node_type)) {
+                    Symbol* global = lookup_symbol_local(ctx->symbols, node->value);
+                    if (global && global->type && global->type->kind != TYPE_UNKNOWN) {
+                        free_type(node->node_type);
+                        node->node_type = clone_type(global->type);
+                    }
+                }
+
                 // If declaration type is unknown, infer it from initializer
                 if (is_type_inferrable(node->node_type)) {
                     Type* init_type = node->children[0]->node_type;
@@ -800,6 +821,13 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                     }
                 }
             }
+            /* A bare `name = value` of a module-level `var`, in a walk that
+             * has no binding of the name, writes the global: it is no local,
+             * and it has the global's type, as a re-bind of a local has the
+             * local's. It used to be entered as a local of the value's type,
+             * so after `f = 2` on a `var f: float` the read `g = f` declared
+             * `g` an int, and the 2.0 the global held was cut to 2. */
+            if (writes_module_var(ctx, node)) break;
             /* #3064: the body's join of this name (below) reads it typed. */
             if (node->type == AST_VARIABLE_DECLARATION && node->value && ctx->scope_owner)
                 hoist_joins_typed(body_joins(ctx, ctx->scope_owner), node);
@@ -912,7 +940,10 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                         if (var->value && strcmp(var->value, "_") != 0 && ctx->symbols) {
                             Symbol* existing = lookup_symbol_local(ctx->symbols, var->value);
                             if (existing && !rebindable_symbol(ctx, existing)) existing = NULL;
-                            if (existing) {
+                            /* A slot of a module `var` writes the global. */
+                            if (!existing && ctx->walk_id != 0 && names_module_var(ctx, var->value)) {
+                                continue;
+                            } else if (existing) {
                                 if (existing->type) free_type(existing->type);
                                 existing->type = clone_type(slot);
                             } else {
