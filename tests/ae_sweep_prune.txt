@@ -86,6 +86,7 @@ tests/integration/derive_schema_cross_module/
 tests/integration/distinct_types/
 tests/integration/quote_errors/
 tests/integration/quote_helper_module/
+tests/integration/dsl_block_capture_param/
 tests/integration/dsl_receiver_program_shadows/
 tests/integration/dsl_receiver_scoping/
 tests/integration/dsl_receiver_scoping_edge/
