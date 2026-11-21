@@ -311,6 +311,9 @@ int main(int argc, char** argv) {
         return 7;
 #endif
     }
+    // A plain open of the outside file: the refusal the log case (in the
+    // script) writes down.
+    if (strcmp(c, "open-out") == 0) return read_verdict(open(at("outside/secret.txt"), O_RDONLY));
     fprintf(stderr, "unknown case %s\n", c);
     return 2;
 }

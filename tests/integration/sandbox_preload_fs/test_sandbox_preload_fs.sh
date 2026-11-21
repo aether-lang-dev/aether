@@ -137,6 +137,29 @@ else
     fail=1
 fi
 run_case "a bind mount of a directory outside onto the box is refused" bind-mount-out 3
+# A refusal logged to the default log, aether-sandbox.log in the working
+# directory, where the grants do not reach. The preload opens its log for
+# itself; it opened it with libc's fopen, which on FreeBSD opens through
+# _open, a call this library wraps: the log line of the refusal was itself
+# refused, and logged, without end, until the stack ran out (a segfault).
+# The refusal must also still read EACCES after the log line is written.
+(cd "$FIX/outside" && LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/box.grants" \
+    "$TMP/harness" open-out "$FIX" </dev/null >"$TMP/out" 2>"$TMP/err")
+got=$?
+if [ "$got" -eq 3 ] && grep -q "AETHER_DENIED: fs_read $FIX/outside/secret.txt" "$FIX/outside/aether-sandbox.log" 2>/dev/null; then
+    echo "  [PASS] a refusal logged where the grants do not reach is EACCES, and logged once"
+else
+    echo "  [FAIL] a refusal logged to a log the grants do not reach: exit $got, expected 3 and one line in its log"
+    sed 's/^/    /' "$TMP/err" | head -5
+    fail=1
+fi
+if [ -f "$FIX/outside/aether-sandbox.log" ] &&
+   [ "$(grep -c AETHER_DENIED "$FIX/outside/aether-sandbox.log")" -ne 1 ]; then
+    echo "  [FAIL] the log holds more than the one refusal:"
+    head -5 "$FIX/outside/aether-sandbox.log" | sed 's/^/    /'
+    fail=1
+fi
+rm -f "$FIX/outside/aether-sandbox.log"
 # unshare(CLONE_NEWUSER|CLONE_NEWNS): EPERM from the preload, whatever the
 # kernel would allow. The log tells the preload's refusal from the kernel's.
 (cd "$FIX/box/sub" && LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/box.grants" \

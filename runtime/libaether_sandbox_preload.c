@@ -114,20 +114,40 @@ extern const char* aether_sandbox_staged_for(const char* tmp) __attribute__((wea
 // which run after this library's.
 static int g_preload_ready = 0;
 
+// The log file, opened by this library for itself: not checked, and so
+// never a refusal to log. Not through libc's fopen: FreeBSD's fopen opens
+// through _open, which this library wraps (a program may call it by name),
+// so under a policy that did not grant the log's directory the log line of a
+// refusal asked to open the log, was refused, and logged that, without end:
+// every refused open recursed until the stack ran out (a segfault after
+// half a gigabyte of stack, minutes of it in a forked child). libc's openat
+// goes to the system call with no wrapper of this library in between.
+static FILE* log_open(void) {
+    static int (*openat_fn)(int, const char*, int, ...) = NULL;
+    if (!openat_fn) openat_fn = (int (*)(int, const char*, int, ...))dlsym(RTLD_NEXT, "openat");
+    if (!openat_fn) return NULL;
+    int fd = openat_fn(AT_FDCWD, "aether-sandbox.log", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0666);
+    if (fd < 0) return NULL;
+    FILE* f = fdopen(fd, "a");
+    if (!f) close(fd);
+    return f;
+}
+
+// A refusal, in the log. The caller's errno is kept: a refusal reads as the
+// kernel's own EACCES whatever writing the line did to errno.
 static void log_deny(const char* category, const char* resource) {
     if (log_mode == LOG_NONE) return;
+    int saved = errno;
     if (log_mode == LOG_STDERR) {
         fprintf(stderr, "AETHER_DENIED: %s %s\n", category, resource);
     } else if (log_mode == LOG_FILE) {
-        if (!log_file) {
-            log_file = real_fopen ? real_fopen("aether-sandbox.log", "a")
-                                  : fopen("aether-sandbox.log", "a");
-        }
+        if (!log_file) log_file = log_open();
         if (log_file) {
             fprintf(log_file, "AETHER_DENIED: %s %s\n", category, resource);
             fflush(log_file);
         }
     }
+    errno = saved;
 }
 
 // The grant check proper, for a resource already resolved (an fs path from
@@ -260,7 +280,7 @@ static void log_note(const char* what) {
         fprintf(stderr, "AETHER_SANDBOX: %s\n", what);
         return;
     }
-    if (!log_file) log_file = real_fopen ? real_fopen("aether-sandbox.log", "a") : NULL;
+    if (!log_file) log_file = log_open();
     if (log_file) {
         fprintf(log_file, "AETHER_SANDBOX: %s\n", what);
         fflush(log_file);
@@ -403,8 +423,8 @@ static void landlock_backstop(void) {
     }
     // The log is opened now: the ruleset does not let the process make it
     // later.
-    if (!why[0] && log_mode == LOG_FILE && !log_file && real_fopen)
-        log_file = real_fopen("aether-sandbox.log", "a");
+    if (!why[0] && log_mode == LOG_FILE && !log_file)
+        log_file = log_open();
     if (!why[0] && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
         snprintf(why, sizeof why, "landlock: PR_SET_NO_NEW_PRIVS refused (%s); the permanent policy "
                  "holds at libc only", strerror(errno));
