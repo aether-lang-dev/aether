@@ -8,18 +8,30 @@
 // it in (sandbox.spawn_socket), and the worker's own sandbox.enforce, which
 // it enters with no grants before its script's first step. The worker's
 // half is std.guest.child; README.md beside this file has the protocol,
-// every message in both directions.
+// every message in both directions, and docs/design/guest-host-calls-guest.md
+// the design of the host-calls-guest direction.
+//
+// The host may call the guest too. A script that leaves functions behind
+// ends with READY and their names instead of DONE; the guest then serves:
+// it sits idle until the host INVOKEs one of them (answered with RETURN or
+// RAISE, with SAY, LOG and the guest's own CALLs on the way) or ENDs it
+// (answered with DONE 0). Host and guest strictly alternate: the host
+// invokes only an idle guest, one invocation at a time, and a guest never
+// invokes the host's functions any other way than CALL. A script that
+// exports nothing sends DONE exactly as before.
 //
 // Deadlines. Each exchange, from what the host last sent or received to the
-// guest's next frame, is bounded by `deadline_ms`. When it passes the host
-// sends CANCEL; a guest whose script is looping or waiting on a reply stops
-// it in the engine and answers ERROR "cancelled by host: ...". One that does
-// not answer within `grace_ms` is hung up on and killed. A frame over
-// `max_frame`, a malformed one or one that stalls part way is refused the
-// same way. Every spawn, GRANT, DENY, timeout, cancel and kill goes to one
-// audit log, with what the guest reported from its own sandbox.
+// guest's next frame, is bounded by `deadline_ms`, inside an invocation as
+// inside the script. When it passes the host sends CANCEL; a guest whose
+// script is looping or waiting on a reply stops it in the engine and
+// answers ERROR "cancelled by host: ...". One that does not answer within
+// `grace_ms` is hung up on and killed. A frame over `max_frame`, a
+// malformed one or one that stalls part way is refused the same way. An
+// idle guest has no deadline: the host decides when it is next spoken to.
+// Every spawn, GRANT, DENY, INVOKE, END, timeout, cancel and kill goes to
+// one audit log, with what the guest reported from its own sandbox.
 //
-// Usage:
+// Usage, the loop written out:
 //
 //   perms = sandbox.new("rexx") {}            // the worker reads nothing
 //   g, err = guest.launch(perms, "build/rexxae-worker", null, "rexx", "audit.log")
@@ -30,12 +42,28 @@
 //       if e.kind == "SAY" { println(guest.printable(e.text)) }
 //       else if e.kind == "CALL" { guest.answer(&g, guest.json_string("hi")) }
 //       else if e.kind == "LOG" { }           // only after guest.log_level
-//       else { break }                        // DONE, ERROR or KILLED
+//       else { break }                        // DONE, ERROR, KILLED or READY
+//   }
+//
+// or with the loop written once, in run_script and call_export, and only
+// the host's own functions in a handler:
+//
+//   e = guest.run_script(&g, source) callback | h: *guest.Guest, ev: guest.Event | {
+//       if ev.kind == "CALL" { guest.answer(h, guest.json_string("hi")) }
+//   }
+//   if e.kind == "READY" {
+//       v, verr = guest.call_export(&g, "on_txn", "[\"123456\"]") callback | h: *guest.Guest, ev: guest.Event | {
+//           // the export's CALLs to the host's functions, answered here
+//       }
+//       guest.end(&g)
+//       guest.next(&g)                        // DONE 0
 //   }
 
 exports(Guest, Event, launch, launch_uncontained, mount, probe, log_level,
     start, answer, fail, grant_file, deny, cancel, next, close, audit,
-    json_string, printable, level_name, MAX_FRAME, DEADLINE_MS, GRACE_MS)
+    invoke, end, result, is_exported, is_serving, run_script, call_export,
+    json_string, printable, level_name, MAX_FRAME, DEADLINE_MS, GRACE_MS,
+    MAX_EXPORTS, MAX_EXPORT_NAME, SCRIPT, SERVING, INVOKING, ENDING, CANCELLED)
 
 import std.io
 import std.ipc
@@ -49,6 +77,22 @@ const MAX_FRAME = 65536
 // The default bound on one exchange, and on the answer to a CANCEL.
 const DEADLINE_MS = 5000
 const GRACE_MS = 1000
+// The most functions a guest may export, and the longest name of one, in
+// bytes. A READY over either is a protocol error: the guest is hung up on.
+const MAX_EXPORTS = 256
+const MAX_EXPORT_NAME = 128
+
+// Where a guest's conversation is (Guest.phase):
+//   SCRIPT     its script runs (from launch to READY or DONE)
+//   SERVING    its script has ended with READY: idle, waiting for INVOKE or END
+//   INVOKING   an invocation runs (from INVOKE to RETURN or RAISE)
+//   ENDING     END has been sent: only DONE (or ERROR) may come
+//   CANCELLED  CANCEL has been sent: the guest is ending (see cancelling)
+const SCRIPT = 0
+const SERVING = 1
+const INVOKING = 2
+const ENDING = 3
+const CANCELLED = 4
 
 // A running guest. `deadline_ms`, `grace_ms` and `max_frame` may be changed
 // at any time.
@@ -62,6 +106,14 @@ struct Guest {
     max_frame: int
     // 1 once DONE, ERROR or KILLED has been returned: the child is reaped.
     over: int
+    // SCRIPT, SERVING, INVOKING, ENDING or CANCELLED (above).
+    phase: int
+    // What READY exported: a JSON array of names, written ["a","b"]
+    // whatever spacing the guest used; "[]" before READY.
+    exported: string
+    // 1 from a CALL until the host answers it (answer, fail, grant_file,
+    // deny).
+    pending: int
 }
 
 // One thing the guest did. kind is
@@ -74,6 +126,12 @@ struct Guest {
 //   ERROR   text, the guest's message ("cancelled by host: ..." after a
 //           deadline or a cancel)
 //   KILLED  text, why the host hung up and killed it
+//   READY   text = the exported names as a JSON array (also g.exported):
+//           the script has ended and the guest serves; invoke, or end
+//   RETURN  text = the JSON value the invoked function returned
+//   RAISE   text = the error the invoked function raised; the guest
+//           still serves
+//   IDLE    next was called while the guest serves: nothing was read
 struct Event {
     kind: string
     name: string
@@ -121,7 +179,8 @@ fn log_event(rest: string) -> (Event, string) {
 fn new_guest(ch: int, pid: int, name: string, audit_path: string) -> Guest {
     return Guest {
         ch: ch, pid: pid, name: name, audit_path: audit_path,
-        deadline_ms: DEADLINE_MS, grace_ms: GRACE_MS, max_frame: MAX_FRAME, over: 0
+        deadline_ms: DEADLINE_MS, grace_ms: GRACE_MS, max_frame: MAX_FRAME, over: 0,
+        phase: SCRIPT, exported: "[]", pending: 0
     }
 }
 
@@ -196,11 +255,13 @@ start(g: *Guest, source: string) -> string {
 
 // Answers the pending CALL with a JSON value.
 answer(g: *Guest, json: string) -> string {
+    g.pending = 0
     return ipc.write_frame(g.ch, "REPLY ${json}")
 }
 
 // Fails the pending CALL; the script sees an error with this message.
 fail(g: *Guest, why: string) -> string {
+    g.pending = 0
     return ipc.write_frame(g.ch, "FAIL ${why}")
 }
 
@@ -210,6 +271,7 @@ fail(g: *Guest, why: string) -> string {
 grant_file(g: *Guest, name: string, path: string) -> string {
     fd, oerr = io.fd_open_read(path)
     if oerr != "" { return deny(g, name, oerr) }
+    g.pending = 0
     audit(g, "GRANT ${printable(name)} -> ${path}")
     err = ipc.write_frame(g.ch, "FILE")
     if err == "" { err = ipc.send_fd(g.ch, fd, "F") }
@@ -221,27 +283,84 @@ grant_file(g: *Guest, name: string, path: string) -> string {
 // script gets {"granted":false,"why":why}.
 deny(g: *Guest, name: string, why: string) -> string {
     audit(g, "DENY ${printable(name)}: ${why}")
+    g.pending = 0
     return ipc.write_frame(g.ch, "REPLY {\"granted\":false,\"why\":${json_string(why)}}")
 }
 
-// Asks the guest to stop its script now. next() then returns its ERROR.
+// Asks the guest to stop now: its script, its invocation, or (serving)
+// itself. next() then returns its ERROR. A cancel ends the guest
+// (cancelling, below).
 cancel(g: *Guest, reason: string) -> string {
     audit(g, "CANCEL ${reason}")
-    return ipc.write_frame(g.ch, "CANCEL ${reason}")
+    err = ipc.write_frame(g.ch, "CANCEL ${reason}")
+    if err == "" && g.over == 0 { cancelling(g) }
+    return err
+}
+
+// Open question (i), decided here and nowhere else on the host: a cancel,
+// the host's own or a passed deadline's, ENDS THE GUEST, inside an
+// invocation as inside its script, because the function's state is half
+// done. From here only ERROR (or DONE) ends the exchange; a READY, RETURN
+// or RAISE already on its way is dropped (next), and deadline_passed waits
+// for ERROR or DONE alone. The alternative, ending only the invocation,
+// would keep an INVOKING guest INVOKING here, take a RAISE as the answer
+// to the cancel in deadline_passed too, and have the worker answer a
+// cancel inside an invocation with RAISE (std.guest.child, serve).
+fn cancelling(g: *Guest) {
+    g.phase = CANCELLED
+}
+
+// Open question (ii), decided here: an invocation has NO total time
+// budget. Each exchange inside it is bounded by deadline_ms, as in a
+// script, so an export that keeps calling the host runs as long as the
+// host keeps answering. A budget would be the remainder of it, when
+// smaller, returned from here while the phase is INVOKING.
+fn exchange_deadline_ms(g: *Guest) -> int {
+    return g.deadline_ms
+}
+
+// Open question (iii), decided here: INVOKE carries NO sequence number.
+// What can be checked without one is checked: a guest that is idle has
+// nothing to say, so a frame from it before the host's INVOKE or END (or
+// when next is called on it) is unsolicited, and the host hangs up. A
+// RETURN the guest sends after the host's INVOKE has gone but before it
+// has read it cannot be told from the answer, and is taken as one: the
+// guest can only lie about its own function, which it could anyway. A
+// number that RETURN and RAISE echo would close that; it would be checked
+// here and in next. "" when the guest is quiet, or why to hang up.
+fn unsolicited_while_idle(g: *Guest) -> string {
+    ready, werr = ipc.wait_readable(g.ch, 0)
+    if werr != "" { return "while the guest was idle: ${werr}" }
+    if ready == 0 { return "" }
+    data, rerr = ipc.read_frame_timeout(g.ch, g.max_frame, g.grace_ms)
+    if rerr != "" { return "while the guest was idle: ${rerr}" }
+    verb, _rest = split_verb(data)
+    return "protocol: '${printable(verb)}' from the guest while it was idle"
 }
 
 // The guest's next event, waiting at most deadline_ms for it (see the top
 // of this file). AUDIT frames go to the audit log and are not returned.
 next(g: *Guest) -> Event {
     if g.over == 1 { return event("ERROR", "", "the guest has finished", -1) }
+    // A serving guest is idle until the host invokes or ends it: there is
+    // nothing to wait for, and waiting would only run the deadline down.
+    if g.phase == SERVING {
+        uerr = unsolicited_while_idle(g)
+        if uerr != "" { return hang_up(g, uerr) }
+        return event("IDLE", "", "the guest serves; invoke or end it", 0)
+    }
     while true {
-        data, rerr = ipc.read_frame_timeout(g.ch, g.max_frame, g.deadline_ms)
+        data, rerr = ipc.read_frame_timeout(g.ch, g.max_frame, exchange_deadline_ms(g))
         // Nothing of a frame arrived: the stream is still in step, so CANCEL
         // can go down it. Any other error (a frame that stalled part way
         // included) leaves it out of step.
         if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES { return deadline_passed(g) }
         if rerr != "" { return hang_up(g, "frame refused: ${rerr}") }
         verb, rest = split_verb(data)
+        // After END the guest may only finish.
+        if g.phase == ENDING && verb != "AUDIT" && verb != "DONE" && verb != "ERROR" {
+            return hang_up(g, "protocol: '${printable(verb)}' after END")
+        }
         match verb {
             "AUDIT" -> { audit(g, "reports: ${printable(rest)}") }
             "SAY" -> { return event("SAY", "", rest, 0) }
@@ -252,10 +371,49 @@ next(g: *Guest) -> Event {
             }
             "CALL" -> {
                 name, args = split_verb(rest)
+                g.pending = 1
                 return event("CALL", name, args, 0)
             }
             "DONE" -> { return ended(g, verb, rest) }
             "ERROR" -> { return ended(g, verb, rest) }
+            "READY" -> {
+                if g.phase == CANCELLED {
+                    audit(g, "READY after CANCEL, dropped")
+                } else if g.phase != SCRIPT {
+                    return hang_up(g, "protocol: a second READY")
+                } else {
+                    names, xerr = check_exports(rest)
+                    if xerr != "" { return hang_up(g, "protocol: READY ${xerr}") }
+                    g.exported = names
+                    g.phase = SERVING
+                    audit(g, "READY exports ${names}")
+                    return event("READY", "", names, 0)
+                }
+            }
+            "RETURN" -> {
+                if g.phase == CANCELLED {
+                    audit(g, "RETURN after CANCEL, dropped")
+                } else if g.phase != INVOKING {
+                    return hang_up(g, "protocol: RETURN with no INVOKE")
+                } else {
+                    g.phase = SERVING
+                    g.pending = 0
+                    return event("RETURN", "", rest, 0)
+                }
+            }
+            "RAISE" -> {
+                if g.phase == CANCELLED {
+                    audit(g, "RAISE after CANCEL, dropped")
+                } else if g.phase != INVOKING {
+                    return hang_up(g, "protocol: RAISE with no INVOKE")
+                } else {
+                    g.phase = SERVING
+                    g.pending = 0
+                    why = if rest == "" { "guest function failed" } else { rest }
+                    audit(g, "RAISE ${printable(why)}")
+                    return event("RAISE", "", why, 0)
+                }
+            }
             _ -> { return hang_up(g, "protocol: unexpected '${printable(verb)}'") }
         }
     }
@@ -278,9 +436,11 @@ fn ended(g: *Guest, verb: string, rest: string) -> Event {
 // still between frames: ask the guest to cancel and give it grace_ms to
 // say it has.
 fn deadline_passed(g: *Guest) -> Event {
-    audit(g, "TIMEOUT no frame within ${g.deadline_ms} ms; CANCEL sent")
-    serr = ipc.write_frame(g.ch, "CANCEL deadline of ${g.deadline_ms} ms passed")
+    ms = exchange_deadline_ms(g)
+    audit(g, "TIMEOUT no frame within ${ms} ms; CANCEL sent")
+    serr = ipc.write_frame(g.ch, "CANCEL deadline of ${ms} ms passed")
     if serr != "" { return hang_up(g, "CANCEL not delivered: ${serr}") }
+    cancelling(g)
     while true {
         data, rerr = ipc.read_frame_timeout(g.ch, g.max_frame, g.grace_ms)
         if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES {
@@ -290,7 +450,8 @@ fn deadline_passed(g: *Guest) -> Event {
         verb, rest = split_verb(data)
         if verb == "ERROR" || verb == "DONE" { return ended(g, verb, rest) }
         if verb == "AUDIT" { audit(g, "reports: ${printable(rest)}") }
-        // A SAY, LOG or CALL already on its way when the CANCEL went: dropped.
+        // A SAY, LOG, CALL, READY, RETURN or RAISE already on its way when
+        // the CANCEL went: dropped.
     }
 }
 
@@ -319,6 +480,195 @@ fn finish(g: *Guest) {
         audit(g, "KILLED did not exit after it finished")
         os.kill(g.pid, 9)
         os.wait_pid(g.pid)
+    }
+}
+
+// Calls the guest's exported function `name` with `args`, a JSON array.
+// Only while the guest serves: after READY, and after the RETURN or RAISE
+// that ended the last invocation. The host then reads the invocation's
+// events with next as it reads a script's: SAY, LOG, CALL (answer each),
+// and at the end RETURN or RAISE, each exchange bounded by deadline_ms. A
+// deadline that passes cancels the guest, which ends it. "" when sent, or
+// why nothing was: the guest is not serving (its script, an invocation or
+// a host call it waits on is still running, or it is ending), it does not
+// export `name`, or `args` is not an array. A frame the idle guest sent
+// unasked is a protocol error: the host hangs up and says so.
+invoke(g: *Guest, name: string, args: string) -> string {
+    if g.over == 1 { return "invoke: the guest has finished" }
+    refused = not_serving(g, "invoke")
+    if refused != "" { return refused }
+    if !is_exported(g, name) { return "invoke: the guest does not export '${printable(name)}'" }
+    if !is_array_text(args) { return "invoke: the arguments are a JSON array, not '${printable(args)}'" }
+    uerr = unsolicited_while_idle(g)
+    if uerr != "" {
+        hang_up(g, uerr)
+        return "invoke: ${uerr}"
+    }
+    audit(g, "INVOKE ${name}")
+    err = ipc.write_frame(g.ch, "INVOKE ${name} ${args}")
+    if err == "" { g.phase = INVOKING }
+    return err
+}
+
+// Ends a serving guest politely: END, which it answers with DONE 0 (next
+// returns it, and reaps the guest). "" or why nothing was sent.
+end(g: *Guest) -> string {
+    if g.over == 1 { return "end: the guest has finished" }
+    refused = not_serving(g, "end")
+    if refused != "" { return refused }
+    uerr = unsolicited_while_idle(g)
+    if uerr != "" {
+        hang_up(g, uerr)
+        return "end: ${uerr}"
+    }
+    audit(g, "END")
+    err = ipc.write_frame(g.ch, "END")
+    if err == "" { g.phase = ENDING }
+    return err
+}
+
+// "" while the guest serves, or why `what` is refused.
+fn not_serving(g: *Guest, what: string) -> string {
+    match g.phase {
+        SERVING -> { return "" }
+        SCRIPT -> { return "${what}: the guest is not serving: its script is still running" }
+        INVOKING -> {
+            if g.pending == 1 {
+                return "${what}: the guest is not serving: it is waiting on a host call inside an invocation"
+            }
+            return "${what}: the guest is not serving: an invocation is still running"
+        }
+        _ -> { return "${what}: the guest is not serving: it is ending" }
+    }
+}
+
+// Whether the guest is idle and serving: invoke and end may be called.
+is_serving(g: *Guest) -> bool {
+    return g.over == 0 && g.phase == SERVING
+}
+
+// Whether the guest's READY exported `name` (compared exactly).
+is_exported(g: *Guest, name: string) -> bool {
+    if string.length(name) == 0 || !is_export_name(name) { return false }
+    return string.contains(g.exported, "\"${name}\"") == 1
+}
+
+// An invocation's outcome from the event that ended it: (the JSON value,
+// "") for RETURN; ("", the error) for RAISE, and for the ERROR, KILLED or
+// DONE that ended the guest instead.
+result(e: Event) -> (string, string) {
+    if e.kind == "RETURN" { return e.text, "" }
+    if e.kind == "RAISE" { return "", e.text }
+    if e.kind == "DONE" { return "", "the guest ended (DONE ${e.code})" }
+    return "", "${e.kind} ${e.text}"
+}
+
+// Starts `source` and runs it to its end, handing every SAY, LOG and CALL
+// to `on_event`, a function of (*Guest, Event), which answers each CALL
+// (answer, fail, grant_file or deny). A CALL it leaves unanswered is
+// failed for it. Returns the event that ended the script: READY (the guest
+// serves; call_export, then end), DONE, ERROR or KILLED.
+run_script(g: *Guest, source: string, on_event: fn) -> Event {
+    if g.over == 1 { return event("ERROR", "", "the guest has finished", -1) }
+    serr = start(g, source)
+    if serr != "" { return hang_up(g, "SCRIPT not delivered: ${serr}") }
+    return until_settled(g, on_event)
+}
+
+// invoke, then the invocation's events up to its end, handed to
+// `on_event` as run_script hands a script's: (the JSON value, "") for a
+// RETURN; ("", the error) for a RAISE, a refused invoke, or the end of the
+// guest (a deadline, a kill). The guest still serves after a RAISE.
+call_export(g: *Guest, name: string, args: string, on_event: fn) -> (string, string) {
+    ierr = invoke(g, name, args)
+    if ierr != "" { return "", ierr }
+    return result(until_settled(g, on_event))
+}
+
+// next until the script or the invocation settles: the first event that
+// is not SAY, LOG or CALL.
+fn until_settled(g: *Guest, on_event: fn) -> Event {
+    while true {
+        e = next(g)
+        if e.kind != "SAY" && e.kind != "LOG" && e.kind != "CALL" { return e }
+        call(on_event, g, e)
+        if e.kind == "CALL" && g.pending == 1 {
+            fail(g, "the host has no answer for '${printable(e.name)}'")
+        }
+    }
+}
+
+// A JSON array, by its brackets (the values in it are the host's own).
+fn is_array_text(text: string) -> bool {
+    t = string.trim(text)
+    n = string.length(t)
+    return n >= 2 && string.char_at(t, 0) == 91 && string.char_at(t, n - 1) == 93
+}
+
+// Letters, digits, '_' and '.'; 1 to MAX_EXPORT_NAME bytes.
+fn is_export_name(name: string) -> bool {
+    n = string.length(name)
+    if n < 1 || n > MAX_EXPORT_NAME { return false }
+    i = 0
+    while i < n {
+        c = string.char_at(name, i)
+        ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 46
+        if !ok { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn is_json_space(c: int) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+// READY's text: a JSON array of 1 to MAX_EXPORTS distinct names, each a
+// string of letters, digits, '_' and '.' of at most MAX_EXPORT_NAME
+// bytes (so no escapes), with JSON's spacing anywhere between. The names
+// written ["a","b"], or why the list is refused.
+fn check_exports(text: string) -> (string, string) {
+    n = string.length(text)
+    shape = "wants a JSON array of names"
+    i = 0
+    while i < n && is_json_space(string.char_at(text, i)) { i = i + 1 }
+    if i >= n || string.char_at(text, i) != 91 { return "", shape }
+    i = i + 1
+    out = "["
+    count = 0
+    while true {
+        while i < n && is_json_space(string.char_at(text, i)) { i = i + 1 }
+        if i >= n { return "", shape }
+        if string.char_at(text, i) == 93 && count == 0 {
+            return "", "exports nothing (a guest with nothing to serve sends DONE)"
+        }
+        if string.char_at(text, i) != 34 { return "", shape }
+        j = i + 1
+        while j < n && string.char_at(text, j) != 34 { j = j + 1 }
+        if j >= n { return "", shape }
+        name = string.substring(text, i + 1, j)
+        if string.length(name) > MAX_EXPORT_NAME {
+            return "", "a name is at most ${MAX_EXPORT_NAME} bytes"
+        }
+        if !is_export_name(name) {
+            return "", "a name holds letters, digits, '_' and '.', not '${printable(name)}'"
+        }
+        quoted = "\"${name}\""
+        if string.contains(out, quoted) == 1 { return "", "exports ${quoted} twice" }
+        count = count + 1
+        if count > MAX_EXPORTS { return "", "exports more than ${MAX_EXPORTS} functions" }
+        out = if count == 1 { "${out}${quoted}" } else { "${out},${quoted}" }
+        i = j + 1
+        while i < n && is_json_space(string.char_at(text, i)) { i = i + 1 }
+        if i >= n { return "", shape }
+        c = string.char_at(text, i)
+        i = i + 1
+        if c == 93 {
+            while i < n && is_json_space(string.char_at(text, i)) { i = i + 1 }
+            if i != n { return "", shape }
+            return "${out}]", ""
+        }
+        if c != 44 { return "", shape }
     }
 }
 

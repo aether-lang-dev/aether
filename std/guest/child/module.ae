@@ -18,7 +18,13 @@
 //   5. looks for a CANCEL: poll, without waiting, between steps or from an
 //      engine's interrupt hook; call_host returns one that comes instead of a
 //      reply. Either way it is `h.cancel`, and the engine stops the script
-//      and answers error(h, "cancelled by host: ...").
+//      and answers error(h, "cancelled by host: ...");
+//   6. when the script has left functions for the host to call, ends with
+//      ready(h, names) instead of done, and serves: serve waits for the
+//      host's next INVOKE (call the function, answer returned or raised,
+//      CALLing the host and polling on the way exactly as a script does),
+//      END (answer done(h, 0)) or CANCEL (answer error). A worker whose
+//      script exports nothing sends done, as before.
 //
 // A LOGLEVEL from the host at any time lands in `h.log_level`, which `log`
 // holds to; an engine with a threshold of its own copies it from there.
@@ -36,7 +42,17 @@
 //           // ... run h.source in the engine; for each mounted call:
 //           r = child.call_host(h, "GREET", "[\"you\"]")
 //           // r.kind VALUE (r.text is JSON), FAIL, or CANCEL
+//           // nothing exported:
 //           child.done(h, 0)
+//           // or, the script left on_txn behind:
+//           child.ready(h, "[\"on_txn\"]")
+//           while true {
+//               inv = child.serve(h)
+//               if inv.kind == "END" { child.done(h, 0) break }
+//               if inv.kind == "CANCEL" { child.error(h, "cancelled by host: ${inv.args}") break }
+//               // INVOKE: call inv.name with inv.args (a JSON array) in the
+//               // engine, then child.returned(h, json) or child.raised(h, why)
+//           }
 //       }
 //       child.free(h)
 //       exit(0)
@@ -44,8 +60,9 @@
 //
 // The Host is the worker's: free gives it back, with what it holds.
 
-exports(Host, Reply, open, attach, free, read_script, run, poll, call_host, say, log, audit,
+exports(Host, Reply, Invocation, open, attach, free, read_script, run, poll, call_host, say, log, audit,
     report_refusals, done, error, mount_count, mount_at, is_mounted,
+    ready, serve, returned, raised, is_exported,
     json_string, split_verb, MAX_FRAME, MAX_FILE)
 
 import std.audit as sandbox_audit
@@ -79,6 +96,12 @@ struct Host {
     cancel: string
     // The mounted functions, a std.list of "NAME min max".
     mounts: ptr
+    // The names ready announced, a JSON array; "" before ready.
+    exported: string
+    // While an invocation runs: its arguments (a JSON array), for engine
+    // glue that fetches them from a callback rather than splicing them
+    // into source. "" otherwise.
+    invoked: string
 }
 
 // The host's answer to a call. kind is VALUE (text is the JSON value; a
@@ -87,6 +110,21 @@ struct Host {
 struct Reply {
     kind: string
     text: string
+}
+
+// What the host asks of a guest that serves (serve). kind is
+//   INVOKE  call the export `name` with `args`, a JSON array (also
+//           h.invoked), and answer returned or raised
+//   END     the host is finished: answer done(h, 0)
+//   CANCEL  `args` is the reason (also h.cancel): answer error(h,
+//           "cancelled by host: ..."). A cancel ends the worker, inside an
+//           invocation as while idle (open question (i) in
+//           docs/design/guest-host-calls-guest.md); an engine that hears
+//           one inside an invocation answers error, not raised, too.
+struct Invocation {
+    kind: string
+    name: string
+    args: string
 }
 
 // The channel this process was spawned with (std.guest's launch, through
@@ -110,6 +148,8 @@ attach(ch: int, name: string) -> *Host {
     h.log_level = -1
     h.cancel = ""
     h.mounts = list.new()
+    h.exported = ""
+    h.invoked = ""
     return h
 }
 
@@ -354,6 +394,85 @@ fn answered(h: *Host, kind: string, text: string) -> Reply {
 fn reason(rest: string) -> string {
     if rest == "" { return "no reason given" }
     return rest
+}
+
+// The script has ended and left functions for the host to call: `names`
+// is a JSON array of their names (1 to 256 distinct names of letters,
+// digits, '_' and '.', at most 128 bytes each; the host hangs up on any
+// other list). Instead of done: the guest now serves, in serve. A guest
+// that exports nothing sends done, as before.
+ready(h: *Host, names: string) {
+    h.exported = names
+    report_refusals(h)
+    tell(h, "READY ${names}")
+}
+
+// Whether ready announced `name` (compared exactly).
+is_exported(h: *Host, name: string) -> bool {
+    n = string.length(name)
+    if n == 0 || n > 128 { return false }
+    i = 0
+    while i < n {
+        c = string.char_at(name, i)
+        ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 46
+        if !ok { return false }
+        i = i + 1
+    }
+    return string.contains(h.exported, "\"${name}\"") == 1
+}
+
+// Waits, with no deadline (the host decides when), for what the host asks
+// next of a guest that serves: an Invocation. A LOGLEVEL is applied while
+// it waits. An INVOKE of a name ready did not announce is answered with
+// raised here, and serve waits on. Any other frame breaks the protocol,
+// and is returned as a CANCEL.
+serve(h: *Host) -> Invocation {
+    h.invoked = ""
+    if h.cancel != "" { return Invocation { kind: "CANCEL", name: "", args: h.cancel } }
+    while true {
+        verb, rest = split_verb(hear(h))
+        match verb {
+            "INVOKE" -> {
+                name, args = split_verb(rest)
+                if is_exported(h, name) {
+                    h.invoked = args
+                    return Invocation { kind: "INVOKE", name: name, args: args }
+                }
+                tell(h, "RAISE no exported function '${name}'")
+            }
+            "END" -> { return Invocation { kind: "END", name: "", args: "" } }
+            "LOGLEVEL" -> {
+                lerr = set_level(h, rest)
+                if lerr != "" {
+                    h.cancel = lerr
+                    return Invocation { kind: "CANCEL", name: "", args: h.cancel }
+                }
+            }
+            "CANCEL" -> {
+                h.cancel = reason(rest)
+                return Invocation { kind: "CANCEL", name: "", args: h.cancel }
+            }
+            _ -> {
+                h.cancel = "protocol: unexpected '${verb}' while the guest serves"
+                return Invocation { kind: "CANCEL", name: "", args: h.cancel }
+            }
+        }
+    }
+}
+
+// The invoked function returned `json`, a JSON value. The guest serves
+// again.
+returned(h: *Host, json: string) {
+    h.invoked = ""
+    report_refusals(h)
+    tell(h, "RETURN ${json}")
+}
+
+// The invoked function raised `why`. The guest still serves.
+raised(h: *Host, why: string) {
+    h.invoked = ""
+    report_refusals(h)
+    tell(h, "RAISE ${why}")
 }
 
 // FILE: the descriptor rides on the next byte; read it, close it, and give

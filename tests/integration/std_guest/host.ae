@@ -113,7 +113,7 @@ main() {
             args = list.new()
             list.add(args, "one")
             list.add(args, "two words")
-            g = guest.Guest { ch: -1, pid: -1, name: "", audit_path: "", deadline_ms: 0, grace_ms: 0, max_frame: 0, over: 1 }
+            g = guest.Guest { ch: -1, pid: -1, name: "", audit_path: "", deadline_ms: 0, grace_ms: 0, max_frame: 0, over: 1, phase: guest.SCRIPT, exported: "[]", pending: 0 }
             err = ""
             if os.platform() == "linux" {
                 g, err = guest.launch(perms, stub, args, "args", log)

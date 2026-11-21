@@ -10,6 +10,7 @@ import std.spec
 import std.fs
 import std.io
 import std.ipc
+import std.list
 import std.os
 import std.sandbox
 import std.string
@@ -20,7 +21,8 @@ import std.guest
 fn paired(ch: int, log: string) -> guest.Guest {
     return guest.Guest {
         ch: ch, pid: -1, name: "spec", audit_path: log,
-        deadline_ms: 200, grace_ms: 200, max_frame: guest.MAX_FRAME, over: 0
+        deadline_ms: 200, grace_ms: 200, max_frame: guest.MAX_FRAME, over: 0,
+        phase: guest.SCRIPT, exported: "[]", pending: 0
     }
 }
 
@@ -138,6 +140,287 @@ main() {
                 ipc.write_frame(w, "SAY nine bytes")
                 e = guest.next(&g)
                 spec.assert_str_eq("${e.kind} ${e.text}", "KILLED frame refused: ipc.read_frame: frame longer than max", "refused")
+                io.fd_close(w)
+            }
+        }
+        spec.describe(fw, "std.guest, the host calls the guest") {
+            spec.it("serves after READY: INVOKE, a CALL inside it, RETURN, RAISE, IDLE and END") callback {
+                fs.write(log, "")
+                w, h, _ = os.socketpair()
+                g = paired(h, log)
+                ipc.write_frame(w, "READY [ \"f\" ,\n\"g.h\"]")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "READY [\"f\",\"g.h\"]", "READY, the names written plainly")
+                spec.assert_str_eq(g.exported, "[\"f\",\"g.h\"]", "on the handle")
+                spec.assert_true(guest.is_serving(&g), "serving")
+                e = guest.next(&g)
+                spec.assert_str_eq(e.kind, "IDLE", "next on an idle guest reads nothing")
+                spec.assert_err_contains(guest.invoke(&g, "nope", "[]"), "does not export 'nope'", "an unexported name")
+                spec.assert_err_contains(guest.invoke(&g, "g", "[]"), "does not export", "a prefix of a name is not the name")
+                spec.assert_err_contains(guest.invoke(&g, "f", "1"), "the arguments are a JSON array", "arguments not an array")
+                spec.assert_str_eq(guest.invoke(&g, "g.h", "[1,2]"), "", "sent")
+                data, _ = ipc.read_frame(w, 65536)
+                spec.assert_str_eq(data, "INVOKE g.h [1,2]", "one INVOKE frame")
+                ipc.write_frame(w, "SAY inside")
+                ipc.write_frame(w, "CALL log [\"inside\"]")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "SAY inside", "a SAY inside the invocation")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.name} ${e.text}", "CALL log [\"inside\"]", "a host call inside the invocation")
+                guest.answer(&g, "null")
+                ipc.write_frame(w, "RETURN 3")
+                e = guest.next(&g)
+                v, err = guest.result(e)
+                spec.assert_str_eq("${e.kind} ${v}|${err}", "RETURN 3|", "RETURN")
+                spec.assert_str_eq(guest.invoke(&g, "f", "[]"), "", "a second invocation")
+                ipc.write_frame(w, "RAISE bad")
+                e = guest.next(&g)
+                v, err = guest.result(e)
+                spec.assert_str_eq("${e.kind} [${v}] ${err}", "RAISE [] bad", "RAISE")
+                spec.assert_true(guest.is_serving(&g), "still serving after a RAISE")
+                spec.assert_str_eq(guest.end(&g), "", "END sent")
+                want = ["REPLY null", "INVOKE f []", "END"]
+                i = 0
+                while i < 3 {
+                    data, _ = ipc.read_frame(w, 65536)
+                    spec.assert_str_eq(data, want[i], want[i])
+                    i = i + 1
+                }
+                ipc.write_frame(w, "DONE 0")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "DONE")
+                spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "finished", "nothing after the end")
+                spec.assert_err_contains(guest.end(&g), "finished", "nor an END")
+                text = read_log(log)
+                spec.assert_contains(text, "spec READY exports [\"f\",\"g.h\"]", "READY audited")
+                spec.assert_contains(text, "spec INVOKE g.h\n", "INVOKE audited")
+                spec.assert_contains(text, "spec RAISE bad\n", "RAISE audited")
+                spec.assert_contains(text, "spec END\n", "END audited")
+                io.fd_close(w)
+            }
+            spec.it("refuses invoke and end unless the guest serves, and sends nothing") callback {
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "its script is still running", "before READY")
+                spec.assert_err_contains(guest.end(&g), "its script is still running", "end before READY")
+                ipc.write_frame(w, "READY [\"f\"]")
+                guest.next(&g)
+                guest.invoke(&g, "f", "[]")
+                ipc.read_frame(w, 65536)
+                spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "an invocation is still running", "one invocation at a time")
+                ipc.write_frame(w, "CALL F []")
+                guest.next(&g)
+                spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "waiting on a host call inside an invocation", "not from a host call's handler")
+                spec.assert_err_contains(guest.end(&g), "waiting on a host call", "nor end")
+                guest.answer(&g, "1")
+                ipc.read_frame(w, 65536)
+                ipc.write_frame(w, "RETURN 1")
+                guest.next(&g)
+                guest.end(&g)
+                ipc.read_frame(w, 65536)
+                spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "it is ending", "after END")
+                ready, _ = ipc.wait_readable(w, 0)
+                spec.assert_eq(ready, 0, "and nothing was sent for any of them")
+                io.fd_close(w)
+                a, b, _ = os.socketpair()
+                c = paired(b, "")
+                ipc.write_frame(a, "READY [\"f\"]")
+                guest.next(&c)
+                guest.cancel(&c, "stop")
+                ipc.read_frame(a, 65536)
+                spec.assert_err_contains(guest.invoke(&c, "f", "[]"), "it is ending", "after a cancel")
+                ipc.write_frame(a, "ERROR cancelled by host: stop")
+                e = guest.next(&c)
+                spec.assert_str_eq("${e.kind} ${e.text}", "ERROR cancelled by host: stop", "a serving guest cancelled answers ERROR")
+                io.fd_close(a)
+            }
+            spec.it("checks the READY list: 1 to 256 distinct names of letters, digits, '_' and '.', 128 bytes at most") callback {
+                long128 = ""
+                while string.length(long128) < 128 { long128 = "${long128}a" }
+                many = "[\"f0\""
+                k = 1
+                while k < 256 {
+                    many = "${many},\"f${k}\""
+                    k = k + 1
+                }
+                bad = ["READY []", "READY [\"a b\"]", "READY [\"a\",\"a\"]", "READY f", "READY [\"${long128}b\"]",
+                    "READY ${many},\"f256\"]", "READY [\"a\"] x", "READY [\"a\"", "READY [\"a\\u0041\"]", "READY [\"\"]",
+                    "READY [\"a\",]", "READY [1]"]
+                why = ["exports nothing", "a name holds letters, digits", "exports \"a\" twice", "wants a JSON array",
+                    "a name is at most 128 bytes", "exports more than 256 functions", "wants a JSON array", "wants a JSON array",
+                    "a name holds letters", "a name holds letters", "wants a JSON array", "wants a JSON array"]
+                i = 0
+                while i < 12 {
+                    w, h, _ = os.socketpair()
+                    g = paired(h, "")
+                    ipc.write_frame(w, bad[i])
+                    e = guest.next(&g)
+                    spec.assert_str_eq(e.kind, "KILLED", "refused: ${guest.printable(bad[i])}")
+                    spec.assert_contains(e.text, "protocol: READY ${why[i]}", why[i])
+                    io.fd_close(w)
+                    i = i + 1
+                }
+                good = ["READY [\"${long128}\"]", "READY ${many}]", "READY [\"A_z.9\"]"]
+                i = 0
+                while i < 3 {
+                    w, h, _ = os.socketpair()
+                    g = paired(h, "")
+                    ipc.write_frame(w, good[i])
+                    e = guest.next(&g)
+                    spec.assert_str_eq(e.kind, "READY", "accepted: ${i}")
+                    io.fd_close(w)
+                    io.fd_close(h)
+                    i = i + 1
+                }
+            }
+            spec.it("hangs up on what nobody asked for: RETURN or RAISE before an INVOKE, a second READY, a frame while idle, anything but DONE after END") callback {
+                cases = ["RETURN 1", "RAISE no", "INVOKE f []"]
+                want = ["protocol: RETURN with no INVOKE", "protocol: RAISE with no INVOKE", "protocol: unexpected 'INVOKE'"]
+                i = 0
+                while i < 3 {
+                    w, h, _ = os.socketpair()
+                    g = paired(h, "")
+                    ipc.write_frame(w, cases[i])
+                    e = guest.next(&g)
+                    spec.assert_str_eq("${e.kind} ${e.text}", "KILLED ${want[i]}", cases[i])
+                    io.fd_close(w)
+                    i = i + 1
+                }
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                ipc.write_frame(w, "READY [\"f\"]")
+                guest.next(&g)
+                guest.invoke(&g, "f", "[]")
+                ipc.write_frame(w, "READY [\"f\"]")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "KILLED protocol: a second READY", "a second READY")
+                io.fd_close(w)
+                // A RETURN while idle, found by next, invoke or end.
+                k = 0
+                while k < 3 {
+                    a, b, _ = os.socketpair()
+                    c = paired(b, "")
+                    ipc.write_frame(a, "READY [\"f\"]")
+                    guest.next(&c)
+                    ipc.write_frame(a, "RETURN 7")
+                    if k == 0 {
+                        e = guest.next(&c)
+                        spec.assert_str_eq("${e.kind} ${e.text}", "KILLED protocol: 'RETURN' from the guest while it was idle", "next")
+                    } else if k == 1 {
+                        spec.assert_str_eq(guest.invoke(&c, "f", "[]"), "invoke: protocol: 'RETURN' from the guest while it was idle", "invoke")
+                    } else {
+                        spec.assert_str_eq(guest.end(&c), "end: protocol: 'RETURN' from the guest while it was idle", "end")
+                    }
+                    spec.assert_eq(c.over, 1, "hung up")
+                    _, rerr = ipc.read_frame_timeout(a, 65536, 100)
+                    spec.assert_true(rerr != "", "and no INVOKE or END went")
+                    io.fd_close(a)
+                    k = k + 1
+                }
+                a, b, _ = os.socketpair()
+                c = paired(b, "")
+                ipc.write_frame(a, "READY [\"f\"]")
+                guest.next(&c)
+                guest.end(&c)
+                ipc.write_frame(a, "RETURN 1")
+                e = guest.next(&c)
+                spec.assert_str_eq("${e.kind} ${e.text}", "KILLED protocol: 'RETURN' after END", "after END")
+                io.fd_close(a)
+            }
+            spec.it("ends the guest on a cancel inside an invocation, dropping a RETURN already on its way") callback {
+                fs.write(log, "")
+                w, h, _ = os.socketpair()
+                g = paired(h, log)
+                ipc.write_frame(w, "READY [\"f\"]")
+                guest.next(&g)
+                guest.invoke(&g, "f", "[]")
+                guest.cancel(&g, "enough")
+                ipc.write_frame(w, "RETURN 1")
+                ipc.write_frame(w, "ERROR cancelled by host: enough")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "ERROR cancelled by host: enough", "the ERROR, not the RETURN")
+                spec.assert_contains(read_log(log), "spec RETURN after CANCEL, dropped", "the RETURN audited as dropped")
+                io.fd_close(w)
+            }
+            spec.it("cancels an invocation that outlives the deadline, then kills a guest that does not answer") callback {
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                g.deadline_ms = 50
+                g.grace_ms = 50
+                ipc.write_frame(w, "READY [\"spin\"]")
+                guest.next(&g)
+                guest.invoke(&g, "spin", "[]")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "KILLED no answer to CANCEL within 50 ms", "killed")
+                ipc.read_frame(w, 65536)
+                data, _ = ipc.read_frame(w, 65536)
+                spec.assert_str_eq(data, "CANCEL deadline of 50 ms passed", "the CANCEL went")
+                io.fd_close(w)
+            }
+            spec.it("refuses a RETURN over max_frame") callback {
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                ipc.write_frame(w, "READY [\"f\"]")
+                guest.next(&g)
+                g.max_frame = 16
+                guest.invoke(&g, "f", "[]")
+                ipc.write_frame(w, "RETURN \"seventeen bytes\"")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "KILLED frame refused: ipc.read_frame: frame longer than max", "refused")
+                io.fd_close(w)
+            }
+            spec.it("turns the end of an invocation into (value, err)") callback {
+                v, err = guest.result(guest.Event { kind: "DONE", name: "", text: "", code: 0, tags: "" })
+                spec.assert_str_eq("[${v}] ${err}", "[] the guest ended (DONE 0)", "DONE")
+                v, err = guest.result(guest.Event { kind: "KILLED", name: "", text: "why", code: -1, tags: "" })
+                spec.assert_str_eq("[${v}] ${err}", "[] KILLED why", "KILLED")
+            }
+            spec.it("runs a script to its end with a handler (run_script); call_export refuses as invoke does") callback {
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                ipc.write_frame(w, "SAY hi")
+                ipc.write_frame(w, "CALL F [1]")
+                ipc.write_frame(w, "READY [\"f\"]")
+                seen = list.new()
+                e = guest.run_script(&g, "the script") callback | gh: *guest.Guest, ev: guest.Event | {
+                    list.add(seen, ev.kind)
+                    if ev.kind == "CALL" { guest.answer(gh, "2") }
+                }
+                k0, _ = list.get_string(seen, 0)
+                k1, _ = list.get_string(seen, 1)
+                spec.assert_str_eq("${list.size(seen)} ${k0} ${k1} ${e.kind}", "2 SAY CALL READY", "events to the handler, READY back")
+                data, _ = ipc.read_frame(w, 65536)
+                spec.assert_str_eq(data, "SCRIPT the script", "the script")
+                data, _ = ipc.read_frame(w, 65536)
+                spec.assert_str_eq(data, "REPLY 2", "the handler's answer")
+                // call_export against a real guest is in
+                // tests/integration/std_guest_invoke: here, its refusals.
+                v, err = guest.call_export(&g, "nope", "[]") callback | gh: *guest.Guest, ev: guest.Event | {
+                }
+                spec.assert_err_contains(err, "does not export 'nope'", "a refused invoke")
+                ipc.write_frame(w, "RETURN 1")
+                v, err = guest.call_export(&g, "f", "[]") callback | gh: *guest.Guest, ev: guest.Event | {
+                }
+                spec.assert_str_eq(err, "invoke: protocol: 'RETURN' from the guest while it was idle", "an unsolicited frame, found before the INVOKE")
+                io.fd_close(w)
+                list.free(seen)
+            }
+            spec.it("carries an embedded NUL as \\u0000 both ways, and a raw one in a frame") callback {
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                arg = guest.json_string("a\x00b")
+                spec.assert_str_eq(arg, "\"a\\u0000b\"", "json_string escapes NUL")
+                ipc.write_frame(w, "READY [\"f\"]")
+                guest.next(&g)
+                guest.invoke(&g, "f", "[${arg}]")
+                data, _ = ipc.read_frame(w, 65536)
+                spec.assert_str_eq(data, "INVOKE f [\"a\\u0000b\"]", "down, escaped")
+                ipc.write_frame(w, "SAY x\x00y")
+                ipc.write_frame(w, "RETURN ${arg}")
+                e = guest.next(&g)
+                spec.assert_eq(string.length(e.text), 3, "a raw NUL in a SAY arrives, all three bytes")
+                e = guest.next(&g)
+                spec.assert_str_eq(e.text, "\"a\\u0000b\"", "up, escaped")
                 io.fd_close(w)
             }
         }
