@@ -79,8 +79,8 @@ and by a budget (a test now says so).
 ## For the bridge (quickjs/aether_host_quickjs.c), after the release
 
 - `vm_set_instruction_limit` can be real: `qjs_set_poll_budget(q, (budget +
-  9999) / 10000)`, reason code 4 beside `QJS_INTERRUPT_DEADLINE` (line 94);
-  `set_error` (line 450) maps 4 to "InternalError: interrupted: instruction
+  9999) / 10000)`, reason code 4 beside `QJS_INTERRUPT_DEADLINE` (line 96);
+  `set_error` (line 449) maps 4 to "InternalError: interrupted: instruction
   limit exceeded" or the words the other bridges use.
 - `caught_text` (line 426) and the catcher (line 218) become
   `int e = qjs_last_exception(q)` and `value_str(q, e, &n)` (String(e)), or
