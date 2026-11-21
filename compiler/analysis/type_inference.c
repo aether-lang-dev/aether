@@ -2224,7 +2224,43 @@ static void merge_tuple_returns(ASTNode* node, Type* merged) {
     }
 }
 
-void infer_function_return_types(ASTNode* program, SymbolTable* table) {
+/* Enter, in `scope`, every name a function binds itself under `n`: its
+ * locals, destructured slots, loop and pattern variables, not a nested
+ * closure's. A bare binding of a module `var` writes the global and binds
+ * nothing (bind_untyped_walk_local's rule). */
+static void add_own_bindings(ASTNode* n, SymbolTable* scope, const StrMap* module_vars) {
+    if (!n || ast_is_own_function(n)) return;
+    if ((n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE) &&
+        n->value && strcmp(n->value, "_") != 0 && !lookup_symbol_local(scope, n->value)) {
+        int writes_global = n->type == AST_VARIABLE_DECLARATION && n->type_inferred &&
+                            module_vars && strmap_has(module_vars, n->value);
+        if (!writes_global) add_symbol(scope, n->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
+    }
+    for (int i = 0; i < n->child_count; i++)
+        add_own_bindings(n->children[i], scope, module_vars);
+}
+
+/* The scope a function's returns are typed in after its walk: the
+ * program's table beneath an entry of unknown type for each name the
+ * function binds itself. The walk's own symbols are unwound by then, so a
+ * `return f` the walk left untyped (`f` bound from a value it could not
+ * type yet, or an untyped parameter) was looked up in the program's table
+ * and took a constant's type, or anything else the program has of the
+ * name: the function returned a string. A name of the function's own is
+ * the function's, typed or not. */
+static SymbolTable* own_bindings_scope(ASTNode* fn, SymbolTable* table, const StrMap* module_vars) {
+    SymbolTable* scope = create_symbol_table(table);
+    int body_index = fn->child_count - 1;
+    for (int i = 0; i < body_index; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && p->value && strcmp(p->value, "_") != 0 && !lookup_symbol_local(scope, p->value))
+            add_symbol(scope, p->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
+    }
+    if (body_index >= 0) add_own_bindings(fn->children[body_index], scope, module_vars);
+    return scope;
+}
+
+void infer_function_return_types(ASTNode* program, SymbolTable* table, const StrMap* module_vars) {
     if (!program) return;
 
     for (int i = 0; i < program->child_count; i++) {
@@ -2258,7 +2294,9 @@ void infer_function_return_types(ASTNode* program, SymbolTable* table) {
                 node->node_type->kind == TYPE_UNKNOWN ||
                 node->node_type->kind == TYPE_VOID ||
                 has_unknown_tuple_slot) {
-                Type* return_type = infer_return_type_from_body(node->children[body_index], table);
+                SymbolTable* own = own_bindings_scope(node, table, module_vars);
+                Type* return_type = infer_return_type_from_body(node->children[body_index], own);
+                free_symbol_table(own);
                 /* #3068: a function that returns `none` on one path and a
                  * `T` on another returns `T?`, as a clause set with a
                  * `none` clause (#3063) and an if-expression with a `none`
@@ -2615,7 +2653,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
         // not VOID/UNKNOWN) before incrementing `changed` — otherwise a
         // function whose body genuinely returns void would loop forever
         // re-syncing the same VOID.
-        infer_function_return_types(program, table);
+        infer_function_return_types(program, table, &module_vars);
         settle_clause_sets(program, table, &clause_sets);   /* #3061 review */
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* child = program->children[i];
@@ -2664,7 +2702,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
     }
 
     // Phase 6: Infer function return types (now that return expressions have types)
-    infer_function_return_types(program, table);
+    infer_function_return_types(program, table, &module_vars);
     settle_clause_sets(program, table, &clause_sets);   /* #3061 review */
 
     // Phase 7: Widen `out = 0` locals to ptr when a later assignment in
