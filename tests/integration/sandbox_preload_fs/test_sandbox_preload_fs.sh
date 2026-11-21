@@ -140,6 +140,10 @@ run_case "a bind mount of a directory outside onto the box is refused" bind-moun
 run_case "renameat2 out of outside is refused"                   renameat2-out    3
 run_case "glob_b leaves out a match through a symlink out"       glob-b-filter    0
 run_case "fts_open_b of outside is refused"                      fts-b-out        3
+run_case "openat2 of outside is refused"                         openat2-out      3
+run_case "openat2 with RESOLVE_NO_SYMLINKS of outside is refused" openat2-resolve-out 3
+run_case "openat2 in the box opens"                              openat2-in       0
+run_case "openat2 with RESOLVE_NO_SYMLINKS in the box opens"     openat2-resolve-in 0
 # A refusal logged to the default log, aether-sandbox.log in the working
 # directory, where the grants do not reach. The preload opens its log for
 # itself; it opened it with libc's fopen, which on FreeBSD opens through

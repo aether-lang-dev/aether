@@ -96,7 +96,7 @@ posix_spawn posix_spawnp posix_spawn_file_actions_addopen dlopen
 "
 # Linux only: the calls (or their shapes) the BSDs do not share.
 WRAPPED_LINUX="
-mount umount umount2 renameat2 setxattr lsetxattr removexattr lremovexattr open_by_handle_at
+mount umount umount2 renameat2 setxattr lsetxattr removexattr lremovexattr open_by_handle_at openat2
 execveat pidfd_spawn pidfd_spawnp dlmopen __xmknod __xmknodat
 "
 # FreeBSD only: its file flags, extended attributes and ACLs set by path,

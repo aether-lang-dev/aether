@@ -353,6 +353,25 @@ int main(int argc, char** argv) {
         }
         return verdict(0);
     }
+    // openat2 (glibc 2.42 made it a function that makes the system call
+    // itself): outside refused with and without RESOLVE_ flags, inside
+    // opened. Found by name, so a C library without it reaches the
+    // preload's own, which makes the system call.
+    if (strncmp(c, "openat2-", 8) == 0) {
+#if defined(__linux__)
+        struct { unsigned long long flags, mode, resolve; } how = { O_RDONLY, 0, 0 };
+        int (*fn)(int, const char*, const void*, size_t) =
+            (int (*)(int, const char*, const void*, size_t))dlsym(RTLD_DEFAULT, "openat2");
+        if (!fn) return 7;
+        if (strstr(c, "-resolve")) how.resolve = 0x04;   // RESOLVE_NO_SYMLINKS
+        const char* p = strstr(c, "-out") ? at("outside/secret.txt") : at("box/inside.txt");
+        int fd = fn(AT_FDCWD, p, &how, sizeof how);
+        if (fd < 0 && errno == ENOSYS) return 7;
+        return read_verdict(fd);
+#else
+        return 7;
+#endif
+    }
     // A plain open of the outside file: the refusal the log case (in the
     // script) writes down.
     if (strcmp(c, "open-out") == 0) return read_verdict(open(at("outside/secret.txt"), O_RDONLY));

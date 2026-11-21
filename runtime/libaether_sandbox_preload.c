@@ -2210,6 +2210,67 @@ int open_by_handle_at(int mountfd, struct file_handle* handle, int flags) {
 }
 #endif
 
+// openat2: glibc 2.42 added it as a function that makes the system call
+// itself, so the syscall() wrapper's refusal of SYS_openat2 under a policy
+// never sees it. With no RESOLVE_ flags it is openat, checked and made as
+// openat is. With them (each only narrows where the kernel may resolve to)
+// it is checked as openat is, made by the kernel with the caller's flags,
+// and what it opened is named and checked again, so a name swapped between
+// the two is refused. RESOLVE_IN_ROOT reads the path beneath the directory
+// as its root, which the check, reading it from the real root, cannot
+// follow: refused under a policy. A C library without the function leaves
+// it to the system call.
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<linux/openat2.h>)
+#include <linux/openat2.h>
+#include <sys/syscall.h>          // SYS_openat2, where libc has no openat2
+static int (*real_openat2)(int, const char*, const struct open_how*, size_t) = NULL;
+static int fs_openat2_raw(int dirfd, const char* path, const struct open_how* how, size_t size) {
+    if (FS_REAL(openat2)) return FS_REAL(openat2)(dirfd, path, how, size);
+#if defined(SYS_openat2)
+    return (int)fs_real_syscall(SYS_openat2, (long)dirfd, (long)path, (long)how, (long)size);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+static int fs_open_how_plain(const struct open_how* how, size_t size) {
+    if (how->resolve) return 0;
+    // A larger structure than this one is the kernel's to judge (E2BIG for
+    // a field it does not know that is not zero): made by the kernel.
+    const unsigned char* extra = (const unsigned char*)how + sizeof *how;
+    for (size_t i = sizeof *how; i < size; i++)
+        if (extra[i - sizeof *how]) return 0;
+    return 1;
+}
+int openat2(int dirfd, const char* path, const struct open_how* how, size_t size) {
+    if (!policy_in_force() || !how || size < sizeof *how) return fs_openat2_raw(dirfd, path, how, size);
+    int flags = (int)how->flags;
+    if (fs_open_how_plain(how, size)) return fs_open_checked(dirfd, path, flags, (unsigned)how->mode);
+    if (how->resolve & RESOLVE_IN_ROOT) {
+        log_deny("fs_read", path ? path : "(null)");
+        errno = EACCES;
+        return -1;
+    }
+    int access = fs_open_access(flags);
+    int entry = (flags & O_NOFOLLOW) || (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(dirfd, path, entry, access, resolved)) return -1;
+    int fd = fs_openat2_raw(dirfd, path, how, size);
+    if (fd < 0) return fd;
+    char target[PATH_MAX], run[PATH_MAX], opened[PATH_MAX];
+    if (!fd_path(fd, target, run) || !aether_sandbox_canon_path(target, opened, sizeof opened) ||
+        ((access & AETHER_ACCESS_READ) && !check_resolved("fs_read", opened)) ||
+        ((access & AETHER_ACCESS_WRITE) && !check_resolved("fs_write", opened))) {
+        close(fd);
+        errno = EACCES;
+        return -1;
+    }
+    return fd;
+}
+#endif
+#endif
+
 // mount and its undoing change what a path leads to: fs_write on the
 // mount point. A bind mount (MS_BIND) or a move (MS_MOVE) also takes a
 // directory's tree from its source and shows it at the mount point, so the
