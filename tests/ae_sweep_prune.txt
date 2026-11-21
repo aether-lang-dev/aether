@@ -10,6 +10,7 @@
 /custom_lib_dir/
 /lib/
 tests/integration/actor_alignment/
+tests/integration/actor_local_module_scope/
 tests/integration/actor_ref_after_release/
 tests/integration/actor_ref_field_reject/
 tests/integration/actor_state_base_member_reject/

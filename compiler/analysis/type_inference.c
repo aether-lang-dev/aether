@@ -1610,6 +1610,51 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     ctx->walk_id = prev_walk_id;
 }
 
+/* Unwind the symbols added to the walk's table since `head`, through
+ * pop_symbol so the scope's hash index (#2007) is unlinked in step. */
+static void unwind_symbols_to(InferenceContext* ctx, Symbol* head) {
+    if (!ctx->symbols) return;
+    while (ctx->symbols->symbols && ctx->symbols->symbols != head) {
+        pop_symbol(ctx->symbols);
+    }
+}
+
+/* An actor is walked as a scope of its own, as a function is: its states
+ * are names of the actor, and each receive arm is a handler whose locals
+ * are its own. The actor fell through to the generic walk, which never
+ * unwound, so a handler's `f = spawn(Fetcher())` stayed in the program's
+ * table for every walk after it, of every function in every module. A
+ * module function with its own `f`, bound from a value this pass could not
+ * type yet (`f = ctx.h5` through a pointer), then read the handler's `f`
+ * in `g = f`, and `g` was declared an actor of a type that module had never
+ * heard of.
+ *
+ * The actor gets a walk id, so its states and its handlers' locals are
+ * stamped as its own and only they are rebound by a later binding of the
+ * name: a handler assigning a state refines the state, as before, and
+ * nothing of the program's is retyped. Each arm is unwound when it ends,
+ * and the whole actor when it ends. */
+static void collect_actor_constraints(ASTNode* actor, InferenceContext* ctx) {
+    Symbol* actor_head = ctx->symbols ? ctx->symbols->symbols : NULL;
+    unsigned prev_walk_id = ctx->walk_id;
+    ctx->walk_id = new_walk_id();
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* child = actor->children[i];
+        if (!child) continue;
+        if (child->type != AST_RECEIVE_STATEMENT) {
+            collect_constraints(child, ctx);
+            continue;
+        }
+        for (int j = 0; j < child->child_count; j++) {
+            Symbol* arm_head = ctx->symbols ? ctx->symbols->symbols : NULL;
+            collect_constraints(child->children[j], ctx);
+            unwind_symbols_to(ctx, arm_head);
+        }
+    }
+    unwind_symbols_to(ctx, actor_head);
+    ctx->walk_id = prev_walk_id;
+}
+
 // Main constraint collection
 void collect_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node) return;
@@ -1682,6 +1727,10 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             ctx->walk_id = prev_walk_id;
             break;
         }
+
+        case AST_ACTOR_DEFINITION:
+            collect_actor_constraints(node, ctx);
+            break;
 
         case AST_CLOSURE:
         case AST_QUOTE: {   /* a quote's body is checked as a closure's */

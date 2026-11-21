@@ -1,0 +1,113 @@
+// An actor's states and its handlers' locals are names of the actor only.
+//
+// The early inference walk took actors through its generic path, which
+// never unwound what it bound, so a state, a handler's local, a handler's
+// loop variable and a handler's destructured local all stayed in the table
+// for every function and main walked after the actor. A later binding of the
+// same name from a value that walk cannot type yet (`list.get`'s result,
+// whose type is inferred from its body) did not replace them, so the next line read the actor's name: `g =
+// f` declared `g` an actor reference, a string or an int, and the checker
+// refused the program with "Type mismatch in variable initialization". The
+// fix walks an actor as its own scope and each receive arm as a handler of
+// its own, unwound when it ends. Each function below reads a name one of the
+// actors bound; before the fix every one of them was refused.
+
+import std.list
+
+extern exit(code: int)
+
+message Job { n: int }
+
+pair() -> (string, int) { return ("a", 1) }
+
+actor Fetcher {
+    state done = 0
+    receive {
+        Job(n) -> { done = done + n }
+    }
+}
+
+// A handler's local of an actor type.
+actor Coord {
+    state k = 0
+    receive {
+        Job(n) -> {
+            f = spawn(Fetcher())
+            f ! Job { n: n }
+        }
+    }
+}
+
+// A state of a string type.
+actor Holder {
+    state s = "text"
+    receive {
+        Job(n) -> { s = "more" }
+    }
+}
+
+// A handler's `for` variable, a local bound in its loop body, and a
+// destructured local.
+actor Walker {
+    state total = 0
+    receive {
+        Job(n) -> {
+            for i in 0..n { total = total + i }
+            j = 0
+            while j < n {
+                w = "s${j}"
+                j = j + 1
+            }
+            d, e = pair()
+            total = total + e
+        }
+    }
+}
+
+first(xs: ptr) -> (ptr, string) {
+    f = list.get(xs, 0)
+    g = f
+    return g
+}
+
+state_name(xs: ptr) -> (ptr, string) {
+    s = list.get(xs, 0)
+    t = s
+    return t
+}
+
+loop_names(xs: ptr) -> (ptr, string) {
+    i = list.get(xs, 0)
+    w = list.get(xs, 0)
+    a = i
+    b = w
+    ap, ae = a
+    if ap == null { return a }
+    return b
+}
+
+destructured_name(xs: ptr) -> (ptr, string) {
+    d = list.get(xs, 0)
+    e = d
+    return e
+}
+
+main() {
+    xs = list.new()
+    list.add(xs, xs)
+    p1, e1 = first(xs)
+    if p1 != xs || e1 != "" { println("FAIL: handler local"); exit(1) }
+    p2, e2 = state_name(xs)
+    if p2 != xs || e2 != "" { println("FAIL: state"); exit(1) }
+    p3, e3 = loop_names(xs)
+    if p3 != xs || e3 != "" { println("FAIL: loop variables"); exit(1) }
+    p4, e4 = destructured_name(xs)
+    if p4 != xs || e4 != "" { println("FAIL: destructured local"); exit(1) }
+    // main is walked after the actors too.
+    f = list.get(xs, 0)
+    g = f
+    p5, e5 = g
+    if p5 != xs || e5 != "" { println("FAIL: main"); exit(1) }
+    list.free(xs)
+    println("actor locals scoped to actor: ok")
+}

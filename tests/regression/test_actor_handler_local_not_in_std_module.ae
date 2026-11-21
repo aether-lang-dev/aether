@@ -1,0 +1,49 @@
+// An actor handler's local must not type a std module's local of the same name.
+//
+// A program importing std.cryptography, with `f = spawn(Fetcher())` in an
+// actor handler, failed to compile with E0302 "Unknown type 'Fetcher': the
+// local 'g' is declared of a type the program does not define", reported at
+// `g = f` in std/cryptography/sha2/module.ae. The early inference walk took
+// actors through its generic path, which never unwound what it bound, so
+// the handler's `f` stayed in the table for every walk after it. sha2's
+// process_block_512 binds its own `f = ctx.h5` from a field read through a
+// pointer, which that walk cannot type yet, so its `g = f` read the
+// handler's `f` instead. The fix walks an actor as a scope of its own and
+// unwinds each handler's locals when the handler ends; this program is the
+// shape the bug was found in, and it also runs sha2's SHA-512 to show the
+// module's code is right, not just accepted.
+
+import std.cryptography
+import std.cryptography.sha2
+import std.string
+
+extern exit(code: int)
+
+message Job { n: int }
+
+actor Fetcher {
+    state done = 0
+    receive {
+        Job(n) -> { done = done + n }
+    }
+}
+
+actor Coord {
+    state k = 0
+    receive {
+        Job(n) -> {
+            f = spawn(Fetcher())
+            f ! Job { n: n }
+        }
+    }
+}
+
+main() {
+    got = sha2.sha512_hex(string.bytes("abc")[0..3])
+    want = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+    if got != want {
+        println("FAIL: sha512(abc) = ${got}")
+        exit(1)
+    }
+    println("actor handler local not in std module: ok")
+}

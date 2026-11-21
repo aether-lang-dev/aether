@@ -1,0 +1,13 @@
+// A module imported after coord, with its own `f`, bound from a call
+// whose result type is inferred from its body.
+exports(pick)
+
+import std.list
+
+pick(xs: ptr) -> ptr {
+    f = list.get(xs, 0)
+    g = f
+    p, err = g
+    if err != "" { return null }
+    return p
+}

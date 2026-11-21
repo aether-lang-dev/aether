@@ -1,0 +1,54 @@
+// A receive arm's locals are its own, not the next arm's.
+//
+// The early inference walk took an actor's receive arms as one flat scope
+// that was never unwound, so `f = spawn(Fetcher())` in the Job arm was still
+// the `f` the Other arm saw. The Other arm binds its own `f` from a call
+// whose result type that walk cannot know yet (`list.get`, inferred from its
+// body), so `g = f` read the Job arm's actor reference, and the checker
+// refused the program with "Type mismatch in variable initialization". Each
+// arm is now unwound when it ends; this program fails to compile without
+// that, and with it the Other arm reads its own `f`.
+
+import std.list
+
+extern exit(code: int)
+
+message Job { n: int }
+message Other { xs: ptr }
+
+actor Fetcher {
+    state done = 0
+    receive {
+        Job(n) -> { done = done + n }
+    }
+}
+
+actor Coord {
+    state seen = 0
+    receive {
+        Job(n) -> {
+            f = spawn(Fetcher())
+            f ! Job { n: n }
+        }
+        Other(xs) -> {
+            f = list.get(xs, 0)
+            g = f
+            p, e = g
+            if p == xs && e == "" { seen = 1 }
+            if seen != 1 {
+                println("FAIL: the Other arm read the wrong f")
+                exit(1)
+            }
+            println("actor receive arm locals own: ok")
+        }
+    }
+}
+
+main() {
+    xs = list.new()
+    list.add(xs, xs)
+    c = spawn(Coord())
+    c ! Other { xs: xs }
+    wait_for_idle()
+    list.free(xs)
+}
