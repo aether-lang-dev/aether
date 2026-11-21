@@ -1,0 +1,28 @@
+// Where the program binds nothing of a name, a bare call in the block is
+// the receiver's function: in a block, a nested block (the innermost
+// receiver first), a builder's block, and through an import alias.
+
+import dsl
+import inner
+import dsl as d
+
+main() {
+    dsl.run(1) callback {
+        tag(1)
+        say(1, 2)
+        println(label())
+    }
+    dsl.run(1) callback {
+        inner.run() callback {
+            tag(2)
+            note(3)
+            say(2, 2)
+        }
+    }
+    dsl.build("b") {
+        opt("o")
+    }
+    d.run(1) callback {
+        tag(4)
+    }
+}

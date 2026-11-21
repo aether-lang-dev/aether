@@ -412,7 +412,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
 }
 
 static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from,
-                                int obey_directives);
+                                int obey_directives, int receivers, SymbolTable** found_in);
 static const char* find_import_alias(const char* name);
 
 /* The program's own top-level `var`s (no origin_module), named once per
@@ -447,7 +447,7 @@ static void note_program_globals(ASTNode* program) {
 
 Symbol* lookup_symbol(SymbolTable* table, const char* name) {
     if (!table || !name) return NULL;
-    return lookup_symbol_in(table, name, table->merged_from, 1);
+    return lookup_symbol_in(table, name, table->merged_from, 1, 1, NULL);
 }
 
 /* The declaration of a type that a value in hand already has: the struct a
@@ -459,7 +459,7 @@ Symbol* lookup_symbol(SymbolTable* table, const char* name) {
  * field compared as a pointer, a closure field stored unretained. */
 Symbol* lookup_type_symbol(SymbolTable* table, const char* name) {
     if (!table || !name) return NULL;
-    return lookup_symbol_in(table, name, table->merged_from, 0);
+    return lookup_symbol_in(table, name, table->merged_from, 0, 1, NULL);
 }
 
 /* A bare `extern` is private to the file that declares it, but every
@@ -628,11 +628,62 @@ static Symbol* lookup_file_symbol_for_module(SymbolTable* table, const char* nam
     return NULL;
 }
 
+/* Is `s`, which the walk without receivers found in the scope `where`, a
+ * binding the program made itself: a name of a scope inside the file (a
+ * block's, a closure's, a function's locals and parameters), a local the
+ * inference walk pushed onto the file scope (walk_id), or one of the
+ * program's own top-level declarations (a function, a type, a constant, a
+ * top-level `var`)? Such a binding shadows a DSL block's receiver: what
+ * the file scope holds otherwise (a builtin, a name an import bound, a
+ * module's merged function) does not. */
+static int binding_is_programs(const Symbol* s, const SymbolTable* where, const char* merged_from) {
+    if (!s || !where) return 0;
+    if (where->parent || s->walk_id != 0) return 1;
+    if (s->import_bound) return 0;
+    if (is_program_own_decl(s)) return 1;
+    return !merged_from && !s->is_function && !s->is_actor && is_program_global_name(s->name);
+}
+
+/* The `<receiver>_<name>` member a DSL block's receiver resolves the bare
+ * `name` to, block by block from `table` outward (the innermost receiver
+ * first), or NULL. A scope that hides or seals out `name` ends the search
+ * for the receiver's member, not the lookup: the plain walk still finds a
+ * binding of `name` at or below that scope (the sealed function's own
+ * local), and refuses one beyond it. It returned NULL here, so a closure
+ * passed to a module function (`mm.run_it(|| { ctx })`, receiver `mm`)
+ * could not see the locals of the sealed function it was written in. */
+static Symbol* dsl_receiver_member(SymbolTable* table, const char* name, int obey_directives) {
+    for (SymbolTable* t = table; t; t = t->parent) {
+        if (t != table && obey_directives &&
+            (scope_name_is_hidden(t, name) ||
+             (t->is_sealed && !scope_name_in_whitelist(t, name)))) {
+            return NULL;
+        }
+        if (!t->dsl_receiver || !t->dsl_receiver[0]) continue;
+        /* Interned, as long as the two names are: each was cut at 250
+         * bytes, and a longer one reached another name (#3569). */
+        const char* rewritten = aether_internf("%s_%s", t->dsl_receiver, name);
+        for (SymbolTable* u = t; u; u = u->parent) {
+            if (u != t && obey_directives &&
+                (scope_name_is_hidden(u, name) ||
+                 (u->is_sealed && !scope_name_in_whitelist(u, name)))) {
+                break;
+            }
+            Symbol* s = lookup_symbol_local(u, rewritten);
+            if (s) return s;
+        }
+    }
+    return NULL;
+}
+
 /* `merged_from` is the scope the lookup STARTED in: a merged body's, even
- * when the walk reaches a file scope whose own merged_from says otherwise. */
+ * when the walk reaches a file scope whose own merged_from says otherwise.
+ * `receivers`: whether a DSL block's receiver may resolve the name (#333);
+ * `found_in`, when given, is set to the scope the result was found in. */
 static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from,
-                                int obey_directives) {
+                                int obey_directives, int receivers, SymbolTable** found_in) {
     if (!table || !name) return NULL;
+    if (found_in) *found_in = table;
 
     // Local bindings always win — `hide` and `seal except` only block
     // resolution that would walk OUT of this scope into a parent.
@@ -703,46 +754,53 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
 
     // Issue #333 DSL block receiver fallback: when this scope is the
     // body of a `receiver.method(args) { ... }` trailing closure,
-    // `dsl_receiver` names the receiver namespace or struct type.
-    // Try `<dsl_receiver>_<name>` — that's how Aether codegen names
-    // namespace and struct-method helpers (e.g. `bash_script`,
-    // `Builder_configure`). The walk uses lookup_symbol_local at
-    // each level to avoid re-entering this DSL fallback at parent
-    // scopes (lookup_symbol is the recursion vector; lookup_symbol_local
-    // is not).
+    // `dsl_receiver` names the receiver namespace or struct type, and a
+    // bare name may resolve to `<dsl_receiver>_<name>`: that's how Aether
+    // codegen names namespace and struct-method helpers (e.g.
+    // `bash_script`, `Builder_configure`).
     //
-    // Nested DSL blocks: inner block's dsl_receiver is checked first.
-    // If the rewrite misses and the parent chain is then walked, the
-    // outer block's dsl_receiver is checked when the recursion lands
-    // on its scope — natural outer→inner shadowing without explicit
-    // stack management.
-    if (table->dsl_receiver && table->dsl_receiver[0] && name[0]) {
-        /* Interned, as long as the two names are: each was cut at 250
-         * bytes, and a longer one reached another name (#3569). */
-        const char* rewritten = aether_internf("%s_%s", table->dsl_receiver, name);
-        for (SymbolTable* t = table; t; t = t->parent) {
-            /* A scope that hides or seals out `name` ends the search for
-             * the receiver's member, not the lookup: the plain walk below
-             * still finds a binding of `name` at or below that scope (the
-             * sealed function's own local), and refuses one beyond it. It
-             * returned NULL here, so a closure passed to a module function
-             * (`mm.run_it(|| { ctx })`, receiver `mm`) could not see the
-             * locals of the sealed function it was written in. */
-            if (t != table && obey_directives &&
-                (scope_name_is_hidden(t, name) ||
-                 (t->is_sealed && !scope_name_in_whitelist(t, name)))) {
-                break;
-            }
-            Symbol* s = lookup_symbol_local(t, rewritten);
-            if (s) return s;
+    // Only when the program has no binding of the name of its own: a
+    // local, a parameter, a name an enclosing block binds, the program's
+    // own function, type or constant shadows the receiver, as the docs
+    // promise. The receiver was tried first, so a program's `say(a, b, c)`
+    // called in `child.run(h) callback { say(1, 2, 3) }` was checked
+    // against the module's two-argument `say`, and a program's `tag(a)`
+    // of the module's own arity silently called the module's. A builtin
+    // or a name the program's import bound is not the program's own: the
+    // receiver still takes those, as it always did.
+    //
+    // Nested DSL blocks: the innermost block's receiver is asked first,
+    // then the outer ones (dsl_receiver_member).
+    if (receivers && table->dsl_receiver && table->dsl_receiver[0] && name[0]) {
+        SymbolTable* where = NULL;
+        Symbol* outer = table->parent
+            ? lookup_symbol_in(table->parent, name, merged_from, obey_directives, 0, &where)
+            : NULL;
+        if (outer && binding_is_programs(outer, where, merged_from)) {
+            if (found_in) *found_in = where;
+            return outer;
         }
+        Symbol* member = dsl_receiver_member(table, name, obey_directives);
+        if (member) return member;
+        if (found_in) *found_in = where;
+        return outer;
     }
 
     if (table->parent) {
-        return lookup_symbol_in(table->parent, name, merged_from, obey_directives);
+        return lookup_symbol_in(table->parent, name, merged_from, obey_directives, receivers,
+                                found_in);
     }
 
     return NULL;
+}
+
+/* Issue #333 (typechecker.h): is `name` bound by the program itself where
+ * `table` is, so that a DSL block's receiver does not resolve it? */
+int dsl_name_is_programs(SymbolTable* table, const char* name) {
+    if (!table || !name) return 0;
+    SymbolTable* where = NULL;
+    Symbol* s = lookup_symbol_in(table, name, table->merged_from, 1, 0, &where);
+    return binding_is_programs(s, where, table->merged_from);
 }
 
 Symbol* lookup_symbol_local(SymbolTable* table, const char* name) {
@@ -20482,14 +20540,14 @@ static void tc_declare_block_names(ASTNode* body, SymbolTable* scope) {
 }
 
 /* Does the bare call `name`, in the scope `table`, resolve through a DSL
- * block's receiver, as lookup_symbol resolves it (#333)? Scope by scope from
- * the innermost: one that binds the name keeps it, and a block's receiver
- * that has a `<receiver>_<name>` takes it, ahead of anything further out:
- * the function's own locals and the program's function of that name. */
+ * block's receiver, as lookup_symbol resolves it (#333)? Only when the
+ * program binds no `name` of its own there (a block's or the function's
+ * local, the program's function: dsl_name_is_programs), and a block's
+ * receiver, the innermost first, has a `<receiver>_<name>`. */
 static int tc_receiver_resolves(SymbolTable* table, const char* name) {
     if (!name || strchr(name, '.')) return 0;
+    if (dsl_name_is_programs(table, name)) return 0;
     for (SymbolTable* t = table; t; t = t->parent) {
-        if (lookup_symbol_local(t, name)) return 0;
         if (t->dsl_receiver && t->dsl_receiver[0]) {
             const char* rewritten = aether_internf("%s_%s", t->dsl_receiver, name);
             for (SymbolTable* u = t; u; u = u->parent)
@@ -22140,6 +22198,25 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                          "of the function, so the function cannot be called as '%s' here; "
                          "give the local another name",
                          call->value);
+                type_error_code_hint(error_msg, hint, call->line, call->column,
+                                     AETHER_ERR_UNDEFINED_FUNC);
+                return 0;
+            }
+            /* #333: in a trailing block the program's local shadows the
+             * receiver's function of its name, as it shadows the program's
+             * own function outside one. */
+            Symbol* member = dsl_receiver_member(table, call->value, 1);
+            if (member && member->is_function && member->name) {
+                const char* qualified = aether_internf("%.*s.%s",
+                    (int)(strlen(member->name) - strlen(call->value) - 1), member->name,
+                    call->value);
+                error_msg = aether_internf(
+                         "'%s' is a local here, which hides the block receiver's function '%s'",
+                         call->value, qualified);
+                const char* hint = aether_internf(
+                         "in a trailing block a name the program binds (a local, a parameter, "
+                         "the program's own function) comes before the receiver's; call it as "
+                         "'%s(...)' or give the local another name", qualified);
                 type_error_code_hint(error_msg, hint, call->line, call->column,
                                      AETHER_ERR_UNDEFINED_FUNC);
                 return 0;
