@@ -67,7 +67,12 @@ buffer in the padding after `flags` (and that field's bits 8 to 31), so C
 code compiled for revision 2 that freed a buffer's `.ptr`, or built a view by
 moving `.ptr`, is refused at revision 3 ([c-interop.md](c-interop.md),
 Counted buffers); 4, an actor's mailbox ring is 16 slots, not 32 (#3776), so
-ActorBase is 952 bytes on a 64-bit target, not 1720.
+ActorBase is 952 bytes on a 64-bit target, not 1720; 5, on x86 an export
+stub hands `aether_exec_enter_at` its own `__builtin_longjmp` with its
+`__builtin_setjmp` buffer, and a panic jumps back through it, because the
+buffer's layout depends on `-fcf-protection` and the library's C and the
+runtime are not always compiled alike (a protected runtime's jump into an
+unprotected stub's buffer ran `incsspq` and died of SIGILL).
 
 **Shared facilities.** A library without `--shared-runtime` brings a copy
 of the runtime, and copies in one process share the sandbox levels and the

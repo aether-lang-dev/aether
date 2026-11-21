@@ -126,7 +126,11 @@ typedef jmp_buf aether_sigjmp_buf;
 // address (the compiler saves the rest in the stub's own frame), where the
 // C library's setjmp saves every callee-saved register and, on Win64, ten
 // XMM registers: 0.57 ns against 2.85 ns on MinGW. A panic reaches it with
-// __builtin_longjmp. x86 and x86-64 only: clang has no such builtins on
+// __builtin_longjmp, made by a function the stub's own translation unit
+// defines (the frame's exec_jump), never by the runtime: the two builtins
+// share a buffer whose layout depends on -fcf-protection (with it, slot 2
+// holds the shadow-stack pointer and slot 3 the stack pointer), and the
+// library's C and the runtime are often compiled with different settings. x86 and x86-64 only: clang has no such builtins on
 // AArch64 (macOS arm64), where the C library's setjmp is cheap anyway, and
 // wasm has no unwinding; there the stub uses AETHER_SIGSETJMP on a frame's
 // buf instead.
@@ -157,6 +161,9 @@ typedef struct AetherJmpFrame {
     // which a panic reaches through `buf`. Appended: the fields above keep
     // their offsets.
     void** exec_buf;
+    // The stub's own __builtin_longjmp to exec_buf (runtime ABI revision 5):
+    // compiled with the stub, so with the flags that laid out the buffer.
+    void (*exec_jump)(void** buf);
 } AetherJmpFrame;
 
 // Push a new frame onto the current thread's stack and return it. The
