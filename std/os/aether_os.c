@@ -3322,6 +3322,28 @@ _tuple_ptr_string_tree os_spawn_tree_to_raw(const char* prog, void* argv_list, v
     if (grace_ms < 0) grace_ms = 0;
     if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
     if (!aether_sandbox_check("fs", out_path)) { out._1 = "denied by sandbox"; return out; }
+#if defined(__linux__)
+    /* The supervisor finds the descendants that left the program's group by
+     * reading /proc, with open() as this process does, so a sandbox that
+     * refuses that read (the preload, and Landlock under it) leaves it with
+     * none to find: tree_kill and the exit would end the group and leave a
+     * setsid'd descendant running, with the token reading as if all had
+     * ended. Refuse the spawn instead, as the sandbox's own spawns fail
+     * closed. The same two reads the supervisor makes: the directory, and a
+     * process's stat by its pid (not "self", which a grant may name alone). */
+    {
+        char probe[64];
+        snprintf(probe, sizeof probe, "/proc/%ld/stat", (long)getpid());
+        int d = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        int f = d < 0 ? -1 : open(probe, O_RDONLY | O_CLOEXEC);
+        if (d >= 0) close(d);
+        if (f >= 0) close(f);
+        if (d < 0 || f < 0) {
+            out._1 = "cannot read /proc, which ending the tree needs (a sandbox may refuse it: grant_fs_read(\"/proc/*\"))";
+            return out;
+        }
+    }
+#endif
 
     AetherTree* t = (AetherTree*)malloc(sizeof(AetherTree));
     if (!t) { out._1 = "out of memory"; return out; }

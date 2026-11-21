@@ -527,7 +527,11 @@ spawn_proc_to(prog: string, argv: ptr, env: ptr, out_path: string) -> {
 //     subreaper, so every descendant is re-parented to it rather than to
 //     init; it watches a pipe only this process holds the write end of, and
 //     it is the token. A supervisor killed by SIGKILL takes the program with
-//     it (its parent-death signal), not what the program started.
+//     it (its parent-death signal), not what the program started. It finds
+//     the descendants by reading /proc, so the spawn fails (and starts
+//     nothing) where /proc cannot be read, as under a sandbox with no
+//     grant_fs_read("/proc/*"); and under one a new process needs
+//     grant_fork() as well.
 //   - FreeBSD: the same, the reaper by procctl (PROC_REAP_ACQUIRE, and
 //     PROC_REAP_KILL to end it).
 //   - macOS: the same supervisor, but macOS has no subreaper. It lists the
