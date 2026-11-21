@@ -12,8 +12,10 @@
 // before #3751, or one it resolved against the wrong directory.
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fts.h>
 #include <ftw.h>
 #include <glob.h>
 #include <pthread.h>
@@ -310,6 +312,46 @@ int main(int argc, char** argv) {
 #else
         return 7;
 #endif
+    }
+    // renameat2 (Linux; FreeBSD from 15.0) out of outside/, found by name so
+    // that a C library without it skips.
+    if (strcmp(c, "renameat2-out") == 0) {
+        int (*fn)(int, const char*, int, const char*, unsigned) =
+            (int (*)(int, const char*, int, const char*, unsigned))dlsym(RTLD_DEFAULT, "renameat2");
+        if (!fn) return 7;
+        return verdict(fn(AT_FDCWD, at("outside/secret.txt"), AT_FDCWD, at("box/stolen2"), 0) == 0);
+    }
+    // FreeBSD's blocks forms of glob and fts_open, called with no block (the
+    // error function and the comparison may be NULL): checked as glob and
+    // fts_open are.
+    if (strcmp(c, "glob-b-filter") == 0) {
+        int (*fn)(const char*, int, void*, glob_t*) =
+            (int (*)(const char*, int, void*, glob_t*))dlsym(RTLD_DEFAULT, "glob_b");
+        if (!fn) return 7;
+        glob_t g;
+        memset(&g, 0, sizeof g);
+        int r = fn(at("box/*"), 0, NULL, &g);
+        int leak = 0, inside = 0;
+        for (size_t i = 0; r == 0 && i < g.gl_pathc; i++) {
+            if (strstr(g.gl_pathv[i], "out_link")) leak = 1;
+            if (strstr(g.gl_pathv[i], "inside.txt")) inside = 1;
+        }
+        if (r == 0) globfree(&g);
+        if (r != 0) return 4;
+        if (leak) return 5;
+        return inside ? 0 : 4;
+    }
+    if (strcmp(c, "fts-b-out") == 0) {
+        FTS* (*fn)(char* const*, int, void*) =
+            (FTS * (*)(char* const*, int, void*))dlsym(RTLD_DEFAULT, "fts_open_b");
+        if (!fn) return 7;
+        char* roots[] = { (char*)at("outside"), NULL };
+        FTS* f = fn(roots, FTS_PHYSICAL, NULL);
+        if (f) {
+            fts_close(f);
+            return 5;
+        }
+        return verdict(0);
     }
     // A plain open of the outside file: the refusal the log case (in the
     // script) writes down.

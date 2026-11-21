@@ -137,6 +137,9 @@ else
     fail=1
 fi
 run_case "a bind mount of a directory outside onto the box is refused" bind-mount-out 3
+run_case "renameat2 out of outside is refused"                   renameat2-out    3
+run_case "glob_b leaves out a match through a symlink out"       glob-b-filter    0
+run_case "fts_open_b of outside is refused"                      fts-b-out        3
 # A refusal logged to the default log, aether-sandbox.log in the working
 # directory, where the grants do not reach. The preload opens its log for
 # itself; it opened it with libc's fopen, which on FreeBSD opens through
@@ -190,7 +193,7 @@ if [ -e "$FIX/box/slash_new" ] || [ ! -e "$FIX/box/inside.txt" ] || [ ! -L "$FIX
     echo "  [FAIL] a call on 'name/' acted on the name as something else"
     fail=1
 fi
-if [ -e "$FIX/box/stolen" ] || [ -e "$FIX/box/hard" ] || [ -e "$FIX/box/stolen_fd" ]; then
+if [ -e "$FIX/box/stolen" ] || [ -e "$FIX/box/stolen2" ] || [ -e "$FIX/box/hard" ] || [ -e "$FIX/box/stolen_fd" ]; then
     echo "  [FAIL] an outside file was moved or linked into the box"
     fail=1
 fi

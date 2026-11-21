@@ -1494,9 +1494,12 @@ int renameat(int fromfd, const char* from, int tofd, const char* to) {
     if (fs_two_names(fromfd, from, tofd, to, &a1, n1, &a2, n2) != 0) return -1;
     FS_AT_CALL2(a1, a2, fs_rename_slash(from, a1, n1, to, a2, n2) != 0 ? -1 : FS_REAL(renameat)(a1, n1, a2, n2));
 }
-#if defined(__linux__)
+// renameat2: Linux's, and FreeBSD's from 15.0 (its AT_RENAME_NOREPLACE).
+// On a FreeBSD older than that libc has none, and neither has this call.
+#if defined(__linux__) || defined(__FreeBSD__)
 static int (*real_renameat2)(int, const char*, int, const char*, unsigned) = NULL;
 int renameat2(int fromfd, const char* from, int tofd, const char* to, unsigned flags) {
+    if (!FS_REAL(renameat2)) { errno = ENOSYS; return -1; }
     if (!policy_in_force()) return FS_REAL(renameat2)(fromfd, from, tofd, to, flags);
     int a1, a2;
     char n1[PATH_MAX], n2[PATH_MAX];
@@ -4136,6 +4139,33 @@ static int (*real_scandirat_b)(int, const char*, struct dirent***, void*, void*)
 int scandirat_b(int dirfd, const char* path, struct dirent*** list, void* sel, void* cmp) {
     if (!policy_in_force()) return FS_REAL(scandirat_b)(dirfd, path, list, sel, cmp);
     return fs_scandir_blocks(dirfd, path, list, sel, cmp);
+}
+
+// The blocks forms of glob and fts_open: checked as glob and fts_open are,
+// their block (the error function, the comparison) passed on untouched.
+// fts_read, which both forms of fts share, holds the walk itself.
+static int (*real_glob_b)(const char*, int, void*, glob_t*) = NULL;
+int glob_b(const char* pattern, int flags, void* errblock, glob_t* g) {
+    if (!FS_REAL(glob_b)) { errno = ENOSYS; return GLOB_ABORTED; }
+    if (!policy_in_force() || !pattern || !g) return FS_REAL(glob_b)(pattern, flags, errblock, g);
+    if (!fs_glob_start_allowed(pattern)) return GLOB_ABORTED;
+    size_t before = (flags & GLOB_APPEND) ? g->gl_pathc : 0;
+    int r = FS_REAL(glob_b)(pattern, flags, errblock, g);
+    if (r != 0 && r != GLOB_NOMATCH) return r;
+    if (g->gl_pathv && !fs_glob_filter(g, before)) return GLOB_ABORTED;
+    if (r == 0 && g->gl_pathc == before) return GLOB_NOMATCH;
+    return r;
+}
+
+static FTS* (*real_fts_open_b)(char* const*, int, void*) = NULL;
+FTS* fts_open_b(char* const* roots, int options, void* compar) {
+    if (!FS_REAL(fts_open_b)) { errno = ENOSYS; return NULL; }
+    if (!policy_in_force() || !roots) return FS_REAL(fts_open_b)(roots, options, compar);
+    for (char* const* r = roots; *r; r++) {
+        char resolved[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, *r, 0, AETHER_ACCESS_READ, resolved)) return NULL;
+    }
+    return FS_REAL(fts_open_b)(roots, options, compar);
 }
 
 // mkostempsat: mkostemps relative to a directory descriptor.
