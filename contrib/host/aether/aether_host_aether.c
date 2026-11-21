@@ -142,12 +142,12 @@ static int spawn_sandboxed_full(
   // 3. Serialize shared map to shm (freeze inputs first)
   char* map_shm = NULL;
   if (map_token != 0) {
-    extern void aether_shared_map_freeze_inputs_by_token(uint64_t);
     aether_shared_map_freeze_inputs_by_token(map_token);
     map_shm = aether_shared_map_to_shm_by_token(map_token);
     if (!map_shm) {
       fprintf(stderr,
-              "[aether-host] cannot serialize map to shm\n");
+              "[aether-host] cannot serialize map to shm: %s\n",
+              errno == E2BIG ? "the map is larger than the 64 KiB block" : strerror(errno));
       if (grants_shm) {
         shm_unlink(grants_shm); free(grants_shm);
       }
@@ -286,8 +286,11 @@ static int spawn_sandboxed_full(
 
   // 7. Read outputs back from shared map
   if (map_shm && map_token != 0) {
-    aether_shared_map_read_outputs_from_shm_by_token(
-        map_token, map_shm);
+    // A block that is not layout 2 (a child built against another Aether,
+    // or one that wrote garbage) is refused whole, and said so.
+    if (aether_shared_map_read_outputs_from_shm_by_token(map_token, map_shm) != 0)
+      fprintf(stderr,
+              "[aether-host] the child's map block was refused (not a layout-2 Aether shared map block, or more keys than a map holds)\n");
   }
 
   // 8. Cleanup shm segments

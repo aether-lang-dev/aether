@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sharedmap - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search sharedmap..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#new">new</a></li>
+    <li><a href="#token">token</a></li>
+    <li><a href="#put">put</a></li>
+    <li><a href="#get">get</a></li>
+    <li><a href="#has">has</a></li>
+    <li><a href="#count">count</a></li>
+    <li><a href="#key_at">key_at</a></li>
+    <li><a href="#value_at">value_at</a></li>
+    <li><a href="#freeze">freeze</a></li>
+    <li><a href="#free">free</a></li>
+    <li><a href="#guest_put">guest_put</a></li>
+    <li><a href="#MAX_ENTRIES">MAX_ENTRIES</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="guest.html">guest</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="sed.html">sed</a></li>
+    <li><a href="set.html">set</a></li>
+    <li class="active"><a href="sharedmap.html">sharedmap</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="stream.html">stream</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>sharedmap</h1>
+    <p class="module-desc">std.sharedmap — the shared map, from Aether: a token-guarded map of strings a host fills with a hosted language's inputs and reads its outputs back from (a guest bridge's aether_map_get / aether_map_put, a sandboxed child through a shared memory block).</p>
+    <p class="import-line"><code>import std.sharedmap</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="new" data-name="new">
+      <h3 class="function-name">new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">A new, empty map, the caller's to free; null without memory.</p>
+    </div>
+    <div class="function" id="token" data-name="token">
+      <h3 class="function-name">token <span class="kind">fn</span></h3>
+      <pre class="usage"><code>token(m) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+      <p class="doc">The token a hosted language reaches the map through (for a bridge's *_with_map runner). It dies when the map is freed.</p>
+    </div>
+    <div class="function" id="put" data-name="put">
+      <h3 class="function-name">put <span class="kind">fn</span></h3>
+      <pre class="usage"><code>put(m, key, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: string, value: string</span></p>
+      <p class="doc">m[key] = value, both by their length: 0, or -1 when refused (the map full with a new key, no memory), the map unchanged.</p>
+    </div>
+    <div class="function" id="get" data-name="get">
+      <h3 class="function-name">get <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get(m, key) <span class="arrow">-&gt;</span> (string, int)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: string</span></p>
+      <p class="doc">m[key]: (the value, 1), or (&quot;&quot;, 0) when the key is absent.</p>
+    </div>
+    <div class="function" id="has" data-name="has">
+      <h3 class="function-name">has <span class="kind">fn</span></h3>
+      <pre class="usage"><code>has(m, key) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, key: string</span></p>
+      <p class="doc">1 when key is in the map, else 0.</p>
+    </div>
+    <div class="function" id="count" data-name="count">
+      <h3 class="function-name">count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>count(m) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+      <p class="doc">Keys in the map; key_at and value_at read entry i (0 .. count - 1), in the order keys were first put; &quot;&quot; past the end.</p>
+    </div>
+    <div class="function" id="key_at" data-name="key_at">
+      <h3 class="function-name">key_at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>key_at(m, i) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="value_at" data-name="value_at">
+      <h3 class="function-name">value_at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>value_at(m, i) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr, i: int</span></p>
+    </div>
+    <div class="function" id="freeze" data-name="freeze">
+      <h3 class="function-name">freeze <span class="kind">fn</span></h3>
+      <pre class="usage"><code>freeze(m)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+      <p class="doc">Make every key put so far an input: a guest reads it and cannot overwrite it (guest_put refuses), and a child's shared memory block cannot either.</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free(m)</code></pre>
+      <p class="signature"><span class="sig-params">m: ptr</span></p>
+      <p class="doc">Frees the map and everything in it; its token is dead from now on.</p>
+    </div>
+    <div class="function" id="guest_put" data-name="guest_put">
+      <h3 class="function-name">guest_put <span class="kind">fn</span></h3>
+      <pre class="usage"><code>guest_put(token, key, value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">token: long, key: string, value: string</span></p>
+      <p class="doc">A put with a guest's rules, through the token, as a host serving a guest in another process applies one: 0, or -1 (a dead token, a frozen input, the map full).</p>
+    </div>
+    <div class="function" id="MAX_ENTRIES" data-name="MAX_ENTRIES">
+      <h3 class="function-name">MAX_ENTRIES <span class="kind">const</span></h3>
+      <pre class="usage"><code>MAX_ENTRIES = 256</code></pre>
+      <p class="doc">The most keys one map holds.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

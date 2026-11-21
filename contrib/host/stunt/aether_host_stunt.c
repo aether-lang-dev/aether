@@ -192,15 +192,23 @@ static void forget_vm(void* vm) {
     }
 }
 
+// stunt's strings are C strings (libstunt's arg_str / push_str), so these
+// pass and take the map's bytes up to a NUL: stunt is the reference guest of
+// the catalogue, and none of its cases puts a NUL through the map.
+static size_t len_of(const char* s) { return s ? strlen(s) : 0; }
+
 static int host_map_get(void* vm) {
-    const char* v = aether_shared_map_get_by_token(map_token_of(vm), S.arg_str(vm, 1));
+    const char* k = S.arg_str(vm, 1);
+    const char* v = k ? aether_shared_map_get_by_token(map_token_of(vm), k, len_of(k), NULL) : NULL;
     if (v) S.push_str(vm, v);
     else S.push_nil(vm);
     return 1;
 }
 
 static int host_map_put(void* vm) {
-    S.push_int(vm, aether_shared_map_put_by_token(map_token_of(vm), S.arg_str(vm, 1), S.arg_str(vm, 2)));
+    const char* k = S.arg_str(vm, 1);
+    const char* v = S.arg_str(vm, 2);
+    S.push_int(vm, k ? aether_shared_map_put_by_token(map_token_of(vm), k, len_of(k), v, len_of(v)) : -1);
     return 1;
 }
 
@@ -230,7 +238,6 @@ int stunt_vm_register(void* vm, const char* name, void* host_fn) {
 // guest reads them and adds keys of its own, and cannot overwrite one.
 void stunt_vm_set_map(void* vm, uint64_t token) {
     if (!vm || !S.lib) return;
-    extern void aether_shared_map_freeze_inputs_by_token(uint64_t);
     aether_shared_map_freeze_inputs_by_token(token);
     set_map_token(vm, token);
     S.reg((st_vm*)vm, "aether_map_get", host_map_get);
@@ -331,12 +338,33 @@ void* stunt_map_new(void) {
 
 uint64_t stunt_map_token(void* map) { return map ? ((StuntMap*)map)->token : 0; }
 
-void stunt_map_put(void* map, const char* key, const char* value) {
-    if (map) aether_shared_map_put(((StuntMap*)map)->map, key, value);
+// Keys and values from Aether cross as `@aether string`: by their length,
+// a NUL kept. A get returns a new string (the caller's), or NULL for absent.
+extern const char* aether_string_data(const void* s);
+extern size_t aether_string_length(const void* s);
+extern void* string_new_with_length(const char* data, size_t length);
+
+static const char* sdata(const void* s, size_t* n) {
+    *n = s ? aether_string_length(s) : 0;
+    const char* d = s ? aether_string_data(s) : NULL;
+    if (!d) { *n = 0; return ""; }
+    return d;
 }
 
-const char* stunt_map_get(void* map, const char* key) {
-    return map ? aether_shared_map_get(((StuntMap*)map)->map, key) : NULL;
+int stunt_map_put(void* map, const void* key, const void* value) {
+    if (!map || !key) return -1;
+    size_t kn, vn;
+    const char* k = sdata(key, &kn);
+    const char* v = sdata(value, &vn);
+    return aether_shared_map_put(((StuntMap*)map)->map, k, kn, v, vn);
+}
+
+void* stunt_map_get(void* map, const void* key) {
+    if (!map || !key) return NULL;
+    size_t kn, vn = 0;
+    const char* k = sdata(key, &kn);
+    const char* v = aether_shared_map_get(((StuntMap*)map)->map, k, kn, &vn);
+    return v ? string_new_with_length(v, vn) : NULL;
 }
 
 void stunt_map_free(void* map) {
@@ -354,16 +382,27 @@ void stunt_map_freeze(void* map) {
 
 // What a guest in a child process asks for over the socket, applied by its
 // host with the guest's rules: inputs frozen, outputs added.
-int stunt_map_guest_put(uint64_t token, const char* key, const char* value) {
-    return aether_shared_map_put_by_token(token, key, value);
+int stunt_map_guest_put(uint64_t token, const void* key, const void* value) {
+    if (!key) return -1;
+    size_t kn, vn;
+    const char* k = sdata(key, &kn);
+    const char* v = sdata(value, &vn);
+    return aether_shared_map_put_by_token(token, k, kn, v, vn);
 }
 
-const char* stunt_map_guest_get(uint64_t token, const char* key) {
-    return aether_shared_map_get_by_token(token, key);
+void* stunt_map_guest_get(uint64_t token, const void* key) {
+    if (!key) return NULL;
+    size_t kn, vn = 0;
+    const char* k = sdata(key, &kn);
+    const char* v = aether_shared_map_get_by_token(token, k, kn, &vn);
+    return v ? string_new_with_length(v, vn) : NULL;
 }
 
-int stunt_map_guest_has(uint64_t token, const char* key) {
-    return aether_shared_map_get_by_token(token, key) != NULL;
+int stunt_map_guest_has(uint64_t token, const void* key) {
+    if (!key) return 0;
+    size_t kn;
+    const char* k = sdata(key, &kn);
+    return aether_shared_map_get_by_token(token, k, kn, NULL) != NULL;
 }
 
 // ---- the catalogue -----------------------------------------------------------
