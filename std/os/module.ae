@@ -540,7 +540,7 @@ spawn_proc_to(prog: string, argv: ptr, env: ptr, out_path: string) -> {
 //     only handles, so the kernel ends the job when this process ends. No
 //     process can leave the job, so the whole tree is covered; there is no
 //     grace period (Windows has no SIGTERM).
-//   - Other POSIX systems: the program's process group only.
+//   - Other POSIX systems, and iOS: the program's process group only.
 // On POSIX the write end the supervisor watches is close-on-exec: an exec
 // of this process (os.execv) ends the tree, and a fork of this process that
 // does not exec keeps the tree alive while that fork lives.

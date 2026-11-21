@@ -2882,7 +2882,7 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
  * a descendant that left the group is reached even after its parent has
  * exited, unless it left and was orphaned within one 50 ms poll (a
  * double-forked daemon can be that quick); such a one is launchd's child and
- * is not reached. Other POSIX systems: the group only.
+ * is not reached. Other POSIX systems, and iOS: the group only.
  *
  * The program also gets the supervisor as its death signal on Linux and
  * FreeBSD (the supervisor is single-threaded, so the thread caveat does not
@@ -2901,8 +2901,11 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
 #include <dirent.h>
 #elif defined(__FreeBSD__)
 #include <sys/procctl.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && defined(__has_include)
+#if __has_include(<libproc.h>)   /* macOS; iOS has no libproc: the group only */
 #include <libproc.h>
+#define AETHER_TREE_LIBPROC 1
+#endif
 #endif
 
 typedef struct { void* _0; const char* _1; } _tuple_ptr_string_tree;
@@ -3041,7 +3044,7 @@ static int tree_descendants(pid_t root, pid_t* out, int max) {
     }
     for (int i = 1; i < n; i++) out[i - 1] = out[i];
     n--;
-#elif defined(__APPLE__)
+#elif defined(AETHER_TREE_LIBPROC)
     out[n++] = root;
     for (int i = 0; i < n; i++) {
         pid_t kids[512];
@@ -3061,7 +3064,7 @@ static int tree_descendants(pid_t root, pid_t* out, int max) {
 }
 #endif
 
-#if defined(__APPLE__)
+#if defined(AETHER_TREE_LIBPROC)
 /* A process's start time, to tell a listed descendant from a later process
  * that took its pid. 0 when it is gone. */
 static uint64_t tree_started(pid_t p) {
@@ -3101,7 +3104,7 @@ static void tree_signal(pid_t prog, int sig, const pid_t* early, const uint64_t*
     int n = tree_descendants(getpid(), now, AETHER_TREE_MAX);
     for (int i = 0; i < n; i++) kill(now[i], sig);
 #endif
-#if defined(__APPLE__)
+#if defined(AETHER_TREE_LIBPROC)
     for (int i = 0; i < nearly; i++) {
         if (early_start[i] && tree_started(early[i]) == early_start[i]) kill(early[i], sig);
     }
@@ -3115,7 +3118,7 @@ static void tree_signal(pid_t prog, int sig, const pid_t* early, const uint64_t*
  * Without one (macOS), the group and the early list are checked too. */
 static int tree_gone(pid_t prog, int no_children, const pid_t* early, const uint64_t* early_start, int nearly) {
     if (!no_children) return 0;
-#if defined(__APPLE__)
+#if defined(AETHER_TREE_LIBPROC)
     if (kill(-prog, 0) == 0) return 0;
     for (int i = 0; i < nearly; i++) {
         if (early_start[i] && tree_started(early[i]) == early_start[i]) return 0;
@@ -3138,7 +3141,7 @@ static uint64_t g_tree_seen_start[AETHER_TREE_MAX];
 static int g_tree_nseen = 0;
 
 static void tree_track(void) {
-#if defined(__APPLE__)
+#if defined(AETHER_TREE_LIBPROC)
     int keep = 0;
     for (int i = 0; i < g_tree_nseen; i++) {
         if (tree_started(g_tree_seen[i]) == g_tree_seen_start[i]) {
