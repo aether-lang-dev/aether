@@ -107,20 +107,28 @@ for f in quickjs-amalgam.c quickjs.h; do
     [ -f "$out/$f" ] || { echo "fetch-quickjs: $f is not in the archive" >&2; exit 1; }
 done
 
-# The patches, with patch(1) where it is installed and git apply where it is
-# not (MSYS2 has git but not always patch). No fuzz: a patch written for one
-# release must not land somewhere else in another.
+# The patches: with patch(1) where it is installed, git apply where it is
+# not, and scripts/apply-unified-patch.awk where there is neither (a bare
+# MSYS2 shell has no patch and no git: the Windows release job stages its
+# archive in one, and the stage failed there). All three are strict: no fuzz
+# and no searching, since a patch written for one release must not land
+# somewhere else in another. QUICKJS_PATCH_TOOL=patch|git|awk picks one (the
+# test of the awk applier does).
+patch_tool="${QUICKJS_PATCH_TOOL:-}"
+if [ -z "$patch_tool" ]; then
+    if command -v patch >/dev/null 2>&1; then patch_tool=patch
+    elif command -v git >/dev/null 2>&1; then patch_tool=git
+    else patch_tool=awk
+    fi
+fi
 for p in "$patches"/*.patch; do
     [ -f "$p" ] || continue
-    if command -v patch >/dev/null 2>&1; then
-        (cd "$out" && patch -s -p1 -F0 -N < "$p") >&2 ||
-            { echo "fetch-quickjs: $(basename "$p") does not apply to QuickJS $QUICKJS_VERSION" >&2; exit 1; }
-    elif command -v git >/dev/null 2>&1; then
-        (cd "$out" && git apply -p1 "$p") >&2 ||
-            { echo "fetch-quickjs: $(basename "$p") does not apply to QuickJS $QUICKJS_VERSION" >&2; exit 1; }
-    else
-        echo "fetch-quickjs: neither patch nor git is installed to apply $(basename "$p")" >&2; exit 1
-    fi
+    case "$patch_tool" in
+        patch) (cd "$out" && patch -s -p1 -F0 -N < "$p") >&2 ;;
+        git)   (cd "$out" && git apply -p1 "$p") >&2 ;;
+        awk)   awk -v dir="$out" -f "$root/scripts/apply-unified-patch.awk" "$p" >&2 ;;
+        *)     echo "fetch-quickjs: QUICKJS_PATCH_TOOL is '$patch_tool'; it is patch, git or awk" >&2; exit 1 ;;
+    esac || { echo "fetch-quickjs: $(basename "$p") does not apply to QuickJS $QUICKJS_VERSION (with $patch_tool)" >&2; exit 1; }
 done
 
 mkdir -p "$dest"
