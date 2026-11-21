@@ -122,6 +122,33 @@ read_response(sock: ptr) -> int {
     return total
 }
 
+// All of `data` onto `sock`, never waiting more than STALL_MS for room at a
+// time: "" when it is all sent, or what stopped it. write_all waits up to the
+// socket's 30 s send timeout for each send, so a server that stopped reading
+// part-way held this test until the sweep's 120 s limit killed it with no
+// output at all (the macOS x86_64 release build, 0.933.0); a stall is now a
+// failure that says how far the send got.
+const STALL_MS = 15000
+
+send_bounded(sock: ptr, data: byte[]) -> string {
+    sent = 0
+    while sent < data.len {
+        room, werr = tcp.wait_writable(sock, STALL_MS)
+        if werr != "" {
+            return "${werr} after ${sent} of ${data.len} bytes"
+        }
+        if !room {
+            return "no room for ${STALL_MS} ms after ${sent} of ${data.len} bytes: the server stopped reading"
+        }
+        n, serr = tcp.write_some(sock, data[sent..])
+        if serr != "" {
+            return "${serr} after ${sent} of ${data.len} bytes"
+        }
+        sent = sent + n
+    }
+    return ""
+}
+
 // A chunked POST of `n` bytes in 64 KiB chunks.
 chunked_post(n: int) -> string {
     piece = string.pad_end("", 65536, 98)
@@ -177,7 +204,11 @@ main() {
         }
 
         before = aether_caps_used_bytes()
-        tcp.write_all(sock, string.bytes(post))
+        werr = send_bounded(sock, string.bytes(post))
+        if werr != "" {
+            println("  FAIL sending a 1 MB chunked request body (${names[g]}): ${werr}")
+            exit(1)
+        }
         got = read_response(sock)
         sleep(200)
         kept = aether_caps_used_bytes() - before
