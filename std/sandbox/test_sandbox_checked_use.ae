@@ -50,6 +50,64 @@ fn swap_until_stopped() {
     }
 }
 
+// What `path` holds, or the error: names what a directory of the race leads
+// to ("inside" is the box's own file, "outside" the link's target).
+fn peek(path: string) -> string {
+    got, err = fs.read(path)
+    if err != "" { return "error: ${err}" }
+    return got
+}
+
+// What box/<name> is after the race: 0 nothing there, 1 the box's own
+// directory (its secret.txt reads "inside"), 2 the link to the directory
+// outside ("outside"), 3 something else.
+fn dir_kind(dir: string) -> int {
+    got, err = fs.read("${dir}/secret.txt")
+    if err != "" { return 0 }
+    if got == "inside" { return 1 }
+    if got == "outside" { return 2 }
+    return 3
+}
+
+// The swapper does four renames and ignores their results, and a rename can
+// fail when the other thread has the directory open (always so on Windows,
+// where a directory with a handle open inside it cannot be moved): then the
+// cycle stops part-way and box/d is left as the link, or missing, with the
+// box's own directory under another name. That is a fault of the race, not
+// of the calls, so once the worker has stopped, with nothing else touching
+// the box, the three names are put back by explicit renames, outside any
+// sandbox: d the box's own directory, d_link the link, d_real nothing. A
+// rename that is refused for a moment (a handle still closing) is tried
+// again, for at most `tries` x 20 ms. "" when they are back, else what the
+// three names are.
+fn restore_swap_dirs(box: string, tries: int) -> string {
+    d = "${box}/d"
+    real = "${box}/d_real"
+    link = "${box}/d_link"
+    n = 0
+    kd = dir_kind(d)
+    kr = dir_kind(real)
+    kl = dir_kind(link)
+    while n < tries && !(kd == 1 && kr == 0 && kl == 2) {
+        if kd == 2 {
+            // The link is at d: move it to a free name.
+            if kl == 0 { _r = fs.rename(d, link) } else if kr == 0 { _r = fs.rename(d, real) }
+        } else if kd == 0 {
+            if kr == 1 { _r = fs.rename(real, d) } else if kl == 1 { _r = fs.rename(link, d) }
+        } else if kd == 1 {
+            // The box's directory is at d already: the link is at d_real.
+            if kr == 2 && kl == 0 { _r = fs.rename(real, link) }
+        }
+        sleep(20)
+        n = n + 1
+        kd = dir_kind(d)
+        kr = dir_kind(real)
+        kl = dir_kind(link)
+    }
+    if kd == 1 && kr == 0 && kl == 2 { return "" }
+    return "d is ${kd}, d_real ${kr}, d_link ${kl} (0 nothing, 1 box's own, 2 link, 3 other) after ${n} tries"
+}
+
 // A Windows junction at `link` to the directory `target`: 1 when made.
 fn make_junction(link: string, target: string) -> int {
     l = string.replace_all(link, "/", "\\")
@@ -135,6 +193,8 @@ main() {
             stop_swap = 1
             if ok { worker.wait() }
             worker.drain(16)
+            put_back = restore_swap_dirs(box, 250)
+            spec.assert_str_eq(put_back, "", "the swapped directory could be put back once the swapping stopped")
             spec.assert_eq(escaped, 0, "nothing outside the box was read")
             spec.assert_true(inside > 0, "and the box's own file was")
             spec.assert_true(swaps_made > 0, "while the directory was being swapped")
@@ -173,26 +233,36 @@ main() {
             stop_swap = 1
             if ok { worker.wait() }
             worker.drain(16)
+            put_back = restore_swap_dirs(box, 250)
             // With the directory its own again, each call works in the box.
-            done = 0
+            // `report` names each call that did not, with its error, and
+            // says what box/d is: it is empty when all nine worked.
+            report = ""
             sandbox.enforce(in_box) callback {
                 _p = fs.delete_dir("${box}/d/k") // a leftover of the race, if any
                 e2 = fs.write("${box}/d/m.txt", "x")
+                if e2 != "" { report = "${report}write: ${e2}; " }
                 e3 = fs.rename("${box}/d/m.txt", "${box}/d/n.txt")
-                u, _k, _e4 = fs.unlink("${box}/d/n.txt")
+                if e3 != "" { report = "${report}rename: ${e3}; " }
+                u, _k, e4 = fs.unlink("${box}/d/n.txt")
+                if u != 1 { report = "${report}unlink: ${u} ${e4}; " }
                 e5 = fs.create_dir("${box}/d/k")
+                if e5 != "" { report = "${report}create_dir: ${e5}; " }
                 e6 = fs.delete_dir("${box}/d/k")
+                if e6 != "" { report = "${report}delete_dir: ${e6}; " }
                 e7 = fs.write_atomic("${box}/d/atomic.txt", string.bytes("x"))
+                if e7 != "" { report = "${report}write_atomic: ${e7}; " }
                 t, terr = fs.make_temp_file("${box}/d", "t")
-                if terr == "" { _d1 = fs.delete(t) }
+                if terr == "" { _d1 = fs.delete(t) } else { report = "${report}make_temp_file: ${terr}; " }
                 td, tderr = fs.make_temp_dir("${box}/d", "t")
-                if tderr == "" { _d2 = fs.delete_dir(td) }
+                if tderr == "" { _d2 = fs.delete_dir(td) } else { report = "${report}make_temp_dir: ${tderr}; " }
                 lfd, _lk, lerr = fs.lock_open("${box}/d/lock")
-                if lerr == "" { _c = io.fd_close(lfd) }
-                if e2 == "" && e3 == "" && u == 1 && e5 == "" && e6 == "" && e7 == "" &&
-                terr == "" && tderr == "" && lerr == "" && fs.exists("${box}/d/atomic.txt") == 1 {
-                    done = 1
-                }
+                if lerr == "" { _c = io.fd_close(lfd) } else { report = "${report}lock_open: ${lerr}; " }
+                if fs.exists("${box}/d/atomic.txt") != 1 { report = "${report}atomic.txt is not there; " }
+            }
+            if report != "" {
+                where = peek("${box}/d/secret.txt")
+                report = "${report}[box/d/secret.txt reads as '${where}']"
             }
             got_w, _rw = fs.read("${outside}/w.txt")
             spec.assert_str_eq(got_w, "outside-w", "a write never truncated or rewrote the outside file")
@@ -210,7 +280,8 @@ main() {
             }
             spec.assert_eq(n_out, 5 + have_links, "nothing else appeared outside (no temporary file or directory)")
             spec.assert_eq(seen, 0, "a lookup never saw a file that is only outside")
-            spec.assert_eq(done, 1, "and each call works in the box when the directory is its own")
+            spec.assert_str_eq(put_back, "", "the swapped directory could be put back once the swapping stopped")
+            spec.assert_str_eq(report, "", "and each call works in the box when the directory is its own")
             spec.assert_true(swaps_made > 0, "while the directory was being swapped")
         }
         // chmod and the listings (list_dir, walk, glob) act on what their
@@ -248,6 +319,8 @@ main() {
             stop_swap = 1
             if ok { worker.wait() }
             worker.drain(16)
+            put_back = restore_swap_dirs(box, 250)
+            spec.assert_str_eq(put_back, "", "the swapped directory could be put back once the swapping stopped")
             werr = fs.write("${outside}/c.txt", "outside-c")
             spec.assert_str_eq(werr, "", "chmod never made the outside file read-only")
             spec.assert_eq(listed_out, 0, "a listing never named a file that is only outside")
