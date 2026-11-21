@@ -1645,12 +1645,75 @@ int run_cross_build(const char* c_file, const char* out_file,
                 fprintf(stderr, "Error: compiling %s for %s failed.\n", c_file, ztriple);
                 break;
             }
-            /* `ar rcs <out> <program>.o <runtime objs...>`. The runtime
-             * objects are re-listed rather than the objdir archive being
-             * copied: ar cannot nest archives portably, and an .a of .a
-             * files is not linkable. */
-            if (!cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s rcs \"%s\" \"%s\" %s", ar_cmd, out_file, user_obj, objlist)) {
+            /* The --extra files and the modules' `@source` C files (`ex`,
+             * which the link steps below hand the compiler) go into the
+             * archive as objects too. They were left out, so the archive of
+             * a program importing contrib.quickjs had every qjs_* symbol
+             * undefined while --emit=lib, which links `ex`, defined them
+             * (servirtium-vcr asks/aether-staticlib-omits-source-files.md).
+             * A source file is compiled with the program's own flags and an
+             * object is archived as it is. An archive cannot be a member of
+             * one, so it is named for the consumer to link beside this one. */
+            char* src_objs = NULL;
+            size_t src_cap = 0, src_pos = 0;
+            bool src_ok = cross_buf_reserve(&src_objs, &src_cap, 1);
+            if (src_ok) src_objs[0] = '\0';
+            else fprintf(stderr, "Error: out of memory building the static-library object list.\n");
+            const char* cursor = ex;
+            char path[4096];
+            int nsrc = 0;
+            while (src_ok && extras_next(&cursor, path, sizeof(path))) {
+                const char* dot = strrchr(path, '.');
+                const char* sep = strrchr(path, '/');
+                const char* bsep = strrchr(path, '\\');
+                if (bsep && (!sep || bsep > sep)) sep = bsep;
+                const char* ext = (dot && (!sep || dot > sep)) ? dot + 1 : "";
+                char obj[4200];
+                if (strcmp(ext, "o") == 0 || strcmp(ext, "obj") == 0) {
+                    snprintf(obj, sizeof(obj), "%s", path);
+                } else if (strcmp(ext, "a") == 0 || strcmp(ext, "lib") == 0) {
+                    fprintf(stderr,
+                        "Warning: %s is an archive, which a static library cannot hold; "
+                        "link it beside %s.\n", path, out_file);
+                    continue;
+                } else {
+                    /* Numbered, not named after the source: two modules may
+                     * each ship a `util.c`. */
+                    snprintf(obj, sizeof(obj), "%s/__aether_source_%d.o", objdir, nsrc++);
+                    if (!cross_cmd_fmt(&cmd, &cmd_cap,
+                        "%s %s%s %s %s %s %s %s -c \"%s\" -o \"%s\"",
+                        cc_cmd, sysroot_flag, lib_pic, opt, feature_defs, user_cflags,
+                        tc.include_flags, ae_includes, path, obj)) {
+                        fprintf(stderr, "Error: out of memory building the static-library compile command.\n");
+                        src_ok = false;
+                        break;
+                    }
+                    if (run_cmd_show_warnings(cmd) != 0) {
+                        fprintf(stderr, "Error: compiling %s for %s failed.\n", path, ztriple);
+                        src_ok = false;
+                        break;
+                    }
+                }
+                if (!cross_buf_reserve(&src_objs, &src_cap, src_pos + strlen(obj) + 4)) {
+                    fprintf(stderr, "Error: out of memory building the static-library object list.\n");
+                    src_ok = false;
+                    break;
+                }
+                src_pos += (size_t)snprintf(src_objs + src_pos, src_cap - src_pos,
+                                            " \"%s\"", obj);
+            }
+            if (!src_ok) {
+                free(src_objs);
+                break;
+            }
+            /* `ar rcs <out> <program>.o <sources' objs...> <runtime objs...>`.
+             * The runtime objects are re-listed rather than the objdir
+             * archive being copied: ar cannot nest archives portably, and an
+             * .a of .a files is not linkable. */
+            bool fmt_ok = cross_cmd_fmt(&cmd, &cmd_cap,
+                "%s rcs \"%s\" \"%s\"%s %s", ar_cmd, out_file, user_obj, src_objs, objlist);
+            free(src_objs);
+            if (!fmt_ok) {
                 fprintf(stderr, "Error: out of memory building the static-library archive command.\n");
                 break;
             }
