@@ -3210,18 +3210,22 @@ static void tree_supervise(int ctl, int start_w, int out_fd, const AetherExec* x
     /* A group of its own: a Ctrl-C meant for this process's foreground group
      * does not end the tree; only this process going, or asking, does. */
     setpgid(0, 0);
+    /* Without the reaper the teardown could not find a descendant that left
+     * the group, so a refusal fails the spawn (Capsicum's capability mode
+     * answers ECAPMODE to PROC_REAP_ACQUIRE) instead of being ignored. */
+    int reap_err = 0;
 #if defined(__linux__)
-    prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) reap_err = errno ? errno : EPERM;
 #elif defined(__FreeBSD__)
-    procctl(P_PID, getpid(), PROC_REAP_ACQUIRE, NULL);
+    if (procctl(P_PID, getpid(), PROC_REAP_ACQUIRE, NULL) != 0) reap_err = errno ? errno : EPERM;
 #endif
     ctl = aether_child_lift_fd(ctl);
     start_w = aether_child_lift_fd(start_w);
     out_fd = aether_child_lift_fd(out_fd);
     AetherTreeStart start = { 0, 0 };
     int ep[2];
-    if (ctl < 0 || start_w < 0 || out_fd < 0 || pipe(ep) != 0) {
-        start.err = errno ? errno : EIO;
+    if (ctl < 0 || start_w < 0 || out_fd < 0 || reap_err || pipe(ep) != 0) {
+        start.err = reap_err ? reap_err : (errno ? errno : EIO);
         tree_write_all(start_w, &start, sizeof start);
         _exit(127);
     }
