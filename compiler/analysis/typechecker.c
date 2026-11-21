@@ -457,9 +457,47 @@ Symbol* lookup_symbol(SymbolTable* table, const char* name) {
  * ask them. Through lookup_symbol, a sealed body that never named `Browser`
  * lost every field type of a `Browser` it held, with no diagnostic: a string
  * field compared as a pointer, a closure field stored unretained. */
+/* Is `s` the declaration of a type, by its node? */
+static int symbol_is_type_decl(const Symbol* s) {
+    if (!s || s->is_function || !s->node) return 0;
+    switch (s->node->type) {
+        case AST_STRUCT_DEFINITION: case AST_SUM_TYPE_DEF: case AST_ENUM_DEFINITION:
+        case AST_BITSTRUCT_DEFINITION: case AST_MESSAGE_DEFINITION:
+        case AST_ACTOR_DEFINITION: case AST_C_STRUCT_DEF: case AST_CFN_TYPE_DEF:
+        case AST_DISTINCT_TYPE_DEF:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* The newest binding of `name` in the scope `t` that declares a type. */
+static Symbol* lookup_type_decl_local(SymbolTable* t, const char* name) {
+    if (t->buckets) {
+        unsigned b = symtab_hash(name) & (unsigned)(t->bucket_count - 1);
+        for (Symbol* s = t->buckets[b]; s; s = s->hash_next)
+            if (strcmp(s->name, name) == 0 && symbol_is_type_decl(s)) return s;
+        return NULL;
+    }
+    for (Symbol* s = t->symbols; s; s = s->next)
+        if (strcmp(s->name, name) == 0 && symbol_is_type_decl(s)) return s;
+    return NULL;
+}
+
 Symbol* lookup_type_symbol(SymbolTable* table, const char* name) {
     if (!table || !name) return NULL;
-    return lookup_symbol_in(table, name, table->merged_from, 0, 1, NULL);
+    Symbol* s = lookup_symbol_in(table, name, table->merged_from, 0, 1, NULL);
+    if (!s || symbol_is_type_decl(s)) return s;
+    /* The type of a value in hand is a type, whatever else its name is
+     * bound to where the value is read: a local named like the struct
+     * (`Other = n` and then `o = Other { q: "x" }`) hid the struct from
+     * `o.q`, which had no type ("an interpolation cannot write this
+     * value"). The declaration further out is the one meant. */
+    for (SymbolTable* t = table; t; t = t->parent) {
+        Symbol* d = lookup_type_decl_local(t, name);
+        if (d) return d;
+    }
+    return s;
 }
 
 /* A bare `extern` is private to the file that declares it, but every
@@ -18467,6 +18505,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
         case AST_STRUCT_LITERAL: {
             // Type check struct literal field initializers
             Symbol* sdef_sym = expr->value ? lookup_symbol(table, expr->value) : NULL;
+            /* `T { ... }` names the type T: a local named like it (`Other =
+             * n` before `o = Other { ... }`) is not what it builds. */
+            if (sdef_sym && !symbol_is_type_decl(sdef_sym)) {
+                Symbol* decl = lookup_type_symbol(table, expr->value);
+                if (decl && symbol_is_type_decl(decl)) sdef_sym = decl;
+            }
             /* `T { ... }` writes the name `T`, so hide / seal decide it. It
              * was refused only because the local it was bound to then named
              * no type the program defines (E0302), which a value of an

@@ -1222,7 +1222,9 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             // Struct literal: StructName{ field: value, ... }
             // Look up struct definition to propagate field types
             if (node->value && ctx->symbols) {
-                Symbol* struct_sym = lookup_symbol(ctx->symbols, node->value);
+                /* The type the literal names, also beside a local named
+                 * like it (`Other = n` before `o = Other { ... }`). */
+                Symbol* struct_sym = lookup_type_symbol(ctx->symbols, node->value);
                 
                 if (struct_sym && struct_sym->type && struct_sym->type->kind == TYPE_STRUCT) {
                     // Set the struct literal's type to the struct type
