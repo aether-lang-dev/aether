@@ -1,5 +1,11 @@
 /* Helpers for test_os_spawn_tree.ae: what std.os has no call for, because
  * only a test wants it. */
+/* A handle the program means never to free (the case where the parent
+ * exits and the tree must end anyway): held here so LeakSanitizer finds it
+ * reachable, as it would a handle a long-lived program kept in a global. */
+void* volatile tree_test_kept;
+void tree_test_keep(void* p) { tree_test_kept = p; }
+
 #ifdef _WIN32
 #include <windows.h>
 /* Windows has no sessions to leave; the job holds every descendant. */

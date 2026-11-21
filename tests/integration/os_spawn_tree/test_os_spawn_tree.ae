@@ -22,6 +22,7 @@ import std.string
 
 extern tree_test_setsid() -> int
 extern tree_test_alive(pid: int) -> int
+extern tree_test_keep(p: ptr)
 extern exit(code: int)
 
 check(label: string, ok: bool) -> int {
@@ -122,7 +123,9 @@ child(mode: string) -> int {
             write_pid("${base}.parent")
             sleep(300000)
         }
-        // Returns, and main exits, without tree_kill, tree_free or a wait.
+        // Returns, and main exits, without tree_kill, tree_free or a wait
+        // (the handle is held in C so a leak checker sees it reachable).
+        tree_test_keep(tree)
         if os.tree_pid(tree) <= 0 {
             return 2
         }
@@ -229,7 +232,9 @@ main() {
     }
 
     // A program that cannot start fails the spawn, with no handle.
-    t5, e5 = os.spawn_tree_to("${dir}/no-such-program", list.new(), null, "${dir}/none.out")
+    a5 = list.new()
+    t5, e5 = os.spawn_tree_to("${dir}/no-such-program", a5, null, "${dir}/none.out")
+    list.free(a5)
     fails = fails + check("a missing program fails the spawn (${e5})", t5 == null && e5 == "program not found")
 
     _rm = fs.remove_tree(dir)
