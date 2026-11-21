@@ -742,6 +742,8 @@ main() {
 
 Constants cost nothing at run time: each is a file-scope `static const` in the generated C. A program's own constants are emitted under the reserved name `ae_const_<NAME>`, so no C header can claim the name: a constant may be called `SIZE`, `NEAR` or `MAX_PATH` on every platform, although `windows.h` owns all three (#2292). A parameter or local named like a constant is still that parameter or local. An imported module's constants carry the module's prefix instead.
 
+The rule for a bare `name = value` in a function (or main, a closure, an actor's handler) is the same for every outer name: it re-binds the local or parameter of that name if the function has one already, writes the module-level `var` of that name if there is one (see [Mutable module-level globals](#mutable-module-level-globals)), and otherwise declares a new local, which shadows a constant, a function, a struct, a message, an actor, an enum constant or an imported name spelled the same for the rest of its scope. Which of the three it is never depends on the value: a local bound from a call whose result the compiler works out from the callee's body, or from a field read through a pointer, shadows exactly as one bound from a literal does.
+
 A constant of an optional type takes a constant of its inner type or `none` (#2807): `const LIMIT: int? = 3`, `const NO_LABEL: string? = none`. It reads as any optional does (`LIMIT ?? 0`, `match LIMIT { ... }`); the value is wrapped once, in its `static const`.
 
 #### Module-level constant arrays, lookup tables

@@ -1,0 +1,35 @@
+import shapes(LIMIT, width)
+import std.list
+
+extern exit(code: int)
+
+struct Box {
+    v: int
+}
+
+pick(xs: ptr) { return list.at(xs, 0) }
+
+// A local named like an imported constant.
+const_name(xs: ptr) -> int {
+    LIMIT = pick(xs)
+    g = LIMIT
+    let bb: *Box = g
+    return bb.v
+}
+
+// A local named like an imported function.
+function_name(xs: ptr) -> int {
+    width = pick(xs)
+    g = width
+    let bb: *Box = g
+    return bb.v
+}
+
+main() {
+    xs = list.new()
+    b = Box { v: 3 }
+    list.add(xs, &b)
+    if const_name(xs) != 3 { exit(1) }
+    if function_name(xs) != 3 { exit(2) }
+    println("${const_name(xs)} ${function_name(xs)} ${LIMIT} ${width(1)}")
+}

@@ -26,7 +26,7 @@ static const char* infer_dotted_as_c_name(const char* name) {
 }
 
 // Create inference context
-InferenceContext* create_inference_context(SymbolTable* table) {
+InferenceContext* create_inference_context(SymbolTable* table, const StrMap* module_vars) {
     InferenceContext* ctx = (InferenceContext*)malloc(sizeof(InferenceContext));
     ctx->constraints = NULL;
     ctx->constraint_count = 0;
@@ -37,6 +37,7 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->walk_id = 0;
     ctx->dsl_depth = 0;
     strmap_init(&ctx->hoist_joins);
+    ctx->module_vars = module_vars;
     return ctx;
 }
 
@@ -495,6 +496,37 @@ static void add_walk_symbol(InferenceContext* ctx, const char* name, Type* type)
     if (ctx->symbols->symbols) ctx->symbols->symbols->walk_id = ctx->walk_id;
 }
 
+/* Is `name` a module-level `var` of the program, which a bare binding of
+ * the name in a function writes (the checker's module_var_named)? */
+static int names_module_var(InferenceContext* ctx, const char* name) {
+    return ctx->module_vars && name && strmap_has(ctx->module_vars, name);
+}
+
+/* A binding in the walk whose value this pass cannot type yet (`f =
+ * list.get(xs, 0)`, `f = ctx.h5` through a pointer, a call whose result is
+ * inferred from its body) binds its name all the same, from here on, as the
+ * checker's scope does. It used to bind nothing until it was typed, so a
+ * read of the name fell through to whatever the program had of that name:
+ * with `const f = "text"` above, `g = f` declared `g` a string, the next
+ * pass could not retype `g`, and the checker refused `g = f` as a type
+ * mismatch (a local of an actor's, a struct's or a message's name was
+ * declared of that type the same way). The binding gets an entry of
+ * unknown type, so the read stays untyped until the binding is typed.
+ *
+ * Which binding a name gets follows the language's rule (the checker's
+ * rebound_global_var): a name the walk has bound already is that binding;
+ * a bare `name = value` of a module-level `var` writes the global, so its
+ * reads keep the global's entry; anything else is a new local of the walk,
+ * shadowing a constant, a function, a type or an import of the name. */
+static void bind_untyped_walk_local(InferenceContext* ctx, const char* name, int writes_module_var) {
+    if (!ctx->symbols || ctx->walk_id == 0 || !name || strcmp(name, "_") == 0) return;
+    Symbol* existing = lookup_symbol_local(ctx->symbols, name);
+    if (existing && rebindable_symbol(ctx, existing)) return;
+    if (writes_module_var && names_module_var(ctx, name)) return;
+    add_walk_symbol(ctx, name, create_type(TYPE_UNKNOWN));
+    ctx->symbols->symbols->inferred_in = ctx->scope_owner;
+}
+
 /* Walk ids are never reused, so a stamp left by an earlier pass over the
  * same function (whose symbols that pass's unwind removed anyway) can never
  * be mistaken for the current walk's. */
@@ -836,6 +868,8 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                     }
                     bound->inferred_closure = lit ? lit : &g_closure_disagrees;
                 }
+            } else if (node->value && node->type == AST_VARIABLE_DECLARATION) {
+                bind_untyped_walk_local(ctx, node->value, node->type_inferred);
             }
             break;
 
@@ -853,8 +887,17 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                 collect_constraints(rhs, ctx);
 
                 Type* rhs_type = rhs ? rhs->node_type : NULL;
-                if (rhs_type && rhs_type->kind == TYPE_TUPLE &&
-                    rhs_type->tuple_count == var_count) {
+                int typed_tuple = rhs_type && rhs_type->kind == TYPE_TUPLE &&
+                                  rhs_type->tuple_count == var_count;
+                /* A slot this pass cannot type yet still binds its name;
+                 * a slot of a module `var` writes the global. */
+                for (int j = 0; j < var_count; j++) {
+                    ASTNode* var = node->children[j];
+                    Type* slot = typed_tuple ? rhs_type->tuple_types[j] : NULL;
+                    if (var && (!slot || slot->kind == TYPE_UNKNOWN))
+                        bind_untyped_walk_local(ctx, var->value, 1);
+                }
+                if (typed_tuple) {
                     // Bind each lvalue's slot type onto the corresponding
                     // AST_VARIABLE_DECLARATION node and into the symbol table.
                     for (int j = 0; j < var_count; j++) {
@@ -2515,6 +2558,19 @@ static void settle_clause_sets(ASTNode* program, SymbolTable* table, const StrMa
     free(nodes);
 }
 
+/* The program's module-level `var`s (`var x = 0`, `export var x = 0`),
+ * merged modules' included, as the checker's module_var_named finds them. */
+static void module_var_names(ASTNode* program, StrMap* out) {
+    strmap_init(out);
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
+        if (c && c->type == AST_CONST_DECLARATION && c->value &&
+            c->annotation && strcmp(c->annotation, "global_var") == 0)
+            strmap_put(out, c->value, NULL);
+    }
+}
+
 // Main inference function
 int infer_all_types(ASTNode* program, SymbolTable* table) {
     if (!program) return 0;
@@ -2522,7 +2578,10 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
     StrMap clause_sets;
     clause_set_names(program, &clause_sets);
 
-    InferenceContext* ctx = create_inference_context(table);
+    StrMap module_vars;
+    module_var_names(program, &module_vars);
+
+    InferenceContext* ctx = create_inference_context(table, &module_vars);
     
     // Phase 1: Collect constraints from the entire program
     collect_constraints(program, ctx);
@@ -2597,7 +2656,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
         }
 
         free_inference_context(ctx);
-        ctx = create_inference_context(table);
+        ctx = create_inference_context(table, &module_vars);
         collect_constraints(program, ctx);
         success = solve_constraints(ctx);
 
@@ -2616,6 +2675,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
 
     free_inference_context(ctx);
     strmap_free(&clause_sets);
+    strmap_free(&module_vars);
 
     return success;
 }

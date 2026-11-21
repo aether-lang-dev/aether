@@ -1,0 +1,50 @@
+// A handler's local named like a program `const` is the handler's local,
+// whether or not the early inference pass can type its value yet.
+//
+// An actor is walked as a scope of its own (#3797), and a local it binds is
+// the handler's, shadowing a constant of its name. The walk bound a local
+// only once it had a type for the value, so `f = pick(xs)` (a result
+// inferred from pick's body) left `f` unbound and the read `g = f` took
+// the constant's string type: E0200 "Type mismatch in variable
+// initialization" before the fix.
+
+import std.list
+
+extern exit(code: int)
+
+const f = "text"
+
+struct Box {
+    v: int
+}
+
+message Ping { n: int }
+
+pick(xs: ptr) { return list.at(xs, 0) }
+
+actor Worker {
+    state seen = 0
+    receive {
+        Ping(n) -> {
+            xs = list.new()
+            b = Box { v: n }
+            list.add(xs, &b)
+            f = pick(xs)
+            g = f
+            let bb: *Box = g
+            seen = bb.v
+            println("handler ${seen}")
+        }
+    }
+}
+
+main() {
+    w = spawn(Worker())
+    w ! Ping { n: 3 }
+    wait_for_idle()
+    if f != "text" {
+        println("FAIL: the constant changed")
+        exit(1)
+    }
+    println("PASS: a handler's untyped local shadows a constant")
+}

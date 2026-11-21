@@ -283,6 +283,7 @@ tests/integration/trailing_block_return/
 tests/integration/transitive_module_import/
 tests/integration/ufcs_cross_module/
 tests/integration/uncalled_module_fn_checked/
+tests/integration/untyped_local_shadows_import/
 tests/integration/varargs_forward/
 # #3375: counter.ae is built by the driver, which runs it with and without AETHER_VERBOSE.
 tests/integration/verbose_env/
