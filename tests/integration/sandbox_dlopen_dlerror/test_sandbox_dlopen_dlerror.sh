@@ -15,8 +15,12 @@
 #   - the message is the refused thread's, not another thread's
 #   - a library that is not libc still loads, with no message
 #
-# Linux only: the preload is built on Linux and FreeBSD, and the probe's
-# library names (libc.so.6, libm.so.6) are glibc's.
+#   - so does one by the path the loader loaded libc from, and (glibc) a
+#     dlmopen into a new namespace, which brings a libc of its own
+#
+# Linux and FreeBSD, where the preload is built: the probe is given this C
+# library's names (glibc's libc.so.6 and libm.so.6, FreeBSD's libc.so.7 and
+# libm.so.5).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -24,9 +28,10 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LIB="$ROOT/build/libaether_sandbox.so"
 
 case "$(uname -s 2>/dev/null)" in
-    Linux) ;;
+    Linux) LIBC_NAME=libc.so.6 LIBM_NAME=libm.so.6 ;;
+    FreeBSD) LIBC_NAME=libc.so.7 LIBM_NAME=libm.so.5 ;;
     *)
-        echo "  [SKIP] sandbox_dlopen_dlerror: the probe's library names are glibc's (this is $(uname -s))"
+        echo "  [SKIP] sandbox_dlopen_dlerror: the preload is Linux and FreeBSD only"
         exit 0 ;;
 esac
 if [ ! -f "$LIB" ]; then
@@ -52,7 +57,7 @@ ln -s "$LIBC" "$TMP/libplain.so"
 printf 'env:HOME\n' > "$TMP/none.grants"
 
 LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/none.grants" AETHER_SANDBOX_LOG=none \
-    LD_LIBRARY_PATH="$TMP" "$TMP/probe" "$TMP" > "$TMP/boxed.out" 2>&1
+    LD_LIBRARY_PATH="$TMP" "$TMP/probe" "$TMP" "$LIBC_NAME" "$LIBM_NAME" "$LIBC" > "$TMP/boxed.out" 2>&1
 rc=$?
 
 fail=0
@@ -61,7 +66,7 @@ if [ "$rc" -ne 0 ]; then
     fail=1
 fi
 for label in bare-null bare-message bare-cleared handle-null handle-message handle-cleared \
-             loader-error thread-local own-thread libm; do
+             loader-error thread-local own-thread path-null path-message path-cleared dlmopen libm; do
     line=$(grep "^$label " "$TMP/boxed.out")
     if [ "$line" = "$label ok" ]; then
         echo "  [PASS] $label"
