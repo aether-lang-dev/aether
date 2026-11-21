@@ -1,0 +1,49 @@
+// A multi-value return with an early return of literals ahead of the real
+// one keeps every value of the written result type.
+//
+// A guard. OpenDisk-ae's native_capacity once had this shape with an
+// inferred result, `if ok != 1 { return 0, 0, 0 }` and then
+// `return total(), important(), 1`, and returned a stale, cut `total()`
+// (241631232 for a volume of about 245 GB) with no diagnostic; it was worked
+// around with a single return. The inferred shape is the narrowing error
+// now (tests/integration/return_type_check, #2782). Written out, the result
+// type is what both returns convert to: the 64-bit values and the early
+// zeros come back whole, from either path, directly and destructured.
+
+extern exit(code: int)
+
+total() -> long { return 245000000000 }
+
+important() -> long { return 200000000001 }
+
+capacity(ok: int) -> (long, long, int) {
+    if ok != 1 { return 0, 0, 0 }
+    return total(), important(), 1
+}
+
+// The early return is the wider one here: its literals take the result's
+// types as well.
+labelled(ok: int) -> (long, string) {
+    if ok == 1 { return 5000000000, "big" }
+    return 0, ""
+}
+
+main() {
+    t, a, k = capacity(1)
+    if t != 245000000000 || a != 200000000001 || k != 1 {
+        println("FAIL: capacity(1) gave ${t} ${a} ${k}")
+        exit(1)
+    }
+    z, y, x = capacity(0)
+    if z != 0 || y != 0 || x != 0 {
+        println("FAIL: capacity(0) gave ${z} ${y} ${x}")
+        exit(1)
+    }
+    n, s = labelled(1)
+    m, e = labelled(0)
+    if n != 5000000000 || s != "big" || m != 0 || e != "" {
+        println("FAIL: labelled gave ${n} ${s} ${m} ${e}")
+        exit(1)
+    }
+    println("PASS: an early multi-value return keeps the written result type")
+}
