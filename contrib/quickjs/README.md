@@ -52,8 +52,40 @@ main() {
 - **Strings**: `quickjs.to_string(q, h) -> (string, string)` is
   `String(h)`, which runs a `toString` and can throw (a Symbol, a throwing
   or interrupted `toString`): `("", error)` then, so an empty string is told
-  apart from a failure. NUL bytes in a JavaScript string are kept.
-  `arg_string` stays a plain string, `""` when the argument has none.
+  apart from a failure. `arg_string` stays a plain string, `""` when the
+  argument has none. Strings cross by their length both ways: see below.
+
+## Strings, NUL and UTF-8
+
+An Aether `string` carries its length, and so does a JavaScript string, so
+every string crossing the module is carried whole, NUL bytes included:
+
+- **Going in**: `new_string`, `eval`, `eval_async`, `eval_module`,
+  `parse_json`, `throw_error`'s message, `function`'s name and the property
+  names of `get`, `set`, `get_global` and `set_global` all take every byte of
+  the string. A script holding a NUL runs all of it (a NUL inside a string
+  literal is a character; outside one it is a `SyntaxError`, as JavaScript
+  says), JSON holding one is a parse error, and a name holding one is a
+  different key from the name cut at it.
+- **Refused**: a filename holding a NUL. The engine takes it as a C string
+  and would put a shorter name in every stack, so `eval` returns
+  `(0, "TypeError: eval: the filename holds a NUL")` instead.
+- **Coming out**: `to_string`, `arg_string`, `to_json`, `last_error` and the
+  error half of every `(value, error)` keep every byte, a NUL in an error's
+  message included (`throw new Error('x\0y')` reads back as `Error: x\0y`).
+
+UTF-8 fidelity, explicitly:
+
+| what | in (Aether to JavaScript) | out (JavaScript to Aether) |
+|---|---|---|
+| a character outside the BMP (U+1F600) | 4 UTF-8 bytes become one code point, a surrogate pair | a surrogate pair becomes 4 UTF-8 bytes |
+| a lone surrogate (`'\uD800'`) | cannot be written in UTF-8 | U+FFFD (`EF BF BD`): what the module hands out is always valid UTF-8 |
+| bytes that are not UTF-8 (`"\xff"`) | U+FFFD for each bad byte (the engine's rule) | cannot happen |
+
+The engine itself writes a lone surrogate as its WTF-8 bytes (`ED A0 80`),
+which are not UTF-8; the module turns each into U+FFFD, the same three
+bytes' room. JSON is the lossless route for one: `to_json` writes it as an
+escape (`"\ud800"`), and `parse_json` reads that back as the surrogate.
 
 ## Bytes
 
