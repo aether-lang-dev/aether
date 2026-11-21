@@ -47,3 +47,7 @@ tests/fuzz/**/corpus/** binary
 # byte for byte): keep them LF on a Windows autocrlf checkout, or every line
 # gains a CR and sed's output no longer matches the expected files.
 tests/integration/sed_parity/freebsd/** text eol=lf
+
+# Patches applied to fetched third-party sources; patch and git apply want
+# them byte for byte, so an autocrlf checkout must not rewrite them.
+*.patch text eol=lf

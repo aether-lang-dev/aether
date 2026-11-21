@@ -59,6 +59,7 @@ AetherJmpFrame* aether_try_push(void) {
     f->reason = NULL;
     f->reason_release = NULL;
     f->exec_buf = NULL;
+    f->exec_jump = NULL;
     return f;
 }
 

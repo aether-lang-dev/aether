@@ -1,0 +1,36 @@
+// A local named like a `const` declared AFTER the function that binds it is
+// still the function's local. See test_untyped_local_shadows_const.ae: the
+// early inference walk left a local it could not type yet unbound, and the
+// read `g = f` took the constant's type (E0200 before the fix), wherever
+// the constant sits in the file.
+
+import std.list
+
+extern exit(code: int)
+
+struct Box {
+    v: int
+}
+
+pick(xs: ptr) { return list.at(xs, 0) }
+
+blk(xs: ptr) -> int {
+    f = pick(xs)
+    g = f
+    let bb: *Box = g
+    return bb.v
+}
+
+const f = "text"
+
+main() {
+    xs = list.new()
+    b = Box { v: 3 }
+    list.add(xs, &b)
+    if blk(xs) != 3 {
+        println("FAIL: blk")
+        exit(1)
+    }
+    list.free(xs)
+    println("PASS: ${f}")
+}

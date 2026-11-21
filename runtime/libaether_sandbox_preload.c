@@ -114,20 +114,40 @@ extern const char* aether_sandbox_staged_for(const char* tmp) __attribute__((wea
 // which run after this library's.
 static int g_preload_ready = 0;
 
+// The log file, opened by this library for itself: not checked, and so
+// never a refusal to log. Not through libc's fopen: FreeBSD's fopen opens
+// through _open, which this library wraps (a program may call it by name),
+// so under a policy that did not grant the log's directory the log line of a
+// refusal asked to open the log, was refused, and logged that, without end:
+// every refused open recursed until the stack ran out (a segfault after
+// half a gigabyte of stack, minutes of it in a forked child). libc's openat
+// goes to the system call with no wrapper of this library in between.
+static FILE* log_open(void) {
+    static int (*openat_fn)(int, const char*, int, ...) = NULL;
+    if (!openat_fn) openat_fn = (int (*)(int, const char*, int, ...))dlsym(RTLD_NEXT, "openat");
+    if (!openat_fn) return NULL;
+    int fd = openat_fn(AT_FDCWD, "aether-sandbox.log", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0666);
+    if (fd < 0) return NULL;
+    FILE* f = fdopen(fd, "a");
+    if (!f) close(fd);
+    return f;
+}
+
+// A refusal, in the log. The caller's errno is kept: a refusal reads as the
+// kernel's own EACCES whatever writing the line did to errno.
 static void log_deny(const char* category, const char* resource) {
     if (log_mode == LOG_NONE) return;
+    int saved = errno;
     if (log_mode == LOG_STDERR) {
         fprintf(stderr, "AETHER_DENIED: %s %s\n", category, resource);
     } else if (log_mode == LOG_FILE) {
-        if (!log_file) {
-            log_file = real_fopen ? real_fopen("aether-sandbox.log", "a")
-                                  : fopen("aether-sandbox.log", "a");
-        }
+        if (!log_file) log_file = log_open();
         if (log_file) {
             fprintf(log_file, "AETHER_DENIED: %s %s\n", category, resource);
             fflush(log_file);
         }
     }
+    errno = saved;
 }
 
 // The grant check proper, for a resource already resolved (an fs path from
@@ -260,7 +280,7 @@ static void log_note(const char* what) {
         fprintf(stderr, "AETHER_SANDBOX: %s\n", what);
         return;
     }
-    if (!log_file) log_file = real_fopen ? real_fopen("aether-sandbox.log", "a") : NULL;
+    if (!log_file) log_file = log_open();
     if (log_file) {
         fprintf(log_file, "AETHER_SANDBOX: %s\n", what);
         fflush(log_file);
@@ -403,8 +423,8 @@ static void landlock_backstop(void) {
     }
     // The log is opened now: the ruleset does not let the process make it
     // later.
-    if (!why[0] && log_mode == LOG_FILE && !log_file && real_fopen)
-        log_file = real_fopen("aether-sandbox.log", "a");
+    if (!why[0] && log_mode == LOG_FILE && !log_file)
+        log_file = log_open();
     if (!why[0] && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
         snprintf(why, sizeof why, "landlock: PR_SET_NO_NEW_PRIVS refused (%s); the permanent policy "
                  "holds at libc only", strerror(errno));
@@ -1128,8 +1148,9 @@ FILE* freopen(const char* path, const char* mode, FILE* stream) {
 }
 
 static DIR* (*real_opendir)(const char*) = NULL;
-DIR* opendir(const char* path) {
-    if (!policy_in_force()) return FS_REAL(opendir)(path);
+// opendir under a policy: steps 1 to 3, then a stream on the descriptor.
+// Refused, NULL with errno EACCES, as the kernel's refusal of the open.
+static DIR* fs_opendir_checked(const char* path) {
     char resolved[PATH_MAX];
     if (!fs_allowed(AT_FDCWD, path, 0, AETHER_ACCESS_READ, resolved)) return NULL;
     int fd = aether_sandbox_walk(resolved, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0, &preload_ops);
@@ -1141,6 +1162,11 @@ DIR* opendir(const char* path) {
         errno = err;
     }
     return d;
+}
+
+DIR* opendir(const char* path) {
+    if (!policy_in_force()) return FS_REAL(opendir)(path);
+    return fs_opendir_checked(path);
 }
 
 // scandir lists a directory through libc's own opendir, which the wrapper
@@ -1474,9 +1500,12 @@ int renameat(int fromfd, const char* from, int tofd, const char* to) {
     if (fs_two_names(fromfd, from, tofd, to, &a1, n1, &a2, n2) != 0) return -1;
     FS_AT_CALL2(a1, a2, fs_rename_slash(from, a1, n1, to, a2, n2) != 0 ? -1 : FS_REAL(renameat)(a1, n1, a2, n2));
 }
-#if defined(__linux__)
+// renameat2: Linux's, and FreeBSD's from 15.0 (its AT_RENAME_NOREPLACE).
+// On a FreeBSD older than that libc has none, and neither has this call.
+#if defined(__linux__) || defined(__FreeBSD__)
 static int (*real_renameat2)(int, const char*, int, const char*, unsigned) = NULL;
 int renameat2(int fromfd, const char* from, int tofd, const char* to, unsigned flags) {
+    if (!FS_REAL(renameat2)) { errno = ENOSYS; return -1; }
     if (!policy_in_force()) return FS_REAL(renameat2)(fromfd, from, tofd, to, flags);
     int a1, a2;
     char n1[PATH_MAX], n2[PATH_MAX];
@@ -2039,11 +2068,11 @@ static int fs_glob_start_allowed(const char* pattern) {
 #if defined(__GLIBC__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
     defined(__APPLE__)
 #define FS_GLOB_FILTER(NAME, GLOB_T)                                              \
-    static int NAME(GLOB_T* g, size_t from) {                                     \
+    static int NAME(GLOB_T* g, size_t from, const char* echo) {                   \
         size_t kept = from;                                                       \
         for (size_t i = from; i < g->gl_pathc; i++) {                             \
             char* p = g->gl_pathv[g->gl_offs + i];                                \
-            if (p && fs_glob_match_allowed(p)) {                                  \
+            if (p && fs_glob_match_allowed(p, echo)) {                            \
                 g->gl_pathv[g->gl_offs + kept++] = p;                             \
                 continue;                                                         \
             }                                                                     \
@@ -2055,16 +2084,20 @@ static int fs_glob_start_allowed(const char* pattern) {
     }
 #else
 #define FS_GLOB_FILTER(NAME, GLOB_T)                                              \
-    static int NAME(GLOB_T* g, size_t from) {                                     \
+    static int NAME(GLOB_T* g, size_t from, const char* echo) {                   \
         for (size_t i = from; i < g->gl_pathc; i++) {                             \
             char* p = g->gl_pathv[g->gl_offs + i];                                \
-            if (!p || !fs_glob_match_allowed(p)) return 0;                        \
+            if (!p || !fs_glob_match_allowed(p, echo)) return 0;                  \
         }                                                                         \
         return 1;                                                                 \
     }
 #endif
 
-static int fs_glob_match_allowed(const char* p) {
+// `echo` is the pattern under GLOB_NOCHECK, which glob hands back as its
+// one result when nothing matched: the caller's own text, not a file it
+// reached, so it is kept.
+static int fs_glob_match_allowed(const char* p, const char* echo) {
+    if (echo && strcmp(p, echo) == 0) return 1;
     char resolved[PATH_MAX];
     return aether_sandbox_canon_path(p, resolved, sizeof resolved) &&
            check_resolved("fs_read", resolved);
@@ -2072,16 +2105,49 @@ static int fs_glob_match_allowed(const char* p) {
 
 FS_GLOB_FILTER(fs_glob_filter, glob_t)
 
+// Where the C library takes a glob's directory functions from the caller
+// (GLOB_ALTDIRFUNC: glibc, the BSDs), every directory the glob lists is
+// opened through the checked opendir, and libc's glob answers a refused one
+// as it answers the kernel's EACCES: the error function is called with the
+// directory and EACCES, and GLOB_ERR (or the function's say) decides between
+// GLOB_ABORTED and carrying on (GLOB_NOMATCH, or the pattern itself under
+// GLOB_NOCHECK). A caller that brings its own directory functions keeps
+// them, and the first directory is checked before the call instead.
+#if defined(GLOB_ALTDIRFUNC)
+#define FS_GLOB_DIRS 1
+static void* fs_glob_opendir(const char* path) { return fs_opendir_checked(path); }
+static void fs_glob_closedir(void* d) { closedir((DIR*)d); }
+#define FS_GLOB_ALTDIR(g, flags, READDIR, STAT, LSTAT)                             \
+    do {                                                                           \
+        (g)->gl_opendir = fs_glob_opendir;                                         \
+        (g)->gl_readdir = (__typeof__((g)->gl_readdir))(void (*)(void))READDIR;    \
+        (g)->gl_closedir = fs_glob_closedir;                                       \
+        (g)->gl_lstat = (__typeof__((g)->gl_lstat))(void (*)(void))LSTAT;          \
+        (g)->gl_stat = (__typeof__((g)->gl_stat))(void (*)(void))STAT;             \
+        (flags) |= GLOB_ALTDIRFUNC;                                                \
+    } while (0)
+// The flag is the call's, not the caller's: taken out of what glob keeps.
+#define FS_GLOB_ALTDIR_DONE(g) ((g)->gl_flags &= ~GLOB_ALTDIRFUNC)
+#else
+#define FS_GLOB_DIRS 0
+#define GLOB_ALTDIRFUNC 0
+#define FS_GLOB_ALTDIR(g, flags, READDIR, STAT, LSTAT) ((void)0)
+#define FS_GLOB_ALTDIR_DONE(g) ((void)0)
+#endif
+
 typedef int (*glob_errfn)(const char*, int);
 static int (*real_glob)(const char*, int, glob_errfn, glob_t*) = NULL;
 int glob(const char* pattern, int flags, glob_errfn errfunc, glob_t* g) {
     if (!policy_in_force()) return FS_REAL(glob)(pattern, flags, errfunc, g);
     if (!pattern || !g) return FS_REAL(glob)(pattern, flags, errfunc, g);
-    if (!fs_glob_start_allowed(pattern)) return GLOB_ABORTED;
+    int own_dirs = FS_GLOB_DIRS && !(flags & GLOB_ALTDIRFUNC);
+    if (!own_dirs && !fs_glob_start_allowed(pattern)) return GLOB_ABORTED;
     size_t before = (flags & GLOB_APPEND) ? g->gl_pathc : 0;
+    if (own_dirs) FS_GLOB_ALTDIR(g, flags, readdir, stat, lstat);
     int r = FS_REAL(glob)(pattern, flags, errfunc, g);
+    if (own_dirs) FS_GLOB_ALTDIR_DONE(g);
     if (r != 0 && r != GLOB_NOMATCH) return r;
-    if (g->gl_pathv && !fs_glob_filter(g, before)) return GLOB_ABORTED;
+    if (g->gl_pathv && !fs_glob_filter(g, before, (flags & GLOB_NOCHECK) ? pattern : NULL)) return GLOB_ABORTED;
     if (r == 0 && g->gl_pathc == before) return GLOB_NOMATCH;
     return r;
 }
@@ -2111,11 +2177,48 @@ static int fs_ftw_call(const char* path, const struct stat* st, int type) {
     return fs_ftw_user(path, st, type);
 }
 
+// A walk's root the policy refuses is answered as the kernel's EACCES on it
+// is: nftw and ftw stat the root (a lookup, which this library does not
+// hold) and pass it to the function as what it is, a directory as FTW_DNR,
+// one they could not list, and the walk ends there with the function's
+// answer. A root that does not exist is -1 with stat's errno. The type for
+// `st`, or -1.
+#define FS_TREE_ROOT_TYPE(NAME, STAT_T, STATF, LSTATF)                          \
+    static int NAME(const char* root, int phys, int nftw_types, struct STAT_T* st) { \
+        if ((phys ? LSTATF(root, st) : STATF(root, st)) != 0) {                   \
+            int err = errno;                                                     \
+            if (nftw_types && !phys && err == ENOENT && LSTATF(root, st) == 0 &&  \
+                S_ISLNK(st->st_mode))                                            \
+                return FTW_SLN;                                                  \
+            errno = err;                                                         \
+            return -1;                                                           \
+        }                                                                        \
+        if (S_ISDIR(st->st_mode)) return FTW_DNR;                                \
+        if (nftw_types && S_ISLNK(st->st_mode)) return FTW_SL;                   \
+        return FTW_F;                                                            \
+    }
+FS_TREE_ROOT_TYPE(fs_tree_root_type, stat, stat, lstat)
+
+// Where the last name of `root` starts, as nftw's FTW.base gives it.
+static int fs_tree_base(const char* root) {
+    size_t n = strlen(root);
+    while (n > 1 && root[n - 1] == '/') n--;
+    size_t b = n;
+    while (b > 0 && root[b - 1] != '/') b--;
+    return (int)b;
+}
+
 static int (*real_nftw)(const char*, nftw_fn, int, int) = NULL;
 int nftw(const char* root, nftw_fn fn, int fds, int flags) {
     if (!policy_in_force() || !fn) return FS_REAL(nftw)(root, fn, fds, flags);
     char resolved[PATH_MAX];
-    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) return -1;
+    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) {
+        struct stat st;
+        int type = fs_tree_root_type(root, (flags & FTW_PHYS) != 0, 1, &st);
+        if (type < 0) return -1;
+        struct FTW f = { .base = fs_tree_base(root), .level = 0 };
+        return fn(root, &st, type, &f);
+    }
     nftw_fn outer = fs_nftw_user;
     fs_nftw_user = fn;
     int r = FS_REAL(nftw)(root, fs_nftw_call, fds, flags);
@@ -2127,7 +2230,11 @@ static int (*real_ftw)(const char*, ftw_fn, int) = NULL;
 int ftw(const char* root, ftw_fn fn, int fds) {
     if (!policy_in_force() || !fn) return FS_REAL(ftw)(root, fn, fds);
     char resolved[PATH_MAX];
-    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) return -1;
+    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) {
+        struct stat st;
+        int type = fs_tree_root_type(root, 0, 0, &st);
+        return type < 0 ? -1 : fn(root, &st, type);
+    }
     ftw_fn outer = fs_ftw_user;
     fs_ftw_user = fn;
     int r = FS_REAL(ftw)(root, fs_ftw_call, fds);
@@ -2185,6 +2292,67 @@ int open_by_handle_at(int mountfd, struct file_handle* handle, int flags) {
     }
     return fd;
 }
+#endif
+
+// openat2: glibc 2.42 added it as a function that makes the system call
+// itself, so the syscall() wrapper's refusal of SYS_openat2 under a policy
+// never sees it. With no RESOLVE_ flags it is openat, checked and made as
+// openat is. With them (each only narrows where the kernel may resolve to)
+// it is checked as openat is, made by the kernel with the caller's flags,
+// and what it opened is named and checked again, so a name swapped between
+// the two is refused. RESOLVE_IN_ROOT reads the path beneath the directory
+// as its root, which the check, reading it from the real root, cannot
+// follow: refused under a policy. A C library without the function leaves
+// it to the system call.
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<linux/openat2.h>)
+#include <linux/openat2.h>
+#include <sys/syscall.h>          // SYS_openat2, where libc has no openat2
+static int (*real_openat2)(int, const char*, const struct open_how*, size_t) = NULL;
+static int fs_openat2_raw(int dirfd, const char* path, const struct open_how* how, size_t size) {
+    if (FS_REAL(openat2)) return FS_REAL(openat2)(dirfd, path, how, size);
+#if defined(SYS_openat2)
+    return (int)fs_real_syscall(SYS_openat2, (long)dirfd, (long)path, (long)how, (long)size);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+static int fs_open_how_plain(const struct open_how* how, size_t size) {
+    if (how->resolve) return 0;
+    // A larger structure than this one is the kernel's to judge (E2BIG for
+    // a field it does not know that is not zero): made by the kernel.
+    const unsigned char* extra = (const unsigned char*)how + sizeof *how;
+    for (size_t i = sizeof *how; i < size; i++)
+        if (extra[i - sizeof *how]) return 0;
+    return 1;
+}
+int openat2(int dirfd, const char* path, const struct open_how* how, size_t size) {
+    if (!policy_in_force() || !how || size < sizeof *how) return fs_openat2_raw(dirfd, path, how, size);
+    int flags = (int)how->flags;
+    if (fs_open_how_plain(how, size)) return fs_open_checked(dirfd, path, flags, (unsigned)how->mode);
+    if (how->resolve & RESOLVE_IN_ROOT) {
+        log_deny("fs_read", path ? path : "(null)");
+        errno = EACCES;
+        return -1;
+    }
+    int access = fs_open_access(flags);
+    int entry = (flags & O_NOFOLLOW) || (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL);
+    char resolved[PATH_MAX];
+    if (!fs_allowed(dirfd, path, entry, access, resolved)) return -1;
+    int fd = fs_openat2_raw(dirfd, path, how, size);
+    if (fd < 0) return fd;
+    char target[PATH_MAX], run[PATH_MAX], opened[PATH_MAX];
+    if (!fd_path(fd, target, run) || !aether_sandbox_canon_path(target, opened, sizeof opened) ||
+        ((access & AETHER_ACCESS_READ) && !check_resolved("fs_read", opened)) ||
+        ((access & AETHER_ACCESS_WRITE) && !check_resolved("fs_write", opened))) {
+        close(fd);
+        errno = EACCES;
+        return -1;
+    }
+    return fd;
+}
+#endif
 #endif
 
 // mount and its undoing change what a path leads to: fs_write on the
@@ -2292,6 +2460,7 @@ int clone(int (*fn)(void*), void* stack, int flags, void* arg, ...) {
 #define AE_DIRENT64 dirent64
 #define AE_READDIR64 readdir64
 #define AE_STAT64 stat64
+#define AE_LSTAT64 lstat64
 #define AE_GLOB64 glob64_t
 #define AE_FTRUNCATE64 ftruncate64
 #else
@@ -2299,6 +2468,7 @@ int clone(int (*fn)(void*), void* stack, int flags, void* arg, ...) {
 #define AE_DIRENT64 dirent
 #define AE_READDIR64 readdir
 #define AE_STAT64 stat
+#define AE_LSTAT64 lstat
 #define AE_GLOB64 glob_t
 #define AE_FTRUNCATE64 ftruncate
 #endif
@@ -2480,11 +2650,14 @@ FS_GLOB_FILTER(fs_glob64_filter, glob64_t)
 static int (*real_glob64)(const char*, int, glob_errfn, AE_GLOB64*) = NULL;
 int glob64(const char* pattern, int flags, glob_errfn errfunc, AE_GLOB64* g) {
     if (!policy_in_force() || !pattern || !g) return FS_REAL(glob64)(pattern, flags, errfunc, g);
-    if (!fs_glob_start_allowed(pattern)) return GLOB_ABORTED;
+    int own_dirs = FS_GLOB_DIRS && !(flags & GLOB_ALTDIRFUNC);
+    if (!own_dirs && !fs_glob_start_allowed(pattern)) return GLOB_ABORTED;
     size_t before = (flags & GLOB_APPEND) ? g->gl_pathc : 0;
+    if (own_dirs) FS_GLOB_ALTDIR(g, flags, AE_READDIR64, AE_STAT64, AE_LSTAT64);
     int r = FS_REAL(glob64)(pattern, flags, errfunc, g);
+    if (own_dirs) FS_GLOB_ALTDIR_DONE(g);
     if (r != 0 && r != GLOB_NOMATCH) return r;
-    if (g->gl_pathv && !fs_glob64_filter(g, before)) return GLOB_ABORTED;
+    if (g->gl_pathv && !fs_glob64_filter(g, before, (flags & GLOB_NOCHECK) ? pattern : NULL)) return GLOB_ABORTED;
     if (r == 0 && g->gl_pathc == before) return GLOB_NOMATCH;
     return r;
 }
@@ -2498,10 +2671,21 @@ static int fs_nftw64_call(const char* path, const struct AE_STAT64* st, int type
     return fs_nftw64_user(path, st, type, f);
 }
 static int (*real_nftw64)(const char*, nftw64_fn, int, int) = NULL;
+#if defined(__GLIBC__)
+FS_TREE_ROOT_TYPE(fs_tree_root_type64, stat64, stat64, lstat64)
+#else
+#define fs_tree_root_type64 fs_tree_root_type
+#endif
 int nftw64(const char* root, nftw64_fn fn, int fds, int flags) {
     if (!policy_in_force() || !fn) return FS_REAL(nftw64)(root, fn, fds, flags);
     char resolved[PATH_MAX];
-    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) return -1;
+    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) {
+        struct AE_STAT64 st;
+        int type = fs_tree_root_type64(root, (flags & FTW_PHYS) != 0, 1, &st);
+        if (type < 0) return -1;
+        struct FTW f = { .base = fs_tree_base(root), .level = 0 };
+        return fn(root, &st, type, &f);
+    }
     nftw64_fn outer = fs_nftw64_user;
     fs_nftw64_user = fn;
     int r = FS_REAL(nftw64)(root, fs_nftw64_call, fds, flags);
@@ -2521,7 +2705,11 @@ static int (*real_ftw64)(const char*, ftw64_fn, int) = NULL;
 int ftw64(const char* root, ftw64_fn fn, int fds) {
     if (!policy_in_force() || !fn) return FS_REAL(ftw64)(root, fn, fds);
     char resolved[PATH_MAX];
-    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) return -1;
+    if (!fs_allowed(AT_FDCWD, root, 0, AETHER_ACCESS_READ, resolved)) {
+        struct AE_STAT64 st;
+        int type = fs_tree_root_type64(root, 0, 0, &st);
+        return type < 0 ? -1 : fn(root, &st, type);
+    }
     ftw64_fn outer = fs_ftw64_user;
     fs_ftw64_user = fn;
     int r = FS_REAL(ftw64)(root, fs_ftw64_call, fds);
@@ -4116,6 +4304,36 @@ static int (*real_scandirat_b)(int, const char*, struct dirent***, void*, void*)
 int scandirat_b(int dirfd, const char* path, struct dirent*** list, void* sel, void* cmp) {
     if (!policy_in_force()) return FS_REAL(scandirat_b)(dirfd, path, list, sel, cmp);
     return fs_scandir_blocks(dirfd, path, list, sel, cmp);
+}
+
+// The blocks forms of glob and fts_open: checked as glob and fts_open are,
+// their block (the error function, the comparison) passed on untouched.
+// fts_read, which both forms of fts share, holds the walk itself.
+static int (*real_glob_b)(const char*, int, void*, glob_t*) = NULL;
+int glob_b(const char* pattern, int flags, void* errblock, glob_t* g) {
+    if (!FS_REAL(glob_b)) { errno = ENOSYS; return GLOB_ABORTED; }
+    if (!policy_in_force() || !pattern || !g) return FS_REAL(glob_b)(pattern, flags, errblock, g);
+    int own_dirs = !(flags & GLOB_ALTDIRFUNC);
+    if (!own_dirs && !fs_glob_start_allowed(pattern)) return GLOB_ABORTED;
+    size_t before = (flags & GLOB_APPEND) ? g->gl_pathc : 0;
+    if (own_dirs) FS_GLOB_ALTDIR(g, flags, readdir, stat, lstat);
+    int r = FS_REAL(glob_b)(pattern, flags, errblock, g);
+    if (own_dirs) FS_GLOB_ALTDIR_DONE(g);
+    if (r != 0 && r != GLOB_NOMATCH) return r;
+    if (g->gl_pathv && !fs_glob_filter(g, before, (flags & GLOB_NOCHECK) ? pattern : NULL)) return GLOB_ABORTED;
+    if (r == 0 && g->gl_pathc == before) return GLOB_NOMATCH;
+    return r;
+}
+
+static FTS* (*real_fts_open_b)(char* const*, int, void*) = NULL;
+FTS* fts_open_b(char* const* roots, int options, void* compar) {
+    if (!FS_REAL(fts_open_b)) { errno = ENOSYS; return NULL; }
+    if (!policy_in_force() || !roots) return FS_REAL(fts_open_b)(roots, options, compar);
+    for (char* const* r = roots; *r; r++) {
+        char resolved[PATH_MAX];
+        if (!fs_allowed(AT_FDCWD, *r, 0, AETHER_ACCESS_READ, resolved)) return NULL;
+    }
+    return FS_REAL(fts_open_b)(roots, options, compar);
 }
 
 // mkostempsat: mkostemps relative to a directory descriptor.

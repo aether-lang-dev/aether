@@ -57,11 +57,22 @@ fi
 TMP="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 
-# Defined, exported names, without symbol versions; glibc's private ones
-# (GLIBC_PRIVATE) are not for programs and are left out. The versions are
-# asked for where nm takes the flag, so the private ones can be told apart.
+# Defined, exported names, without symbol versions. The versions are asked
+# for where nm takes the flag (FreeBSD's llvm-nm prints them anyway), so the
+# C library's private names can be told apart: glibc's GLIBC_PRIVATE and
+# FreeBSD's FBSDprivate_1.0 are for the C library's own family (libthr,
+# rtld), not for programs. FreeBSD 15's libc.so.7 exports an underscored
+# private alias of every system call it moved to libsys (_unlink, _rename,
+# _execve), as glibc has its hidden __unlink; neither is a program's call,
+# and the system calls behind them stay reachable through libsys's
+# __sys_unlink and syscall(2) whatever this library wraps, which is what
+# Landlock and Capsicum hold. The sweep (2) reads the public names; the
+# wrapped list (1) reads them all, since _open and _openat, private too, are
+# what FreeBSD's own fopen and opendir open through, and are wrapped.
 { nm -D --defined-only --with-symbol-versions "$libc" 2>/dev/null ||
-  nm -D --defined-only "$libc" 2>/dev/null; } | grep -v 'GLIBC_PRIVATE' \
+  nm -D --defined-only "$libc" 2>/dev/null; } > "$TMP/libc.nm"
+awk 'NF >= 3 { print $3 } NF == 2 { print $2 }' "$TMP/libc.nm" | sed 's/@.*//' | sort -u > "$TMP/libc.all"
+grep -v -e 'GLIBC_PRIVATE' -e 'FBSDprivate' "$TMP/libc.nm" \
     | awk 'NF >= 3 { print $3 } NF == 2 { print $2 }' | sed 's/@.*//' | sort -u > "$TMP/libc.names"
 nm -D --defined-only "$LIB" 2>/dev/null \
     | awk 'NF >= 3 { print $3 } NF == 2 { print $2 }' | sed 's/@.*//' | sort -u > "$TMP/preload.names"
@@ -85,7 +96,7 @@ posix_spawn posix_spawnp posix_spawn_file_actions_addopen dlopen
 "
 # Linux only: the calls (or their shapes) the BSDs do not share.
 WRAPPED_LINUX="
-mount umount umount2 renameat2 setxattr lsetxattr removexattr lremovexattr open_by_handle_at
+mount umount umount2 renameat2 setxattr lsetxattr removexattr lremovexattr open_by_handle_at openat2
 execveat pidfd_spawn pidfd_spawnp dlmopen __xmknod __xmknodat
 "
 # FreeBSD only: its file flags, extended attributes and ACLs set by path,
@@ -95,7 +106,7 @@ scandir_b scandirat_b mkostempsat chflags lchflags chflagsat funlinkat revoke un
 mount unmount nmount extattrctl extattr_set_file extattr_set_link extattr_delete_file
 extattr_delete_link acl_set_file acl_set_link_np acl_delete_def_file acl_delete_def_link_np
 acl_delete_file_np acl_delete_link_np __acl_set_file __acl_set_link __acl_delete_file
-__acl_delete_link exect execvP _open _openat
+__acl_delete_link exect execvP _open _openat renameat2 glob_b fts_open_b
 "
 
 # Lookups: they read no file's content and change nothing, so they are not
@@ -123,7 +134,7 @@ NOT_A_PATH="
 open_memstream open_wmemstream openlog openpty fopencookie create_module
 globfree globfree64 glob_pattern_p
 fts_close fts_children fts_set fts64_close fts64_children fts64_set
-fts_get_clientptr fts_get_stream fts_set_clientptr link_addr link_ntoa
+fts_get_clientptr fts_get_stream fts_set_clientptr link_addr link_ntoa link_ntoa_r
 "
 # On Linux glibc keeps BSD names that only fail with ENOSYS there.
 if [ "$os" = Linux ]; then
@@ -155,7 +166,7 @@ if [ "$os" = FreeBSD ]; then ALL_WRAPPED="$WRAPPED $WRAPPED_FREEBSD"; fi
 # 1. Every wrapped name this libc has, the preload has.
 missing=""
 for name in $ALL_WRAPPED; do
-    if grep -qx "$name" "$TMP/libc.names" && ! grep -qx "$name" "$TMP/preload.names"; then
+    if grep -qx "$name" "$TMP/libc.all" && ! grep -qx "$name" "$TMP/preload.names"; then
         missing="$missing $name"
     fi
 done
@@ -200,7 +211,10 @@ if [ "$flavour" != other ]; then
     done
     for name in $(grep -E '^posix_spawn_file_actions_' "$TMP/libc.names"); do
         case "$name" in
+            # addchdir and addfchdir are POSIX.1-2024's names for the _np
+            # pair (FreeBSD 15 has both): a chdir, as LOOKUPS says.
             posix_spawn_file_actions_addopen|posix_spawn_file_actions_addchdir_np) continue ;;
+            posix_spawn_file_actions_addchdir|posix_spawn_file_actions_addfchdir) continue ;;
             posix_spawn_file_actions_init|posix_spawn_file_actions_destroy) continue ;;
             posix_spawn_file_actions_addclose|posix_spawn_file_actions_adddup2) continue ;;
             posix_spawn_file_actions_addfchdir_np|posix_spawn_file_actions_addclosefrom_np) continue ;;

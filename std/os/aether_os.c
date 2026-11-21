@@ -106,6 +106,16 @@ _tuple_int_string os_spawn_to_raw(const char* p, void* a, void* e, const char* p
     _tuple_int_string out = { -1, "os.spawn unavailable" };
     return out;
 }
+typedef struct { void* _0; const char* _1; } _tuple_ptr_string_tree;
+_tuple_ptr_string_tree os_spawn_tree_to_raw(const char* p, void* a, void* e, const char* path, int g) {
+    (void)p; (void)a; (void)e; (void)path; (void)g;
+    _tuple_ptr_string_tree out = { NULL, "os.spawn_tree_to unavailable" };
+    return out;
+}
+int os_tree_token_raw(void* t) { (void)t; return -1; }
+int os_tree_pid_raw(void* t) { (void)t; return -1; }
+int os_tree_kill_raw(void* t) { (void)t; return -1; }
+void os_tree_free_raw(void* t) { (void)t; }
 _tuple_int_string os_wait_raw(int token) {
     (void)token;
     _tuple_int_string out = { -1, "os.wait unavailable" };
@@ -191,6 +201,17 @@ _tuple_ptr_string_os os_signal_watch_raw(const int* s, int n) {
 }
 int os_signal_received_raw(void* w) { (void)w; return 0; }
 void os_signal_unwatch_raw(void* w) { (void)w; }
+
+typedef struct { void* _0; const char* _1; } _tuple_ptr_string_tree;
+_tuple_ptr_string_tree os_spawn_tree_to_raw(const char* p, void* a, void* e, const char* path, int g) {
+    (void)p; (void)a; (void)e; (void)path; (void)g;
+    _tuple_ptr_string_tree out = { NULL, "os.spawn_tree_to unavailable" };
+    return out;
+}
+int os_tree_token_raw(void* t) { (void)t; return -1; }
+int os_tree_pid_raw(void* t) { (void)t; return -1; }
+int os_tree_kill_raw(void* t) { (void)t; return -1; }
+void os_tree_free_raw(void* t) { (void)t; }
 
 #define AETHER_OS_PROCESS_STUBBED 1
 
@@ -2824,6 +2845,608 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
     return out;
 }
 
+/* ---- os.spawn_tree_to: a child whose whole tree ends with this process ----
+ *
+ * os_spawn_to_raw's child leads a process group, and os.kill signals the
+ * group, which ends the tree while this process lives and asks. Two things
+ * it cannot do: end the tree when this process dies (by SIGKILL as well),
+ * and reach a descendant that left the group with setsid or setpgid
+ * (selaenium asks/aether-spawn-tree-dies-with-parent.md, where browsers a
+ * WebDriver driver started outlived the test that started the driver).
+ *
+ * The shape. This process forks a SUPERVISOR, which does not exec; the
+ * supervisor forks the program. The token the caller reaps is the
+ * supervisor's pid, and the supervisor exits with the program's status, so
+ * wait, wait_any and wait_any_timeout work on it as on any token. The
+ * supervisor:
+ *   - becomes a child subreaper (Linux PR_SET_CHILD_SUBREAPER, FreeBSD
+ *     procctl PROC_REAP_ACQUIRE), so a descendant whose parent dies is
+ *     re-parented to it, not to init, whatever its process group;
+ *   - holds the read end of a pipe whose only write end is this process's,
+ *     in the spawn result. End of file on it means the handle was released
+ *     (tree_kill, tree_free), or this process ended however it ended: the
+ *     kernel closes the write end of a process that dies, SIGKILL included,
+ *     and it is the PROCESS's end, not a thread's, so a runtime that spawns
+ *     from a pooled thread does not set it off (PR_SET_PDEATHSIG would);
+ *   - ends the tree on that, on SIGTERM, SIGINT or SIGHUP sent to the token,
+ *     and when the program exits on its own: SIGTERM to the program's group
+ *     and to every descendant it can find, up to grace_ms for them to go,
+ *     then SIGKILL to the group and to every descendant until none is left.
+ *     So once the token reaps, nothing the program started is running.
+ *
+ * Descendants by platform. Linux: the subreaper, and /proc read for the
+ * descendants. FreeBSD: the reaper, PROC_REAP_KILL and PROC_REAP_STATUS.
+ * macOS has no subreaper: the supervisor lists the descendants
+ * (proc_listpids) every 50 ms while it watches and again at each step of the
+ * teardown, and signals a listed one while its start time still matches, so
+ * a descendant that left the group is reached even after its parent has
+ * exited, unless it left and was orphaned within one 50 ms poll (a
+ * double-forked daemon can be that quick); such a one is launchd's child and
+ * is not reached. Other POSIX systems, and iOS: the group only.
+ *
+ * The program also gets the supervisor as its death signal on Linux and
+ * FreeBSD (the supervisor is single-threaded, so the thread caveat does not
+ * apply): a supervisor killed by SIGKILL takes the program with it, though
+ * not what the program started. The write end is close-on-exec, so an exec
+ * of this process (os.execv) ends the tree too, and a fork of this process
+ * that does not exec keeps it alive while that fork lives.
+ *
+ * Between its fork and its _exit the supervisor makes only async-signal-safe
+ * calls (and the platform's process-listing system calls): this process may
+ * be multithreaded. Everything that allocates is done before the fork. */
+#if defined(__linux__)
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <sys/mman.h>
+#include <dirent.h>
+#elif defined(__FreeBSD__)
+#include <sys/procctl.h>
+#elif defined(__APPLE__) && defined(__has_include)
+#if __has_include(<libproc.h>)   /* macOS; iOS has no libproc: the group only */
+#include <libproc.h>
+#define AETHER_TREE_LIBPROC 1
+#endif
+#endif
+
+typedef struct { void* _0; const char* _1; } _tuple_ptr_string_tree;
+
+/* The spawn result's handle: the supervisor (the token), the program, and
+ * the write end that keeps the tree alive. */
+typedef struct {
+    pid_t sup;
+    pid_t pid;
+    int   ctl;
+} AetherTree;
+
+/* What the supervisor tells the spawner once the program has started or
+ * failed to: errno of a failed exec (0 when it ran), and the program's pid. */
+typedef struct { int err; int pid; } AetherTreeStart;
+
+/* Set by the supervisor's SIGTERM/SIGINT/SIGHUP handler, in the supervisor's
+ * own copy of this file's memory; nothing in the spawning process reads it. */
+static volatile sig_atomic_t g_tree_stop_asked = 0;
+static void tree_on_stop(int sig) { (void)sig; g_tree_stop_asked = 1; }
+
+static int64_t tree_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void tree_nap_ms(int ms) {
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {}
+}
+
+static void tree_write_all(int fd, const void* buf, size_t n) {
+    const char* p = (const char*)buf;
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) { if (errno == EINTR) continue; return; }
+        p += w;
+        n -= (size_t)w;
+    }
+}
+
+/* Close every descriptor from 3 up but `keep`: the supervisor must not hold
+ * this process's other descriptors (another tree's write end above all, which
+ * would keep that tree alive as long as this one). */
+static void tree_close_from_3(int keep) {
+#if defined(__linux__) && defined(SYS_close_range)
+    if (keep >= 3) {
+        if ((keep == 3 || syscall(SYS_close_range, 3u, (unsigned)keep - 1, 0u) == 0) &&
+            syscall(SYS_close_range, (unsigned)keep + 1, ~0u, 0u) == 0) return;
+    } else if (syscall(SYS_close_range, 3u, ~0u, 0u) == 0) {
+        return;
+    }
+#endif
+    long hi = sysconf(_SC_OPEN_MAX);
+    if (hi <= 0 || hi > 65536) hi = 65536;
+    for (int fd = 3; fd < (int)hi; fd++) {
+        if (fd != keep) close(fd);
+    }
+}
+
+#define AETHER_TREE_MAX 4096
+
+#if defined(__linux__)
+/* The pids of every process under /proc and its parent, into `pid`/`ppid`
+ * (room for `max`). getdents64 and open/read: no allocation, no stdio. */
+struct aether_tree_dirent64 {
+    uint64_t d_ino; int64_t d_off; unsigned short d_reclen; unsigned char d_type; char d_name[];
+};
+static int tree_linux_table(pid_t* pid, pid_t* ppid, int max) {
+    int dfd = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd < 0) return 0;
+    int n = 0;
+    char buf[4096];
+    for (;;) {
+        long got = syscall(SYS_getdents64, dfd, buf, sizeof buf);
+        if (got <= 0) break;
+        for (long off = 0; off < got;) {
+            struct aether_tree_dirent64* d = (struct aether_tree_dirent64*)(buf + off);
+            off += d->d_reclen;
+            const char* s = d->d_name;
+            long p = 0;
+            int digits = 1;
+            for (const char* c = s; *c; c++) {
+                if (*c < '0' || *c > '9') { digits = 0; break; }
+                p = p * 10 + (*c - '0');
+            }
+            if (!digits || p <= 0 || n >= max) continue;
+            char path[64] = "/proc/";
+            size_t o = 6;
+            for (const char* c = s; *c && o < 50; c++) path[o++] = *c;
+            memcpy(path + o, "/stat", 6);
+            int fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd < 0) continue;
+            char st[512];
+            ssize_t r;
+            do { r = read(fd, st, sizeof st - 1); } while (r < 0 && errno == EINTR);
+            close(fd);
+            if (r <= 0) continue;
+            st[r] = '\0';
+            /* "pid (comm) S ppid ...": comm may hold spaces and parentheses,
+             * so the state follows the LAST ')'. */
+            char* rp = NULL;
+            for (char* c = st; *c; c++) if (*c == ')') rp = c;
+            if (!rp || rp[1] != ' ' || !rp[2] || rp[3] != ' ') continue;
+            long pp = 0;
+            for (char* c = rp + 4; *c >= '0' && *c <= '9'; c++) pp = pp * 10 + (*c - '0');
+            pid[n] = (pid_t)p;
+            ppid[n] = (pid_t)pp;
+            n++;
+        }
+    }
+    close(dfd);
+    return n;
+}
+#endif
+
+#if !defined(__FreeBSD__)   /* FreeBSD's reaper signals them all itself */
+/* Every descendant of `root` alive now, into out (room for max): the count. */
+static int tree_descendants(pid_t root, pid_t* out, int max) {
+    int n = 0;
+#if defined(__linux__)
+    static pid_t* tab = NULL;   /* the supervisor's own, made once (mmap) */
+    if (!tab) {
+        void* m = mmap(NULL, sizeof(pid_t) * 2 * 32768, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED) return 0;
+        tab = (pid_t*)m;
+    }
+    int t = tree_linux_table(tab, tab + 32768, 32768);
+    out[n++] = root;   /* breadth first from root, which is dropped below */
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < t && n < max; j++) {
+            if (tab[32768 + j] == out[i]) out[n++] = tab[j];
+        }
+    }
+    for (int i = 1; i < n; i++) out[i - 1] = out[i];
+    n--;
+#elif defined(AETHER_TREE_LIBPROC)
+    out[n++] = root;
+    for (int i = 0; i < n; i++) {
+        pid_t kids[512];
+        int bytes = proc_listpids(PROC_PPID_ONLY, (uint32_t)out[i], kids, (int)sizeof kids);
+        if (bytes <= 0) continue;
+        int k = bytes / (int)sizeof(pid_t);
+        for (int j = 0; j < k && n < max; j++) {
+            if (kids[j] > 0) out[n++] = kids[j];
+        }
+    }
+    for (int i = 1; i < n; i++) out[i - 1] = out[i];
+    n--;
+#else
+    (void)root; (void)out; (void)max;
+#endif
+    return n;
+}
+#endif
+
+#if defined(AETHER_TREE_LIBPROC)
+/* A process's start time, to tell a listed descendant from a later process
+ * that took its pid. 0 when it is gone. */
+static uint64_t tree_started(pid_t p) {
+    struct proc_bsdinfo bi;
+    if (proc_pidinfo(p, PROC_PIDTBSDINFO, 0, &bi, (int)sizeof bi) != (int)sizeof bi) return 0;
+    return (uint64_t)bi.pbi_start_tvsec * 1000000u + (uint64_t)bi.pbi_start_tvusec;
+}
+#endif
+
+/* Reap every child that has exited, keeping the program's status. Returns 1
+ * when the supervisor has no children left. */
+static int tree_reap(pid_t prog, int* prog_status, int* prog_reaped) {
+    for (;;) {
+        int st = 0;
+        pid_t r = waitpid(-1, &st, WNOHANG);
+        if (r > 0) {
+            if (r == prog) { *prog_status = st; *prog_reaped = 1; }
+            continue;
+        }
+        if (r < 0 && errno == EINTR) continue;
+        return r < 0 && errno == ECHILD;
+    }
+}
+
+/* `sig` to the program's group and to every descendant there is to find:
+ * those alive now (Linux, FreeBSD, macOS) and, on macOS, those listed when
+ * the teardown began whose start time still matches. */
+static void tree_signal(pid_t prog, int sig, const pid_t* early, const uint64_t* early_start, int nearly) {
+    kill(-prog, sig);
+#if defined(__FreeBSD__)
+    struct procctl_reaper_kill rk;
+    memset(&rk, 0, sizeof rk);
+    rk.rk_sig = sig;
+    procctl(P_PID, getpid(), PROC_REAP_KILL, &rk);
+#else
+    pid_t now[AETHER_TREE_MAX];
+    int n = tree_descendants(getpid(), now, AETHER_TREE_MAX);
+    for (int i = 0; i < n; i++) kill(now[i], sig);
+#endif
+#if defined(AETHER_TREE_LIBPROC)
+    for (int i = 0; i < nearly; i++) {
+        if (early_start[i] && tree_started(early[i]) == early_start[i]) kill(early[i], sig);
+    }
+#else
+    (void)early; (void)early_start; (void)nearly;
+#endif
+}
+
+/* Whether nothing of the tree is left. With a reaper (Linux, FreeBSD) every
+ * descendant is a child or a child's descendant, so no children means none.
+ * Without one (macOS), the group and the early list are checked too. */
+static int tree_gone(pid_t prog, int no_children, const pid_t* early, const uint64_t* early_start, int nearly) {
+    if (!no_children) return 0;
+#if defined(AETHER_TREE_LIBPROC)
+    if (kill(-prog, 0) == 0) return 0;
+    for (int i = 0; i < nearly; i++) {
+        if (early_start[i] && tree_started(early[i]) == early_start[i]) return 0;
+    }
+#elif !defined(__linux__) && !defined(__FreeBSD__)
+    if (kill(-prog, 0) == 0) return 0;
+#else
+    (void)prog;
+#endif
+    (void)early; (void)early_start; (void)nearly;
+    return 1;
+}
+
+/* macOS: every descendant seen while the supervisor watched, with its start
+ * time; kept up to date at each poll, so one that leaves the group and is
+ * then orphaned (its parent exits, the program included) is still known when
+ * the teardown comes. Supervisor-only memory, like g_tree_stop_asked. */
+static pid_t g_tree_seen[AETHER_TREE_MAX];
+static uint64_t g_tree_seen_start[AETHER_TREE_MAX];
+static int g_tree_nseen = 0;
+
+static void tree_track(void) {
+#if defined(AETHER_TREE_LIBPROC)
+    int keep = 0;
+    for (int i = 0; i < g_tree_nseen; i++) {
+        if (tree_started(g_tree_seen[i]) == g_tree_seen_start[i]) {
+            g_tree_seen[keep] = g_tree_seen[i];
+            g_tree_seen_start[keep] = g_tree_seen_start[i];
+            keep++;
+        }
+    }
+    g_tree_nseen = keep;
+    pid_t now[AETHER_TREE_MAX];
+    int n = tree_descendants(getpid(), now, AETHER_TREE_MAX);
+    for (int i = 0; i < n && g_tree_nseen < AETHER_TREE_MAX; i++) {
+        int known = 0;
+        for (int j = 0; j < g_tree_nseen; j++) {
+            if (g_tree_seen[j] == now[i]) { known = 1; break; }
+        }
+        if (known) continue;
+        uint64_t st = tree_started(now[i]);
+        if (!st) continue;
+        g_tree_seen[g_tree_nseen] = now[i];
+        g_tree_seen_start[g_tree_nseen] = st;
+        g_tree_nseen++;
+    }
+#endif
+}
+
+static void tree_teardown(pid_t prog, int grace_ms, int* prog_status, int* prog_reaped) {
+    tree_track();
+    const pid_t* early = g_tree_seen;
+    const uint64_t* early_start = g_tree_seen_start;
+    int nearly = g_tree_nseen;
+    tree_signal(prog, SIGTERM, early, early_start, nearly);
+    int64_t deadline = tree_now_ms() + grace_ms;
+    for (;;) {
+        int none = tree_reap(prog, prog_status, prog_reaped);
+        if (tree_gone(prog, none, early, early_start, nearly)) return;
+        if (tree_now_ms() >= deadline) break;
+        tree_nap_ms(10);
+    }
+    /* Bounded: a process stuck in an uninterruptible sleep cannot hold the
+     * supervisor, and so the token, for ever. */
+    int64_t until = tree_now_ms() + 10000;
+    for (;;) {
+        tree_signal(prog, SIGKILL, early, early_start, nearly);
+        int none = tree_reap(prog, prog_status, prog_reaped);
+        if (tree_gone(prog, none, early, early_start, nearly)) return;
+        if (tree_now_ms() >= until) return;
+        tree_nap_ms(10);
+    }
+}
+
+/* The supervisor's life; ends in _exit with the program's status (128+signo
+ * when a signal ended it, as the wait calls read a signalled child). */
+__attribute__((noreturn))
+static void tree_supervise(int ctl, int start_w, int out_fd, const AetherExec* x, int grace_ms) {
+    aether_child_reset_signals();
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = tree_on_stop;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &sa, NULL);
+    /* A group of its own: a Ctrl-C meant for this process's foreground group
+     * does not end the tree; only this process going, or asking, does. */
+    setpgid(0, 0);
+    /* Without the reaper the teardown could not find a descendant that left
+     * the group, so a refusal fails the spawn (Capsicum's capability mode
+     * answers ECAPMODE to PROC_REAP_ACQUIRE) instead of being ignored. */
+    int reap_err = 0;
+#if defined(__linux__)
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) reap_err = errno ? errno : EPERM;
+#elif defined(__FreeBSD__)
+    if (procctl(P_PID, getpid(), PROC_REAP_ACQUIRE, NULL) != 0) reap_err = errno ? errno : EPERM;
+#endif
+    ctl = aether_child_lift_fd(ctl);
+    start_w = aether_child_lift_fd(start_w);
+    out_fd = aether_child_lift_fd(out_fd);
+    AetherTreeStart start = { 0, 0 };
+    int ep[2];
+    if (ctl < 0 || start_w < 0 || out_fd < 0 || reap_err || pipe(ep) != 0) {
+        start.err = reap_err ? reap_err : (errno ? errno : EIO);
+        tree_write_all(start_w, &start, sizeof start);
+        _exit(127);
+    }
+    fcntl(ep[0], F_SETFD, FD_CLOEXEC);
+    fcntl(ep[1], F_SETFD, FD_CLOEXEC);
+    pid_t me = getpid();
+    pid_t prog = fork();
+    if (prog < 0) {
+        start.err = errno;
+        tree_write_all(start_w, &start, sizeof start);
+        _exit(127);
+    }
+    if (prog == 0) {
+#if defined(__linux__)
+        prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+#elif defined(__FreeBSD__) && defined(PROC_PDEATHSIG_CTL)
+        {
+            int ds = SIGKILL;
+            procctl(P_PID, 0, PROC_PDEATHSIG_CTL, &ds);
+        }
+#endif
+        if (getppid() != me) _exit(127);   /* the supervisor is gone already */
+        aether_child_reset_signals();
+        setpgid(0, 0);
+        close(ep[0]);
+        close(ctl);
+        close(start_w);
+        int ef = aether_child_lift_fd(ep[1]);
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0 && nul != 0) {
+            dup2(nul, 0);
+            close(nul);
+        }
+        if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        if (dup2(1, 2) < 0) aether_child_exec_failed(ef);
+        close(out_fd);
+        aether_child_exec(x);
+        aether_child_exec_failed(ef);
+    }
+    setpgid(prog, prog);
+    close(ep[1]);
+    close(out_fd);
+    int e = 0;
+    ssize_t r;
+    do { r = read(ep[0], &e, sizeof e); } while (r < 0 && errno == EINTR);
+    close(ep[0]);
+    start.err = r == (ssize_t)sizeof e ? (e ? e : EIO) : 0;
+    start.pid = (int)prog;
+    tree_write_all(start_w, &start, sizeof start);
+    close(start_w);
+    int status = 0, reaped = 0;
+    if (start.err) {
+        while (waitpid(prog, &status, 0) < 0 && errno == EINTR) {}
+        _exit(127);
+    }
+
+    int nul = open("/dev/null", O_RDWR);
+    if (nul >= 0) {
+        dup2(nul, 0);
+        dup2(nul, 1);
+        dup2(nul, 2);
+        if (nul > 2) close(nul);
+    }
+    if (ctl < 3) {   /* /dev/null went onto it: cannot happen, ctl was lifted */
+        _exit(127);
+    }
+    tree_close_from_3(ctl);
+
+    /* Until the handle is released or this process's parent is gone (end of
+     * file), it is asked to stop, or the program exits. */
+    for (;;) {
+        if (g_tree_stop_asked) break;
+        struct pollfd p = { ctl, POLLIN, 0 };
+        int pr = poll(&p, 1, 50);
+        if (pr > 0) {
+            char b[16];
+            ssize_t n = read(ctl, b, sizeof b);
+            if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) break;
+        }
+        tree_track();
+        tree_reap(prog, &status, &reaped);
+        if (reaped) break;
+    }
+    tree_teardown(prog, grace_ms, &status, &reaped);
+    int code = 128 + SIGKILL;
+    if (reaped) {
+        if (WIFEXITED(status)) code = WEXITSTATUS(status);
+        else if (WIFSIGNALED(status)) code = 128 + WTERMSIG(status);
+    }
+    _exit(code);
+}
+
+_tuple_ptr_string_tree os_spawn_tree_to_raw(const char* prog, void* argv_list, void* env_list,
+                                            const char* out_path, int grace_ms) {
+    _tuple_ptr_string_tree out = { NULL, "" };
+    if (!prog) { out._1 = "null prog"; return out; }
+    if (!out_path) { out._1 = "null output path"; return out; }
+    if (grace_ms < 0) grace_ms = 0;
+    if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
+    if (!aether_sandbox_check("fs", out_path)) { out._1 = "denied by sandbox"; return out; }
+#if defined(__linux__)
+    /* The supervisor finds the descendants that left the program's group by
+     * reading /proc, with open() as this process does, so a sandbox that
+     * refuses that read (the preload, and Landlock under it) leaves it with
+     * none to find: tree_kill and the exit would end the group and leave a
+     * setsid'd descendant running, with the token reading as if all had
+     * ended. Refuse the spawn instead, as the sandbox's own spawns fail
+     * closed. The same two reads the supervisor makes: the directory, and a
+     * process's stat by its pid (not "self", which a grant may name alone). */
+    {
+        char probe[64];
+        snprintf(probe, sizeof probe, "/proc/%ld/stat", (long)getpid());
+        int d = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        int f = d < 0 ? -1 : open(probe, O_RDONLY | O_CLOEXEC);
+        if (d >= 0) close(d);
+        if (f >= 0) close(f);
+        if (d < 0 || f < 0) {
+            out._1 = "cannot read /proc, which ending the tree needs (a sandbox may refuse it: grant_fs_read(\"/proc/*\"))";
+            return out;
+        }
+    }
+#endif
+
+    AetherTree* t = (AetherTree*)malloc(sizeof(AetherTree));
+    if (!t) { out._1 = "out of memory"; return out; }
+    int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) { free(t); out._1 = "cannot open the output file"; return out; }
+    int ctl[2], sp[2];
+    if (aether_pipe_cloexec(ctl) != 0) {
+        close(fd);
+        free(t);
+        out._1 = "pipe failed";
+        return out;
+    }
+    if (aether_pipe_cloexec(sp) != 0) {
+        close(fd);
+        close(ctl[0]); close(ctl[1]);
+        free(t);
+        out._1 = "pipe failed";
+        return out;
+    }
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(fd);
+        close(ctl[0]); close(ctl[1]);
+        close(sp[0]); close(sp[1]);
+        free(t);
+        out._1 = xerr;
+        return out;
+    }
+    pid_t sup = aether_os_fork();
+    if (sup < 0) {
+        close(fd);
+        close(ctl[0]); close(ctl[1]);
+        close(sp[0]); close(sp[1]);
+        aether_exec_release(&x);
+        free(t);
+        out._1 = "fork failed";
+        return out;
+    }
+    if (sup == 0) {
+        close(ctl[1]);
+        close(sp[0]);
+        tree_supervise(ctl[0], sp[1], fd, &x, grace_ms);
+    }
+    close(ctl[0]);
+    close(sp[1]);
+    close(fd);
+    aether_exec_release(&x);
+    AetherTreeStart start = { 0, 0 };
+    size_t got = 0;
+    while (got < sizeof start) {
+        ssize_t r = read(sp[0], (char*)&start + got, sizeof start - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    close(sp[0]);
+    if (got < sizeof start || start.err || start.pid <= 0) {
+        close(ctl[1]);
+        aether_reap_failed(sup);
+        free(t);
+        out._1 = got < sizeof start ? "the supervisor failed to start"
+                                    : aether_exec_failure(start.err ? start.err : EIO);
+        return out;
+    }
+    t->sup = sup;
+    t->pid = (pid_t)start.pid;
+    t->ctl = ctl[1];
+    out._0 = t;
+    return out;
+}
+
+int os_tree_token_raw(void* tree) {
+    return tree ? (int)((AetherTree*)tree)->sup : -1;
+}
+
+int os_tree_pid_raw(void* tree) {
+    return tree ? (int)((AetherTree*)tree)->pid : -1;
+}
+
+/* Release the write end: the supervisor ends the tree and exits, and the
+ * token is then reaped with the wait calls. 0, or -1 when already asked. */
+int os_tree_kill_raw(void* tree) {
+    AetherTree* t = (AetherTree*)tree;
+    if (!t || t->ctl < 0) return -1;
+    if (!aether_sandbox_check("exec", "kill")) return -1;
+    close(t->ctl);
+    t->ctl = -1;
+    return 0;
+}
+
+/* Free the handle. A tree still running is ended, as tree_kill ends it. */
+void os_tree_free_raw(void* tree) {
+    AetherTree* t = (AetherTree*)tree;
+    if (!t) return;
+    if (t->ctl >= 0) close(t->ctl);
+    free(t);
+}
+
 _tuple_int_string os_wait_raw(int token) {
     /* On POSIX the token IS the pid, so reap semantics match wait_pid. */
     _tuple_int_string out = { -1, "" };
@@ -4179,7 +4802,9 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
 
 /* `job` is the Job Object of a child os_spawn_to_raw started (NULL for
  * os_spawn_raw's): os.kill ends the job, the child's whole tree. */
-typedef struct { int token; HANDLE h; HANDLE job; } WinProc;
+/* `tree`: an os.spawn_tree_to child, whose job is ended when the token
+ * reaps, so nothing it left running outlives the reap. */
+typedef struct { int token; HANDLE h; HANDLE job; int tree; } WinProc;
 static WinProc  g_winprocs[4096];
 static int      g_winproc_count = 0;
 static int      g_winproc_next_token = WINPROC_TOKEN_BASE;
@@ -4195,7 +4820,7 @@ static void winproc_unlock(void) { ReleaseSRWLockExclusive(&g_winproc_srw); }
 
 /* Register a live handle, and the child's Job Object if it has one; return
  * its token (or -1 if the table is full). */
-static int winproc_register_job(HANDLE h, HANDLE job) {
+static int winproc_register_job(HANDLE h, HANDLE job, int tree) {
     winproc_lock();
     if (g_winproc_count >= (int)(sizeof(g_winprocs)/sizeof(g_winprocs[0]))) {
         winproc_unlock();
@@ -4208,13 +4833,14 @@ static int winproc_register_job(HANDLE h, HANDLE job) {
     g_winprocs[g_winproc_count].token = tok;
     g_winprocs[g_winproc_count].h = h;
     g_winprocs[g_winproc_count].job = job;
+    g_winprocs[g_winproc_count].tree = tree;
     g_winproc_count++;
     winproc_unlock();
     return tok;
 }
 
 static int winproc_register(HANDLE h) {
-    return winproc_register_job(h, NULL);
+    return winproc_register_job(h, NULL, 0);
 }
 
 /* The Job Object of a live token, or NULL. Borrowed: the slot owns it. */
@@ -4246,7 +4872,10 @@ static void winproc_remove(int token) {
     winproc_lock();
     for (int i = 0; i < g_winproc_count; i++) {
         if (g_winprocs[i].token == token) {
-            if (g_winprocs[i].job) CloseHandle(g_winprocs[i].job);
+            if (g_winprocs[i].job) {
+                if (g_winprocs[i].tree) TerminateJobObject(g_winprocs[i].job, 1);
+                CloseHandle(g_winprocs[i].job);
+            }
             g_winprocs[i] = g_winprocs[g_winproc_count - 1];
             g_winproc_count--;
             break;
@@ -4446,8 +5075,9 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
  * the whole tree. The file handle and the null device are the only handles
  * it inherits (#2917). Returns (token, err); reap the token with the wait
  * calls, as an os_spawn_raw one. */
-_tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_list,
-                                  const char* out_path) {
+static _tuple_int_string win_spawn_to_job(const char* prog, void* argv_list, void* env_list,
+                                          const char* out_path, int tree, int* pid_out,
+                                          HANDLE* tree_job) {
     _tuple_int_string out = { -1, "" };
     if (!prog) { out._1 = "null prog"; return out; }
     if (!out_path) { out._1 = "null output path"; return out; }
@@ -4500,6 +5130,15 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
      * escape the job. Should the job fail (it does not on Windows 8 and
      * later, where jobs nest), the child still runs, and a kill ends it alone. */
     HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (tree && !job) {
+        TerminateProcess(pi.hProcess, 1);
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        out._1 = "cannot make a job object";
+        return out;
+    }
     if (job) {
         /* A crash ends the child, or anything it starts, with its exception
          * code: the job sets SEM_NOGPFAULTERRORBOX in every process it holds,
@@ -4509,17 +5148,44 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
         memset(&li, 0, sizeof li);
         li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+        /* os.spawn_tree_to: the job ends every process in it when its last
+         * handle closes, so when this process ends, however it ends. */
+        if (tree) li.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
     }
     if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
         CloseHandle(job);
         job = NULL;
+        if (tree) {
+            TerminateProcess(pi.hProcess, 1);
+            ResumeThread(pi.hThread);
+            CloseHandle(pi.hThread);
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            out._1 = "cannot put the child in a job object";
+            return out;
+        }
     }
+    /* The tree's handle holds a job handle of its own, so the slot's can
+     * close at reap while the handle still reaches the job. */
+    if (tree && !DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), tree_job,
+                                 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        TerminateJobObject(job, 1);
+        CloseHandle(job);
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        out._1 = "cannot duplicate the job handle";
+        return out;
+    }
+    if (pid_out) *pid_out = (int)pi.dwProcessId;
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
 
-    int tok = winproc_register_job(pi.hProcess, job);
+    int tok = winproc_register_job(pi.hProcess, job, tree);
     if (tok < 0) {
+        if (tree) CloseHandle(*tree_job);
         if (job) { TerminateJobObject(job, 1); CloseHandle(job); }
         else TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, INFINITE);
@@ -4529,6 +5195,64 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
     }
     out._0 = tok;
     return out;
+}
+
+_tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_list,
+                                  const char* out_path) {
+    return win_spawn_to_job(prog, argv_list, env_list, out_path, 0, NULL, NULL);
+}
+
+/* os.spawn_tree_to on Windows: os_spawn_to_raw's child in a job that ends
+ * every process in it when its last handle closes (this process ending,
+ * however it ends, closes them all), when the handle asks (tree_kill), and
+ * when the token reaps, which ends whatever the child left running. A
+ * process in the job cannot leave it (no BREAKAWAY_OK), so this covers the
+ * whole tree. The token is the process table's, as for os_spawn_to_raw. */
+typedef struct { void* _0; const char* _1; } _tuple_ptr_string_tree;
+typedef struct { int token; int pid; HANDLE job; int asked; } AetherTree;
+
+_tuple_ptr_string_tree os_spawn_tree_to_raw(const char* prog, void* argv_list, void* env_list,
+                                            const char* out_path, int grace_ms) {
+    (void)grace_ms;   /* Windows has no SIGTERM to give a grace period to */
+    _tuple_ptr_string_tree out = { NULL, "" };
+    AetherTree* t = (AetherTree*)malloc(sizeof(AetherTree));
+    if (!t) { out._1 = "out of memory"; return out; }
+    t->job = NULL;
+    t->pid = -1;
+    t->asked = 0;
+    _tuple_int_string r = win_spawn_to_job(prog, argv_list, env_list, out_path, 1, &t->pid, &t->job);
+    if (r._0 < 0) {
+        free(t);
+        out._1 = r._1;
+        return out;
+    }
+    t->token = r._0;
+    out._0 = t;
+    return out;
+}
+
+int os_tree_token_raw(void* tree) { return tree ? ((AetherTree*)tree)->token : -1; }
+int os_tree_pid_raw(void* tree) { return tree ? ((AetherTree*)tree)->pid : -1; }
+
+/* End every process in the job; reap the token after. 143, as a POSIX child
+ * ended by SIGTERM reads. */
+int os_tree_kill_raw(void* tree) {
+    AetherTree* t = (AetherTree*)tree;
+    if (!t || !t->job || t->asked) return -1;
+    if (!aether_sandbox_check("exec", "kill")) return -1;
+    if (!TerminateJobObject(t->job, 128 + 15)) return -1;
+    t->asked = 1;
+    return 0;
+}
+
+void os_tree_free_raw(void* tree) {
+    AetherTree* t = (AetherTree*)tree;
+    if (!t) return;
+    if (t->job) {
+        TerminateJobObject(t->job, 128 + 15);
+        CloseHandle(t->job);
+    }
+    free(t);
 }
 
 /* Reap a single token. Returns (exit, err). */

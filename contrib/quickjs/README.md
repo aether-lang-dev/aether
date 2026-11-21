@@ -228,6 +228,14 @@ the script once. To move to a new quickjs-ng release, change the lock's
 three values, run the script and `contrib/quickjs/test_quickjs.ae`, and
 update the version here.
 
+The script applies `contrib/quickjs/patches/*.patch` after the checksum:
+upstream fixes the pinned release does not have yet, each naming its
+upstream commit. Today that is one, quickjs-ng e22ce4de43 (#1826): in 0.18.0
+`find`, `findIndex`, `findLast` and `findLastIndex` released an element a
+second time when a deadline, cancel or stop interrupted them between two
+elements. When bumping the lock, drop each patch the new release contains;
+one that no longer applies fails the fetch rather than being skipped.
+
 ## Tested on
 
 macOS arm64, Linux x86_64 and arm64 (glibc), FreeBSD 15 amd64, and Windows

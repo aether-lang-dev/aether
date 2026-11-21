@@ -1,0 +1,102 @@
+// A local named like a struct, a message or an actor is that local, whether
+// or not the early inference pass can type its value yet.
+//
+// A binding names a new local unless the function has bound the name
+// already or it is a module-level `var` (docs/language-reference.md,
+// "Constants" and "Mutable module-level globals"). The early inference
+// walk bound a local only once it had a type for the value, so with
+// `f = pick(xs)` (a result inferred from pick's body) the read `g = Other`
+// fell through to the struct `Other`'s entry: `g` was declared a struct, a
+// message or an actor reference, and the checker refused the program with
+// E0302 "Unknown type" or E0200 "Type mismatch in variable initialization".
+// Bound from a value the walk can type (`list.at(xs, 0)`), each compiled.
+// The enum constant and the function name are guards: they shadowed before.
+
+import std.list
+
+extern exit(code: int)
+
+struct Box {
+    v: int
+}
+
+struct Other {
+    q: string
+}
+
+message Ping { n: int }
+
+actor Fetcher {
+    state d = 0
+    receive {
+        Ping(n) -> { d = n }
+    }
+}
+
+enum Color { Red, Green }
+
+helper(n: int) -> string { return "s${n}" }
+
+pick(xs: ptr) { return list.at(xs, 0) }
+
+struct_name(xs: ptr) -> int {
+    Other = pick(xs)
+    g = Other
+    let bb: *Box = g
+    return bb.v
+}
+
+message_name(xs: ptr) -> int {
+    Ping = pick(xs)
+    g = Ping
+    let bb: *Box = g
+    return bb.v
+}
+
+actor_name(xs: ptr) -> int {
+    Fetcher = pick(xs)
+    g = Fetcher
+    let bb: *Box = g
+    return bb.v
+}
+
+enum_constant(xs: ptr) -> int {
+    Red = pick(xs)
+    g = Red
+    let bb: *Box = g
+    return bb.v
+}
+
+function_name(xs: ptr) -> int {
+    helper = pick(xs)
+    g = helper
+    let bb: *Box = g
+    return bb.v
+}
+
+check(what: string, got: int) {
+    if got != 3 {
+        println("FAIL: ${what}: got ${got}")
+        exit(1)
+    }
+}
+
+main() {
+    xs = list.new()
+    b = Box { v: 3 }
+    list.add(xs, &b)
+    check("struct name", struct_name(xs))
+    check("message name", message_name(xs))
+    check("actor name", actor_name(xs))
+    check("enum constant", enum_constant(xs))
+    check("function name", function_name(xs))
+    a = spawn(Fetcher())
+    a ! Ping { n: 1 }
+    o = Other { q: helper(2) }
+    if o.q != "s2" {
+        println("FAIL: the struct and function still work")
+        exit(1)
+    }
+    list.free(xs)
+    println("PASS: an untyped local shadows a type or function of its name")
+}

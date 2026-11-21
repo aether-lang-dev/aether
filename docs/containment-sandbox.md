@@ -1367,6 +1367,16 @@ against the kernel headers zig ships for every architecture by
 `tests/integration/sandbox_clone_fence`, and every filter the builder can
 make is checked well formed by `tests/integration/sandbox_spawn_socket`.
 
+**`os.spawn_tree_to` inside a sandboxed child.** Its supervisor is a fork
+of the program that called it, so it runs under the same preload and filter.
+It needs `grant_fork()` (without it the spawn fails with "fork failed", the
+filter's `EPERM`) and, on Linux, a read of `/proc` (`grant_fs_read("/proc/*")`),
+which is how it finds a descendant that left the program's group. The
+spawn probes that read first and fails with "cannot read /proc" when the
+sandbox refuses it, so a tree is never started that `tree_kill` could only
+half end. Its other calls (`prctl` for the subreaper, `kill`, `waitpid`) pass
+the filter. `tests/integration/sandbox_spawn_tree` runs the three cases.
+
 ### Interception surface, what LD_PRELOAD sees and what it doesn't
 
 **Lesson from Google App Engine (2013):** An intern broke out of

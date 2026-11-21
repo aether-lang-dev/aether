@@ -283,6 +283,7 @@ tests/integration/trailing_block_return/
 tests/integration/transitive_module_import/
 tests/integration/ufcs_cross_module/
 tests/integration/uncalled_module_fn_checked/
+tests/integration/untyped_local_shadows_import/
 tests/integration/varargs_forward/
 # #3375: counter.ae is built by the driver, which runs it with and without AETHER_VERBOSE.
 tests/integration/verbose_env/
@@ -342,6 +343,9 @@ tests/integration/crypto_tls13_resume/
 # #2956: frames.ae is a library and app.ae its importer; the driver builds both
 # and its C host loads the library.
 tests/integration/emit_lib_execution_frame/
+# boom.ae is a library with no main; the driver builds its C twice, with and
+# without -fcf-protection, into a C host.
+tests/integration/emit_lib_panic_cf_protection/
 # #3362, #3370: server.ae and client.ae take certificates and ports from their driver.
 tests/integration/https_server_tls_pem/
 # #3371: reload.ae takes its certificates from its driver.

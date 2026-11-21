@@ -1,0 +1,47 @@
+// A function returning a name of its own, a local or a parameter the early
+// inference pass cannot type yet, does not return the type of a program
+// `const` of that name.
+//
+// Return types are inferred after each function's walk, when its own
+// symbols are gone, and a `return f` the walk left untyped was looked up in
+// the program's table: with `const f = "text"` the function returned a
+// string, and the binding of its result was refused, E0200 "Type mismatch
+// in variable initialization" (`get`), or "'same' returns int (inferred
+// from its first `return`), but this value is string" (`same`).
+
+import std.list
+
+extern exit(code: int)
+
+const f = 7
+
+struct Box {
+    v: int
+}
+
+pick(xs: ptr) { return list.at(xs, 0) }
+
+get(xs: ptr) {
+    f = pick(xs)
+    return f
+}
+
+same(f) { return f }
+
+main() {
+    xs = list.new()
+    b = Box { v: 3 }
+    list.add(xs, &b)
+    let bb: *Box = get(xs)
+    if bb.v != 3 {
+        println("FAIL: get")
+        exit(1)
+    }
+    s = same("word")
+    if s != "word" {
+        println("FAIL: same")
+        exit(1)
+    }
+    list.free(xs)
+    println("PASS: ${f}")
+}

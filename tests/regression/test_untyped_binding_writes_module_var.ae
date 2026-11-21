@@ -1,0 +1,41 @@
+// A bare binding of a module-level `var`'s name in a function writes the
+// global, whether or not the early inference pass can type its value yet
+// (docs/language-reference.md, "Mutable module-level globals"). A guard
+// beside test_untyped_local_shadows_const.ae: an untyped binding now binds
+// its name in the walk as a new local, except a module `var`'s, whose reads
+// keep the global's type.
+
+import std.list
+
+extern exit(code: int)
+
+struct Box {
+    v: int
+}
+
+var f: ptr = null
+
+pick(xs: ptr) { return list.at(xs, 0) }
+
+blk(xs: @keep ptr) -> int {
+    f = pick(xs)
+    g = f
+    let bb: *Box = g
+    return bb.v
+}
+
+main() {
+    xs = list.new()
+    b = Box { v: 3 }
+    list.add(xs, &b)
+    if blk(xs) != 3 {
+        println("FAIL: blk")
+        exit(1)
+    }
+    if f == null {
+        println("FAIL: the global was not written")
+        exit(1)
+    }
+    list.free(xs)
+    println("PASS: an untyped binding of a module var writes the global")
+}

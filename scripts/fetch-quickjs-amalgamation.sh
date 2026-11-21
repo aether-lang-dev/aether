@@ -6,11 +6,22 @@
 # Reads contrib/quickjs/amalgamation.lock (or $QUICKJS_AMALGAMATION_LOCK),
 # downloads QUICKJS_URL, refuses the archive unless its SHA-256 is
 # QUICKJS_SHA256, and extracts quickjs-amalgam.c and quickjs.h into dest-dir
-# (default contrib/quickjs/amalgamation). Prints dest-dir on success.
+# (default contrib/quickjs/amalgamation), then applies every
+# contrib/quickjs/patches/*.patch to them, in name order. Prints dest-dir on
+# success.
 #
-# Idempotent: dest-dir/.sha256 records the archive the files came from, and a
-# matching record with quickjs-amalgam.c present is a no-op with no network
-# access. The record is written last, so an interrupted run is a miss, never
+# The patches are upstream fixes the pinned release does not have yet, each
+# naming its upstream commit; one is dropped when the lock pins a release
+# that contains it. They are applied here, after the checksum, because every
+# way the engine reaches a build passes through this script: a source
+# install (install.sh), the release archives (scripts/stage-release.sh), CI
+# and the tests, and cross builds, which compile the same fetched files.
+# A patch that does not apply cleanly is an error, never a silent skip.
+#
+# Idempotent: dest-dir/.sha256 records the archive the files came from and
+# the patches applied to them, and a matching record with quickjs-amalgam.c
+# present is a no-op with no network access; adding or changing a patch
+# changes the record, so the next run fetches and patches afresh. The record is written last, so an interrupted run is a miss, never
 # a half-extracted hit. (Modelled on scripts/fetch-sqlite-amalgamation.sh.)
 set -eu
 
@@ -24,12 +35,7 @@ QUICKJS_URL=""; QUICKJS_SHA256=""; QUICKJS_VERSION=""
 . "$lock"
 [ -n "$QUICKJS_URL" ] && [ -n "$QUICKJS_SHA256" ] || {
     echo "fetch-quickjs: $lock must set QUICKJS_URL and QUICKJS_SHA256" >&2; exit 1; }
-
-if [ -f "$dest/quickjs-amalgam.c" ] && [ -f "$dest/.sha256" ] &&
-   [ "$(cat "$dest/.sha256")" = "$QUICKJS_SHA256" ]; then
-    printf '%s\n' "$dest"
-    exit 0
-fi
+patches="${QUICKJS_PATCHES_DIR:-$root/contrib/quickjs/patches}"
 
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
@@ -38,6 +44,21 @@ sha256_of() {
     else echo "fetch-quickjs: neither sha256sum nor shasum is installed" >&2; return 1
     fi
 }
+
+# What dest-dir/.sha256 holds: the archive's SHA-256, then one line per patch
+# (its name and SHA-256).
+record="$QUICKJS_SHA256"
+for p in "$patches"/*.patch; do
+    [ -f "$p" ] || continue
+    record="$record
+$(basename "$p") $(sha256_of "$p")"
+done
+
+if [ -f "$dest/quickjs-amalgam.c" ] && [ -f "$dest/.sha256" ] &&
+   [ "$(cat "$dest/.sha256")" = "$record" ]; then
+    printf '%s\n' "$dest"
+    exit 0
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -86,8 +107,32 @@ for f in quickjs-amalgam.c quickjs.h; do
     [ -f "$out/$f" ] || { echo "fetch-quickjs: $f is not in the archive" >&2; exit 1; }
 done
 
+# The patches: with patch(1) where it is installed, git apply where it is
+# not, and scripts/apply-unified-patch.awk where there is neither (a bare
+# MSYS2 shell has no patch and no git: the Windows release job stages its
+# archive in one, and the stage failed there). All three are strict: no fuzz
+# and no searching, since a patch written for one release must not land
+# somewhere else in another. QUICKJS_PATCH_TOOL=patch|git|awk picks one (the
+# test of the awk applier does).
+patch_tool="${QUICKJS_PATCH_TOOL:-}"
+if [ -z "$patch_tool" ]; then
+    if command -v patch >/dev/null 2>&1; then patch_tool=patch
+    elif command -v git >/dev/null 2>&1; then patch_tool=git
+    else patch_tool=awk
+    fi
+fi
+for p in "$patches"/*.patch; do
+    [ -f "$p" ] || continue
+    case "$patch_tool" in
+        patch) (cd "$out" && patch -s -p1 -F0 -N < "$p") >&2 ;;
+        git)   (cd "$out" && git apply -p1 "$p") >&2 ;;
+        awk)   awk -v dir="$out" -f "$root/scripts/apply-unified-patch.awk" "$p" >&2 ;;
+        *)     echo "fetch-quickjs: QUICKJS_PATCH_TOOL is '$patch_tool'; it is patch, git or awk" >&2; exit 1 ;;
+    esac || { echo "fetch-quickjs: $(basename "$p") does not apply to QuickJS $QUICKJS_VERSION (with $patch_tool)" >&2; exit 1; }
+done
+
 mkdir -p "$dest"
 rm -f "$dest/.sha256"
 cp "$out/quickjs-amalgam.c" "$out/quickjs.h" "$dest/"
-printf '%s\n' "$QUICKJS_SHA256" > "$dest/.sha256"
+printf '%s\n' "$record" > "$dest/.sha256"
 printf '%s\n' "$dest"
