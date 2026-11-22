@@ -30,7 +30,10 @@ grow(n: int) -> int {
     return string.length(build(n))
 }
 
-// A loop that runs until a deadline or a cancel ends it (or n rounds).
+// A loop that runs until a deadline or a cancel ends it (or n rounds). The
+// sum starts again past a billion, so a long spin never overflows an int
+// (UBSan stopped it at about 92,000 rounds); a short one, as the checks use,
+// never reaches that.
 spin(n: int) -> int {
     i = 0
     s = 0
@@ -39,6 +42,9 @@ spin(n: int) -> int {
             s = s + i
         } else {
             s = s - 1
+        }
+        if s > 1000000000 {
+            s = 0
         }
         i = i + 1
     }
