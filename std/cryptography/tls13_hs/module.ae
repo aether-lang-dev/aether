@@ -483,6 +483,12 @@ client_hello_pq(random: ptr, session_id: byte[], hybrid_share: ptr, hybrid_len: 
 // ClientHello" (everything through the PskIdentities, excluding the binders)
 // and patched into the returned buffer.
 //
+// `only_sha256` 1 offers the SHA-256 suites alone (TLS_CHACHA20_POLY1305_SHA256
+// and TLS_AES_128_GCM_SHA256): an external PSK is bound to SHA-256, and a
+// suite of another hash could not use it (RFC 8446 4.2.11), so it is not
+// offered. 0 offers TLS_AES_256_GCM_SHA384 too, as a resumption whose ticket
+// may be of either hash does.
+//
 // Returns the CH via `out_ch` (a PskCh struct): the buffer, the byte offset of
 // the (zero) binder content, and the truncated length (the transcript bytes the
 // binder MACs — the handshake header + body up to and including the binders'
@@ -494,7 +500,7 @@ struct PskCh {
     truncated_len: int // length of CH bytes the binder is computed over
 }
 
-client_hello_psk(random: ptr, session_id: byte[], x25519_pub: ptr, host: string, ticket: byte[], obf_age: int, binder_len: int, with_early_data: int, out_ch: *PskCh) {
+client_hello_psk(random: ptr, session_id: byte[], x25519_pub: ptr, host: string, ticket: byte[], obf_age: int, binder_len: int, with_early_data: int, only_sha256: int, out_ch: *PskCh) {
     if session_id.len < 0 { panic("tls13_hs.client_hello_psk: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int sid_len = session_id.len
     if ticket.len < 0 { panic("tls13_hs.client_hello_psk: the `ticket` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
@@ -507,10 +513,14 @@ client_hello_psk(random: ptr, session_id: byte[], x25519_pub: ptr, host: string,
     off = put8(buf, off, sid_len)
     off = put_bytes(buf, off, session_id)
     // cipher_suites
-    off = put16(buf, off, 6)
+    if only_sha256 == 1 {
+        off = put16(buf, off, 4)
+    } else {
+        off = put16(buf, off, 6)
+    }
     off = put16(buf, off, TLS_CHACHA20_POLY1305_SHA256)
     off = put16(buf, off, TLS_AES_128_GCM_SHA256)
-    off = put16(buf, off, TLS_AES_256_GCM_SHA384)
+    if only_sha256 != 1 { off = put16(buf, off, TLS_AES_256_GCM_SHA384) }
     // compression
     off = put8(buf, off, 1)
     off = put8(buf, off, 0)

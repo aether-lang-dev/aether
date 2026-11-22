@@ -3,7 +3,9 @@
 // draws freely and counts its draws, D; then one connect for each N in
 // 0..D-1 with only N draws let through. Each connects to listener.ae at
 // 127.0.0.1 PEER_PORT, which reports what the client sent; this prints
-// one line per connect: "N=<n> ERR: <why>" or "N=<n> OK".
+// one line per connect: "N=<n> ERR: <why>" or "N=<n> OK". Then the same
+// for connect_psk, the external-PSK handshake, which draws its own
+// ephemeral scalar too: "PSK D=<d>", then "PSK N=<n> ...".
 //
 // Without a failing CSPRNG to stand in (rng_fail_supported() 0: macOS and
 // the BSDs, whose arc4random_buf cannot fail) it prints "SKIP".
@@ -16,6 +18,28 @@ import std.cryptography.tls13_client
 extern rng_fail_after(n: int)
 extern rng_fail_calls() -> int
 extern rng_fail_supported() -> int
+
+fn attempt_psk(port: int, n: int) {
+    id = bytes.new(4)
+    bytes.copy_from_string(id, 0, "rngf", 4)
+    key = bytes.new(32)
+    k = 0
+    while k < 32 {
+        bytes.set(key, k, 0x11)
+        k = k + 1
+    }
+    rng_fail_after(n)
+    conn, err = tls13_client.connect_psk("127.0.0.1", port, bytes.view(id)[0..4], bytes.view(key)[0..32])
+    rng_fail_after(-1)
+    bytes.wipe_free(key)
+    bytes.free(id)
+    if conn != null {
+        tls13_client.close_conn(conn)
+        println("PSK N=${n} OK")
+    } else {
+        println("PSK N=${n} ERR: ${err}")
+    }
+}
 
 fn attempt(port: int, priv: ptr, n: int) {
     rng_fail_after(n)
@@ -53,4 +77,13 @@ main() {
         n = n + 1
     }
     bytes.free(priv)
+    before = rng_fail_calls()
+    attempt_psk(port, -1)
+    pdraws = rng_fail_calls() - before
+    println("PSK D=${pdraws}")
+    n = 0
+    while n < pdraws {
+        attempt_psk(port, n)
+        n = n + 1
+    }
 }

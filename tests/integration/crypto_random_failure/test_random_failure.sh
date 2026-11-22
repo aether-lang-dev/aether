@@ -8,7 +8,8 @@
 # with every draw let through, counting them (D), then once for each N in
 # 0..D-1; listener.ae reports what each connect sent. The verdict: no
 # ClientHello with an all-zero random or session id, at least one connect
-# refused for want of randomness, and the free one a real ClientHello.
+# refused for want of randomness, and the free one a real ClientHello; the
+# same draws for tls13_client.connect_psk, whose first must refuse it.
 #
 # Where the CSPRNG cannot fail (macOS and the BSDs: arc4random_buf) the
 # test reports a skip.
@@ -55,6 +56,8 @@ said="$(cat "$TMP/client.out")"
 ok=1
 case "$seen" in *"random_zero=1"*|*"sid_zero=1"*) ok=0 ;; esac
 case "$said" in *"randomness"*) ;; *) ok=0 ;; esac
+# connect_psk too: its first draw failing refuses it for want of randomness.
+case "$said" in *"PSK N=0 ERR: no randomness"*) ;; *) ok=0 ;; esac
 case "$(echo "$seen" | head -1)" in "CH random_zero=0 sid_zero=0") ;; *) ok=0 ;; esac
 [ -n "${RNG_VERBOSE:-}" ] && { echo "$said"; echo "$seen"; }
 if [ "$ok" = 1 ]; then

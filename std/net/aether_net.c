@@ -52,6 +52,21 @@ int tcp_poll_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
 int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int t) { (void)a; (void)b; (void)t; return -1; }
 int tcp_wait_writable_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
 int tcp_send_some_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return -1; }
+TcpOpenResult tcp_connect_until_raw(const char* h, int p, long long d, TcpCancel* c) {
+    (void)h; (void)p; (void)d; (void)c;
+    TcpOpenResult out = { NULL, "networking disabled at build time" };
+    return out;
+}
+int tcp_set_deadline_raw(TcpSocket* s, long long d, TcpCancel* c) { (void)s; (void)d; (void)c; return -1; }
+long long tcp_deadline_raw(TcpSocket* s) { (void)s; return 0; }
+int tcp_stop_raw(TcpSocket* s) { (void)s; return TCP_STOP_NONE; }
+TcpOpenResult tcp_cancel_new_raw(void) {
+    TcpOpenResult out = { NULL, "networking disabled at build time" };
+    return out;
+}
+int tcp_cancel_raw(TcpCancel* c) { (void)c; return -1; }
+int tcp_cancel_tripped_raw(TcpCancel* c) { (void)c; return 0; }
+void tcp_cancel_free_raw(TcpCancel* c) { (void)c; }
 void aether_net_init(void) {}
 int aether_net_wouldblock(void) { return 0; }
 #else
@@ -61,6 +76,8 @@ int aether_net_wouldblock(void) { return 0; }
 #include <stdio.h>   /* snprintf (getaddrinfo port string) */
 #include <errno.h>   /* EAGAIN/EWOULDBLOCK: idle-peer vs. closed-peer recv */
 #include <stddef.h>  /* offsetof (sockaddr_un length) */
+#include <stdint.h>
+#include <stdatomic.h> /* TcpCancel: its flag and count, read by any thread */
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -97,6 +114,9 @@ int aether_net_wouldblock(void) { return 0; }
     #include <sys/ioctl.h>     /* FIONREAD (tcp_available_raw) */
     #include <poll.h>
     #include <fcntl.h>
+    #if defined(__linux__)
+        #include <sys/eventfd.h>   /* the cancel handle's wake (TcpCancel) */
+    #endif
 #endif
 #include "aether_net_addr.h"
 #include "../../runtime/utils/aether_thread.h"   /* the family memo's lock, aether_now_ns */
@@ -137,7 +157,291 @@ static int net_recv(int fd, void* buf, int len) {
 struct TcpSocket {
     int fd;
     int connected;
+    /* The deadline and cancel bound to this connection (tcp_set_deadline_raw,
+     * tcp_connect_until_raw): due_ms on aether_now_ns's monotonic clock in
+     * ms, 0 for none; cancel a counted reference, NULL for none. stop says
+     * which of them ended the last operation stopped by one (TCP_STOP_*). */
+    long long due_ms;
+    TcpCancel* cancel;
+    int stop;
 };
+
+/* A cancel handle (tcp_cancel_new_raw): a flag, and a descriptor that turns
+ * readable when the flag is set, which every wait of a socket bound to it
+ * polls beside the socket. Tripping it writes to its own descriptor only;
+ * the canceller never touches a connection's. Counted: the creator holds
+ * one reference (tcp_cancel_free_raw drops it) and each bound socket one
+ * (tcp_close drops it), so its descriptors outlive every wait on them.
+ *   Linux: an eventfd (rd == wr).
+ *   Other POSIX (macOS, iOS, the BSDs): a pipe, both ends non-blocking.
+ *   Windows: a connected loopback TCP pair, since select() and WSAPoll wait
+ *   on sockets alone; the accepted end is checked to be the one this
+ *   process connected. */
+struct TcpCancel {
+    _Atomic int tripped;
+    _Atomic int refs;
+    int rd;
+    int wr;
+};
+
+/* A std.tcp handle for the connected descriptor `fd`, which it then owns:
+ * NULL (and `fd` closed) when there is no memory. */
+static TcpSocket* net_sock_new(int fd) {
+    TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
+    if (!sock) { close(fd); return NULL; }
+    sock->fd = fd;
+    sock->connected = 1;
+    sock->due_ms = 0;
+    sock->cancel = NULL;
+    sock->stop = TCP_STOP_NONE;
+    return sock;
+}
+
+/* ---- Deadlines and cancellation ---------------------------------------- */
+
+/* Monotonic milliseconds: aether_now_ns's clock, which is std.os's
+ * now_monotonic_ms (CLOCK_MONOTONIC; QueryPerformanceCounter on Windows). */
+static long long net_mono_ms(void) {
+    return (long long)(aether_now_ns() / 1000000ULL);
+}
+
+static void net_cancel_ref(TcpCancel* c) {
+    atomic_fetch_add(&c->refs, 1);
+}
+
+static void net_cancel_unref(TcpCancel* c) {
+    if (atomic_fetch_sub(&c->refs, 1) != 1) return;
+#if defined(__linux__)
+    close(c->rd);
+#else
+    close(c->rd);
+    close(c->wr);
+#endif
+    free(c);
+}
+
+#ifdef _WIN32
+/* A connected loopback pair for the wake: rd is the accepted end, wr the
+ * connecting one. Another local process could connect to the listener in
+ * the moment it is open, so the accepted end's peer must be wr's own
+ * address. 0, or -1 with nothing left open. */
+static int net_wake_pair(int* rd, int* wr) {
+    SOCKET l = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (l == INVALID_SOCKET) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    int alen = (int)sizeof a;
+    SOCKET c = INVALID_SOCKET, s = INVALID_SOCKET;
+    if (bind(l, (struct sockaddr*)&a, alen) != 0 || listen(l, 1) != 0 ||
+        getsockname(l, (struct sockaddr*)&a, &alen) != 0) goto fail;
+    c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (c == INVALID_SOCKET || connect(c, (struct sockaddr*)&a, alen) != 0) goto fail;
+    s = accept(l, NULL, NULL);
+    if (s == INVALID_SOCKET) goto fail;
+    struct sockaddr_in mine, theirs;
+    int ml = (int)sizeof mine, tl = (int)sizeof theirs;
+    if (getsockname(c, (struct sockaddr*)&mine, &ml) != 0 ||
+        getpeername(s, (struct sockaddr*)&theirs, &tl) != 0 ||
+        mine.sin_port != theirs.sin_port ||
+        mine.sin_addr.s_addr != theirs.sin_addr.s_addr) goto fail;
+    closesocket(l);
+    *rd = (int)s;
+    *wr = (int)c;
+    return 0;
+fail:
+    if (s != INVALID_SOCKET) closesocket(s);
+    if (c != INVALID_SOCKET) closesocket(c);
+    closesocket(l);
+    return -1;
+}
+#endif
+
+TcpOpenResult tcp_cancel_new_raw(void) {
+    TcpOpenResult out = { NULL, "could not make the cancel handle" };
+    aether_net_init();
+    TcpCancel* c = (TcpCancel*)malloc(sizeof(TcpCancel));
+    if (!c) { out._1 = "out of memory"; return out; }
+    atomic_init(&c->tripped, 0);
+    atomic_init(&c->refs, 1);
+#if defined(_WIN32)
+    if (net_wake_pair(&c->rd, &c->wr) != 0) { free(c); return out; }
+#elif defined(__linux__)
+    int e = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (e < 0) { free(c); return out; }
+    c->rd = c->wr = e;
+#else
+    int p[2];
+    if (pipe(p) != 0) { free(c); return out; }
+    for (int i = 0; i < 2; i++) {
+        int fl = fcntl(p[i], F_GETFL, 0);
+        if (fl >= 0) (void)fcntl(p[i], F_SETFL, fl | O_NONBLOCK);
+        (void)fcntl(p[i], F_SETFD, FD_CLOEXEC);
+    }
+    c->rd = p[0];
+    c->wr = p[1];
+#endif
+    out._0 = c;
+    out._1 = "";
+    return out;
+}
+
+/* Trip `c`: from any thread, any number of times; only the first writes,
+ * one byte (eight on an eventfd) to the handle's own descriptor, which is
+ * never read, so it stays readable. On POSIX this is an atomic exchange
+ * and one write(2), both async-signal-safe, so a signal handler may call
+ * it. 0, or -1 for a null handle. */
+int tcp_cancel_raw(TcpCancel* c) {
+    if (!c) return -1;
+    if (atomic_exchange(&c->tripped, 1) != 0) return 0;
+#if defined(_WIN32)
+    (void)send((SOCKET)c->wr, "x", 1, 0);
+#elif defined(__linux__)
+    uint64_t one = 1;
+    ssize_t w;
+    do { w = write(c->wr, &one, sizeof one); } while (w < 0 && errno == EINTR);
+#else
+    ssize_t w;
+    do { w = write(c->wr, "x", 1); } while (w < 0 && errno == EINTR);
+#endif
+    return 0;
+}
+
+int tcp_cancel_tripped_raw(TcpCancel* c) {
+    return c && atomic_load(&c->tripped) ? 1 : 0;
+}
+
+/* Drop the creator's reference. A socket still bound to the handle keeps it
+ * until that socket is closed, so freeing it while a connection is open is
+ * safe; tripping it after this call is not (the caller's last use of it). */
+void tcp_cancel_free_raw(TcpCancel* c) {
+    if (c) net_cancel_unref(c);
+}
+
+#define NET_WAIT_READY      1
+#define NET_WAIT_PERIOD     0    /* the operation's own timeout passed */
+#define NET_WAIT_ERROR     (-1)
+#define NET_WAIT_DEADLINE  (-3)
+#define NET_WAIT_CANCELLED (-4)
+
+/* Wait until `sock` is readable (or writable, `want_write`), no later than
+ * its deadline and no longer than `period_ms` (-1 for no bound of its
+ * own), and give up at once when its cancel is tripped: the cancel's
+ * descriptor is polled beside the socket. NET_WAIT_READY, NET_WAIT_PERIOD,
+ * NET_WAIT_DEADLINE or NET_WAIT_CANCELLED (each recorded in sock->stop),
+ * or NET_WAIT_ERROR. A passed deadline and a tripped cancel are checked
+ * before waiting at all, so both are sticky. The socket itself is only
+ * polled, never closed or shut down here. */
+static int net_wait_bound(TcpSocket* sock, int want_write, long long period_ms) {
+    TcpCancel* c = sock->cancel;
+    for (;;) {
+        if (c && atomic_load(&c->tripped)) { sock->stop = TCP_STOP_CANCELLED; return NET_WAIT_CANCELLED; }
+        long long wait = period_ms;
+        int by_due = 0;
+        if (sock->due_ms > 0) {
+            long long left = sock->due_ms - net_mono_ms();
+            if (left <= 0) { sock->stop = TCP_STOP_DEADLINE; return NET_WAIT_DEADLINE; }
+            if (wait < 0 || left <= wait) { wait = left; by_due = 1; }
+        }
+#ifdef _WIN32
+        fd_set rf, wf, ef;
+        FD_ZERO(&rf); FD_ZERO(&wf); FD_ZERO(&ef);
+        if (want_write) { FD_SET((SOCKET)sock->fd, &wf); FD_SET((SOCKET)sock->fd, &ef); }
+        else FD_SET((SOCKET)sock->fd, &rf);
+        if (c) FD_SET((SOCKET)c->rd, &rf);
+        struct timeval tv, *tvp = NULL;
+        if (wait >= 0) {
+            tv.tv_sec = (long)(wait / 1000);
+            tv.tv_usec = (long)((wait % 1000) * 1000);
+            tvp = &tv;
+        }
+        int r = select(0, &rf, &wf, &ef, tvp);
+        if (r == SOCKET_ERROR) {
+            if (WSAGetLastError() == WSAEINTR) continue;
+            return NET_WAIT_ERROR;
+        }
+        if (c && FD_ISSET((SOCKET)c->rd, &rf)) continue;   /* tripped: the top says so */
+        if (r > 0) return NET_WAIT_READY;
+#else
+        struct pollfd pfd[2];
+        pfd[0].fd = sock->fd;
+        pfd[0].events = want_write ? POLLOUT : POLLIN;
+        pfd[0].revents = 0;
+        nfds_t n = 1;
+        if (c) {
+            pfd[1].fd = c->rd;
+            pfd[1].events = POLLIN;
+            pfd[1].revents = 0;
+            n = 2;
+        }
+        int t = wait < 0 ? -1 : (wait > INT_MAX ? INT_MAX : (int)wait);
+        int r = poll(pfd, n, t);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return NET_WAIT_ERROR;
+        }
+        if (n == 2 && pfd[1].revents) continue;   /* tripped: the top says so */
+        if (r > 0 && pfd[0].revents) return NET_WAIT_READY;
+#endif
+        /* Nothing within `wait`: the deadline is checked again at the top
+         * (a poll may wake a millisecond early), else the period passed. */
+        if (!by_due) return NET_WAIT_PERIOD;
+    }
+}
+
+/* The socket's own receive or send timeout (SO_RCVTIMEO / SO_SNDTIMEO) in
+ * ms, -1 for none. */
+static long long net_sock_timeout_ms(int fd, int opt) {
+#ifdef _WIN32
+    DWORD ms = 0;
+    int len = (int)sizeof ms;
+    if (getsockopt((SOCKET)fd, SOL_SOCKET, opt, (char*)&ms, &len) != 0 || ms == 0) return -1;
+    return (long long)ms;
+#else
+    struct timeval tv = { 0, 0 };
+    socklen_t tl = sizeof tv;
+    if (getsockopt(fd, SOL_SOCKET, opt, &tv, &tl) != 0) return -1;
+    long long ms = (long long)tv.tv_sec * 1000 + (tv.tv_usec + 999) / 1000;
+    return ms > 0 ? ms : -1;
+#endif
+}
+
+#ifdef _WIN32
+#define NET_WOULDBLOCK() (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEINTR)
+#define NET_RECV_NOWAIT 0
+#else
+#define NET_WOULDBLOCK() (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+#define NET_RECV_NOWAIT MSG_DONTWAIT
+#endif
+
+/* 1 when a deadline or a cancel is bound to `sock`. */
+static int net_bound(const TcpSocket* sock) {
+    return sock->due_ms > 0 || sock->cancel != NULL;
+}
+
+/* One receive on a socket with a deadline or a cancel bound to it: wait
+ * (net_wait_bound) no later than the deadline, no longer than the socket's
+ * own receive timeout, and not past a cancel, then take what is there.
+ * The count (> 0), 0 for the peer's FIN, TCP_RECV_TIMEOUT (the receive
+ * timeout passed: still connected, as an unbound receive's), TCP_RECV_
+ * DEADLINE or TCP_RECV_CANCELLED (still connected: the owner closes), or
+ * -1 for an error. */
+static int net_recv_bound(TcpSocket* sock, void* buf, int len) {
+    long long period = net_sock_timeout_ms(sock->fd, SO_RCVTIMEO);
+    for (;;) {
+        int w = net_wait_bound(sock, 0, period);
+        if (w == NET_WAIT_DEADLINE) return TCP_RECV_DEADLINE;
+        if (w == NET_WAIT_CANCELLED) return TCP_RECV_CANCELLED;
+        if (w == NET_WAIT_PERIOD) return TCP_RECV_TIMEOUT;
+        if (w != NET_WAIT_READY) return -1;
+        int n = (int)recv(sock->fd, (char*)buf, len, NET_RECV_NOWAIT);
+        if (n >= 0) return n;
+        if (NET_WOULDBLOCK()) continue;   /* woken with nothing to read */
+        return -1;
+    }
+}
 
 struct TcpServer {
     int fd;
@@ -251,9 +555,12 @@ int aether_net_order(const char* host, int port, AetherAddrList* addrs) {
     return family;
 }
 
-int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
-                            long long timeout_ns, int read_buffer,
-                            const char** why, int* timed_out) {
+/* aether_net_connect_addr, and with `cancel` the wait for the connection
+ * also ends when it is tripped: "cancelled", *timed_out 2. With a cancel the
+ * connect is non-blocking even with no timeout, so that it can be woken. */
+static int net_connect_addr_ex(const struct sockaddr_storage* addr, socklen_t len,
+                               long long timeout_ns, int read_buffer, TcpCancel* cancel,
+                               const char** why, int* timed_out) {
     *timed_out = 0;
     int sockfd = (int)socket(addr->ss_family, SOCK_STREAM, 0);
     if (sockfd < 0) {
@@ -271,7 +578,7 @@ int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
         *why = "could not set the receive buffer";
         return -1;
     }
-    if (timeout_ns <= 0) {
+    if (timeout_ns <= 0 && !cancel) {
         if (connect(sockfd, (const struct sockaddr*)addr, len) < 0) {
             close(sockfd);
             *why = "connection failed";
@@ -310,13 +617,19 @@ int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
         /* Winsock's fd_set is a small array of SOCKET handles, not a bitmap
          * indexed by descriptor, so it has no FD_SETSIZE hazard for a single
          * socket. */
-        fd_set wfds, efds;
+        fd_set wfds, efds, rfds;
         FD_ZERO(&wfds); FD_SET(sockfd, &wfds);
         FD_ZERO(&efds); FD_SET(sockfd, &efds);
-        struct timeval tv;
-        tv.tv_sec  = (long)(timeout_ns / 1000000000LL);
-        tv.tv_usec = (long)((timeout_ns / 1000LL) % 1000000LL);
-        int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
+        FD_ZERO(&rfds);
+        if (cancel) FD_SET((SOCKET)cancel->rd, &rfds);
+        struct timeval tv, *tvp = NULL;
+        if (timeout_ns > 0) {
+            tv.tv_sec  = (long)(timeout_ns / 1000000000LL);
+            tv.tv_usec = (long)((timeout_ns / 1000LL) % 1000000LL);
+            tvp = &tv;
+        }
+        int sel = select(sockfd + 1, &rfds, &wfds, &efds, tvp);
+        int woken = cancel && sel > 0 && FD_ISSET((SOCKET)cancel->rd, &rfds);
 #else
         /* poll, not select: a POSIX fd_set is a bitmap of FD_SETSIZE bits,
          * and FD_SET on a descriptor at or above it writes past the end. A
@@ -324,14 +637,29 @@ int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
          * most often) passes 1024 descriptors easily. POLLOUT covers both
          * outcomes: a refused non-blocking connect reports the socket ready
          * with SO_ERROR set, which the check below reads. */
-        struct pollfd pfd;
-        pfd.fd = sockfd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        long long timeout_ms = (timeout_ns + 999999LL) / 1000000LL;
+        struct pollfd pfd[2];
+        pfd[0].fd = sockfd;
+        pfd[0].events = POLLOUT;
+        pfd[0].revents = 0;
+        nfds_t npfd = 1;
+        if (cancel) {
+            pfd[1].fd = cancel->rd;
+            pfd[1].events = POLLIN;
+            pfd[1].revents = 0;
+            npfd = 2;
+        }
+        long long timeout_ms = timeout_ns > 0 ? (timeout_ns + 999999LL) / 1000000LL : -1;
         if (timeout_ms > INT_MAX) timeout_ms = INT_MAX;
-        int sel = poll(&pfd, 1, (int)timeout_ms);
+        int sel;
+        do { sel = poll(pfd, npfd, (int)timeout_ms); } while (sel < 0 && errno == EINTR);
+        int woken = npfd == 2 && sel > 0 && pfd[1].revents != 0;
 #endif
+        if (woken || (cancel && atomic_load(&cancel->tripped))) {
+            close(sockfd);
+            *why = TCP_ERR_CANCELLED;
+            *timed_out = 2;
+            return -1;
+        }
         if (sel == 0) {
             close(sockfd);
             *why = "connect timeout";
@@ -362,8 +690,25 @@ int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
     return sockfd;
 }
 
+int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
+                            long long timeout_ns, int read_buffer,
+                            const char** why, int* timed_out) {
+    return net_connect_addr_ex(addr, len, timeout_ns, read_buffer, NULL, why, timed_out);
+}
+
+/* aether_net_dial_addrs, ended early by `cancel` (NULL for none). */
+static int net_dial_addrs_ex(const char* host, int port, AetherAddrList* addrs,
+                             long long timeout_ns, int read_buffer, TcpCancel* cancel,
+                             const char** why);
+
 int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
                           long long timeout_ns, int read_buffer, const char** why) {
+    return net_dial_addrs_ex(host, port, addrs, timeout_ns, read_buffer, NULL, why);
+}
+
+static int net_dial_addrs_ex(const char* host, int port, AetherAddrList* addrs,
+                             long long timeout_ns, int read_buffer, TcpCancel* cancel,
+                             const char** why) {
     *why = "could not resolve host";
     if (!addrs || addrs->n <= 0) return -1;
     /* A family that has connected to this host and port before is a proven
@@ -394,8 +739,9 @@ int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
             if (!last && addrs->ss[i].ss_family != proven)
                 t = (left > 0 && left < first_try) ? left : first_try;
             int timed_out = 0;
-            int fd = aether_net_connect_addr(&addrs->ss[i], addrs->len[i], t, read_buffer,
-                                             why, &timed_out);
+            int fd = net_connect_addr_ex(&addrs->ss[i], addrs->len[i], t, read_buffer, cancel,
+                                         why, &timed_out);
+            if (timed_out == 2) return -1;   /* cancelled */
             if (fd >= 0) {
                 if (addrs->n > 1) aether_net_note_family(host, port, addrs->ss[i].ss_family);
                 return fd;
@@ -485,10 +831,8 @@ static TcpSocket* tcp_connect_with(const char* host, int port, int read_buffer,
     net_set_socket_timeouts(sockfd, 30);
     net_no_sigpipe(sockfd);
 
-    TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
-    if (!sock) { close(sockfd); *why = "out of memory"; return NULL; }
-    sock->fd = sockfd;
-    sock->connected = 1;
+    TcpSocket* sock = net_sock_new(sockfd);
+    if (!sock) { *why = "out of memory"; return NULL; }
     return sock;
 }
 
@@ -519,8 +863,160 @@ TcpOpenResult tcp_connect_timeout_raw(const char* host, int port, int timeout_ms
     return out;
 }
 
+/* Make `fd` non-blocking for a bound send; returns what to hand to
+ * net_nonblock_end. On Windows a socket's mode cannot be read back; std.tcp's
+ * are blocking, so it goes back to blocking (as tcp_send_some_raw does). */
+static int net_nonblock_begin(int fd) {
+#ifdef _WIN32
+    u_long on = 1;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &on) == 0 ? 1 : 0;
+#else
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0 || (fl & O_NONBLOCK)) return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0 ? fl : -1;
+#endif
+}
+
+static void net_nonblock_end(int fd, int saved) {
+#ifdef _WIN32
+    if (saved) {
+        u_long off = 0;
+        ioctlsocket((SOCKET)fd, FIONBIO, &off);
+    }
+#else
+    if (saved >= 0) {
+        int e = errno;
+        (void)fcntl(fd, F_SETFL, saved);
+        errno = e;
+    }
+#endif
+}
+
+/* Send on a socket with a deadline or a cancel bound to it: `all` 1 sends
+ * every byte (tcp_send_all_raw), 0 returns after the first send that takes
+ * any (tcp_send_raw and its kin). The socket is non-blocking for the
+ * sends, so none waits past what net_wait_bound allows, and the socket's
+ * own send timeout keeps its meaning: a period of it in which nothing went
+ * ends the send, one in which something did starts another (#3108). A
+ * passed deadline or a tripped cancel ends it with sock->stop saying which,
+ * checked before the first byte too. Returns the bytes sent, or -1 when
+ * nothing was sent and the send failed or stopped. Do not send on the
+ * socket from another thread at the same time. */
+static int net_send_bound(TcpSocket* sock, const char* p, int length, int all) {
+    if (sock->cancel && atomic_load(&sock->cancel->tripped)) { sock->stop = TCP_STOP_CANCELLED; return -1; }
+    if (sock->due_ms > 0 && net_mono_ms() >= sock->due_ms) { sock->stop = TCP_STOP_DEADLINE; return -1; }
+    long long period = net_sock_timeout_ms(sock->fd, SO_SNDTIMEO);
+    long long period_due = 0;
+    int progressed = 0;
+    int sent = 0;
+    int saved = net_nonblock_begin(sock->fd);
+    while (sent < length) {
+        int n = (int)send(sock->fd, p + sent, length - sent, AE_NET_NOSIGNAL);
+        if (n > 0) {
+            sent += n;
+            progressed = 1;
+            if (!all) break;
+            continue;
+        }
+        if (n < 0 && NET_WOULDBLOCK()) {
+            long long wait = -1;
+            if (period > 0) {
+                long long now = net_mono_ms();
+                if (!period_due) period_due = now + period;
+                if (period_due - now <= 0) {
+                    if (!progressed) break;      /* a whole period, nothing went */
+                    progressed = 0;
+                    period_due = now + period;
+                }
+                wait = period_due - now;
+            }
+            int w = net_wait_bound(sock, 1, wait);
+            if (w == NET_WAIT_READY || w == NET_WAIT_PERIOD) continue;
+            break;                                /* deadline, cancel or error */
+        }
+        break;                                    /* the connection failed */
+    }
+    net_nonblock_end(sock->fd, saved);
+    return sent > 0 ? sent : -1;
+}
+
+/* Bind `due_ms` (monotonic ms, 0 for none) and `cancel` (NULL for none) to
+ * `sock`, replacing what was bound, and clear its stop: every receive and
+ * send on it from now on is bounded by them (tcp_poll_raw and its kin,
+ * which take a timeout of their own, and tcp_send_some_raw, which never
+ * waits, are not). The socket takes a reference to `cancel`, dropped when it
+ * is closed or something else is bound. 0, or -1 for a null handle or a
+ * negative deadline. */
+int tcp_set_deadline_raw(TcpSocket* sock, long long due_ms, TcpCancel* cancel) {
+    if (!sock || due_ms < 0) return -1;
+    if (cancel) net_cancel_ref(cancel);
+    if (sock->cancel) net_cancel_unref(sock->cancel);
+    sock->cancel = cancel;
+    sock->due_ms = due_ms;
+    sock->stop = TCP_STOP_NONE;
+    return 0;
+}
+
+long long tcp_deadline_raw(TcpSocket* sock) {
+    return sock ? sock->due_ms : 0;
+}
+
+/* What stopped the last operation a bound deadline or cancel stopped on
+ * `sock`: TCP_STOP_DEADLINE, TCP_STOP_CANCELLED, or TCP_STOP_NONE. */
+int tcp_stop_raw(TcpSocket* sock) {
+    return sock ? sock->stop : TCP_STOP_NONE;
+}
+
+/* tcp_connect_raw held to the absolute deadline `due_ms` (aether_now_ns's
+ * monotonic clock, in ms; 0 for none) and ended by `cancel` (NULL for none)
+ * while it waits for the connection, every address the host resolves to;
+ * the socket comes back with both bound (tcp_set_deadline_raw), so the
+ * same deadline goes on covering every receive and send. Resolving the
+ * name is not interrupted (getaddrinfo cannot be): the deadline and the
+ * cancel are checked before and after it, so a numeric address is the
+ * fully bounded dial. "deadline exceeded" and "cancelled" are the two
+ * stops; otherwise the errors are tcp_connect_timeout_raw's. */
+TcpOpenResult tcp_connect_until_raw(const char* host, int port, long long due_ms, TcpCancel* cancel) {
+    TcpOpenResult out = { NULL, "connection failed" };
+    if (due_ms < 0) { out._1 = "due_ms must be 0 (no deadline) or a time on the monotonic clock"; return out; }
+    if (cancel && atomic_load(&cancel->tripped)) { out._1 = TCP_ERR_CANCELLED; return out; }
+    if (due_ms > 0 && net_mono_ms() >= due_ms) { out._1 = TCP_ERR_DEADLINE; return out; }
+    char tcp_res[300];
+    if (!aether_sandbox_check("tcp", aether_net_resource(tcp_res, sizeof tcp_res, host, port))) {
+        out._1 = "denied by sandbox";
+        return out;
+    }
+    aether_net_init();
+    AetherAddrList addrs;
+    if (aether_addr_resolve(host, port, &addrs) != 0) { out._1 = "could not resolve host"; return out; }
+    if (cancel && atomic_load(&cancel->tripped)) { out._1 = TCP_ERR_CANCELLED; return out; }
+    long long timeout_ns = 0;
+    if (due_ms > 0) {
+        long long left = due_ms - net_mono_ms();
+        if (left <= 0) { out._1 = TCP_ERR_DEADLINE; return out; }
+        timeout_ns = left * 1000000LL;
+    }
+    const char* why = "connection failed";
+    int fd = net_dial_addrs_ex(host, port, &addrs, timeout_ns, 0, cancel, &why);
+    if (fd < 0) {
+        if (cancel && atomic_load(&cancel->tripped)) why = TCP_ERR_CANCELLED;
+        else if (due_ms > 0 && net_mono_ms() >= due_ms) why = TCP_ERR_DEADLINE;
+        out._1 = why ? why : "connection failed";
+        return out;
+    }
+    net_set_socket_timeouts(fd, 30);
+    net_no_sigpipe(fd);
+    TcpSocket* sock = net_sock_new(fd);
+    if (!sock) { out._1 = "out of memory"; return out; }
+    tcp_set_deadline_raw(sock, due_ms, cancel);
+    out._0 = sock;
+    out._1 = "";
+    return out;
+}
+
 int tcp_send_raw(TcpSocket* sock, const char* data) {
     if (!sock || !sock->connected || !data) return -1;
+    if (net_bound(sock)) return net_send_bound(sock, data, (int)strlen(data), 0);
 
     int sent = send(sock->fd, data, strlen(data), AE_NET_NOSIGNAL);
     return sent;
@@ -529,6 +1025,7 @@ int tcp_send_raw(TcpSocket* sock, const char* data) {
 int tcp_send_n_raw(TcpSocket* sock, const char* data, int length) {
     if (!sock || !sock->connected || !data || length < 0) return -1;
     if (length == 0) return 0;
+    if (net_bound(sock)) return net_send_bound(sock, data, length, 0);
 
     int sent = send(sock->fd, data, (size_t)length, AE_NET_NOSIGNAL);
     return sent;
@@ -542,7 +1039,18 @@ char* tcp_receive_raw(TcpSocket* sock, int max_bytes) {
      * The buffer becomes the payload of the counted string returned. */
     char* buffer = (char*)aether_caps_malloc((size_t)max_bytes + 1);
     if (!buffer) return NULL;
-    int received = net_recv(sock->fd, buffer, max_bytes);
+    int received = 0;
+    if (net_bound(sock)) {
+        received = net_recv_bound(sock, buffer, max_bytes);
+        if (received < -1) {
+            /* A receive timeout, a passed deadline or a cancel: the socket
+             * stays connected for its owner to close. */
+            aether_caps_free(buffer, (size_t)max_bytes + 1);
+            return NULL;
+        }
+    } else {
+        received = net_recv(sock->fd, buffer, max_bytes);
+    }
 
     if (received <= 0) {
         aether_caps_free(buffer, (size_t)max_bytes + 1);
@@ -579,7 +1087,21 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes) {
         return out;
     }
 
-    int received = net_recv(sock->fd, buffer, max_bytes);
+    int received = 0;
+    if (net_bound(sock)) {
+        received = net_recv_bound(sock, buffer, max_bytes);
+        if (received < -1) {
+            aether_caps_free(buffer, (size_t)max_bytes);
+            /* Distinct from each other and from a close: the socket stays
+             * connected, and its owner closes it. */
+            if (received == TCP_RECV_DEADLINE) out._2 = TCP_ERR_DEADLINE;
+            else if (received == TCP_RECV_CANCELLED) out._2 = TCP_ERR_CANCELLED;
+            else out._2 = "timeout";
+            return out;
+        }
+    } else {
+        received = net_recv(sock->fd, buffer, max_bytes);
+    }
     if (received <= 0) {
         aether_caps_free(buffer, (size_t)max_bytes);
         /* Split the failure branch (#1092): a would-block / recv-timeout means
@@ -616,6 +1138,7 @@ int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length) {
     if (!sock || !sock->connected || length < 0) return -1;
     if (length == 0) return 0;
     if (!data) return -1;
+    if (net_bound(sock)) return net_send_bound(sock, (const char*)data, length, 0);
     int sent = send(sock->fd, (const char*)data, (size_t)length, AE_NET_NOSIGNAL);
     return sent < 0 ? -1 : sent;
 }
@@ -684,6 +1207,10 @@ static int net_wait_writable(int fd, NetSendWait* w) {
  * that time. The pure-Aether TLS server writes through here. */
 int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
     if (!sock || !sock->connected || length <= 0 || !data) return 0;
+    if (net_bound(sock)) {
+        int n = net_send_bound(sock, (const char*)data, length, 1);
+        return n < 0 ? 0 : n;
+    }
     const char* p = (const char*)data;
     int sent = 0;
 #ifndef _WIN32
@@ -746,7 +1273,13 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
  * dead), a null/closed handle or a bad buffer. */
 int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap) {
     if (!sock || !sock->connected || !buf || cap <= 0) return TCP_RECV_CLOSED;
-    int received = net_recv(sock->fd, buf, cap);
+    int received = 0;
+    if (net_bound(sock)) {
+        received = net_recv_bound(sock, buf, cap);
+        if (received < -1) return received;   /* TIMEOUT, DEADLINE, CANCELLED */
+    } else {
+        received = net_recv(sock->fd, buf, cap);
+    }
     if (received > 0) return received;
     if (received < 0 && aether_net_wouldblock()) return TCP_RECV_TIMEOUT;
     sock->connected = 0;
@@ -756,11 +1289,17 @@ int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap) {
 int tcp_close(TcpSocket* sock) {
     if (!sock) return -1;
 
-    /* A peer EOF/error clears connected, but the handle still owns fd. */
+    /* A peer EOF/error clears connected, but the handle still owns fd. The
+     * one close of the descriptor is here, by the handle's owner: neither a
+     * passed deadline nor a cancel closes it (see TcpCancel). */
     if (sock->fd >= 0) {
         close(sock->fd);
         sock->fd = -1;
         sock->connected = 0;
+    }
+    if (sock->cancel) {
+        net_cancel_unref(sock->cancel);
+        sock->cancel = NULL;
     }
 
     free(sock);
@@ -899,11 +1438,7 @@ TcpSocket* tcp_accept_raw(TcpServer* server) {
     net_set_socket_timeouts(newsockfd, 30);
     net_no_sigpipe(newsockfd);
 
-    TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
-    if (!sock) { close(newsockfd); return NULL; }
-    sock->fd = newsockfd;
-    sock->connected = 1;
-    return sock;
+    return net_sock_new(newsockfd);
 }
 
 int tcp_server_close(TcpServer* server) {
@@ -1012,10 +1547,8 @@ TcpOpenResult tcp_connect_unix_raw(const char* path) {
      * quiet peer reads as "timeout", not a close) and no SIGPIPE. */
     net_set_socket_timeouts(fd, 30);
     net_no_sigpipe(fd);
-    TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
-    if (!sock) { close(fd); out._1 = "out of memory"; return out; }
-    sock->fd = fd;
-    sock->connected = 1;
+    TcpSocket* sock = net_sock_new(fd);
+    if (!sock) { out._1 = "out of memory"; return out; }
     out._0 = sock;
     out._1 = "";
     return out;
@@ -1101,14 +1634,7 @@ static TcpSocket* tcp_socket_wrap_fd(int fd, int default_timeouts) {
     if (default_timeouts) net_set_socket_timeouts(fd, 30);
     net_no_sigpipe(fd);
 
-    TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
-    if (!sock) {
-        close(fd);
-        return NULL;
-    }
-    sock->fd = fd;
-    sock->connected = 1;
-    return sock;
+    return net_sock_new(fd);
 }
 
 TcpSocket* tcp_socket_from_fd_owned(int fd) {

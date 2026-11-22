@@ -5,6 +5,9 @@
 
 typedef struct TcpSocket TcpSocket;
 typedef struct TcpServer TcpServer;
+// A cancel handle (tcp_cancel_new_raw), bound to sockets by
+// tcp_set_deadline_raw or tcp_connect_until_raw.
+typedef struct TcpCancel TcpCancel;
 typedef struct TcpReceiveResult {
     void* _0;
     int _1;
@@ -43,6 +46,20 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes);
 //   or TCP_RECV_CLOSED for a FIN, an error, a closed handle or a bad buffer.
 #define TCP_RECV_CLOSED  (-1)
 #define TCP_RECV_TIMEOUT (-2)
+// A receive on a socket with a deadline or a cancel bound to it
+// (tcp_set_deadline_raw) also ends with these; the socket stays connected,
+// and its owner closes it.
+#define TCP_RECV_DEADLINE  (-3)
+#define TCP_RECV_CANCELLED (-4)
+// tcp_stop_raw: what stopped the last operation a bound deadline or cancel
+// stopped.
+#define TCP_STOP_NONE      0
+#define TCP_STOP_DEADLINE  1
+#define TCP_STOP_CANCELLED 2
+// The errors for those two stops, the same text std.tcp's DEADLINE_EXCEEDED
+// and CANCELLED hold.
+#define TCP_ERR_DEADLINE  "deadline exceeded"
+#define TCP_ERR_CANCELLED "cancelled"
 int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length);
 // tcp_send_all_raw: every one of `length` bytes from `data`, one send(2)
 //   after another (#3108); the bytes sent, `length` unless a send failed.
@@ -122,6 +139,32 @@ int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int timeout_ms);
 //                buffer is full), or -1 on an error (the connection gone).
 int tcp_wait_writable_raw(TcpSocket* sock, int timeout_ms);
 int tcp_send_some_raw(TcpSocket* sock, const void* data, int length);
+
+// Deadlines and cancellation, per connection (std.tcp's connect_until,
+// set_deadline, cancel_new; docs/design/tcp-tls-deadlines-and-cancellation.md).
+// due_ms is an absolute time on the monotonic clock std.os's
+// now_monotonic_ms reads, in ms; 0 means none.
+// tcp_connect_until_raw: a dial bounded by both, the socket coming back
+//                with both bound; "deadline exceeded" or "cancelled".
+// tcp_set_deadline_raw: bind them to a socket (replacing what was bound,
+//                clearing its stop); 0, or -1 for a null handle or a
+//                negative due_ms.
+// tcp_deadline_raw / tcp_stop_raw: what is bound, and what stopped the
+//                last operation (TCP_STOP_*).
+// tcp_cancel_new_raw: a fresh handle, or NULL with why.
+// tcp_cancel_raw: trip it, from any thread (on POSIX, a signal handler
+//                too); idempotent. It never touches a socket's descriptor.
+// tcp_cancel_tripped_raw: 1 once tripped.
+// tcp_cancel_free_raw: drop the creator's reference; a bound socket keeps
+//                the handle alive until it is closed.
+TcpOpenResult tcp_connect_until_raw(const char* host, int port, long long due_ms, TcpCancel* cancel);
+int tcp_set_deadline_raw(TcpSocket* sock, long long due_ms, TcpCancel* cancel);
+long long tcp_deadline_raw(TcpSocket* sock);
+int tcp_stop_raw(TcpSocket* sock);
+TcpOpenResult tcp_cancel_new_raw(void);
+int tcp_cancel_raw(TcpCancel* cancel);
+int tcp_cancel_tripped_raw(TcpCancel* cancel);
+void tcp_cancel_free_raw(TcpCancel* cancel);
 
 // Shared by std.udp (#2201): one-time platform socket init (WSAStartup on
 // Windows, a no-op elsewhere), and the "was that EAGAIN/EWOULDBLOCK/EINTR"

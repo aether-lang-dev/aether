@@ -54,10 +54,15 @@ TEST_CATEGORY(server_create_invalid_port, TEST_CATEGORY_NETWORK) {
 
 #ifndef _WIN32
 // Mirror the private runtime layout so this unit test can wrap a POSIX
-// socketpair without depending on a bindable TCP port.
+// socketpair without depending on a bindable TCP port. Keep it the whole
+// struct (std/net/aether_net.c): a brace initialiser zeroes the fields it
+// does not name, so no deadline and no cancel handle are bound.
 struct TcpSocket {
     int fd;
     int connected;
+    long long due_ms;
+    void* cancel;
+    int stop;
 };
 
 TEST_CATEGORY(tcp_binary_nul_roundtrip, TEST_CATEGORY_NETWORK) {
