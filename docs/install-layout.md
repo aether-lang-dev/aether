@@ -15,6 +15,11 @@ $PREFIX/
 ├── lib/aether/
 │   ├── libaether.a               # prebuilt static archive, link target for downstream
 │   │                              # programs / libraries that compile against the runtime
+│   ├── libaether.crt             # the C runtime libaether.a was built against (msvcrt,
+│   │                              # ucrt, glibc, musl, ...; empty where a platform has
+│   │                              # one): `ae` links the archive only with a compiler that
+│   │                              # targets the same one (build-system.md, #3813)
+│   ├── VERSION                   # the version libaether.a was built at
 │   ├── libaether_sandbox.so      # Linux and FreeBSD: the LD_PRELOAD library
 │   │                              # spawn_sandboxed starts a child with; it looks
 │   │                              # here under AETHER_HOME (containment-sandbox.md)
@@ -178,6 +183,14 @@ disagree. The flag that matters:
 The version stamp at `lib/aether/VERSION` catches the
 ae-vs-libaether version skew separately; the define skew is its
 own thing and silent unless a symbol is actually missing.
+
+`lib/aether/libaether.crt` (in a release archive, `lib/libaether.crt`,
+beside `lib/libaether.a`) names the C runtime the archive was built
+against, one word on one line. A build tool that links the archive
+with a compiler of its own can compare it with what that compiler
+targets (`runtime/aether_crt_id.h` names it); `ae` does, and compiles
+the runtime from source when they differ. The MANIFEST's format does
+not change: the record is a file of its own.
 
 The MANIFEST never references trimmed paths, the regression test
 at `tests/integration/install_manifest/` verifies this on every

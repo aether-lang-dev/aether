@@ -794,6 +794,35 @@ falling back to `gcc` (the WinLibs-bundled gcc on Windows) when neither is
 set. This affects only the C backend that turns Aether's generated C into the
 final binary; it never changes `aetherc`, the Aether-to-C front end.
 
+**The archive and the compiler's C runtime.** A prebuilt `libaether.a` is
+linked only when its C runtime is the one the build's compiler targets. The
+archive is compiled against one C runtime's headers and imports that runtime's
+symbols: MinGW GCC's msvcrt headers declare `_setjmp` as an msvcrt import, so
+an msvcrt archive linked by a UCRT compiler (`AE_CC="zig cc"`) failed on
+`undefined symbol: __declspec(dllimport) _setjmp` as soon as a program used
+`try` (#3813), and two C runtimes in one program disagree on `FILE`, `errno`
+and the heap besides. `make` writes the archive's runtime to `libaether.crt`
+beside it (msvcrt or ucrt on Windows, glibc, musl, bionic or uclibc on Linux;
+nothing where a platform has one C runtime), from `runtime/aether_crt_id.h`.
+`ae` asks the build compiler, through the same header, whether it targets that
+runtime; the answer is kept in the cache directory by the compiler's identity.
+When it does not, `ae` does not link the archive and compiles the runtime from
+source with that compiler, as `--trace` does, and `ae build -v` says why:
+
+```
+[toolchain] libaether.a is msvcrt; zig cc targets ucrt: the runtime is compiled from source
+```
+
+An archive with no record (one an older tree built) is linked as before. The
+fallback costs the runtime's compile on a program's first build and nothing
+after it: a try and catch program, Windows, `AE_CC="zig cc"` against an msvcrt
+archive, took 10 to 11 s to build (about 20 s the first time, with zig's own
+object cache cold) against 1.7 to 2.0 s with GCC linking the archive, and 0.5 s
+against 0.4 s on a cache hit. The WinLibs GCC that `ae` downloads on Windows
+when no gcc is on PATH is GCC 14.2.0 on UCRT, while the Windows releases'
+archive is msvcrt (they are built in MSYS2 MINGW64), so it takes the source
+fallback; its zip is checked against a pinned SHA-256 before it is unpacked.
+
 The same-OS, cross-arch cell is then a one-liner. On an x86_64 Linux host with
 a cross-gcc installed:
 

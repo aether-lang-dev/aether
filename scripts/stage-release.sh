@@ -63,6 +63,8 @@ mkdir -p "$out/bin" "$out/lib" "$out/include/aether" "$out/share/aether"
 cp "$bin/aetherc$exe" "$bin/ae$exe" "$out/bin/"
 chmod 755 "$out/bin/"*
 [ -f "$bin/libaether.a" ] && cp "$bin/libaether.a" "$out/lib/"
+# The C runtime the archive was built against, beside it (#3813).
+[ -f "$bin/libaether.crt" ] && cp "$bin/libaether.crt" "$out/lib/"
 # Linux and FreeBSD: the sandbox's preload library, beside the archive, where
 # spawn_sandboxed looks under AETHER_HOME (#3177).
 [ -f "$bin/libaether_sandbox.so" ] && cp "$bin/libaether_sandbox.so" "$out/lib/"

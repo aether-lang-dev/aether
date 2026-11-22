@@ -23,25 +23,8 @@ if [ ! -x "$AE" ] && [ ! -x "$AE.exe" ]; then
     exit 0
 fi
 
-# The first zig that answers `zig version`.
-zig=""
-roots="$ROOT"
-common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
-# Without git: a worktree's .git file names <main>/.git/worktrees/<name>.
-if [ -z "$common" ] && [ -f "$ROOT/.git" ]; then
-    common="$(sed -n 's/^gitdir: \(.*\)\/worktrees\/[^/]*$/\1/p' "$ROOT/.git")"
-fi
-[ -n "$common" ] && roots="$roots $(dirname "$common")"
-for z in $(command -v zig 2>/dev/null); do
-    "$z" version > /dev/null 2>&1 && { zig="$z"; break; }
-done
-if [ -z "$zig" ]; then
-    for r in $roots; do
-        for z in "$r"/build/scratch/.zig/zig-*/zig.exe "$r"/build/scratch/.zig/zig-*/zig; do
-            [ -f "$z" ] && "$z" version > /dev/null 2>&1 && { zig="$z"; break 2; }
-        done
-    done
-fi
+. "$ROOT/tests/lib/find_zig.sh"
+zig="$(find_zig "$ROOT")"
 if [ -z "$zig" ]; then
     echo "  [SKIP] $NAME: no zig on PATH or under build/scratch/.zig"
     exit 0
@@ -65,28 +48,15 @@ awk 'BEGIN { print "main() {\n    x = 0"
              print "    println(\"matches ${x}\")\n}" }' > "$TMP/deep.ae"
 
 # The compile line must carry -fbracket-depth, which zig's clang takes, and
-# the C must compile: no "bracket nesting level exceeded". zig 0.16's clang
-# sets a default above 256, so with it the C compiles either way, and the
-# flag on the line is what tells the probe read the compiler right.
-#
-# The link is not under test. On Windows the runtime archive is MinGW GCC's,
-# and its objects import a _setjmp that zig's MinGW libc does not provide,
-# so a program that pulls in aether_contain links only with GCC there.
-linked=""
-if (cd "$TMP" && "$AE" build -v deep.ae -o deep) > "$TMP/log" 2>&1; then
-    if [ "$("$TMP/deep" | tr -d '\r')" = "matches 0" ]; then
-        linked=", builds and runs"
-    else
-        fail "the program built with AE_CC=\"zig cc\" did not print \"matches 0\""
-    fi
-elif grep -q "bracket nesting level exceeded" "$TMP/log"; then
-    grep "bracket nesting level exceeded" "$TMP/log" | head -1 | cut -c1-200 | sed 's/^/        /'
-    fail "a program nested 1018 brackets deep did not compile with AE_CC=\"zig cc\""
-elif ! grep -q "lld-link: error\|ld.lld: error" "$TMP/log"; then
+# the program must build and run. zig 0.16's clang sets a default above 256,
+# so with it the C compiles either way, and the flag on the line is what
+# tells the probe read the compiler right. (Where the runtime archive is
+# another C runtime's, ae compiles the runtime from source for zig, #3813.)
+if ! (cd "$TMP" && "$AE" build -v deep.ae -o deep) > "$TMP/log" 2>&1; then
     grep -i "error" "$TMP/log" | head -3 | cut -c1-200 | sed 's/^/        /'
-    fail "the build with AE_CC=\"zig cc\" failed before its link"
-else
-    linked=" (its link with this tree's runtime archive fails, which is not under test)"
+    fail "a program nested 1018 brackets deep did not build with AE_CC=\"zig cc\""
+elif [ "$("$TMP/deep" | tr -d '\r')" != "matches 0" ]; then
+    fail "the program built with AE_CC=\"zig cc\" did not print \"matches 0\""
 fi
 grep '^\[cmd\].*-Wformat' "$TMP/log" | tail -1 | grep -q -- '-fbracket-depth=' ||
     fail "the compile line with AE_CC=\"zig cc\" carries no -fbracket-depth"
@@ -96,5 +66,5 @@ grep '^\[cache\] ccid: .* --version .*outcome=line line=.*clang version' "$TMP/l
     fail "the cache's compiler identity with AE_CC=\"zig cc\" does not name zig's clang version: $(grep '^\[cache\] ccid:' "$TMP/log" | tail -1 | cut -c1-160)"
 
 [ "$fails" -eq 0 ] || exit 1
-echo "  [PASS] $NAME: with AE_CC=\"zig cc\" the bracket probe tells, and a program nested 1018 brackets deep compiles with -fbracket-depth$linked"
+echo "  [PASS] $NAME: with AE_CC=\"zig cc\" the bracket probe tells, and a program nested 1018 brackets deep builds with -fbracket-depth and runs"
 exit 0

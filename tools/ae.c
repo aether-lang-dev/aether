@@ -3788,23 +3788,31 @@ const char* c_backend_env_override(void) {
  * cache, so under -fsyntax-only, where clang writes none, every compile
  * failed with "FileNotFound", flags or not. That read as a refusal, and a
  * program nested past 256 brackets did not build with AE_CC="zig cc".
- * When no form tells, the answer is no for this process and nothing is
- * remembered.
+ * When no form tells, the answer is -1 ("cannot tell") for this process and
+ * nothing is remembered; each caller says what that means for it.
  *
  * #3600: an answer that is told is remembered in the cache directory by
- * the compiler's identity, under `flags`, so later builds compile nothing.
- * `name` names the probe's files (`<name>.c`, `<name>.o`); the -v log shows
- * each command, by that name. */
+ * the compiler's identity, under the question asked (`flags` and `text`:
+ * #3813's probe of the C runtime passes no flags, and two trees ask about
+ * two runtimes), so later builds compile nothing. `name` names the probe's
+ * files (`<name>.c`, `<name>.o`); the -v log shows each command, by that
+ * name. 1 takes, 0 refuses, -1 cannot tell. */
 static int cc_probe_takes(const char* cc, const char* flags, const char* name, const char* text) {
-    int known = cache_probe_memo_get(cc, flags);
-    if (known >= 0) return known;
+    char* question = ae_strdup_printf("%s\n%s", flags, text);
+    if (!question) return -1;
+    int known = cache_probe_memo_get(cc, question);
+    if (known >= 0) { free(question); return known; }
     char file[200], probe_c[1100], probe_o[1100];
     snprintf(file, sizeof(file), "%s.c", name);
-    if (!ae_private_temp_path(probe_c, sizeof(probe_c), file)) return 0;   /* #3745 */
+    probe_o[0] = '\0';
+    FILE* f =ae_private_temp_path(probe_c, sizeof(probe_c), file)   /* #3745 */
+              ? fopen(probe_c, "w") : NULL;
     snprintf(file, sizeof(file), "%s.o", name);
-    if (!ae_private_temp_path(probe_o, sizeof(probe_o), file)) return 0;
-    FILE* f = fopen(probe_c, "w");
-    if (!f) return 0;
+    if (!f || !ae_private_temp_path(probe_o, sizeof(probe_o), file)) {
+        if (f) { fclose(f); remove(probe_c); }
+        free(question);
+        return -1;
+    }
     fputs(text, f);
     fclose(f);
     int answer = -1;
@@ -3825,8 +3833,8 @@ static int cc_probe_takes(const char* cc, const char* flags, const char* name, c
         remove(probe_o);
     }
     remove(probe_c);
-    if (answer < 0) return 0;
-    cache_probe_memo_put(cc, flags, answer);
+    if (answer >= 0) cache_probe_memo_put(cc, question, answer);
+    free(question);
     return answer;
 }
 
@@ -3847,7 +3855,7 @@ static const char* bracket_depth_flags(const char* cc) {
     asked = strdup(cc);
     answer = "";
     if (cc_probe_takes(cc, AETHER_CLANG_DEPTH_CFLAGS, "ae_bracket_probe",
-                       "int ae_bracket_probe;\n"))
+                       "int ae_bracket_probe;\n") == 1)
         answer = AETHER_CLANG_DEPTH_CFLAGS;
     return answer;
 }
@@ -3889,9 +3897,108 @@ static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
                        "#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
                        "#error not GCC\n"
                        "#endif\n"
-                       "int ae_inline_probe;\n"))
+                       "int ae_inline_probe;\n") == 1)
         answer = AETHER_GCC_INLINE_CFLAGS;
     return answer;
+}
+
+static char* ae_read_file(const char* path, long* out_len);
+
+/* The C runtime runtime/aether_crt_id.h names for compiler `cc` (its
+ * AETHER_CRT_NAME, by preprocessing `header`), into `out`; "" when it names
+ * none or the compiler cannot be run. For the -v line only. */
+static void crt_name_of(const char* cc, const char* header, char* out, size_t outsz) {
+    out[0] = '\0';
+    char src[1100], got[1100];
+    if (!ae_private_temp_path(src, sizeof(src), "ae_crt_name.c") ||
+        !ae_private_temp_path(got, sizeof(got), "ae_crt_name.out")) return;
+    FILE* f = fopen(src, "w");
+    if (!f) return;
+    fprintf(f, "%s\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n", header);
+    fclose(f);
+    char* cmd = ae_strdup_printf("%s -E -P \"%s\"", cc, src);
+    if (cmd && run_cmd_capture_stdout(cmd, got) == 0) {
+        FILE* g = fopen(got, "r");
+        char line[256];
+        while (g && fgets(line, sizeof(line), g)) {
+            if (strncmp(line, "AETHER_CRT_RECORD ", 18) == 0) {
+                line[strcspn(line, "\r\n")] = '\0';
+                snprintf(out, outsz, "%s", line + 18);
+                break;
+            }
+        }
+        if (g) fclose(g);
+    }
+    free(cmd);
+    remove(src);
+    remove(got);
+}
+
+/* #3813: a prebuilt libaether.a is linked only when its C runtime is the one
+ * compiler `cc` builds against. The archive is compiled against one C
+ * runtime's headers and imports that runtime's symbols: MinGW GCC's msvcrt
+ * headers declare _setjmp as an msvcrt import, and AE_CC="zig cc", which
+ * links UCRT, failed on "undefined symbol: __declspec(dllimport) _setjmp" as
+ * soon as a program used try; two C runtimes in one program disagree on FILE,
+ * errno and the heap besides. `make` records the archive's runtime beside it
+ * (libaether.crt, from runtime/aether_crt_id.h); the compiler is asked,
+ * through the same header, whether it targets that runtime (cc_probe_takes,
+ * the answer remembered by its identity). On a mismatch the archive is not
+ * linked and the runtime is compiled from source with `cc`, as a --trace
+ * build does (#1333).
+ *
+ * The archive is linked as before when there is nothing to compare: an
+ * archive with no record (one an older tree built, or a platform with one C
+ * runtime), no header to ask with, or a compiler that cannot be asked. */
+static void archive_crt_check(const char* cc) {
+    static char* asked = NULL;
+    static int matches = 1;
+    if (!tc.has_lib || !cc || !*cc) return;
+    if (!(asked && strcmp(asked, cc) == 0)) {
+        free(asked);
+        asked = strdup(cc);
+        matches = 1;
+        char lib_dir[sizeof(tc.lib)];
+        snprintf(lib_dir, sizeof(lib_dir), "%s", tc.lib);
+        char* slash = strrchr(lib_dir, '/');
+        char* bslash = strrchr(lib_dir, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        if (slash) *slash = '\0';
+        char* rec_path = ae_path_printf("%s/libaether.crt", lib_dir);
+        char* rec = rec_path ? ae_read_file(rec_path, NULL) : NULL;
+        free(rec_path);
+        char name[64] = "";
+        if (rec) {
+            size_t n = strcspn(rec, "\r\n");
+            int ok = n > 0 && n < sizeof(name);
+            for (size_t i = 0; ok && i < n; i++)
+                ok = (rec[i] >= 'a' && rec[i] <= 'z') || (rec[i] >= '0' && rec[i] <= '9') ||
+                     rec[i] == '_';
+            if (ok) snprintf(name, sizeof(name), "%.*s", (int)n, rec);
+            free(rec);
+        }
+        char* hdr_path = name[0] ? ae_path_printf("%s/runtime/aether_crt_id.h", tc.src_root) : NULL;
+        char* header = hdr_path ? ae_read_file(hdr_path, NULL) : NULL;
+        free(hdr_path);
+        char* text = header ? ae_strdup_printf("%s\n#if !defined(AE_PROBE_ANY) && "
+                                               "!defined(AETHER_CRT_IS_%s)\n"
+                                               "#error another C runtime than the archive's\n"
+                                               "#endif\nint ae_crt_probe;\n", header, name)
+                            : NULL;
+        if (text && cc_probe_takes(cc, "", "ae_crt_probe", text) == 0) {
+            matches = 0;
+            if (tc.verbose) {
+                char theirs[64];
+                crt_name_of(cc, header, theirs, sizeof(theirs));
+                fprintf(stderr, "[toolchain] libaether.a is %s; %s targets %s: the runtime is "
+                                "compiled from source\n",
+                        name, cc, theirs[0] ? theirs : "another C runtime");
+            }
+        }
+        free(text);
+        free(header);
+    }
+    if (!matches) tc.has_lib = false;
 }
 
 #ifndef _WIN32
@@ -3912,10 +4019,21 @@ static const char* posix_driven_cc(void) {
 // --------------------------------------------------------------------------
 #ifdef _WIN32
 
-// Pinned WinLibs release — GCC 14.2.0 UCRT, x86-64, no LLVM (~250 MB).
-// Update WINLIBS_TAG + WINLIBS_ZIP together when upgrading.
+// Pinned WinLibs release: GCC 14.2.0 UCRT, x86-64, no LLVM (~250 MB).
+// Update WINLIBS_TAG, WINLIBS_ZIP and WINLIBS_SHA256 together when upgrading.
+//
+// UCRT, while the Windows releases' libaether.a is msvcrt (MSYS2 MINGW64):
+// ae compiles the runtime from source for it (archive_crt_check, #3813). The
+// msvcrt build of this GCC is no better: its mingw-w64 (12) has no
+// _strtof_l import, which an archive MSYS2's mingw-w64 (15) built references,
+// so it fails the link where UCRT builds from source and runs.
+//
+// WINLIBS_SHA256 is the .sha256 WinLibs publishes beside the zip, pinned
+// here and checked in-process before the zip is opened: the compiler it
+// holds builds every program on this machine.
 #define WINLIBS_TAG "14.2.0posix-12.0.0-ucrt-r3"
 #define WINLIBS_ZIP "winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64ucrt-12.0.0-r3.zip"
+#define WINLIBS_SHA256 "88868d745b807f083a117ff69348d8bc021ad7389aa503379dbed1866efcaeb9"
 #define WINLIBS_URL \
     "https://github.com/brechtsanders/winlibs_mingw/releases/download/" \
     WINLIBS_TAG "/" WINLIBS_ZIP
@@ -4020,14 +4138,43 @@ static bool find_gcc_windows(bool may_download) {
     fprintf(ps,
         "$ProgressPreference = 'SilentlyContinue'\n"
         "Write-Host '[ae] Downloading GCC...'\n"
-        "Invoke-WebRequest -Uri '%s' -OutFile '%s'\n"
+        "Invoke-WebRequest -Uri '%s' -OutFile '%s'\n",
+        WINLIBS_URL, zip_path);
+    fclose(ps);
+
+    {
+        char run_ps[2048];
+        snprintf(run_ps, sizeof(run_ps),
+            "powershell -NoProfile -ExecutionPolicy Bypass -File \"%s\"", ps_path);
+        int ret = system(run_ps);
+        remove(ps_path);
+        if (ret != 0) goto fail;
+    }
+    /* The pinned digest, before anything is unpacked (see WINLIBS_SHA256). */
+    {
+        char got_hex[65] = "";
+        if (ae_sha256_file_hex(zip_path, got_hex) != 0 || strcmp(got_hex, WINLIBS_SHA256) != 0) {
+            fprintf(stderr, "[ae] %s does not have the pinned SHA-256 (got %s, want %s); "
+                            "not installing it.\n",
+                    WINLIBS_ZIP, got_hex[0] ? got_hex : "none", WINLIBS_SHA256);
+            remove(zip_path);
+            goto fail;
+        }
+    }
+    ps = fopen(ps_path, "w");
+    if (!ps) {
+        fprintf(stderr, "[ae] Cannot write installer script to %s\n", tools_dir);
+        remove(zip_path);
+        goto fail;
+    }
+    fprintf(ps,
+        "$ProgressPreference = 'SilentlyContinue'\n"
         "Write-Host '[ae] Extracting...'\n"
         "Expand-Archive -Path '%s' -DestinationPath '%s' -Force\n"
         "Remove-Item -Path '%s' -Force\n"
         "Write-Host '[ae] GCC ready.'\n",
-        WINLIBS_URL, zip_path, zip_path, tools_dir, zip_path);
+        zip_path, tools_dir, zip_path);
     fclose(ps);
-
     {
         char run_ps[2048];
         snprintf(run_ps, sizeof(run_ps),
@@ -5491,6 +5638,9 @@ void build_gcc_cmd(char* cmd, size_t size,
         set_failing_cmd(cmd, size);  // will fail; error already printed
         return;
     }
+    /* Before anything below reads tc.has_lib: the archive is linked only
+     * when its C runtime is this compiler's (#3813). */
+    archive_crt_check(s_gcc_cmd);
     // Windows (MinGW): no -pthread (Win32 threads via aether_thread.h), no -lm (CRT).
     // -lws2_32 is required for Winsock2 (aether_http/net always compiled into runtime).
     // -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt are required when OpenSSL
@@ -5732,6 +5882,9 @@ void build_gcc_cmd(char* cmd, size_t size,
             return;
         }
     }
+    /* Before anything below reads tc.has_lib: the archive is linked only
+     * when its C runtime is this compiler's (#3813). */
+    archive_crt_check(cc);
 #ifdef __APPLE__
     default_macos_deployment_target();
 #endif

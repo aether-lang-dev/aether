@@ -405,6 +405,14 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     if [ -f build/libaether.a ]; then
         cp build/libaether.a "$LIB_DIR/libaether.a"
     fi
+    # The C runtime the archive was built against, beside it (#3813): `ae`
+    # links the archive only with a compiler that targets the same one. A
+    # record from an older install goes when this build has none.
+    if [ -f build/libaether.crt ]; then
+        cp build/libaether.crt "$LIB_DIR/libaether.crt"
+    else
+        rm -f "$LIB_DIR/libaether.crt"
+    fi
     # The shared runtime (#2297), in its own directory beside the archive,
     # where `ae build --shared-runtime` looks for it.
     if [ -d build/shared ]; then

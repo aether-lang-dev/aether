@@ -1874,6 +1874,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	test -f "$$verdir/bin/aetherc$(EXE_EXT)" || (echo "  FAIL: bin/aetherc missing"; exit 1) && \
 	test -f "$$verdir/bin/ae$(EXE_EXT)"      || (echo "  FAIL: bin/ae missing"; exit 1) && \
 	test -f "$$verdir/lib/libaether.a"       || (echo "  FAIL: lib/libaether.a missing"; exit 1) && \
+	test -f "$$verdir/lib/libaether.crt"     || (echo "  FAIL: lib/libaether.crt missing, the archive's C runtime (#3813)"; exit 1) && \
 	for h in include/*.h; do \
 	  test -f "$$verdir/include/aether/$$(basename "$$h")" || { echo "  FAIL: include/aether/$$(basename "$$h") missing (#1420)"; exit 1; }; \
 	done && \
@@ -2353,7 +2354,7 @@ $(STUNT_DIR)/stunt$(EXE_EXT): contrib/host/stunt/stunt.c contrib/host/stunt/stun
 	$(CC) -std=c11 -O1 -Wall -Wextra -o $@ contrib/host/stunt/stunt.c contrib/host/stunt/stunt_main.c $(STUNT_LIBS)
 
 # Precompiled stdlib archive — runtime + std for user programs.
-stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT) $(SANDBOX_PRELOAD)
+stdlib: $(BUILD_DIR)/libaether.a $(BUILD_DIR)/libaether.crt $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT) $(SANDBOX_PRELOAD)
 
 ifneq ($(SHARED_RT),)
 $(SHARED_RT): $(BUILD_DIR)/libaether.a
@@ -2395,6 +2396,21 @@ $(BUILD_DIR)/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(
 	@$(AR) rcs $(BUILD_DIR)/libaether.a.tmp $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME_OBJS)
 	@mv $(BUILD_DIR)/libaether.a.tmp $(BUILD_DIR)/libaether.a
 	@echo "✓ Stdlib archive created: $(BUILD_DIR)/libaether.a"
+
+# The C runtime libaether.a is built against (#3813), in libaether.crt beside
+# it: msvcrt or ucrt on Windows, glibc, musl, bionic or uclibc on Linux,
+# empty where the platform has one C runtime. `ae` links the archive only
+# with a C compiler that targets the same one; with any other it compiles the
+# runtime from source, as a --trace build does (#1333). The name comes from
+# runtime/aether_crt_id.h, preprocessed by the compiler and flags the
+# archive's objects are compiled with; the flags stamp moves when either
+# does. An empty file, not none, so make does not run this every time.
+$(BUILD_DIR)/libaether.crt: runtime/aether_crt_id.h $(BUILD_FLAGS_STAMP) | $(BUILD_DIR)
+	@crt=$$(printf '#include "runtime/aether_crt_id.h"\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n' \
+	    | $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -E -P -x c - 2>/dev/null \
+	    | sed -n 's/^AETHER_CRT_RECORD //p' | tr -d '\r'); \
+	  printf '%s\n' "$$crt" > $@.tmp && mv $@.tmp $@ && \
+	  echo "✓ C runtime of libaether.a: $${crt:-(one on this platform, not recorded)}"
 
 # Authoritative MANIFEST — list of link-suitable runtime + stdlib
 # .c files for downstream consumers (aetherBuild and similar tools)
@@ -2712,6 +2728,11 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@# install) is reported up front instead of surfacing only as a
 	@# cryptic `undefined reference to aether_*` at link time.
 	@printf '%s\n' "$(VERSION)" > $(PREFIX)/lib/aether/VERSION
+	@# The C runtime the archive was built against, beside it (#3813): ae
+	@# links the archive only with a compiler that targets the same one.
+	@if [ -f $(BUILD_DIR)/libaether.crt ]; then \
+		install -m 644 $(BUILD_DIR)/libaether.crt $(PREFIX)/lib/aether/; \
+	fi
 	@# Headers: walk the runtime/ and std/ trees and mirror every .h
 	@# into $(PREFIX)/include/aether. Whole-tree copy (rather than the
 	@# per-subdir enumeration this used to do) so new modules don't
