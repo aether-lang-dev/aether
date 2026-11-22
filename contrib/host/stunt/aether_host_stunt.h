@@ -34,13 +34,15 @@ int         stunt_raise_error(void* vm, const char* msg);
 /* The shared map, for a host that has no other way to make one. */
 void*       stunt_map_new(void);
 uint64_t    stunt_map_token(void* map);
-void        stunt_map_put(void* map, const char* key, const char* value);
-const char* stunt_map_get(void* map, const char* key);
+// Keys and values are AetherStrings (`@aether string`), carried by length;
+// a get returns a new AetherString, the caller's, or NULL when absent.
+int         stunt_map_put(void* map, const void* key, const void* value);
+void*       stunt_map_get(void* map, const void* key);
 void        stunt_map_free(void* map);
 void        stunt_map_freeze(void* map);
-int         stunt_map_guest_put(uint64_t token, const char* key, const char* value);
-const char* stunt_map_guest_get(uint64_t token, const char* key);
-int         stunt_map_guest_has(uint64_t token, const char* key);
+int         stunt_map_guest_put(uint64_t token, const void* key, const void* value);
+void*       stunt_map_guest_get(uint64_t token, const void* key);
+int         stunt_map_guest_has(uint64_t token, const void* key);
 
 /* The catalogue. */
 int         stunt_catalogue_size(void);

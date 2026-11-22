@@ -6716,6 +6716,104 @@ static void rename_locals_shadowing_functions_in(ASTNode* scope, const ShadowFns
     nameset_free(&s.renamed);
 }
 
+/* A local named like a type the generated C declares by that name: a
+ * struct, a message, an actor, an enum, a sum type, a bitstruct. From its
+ * binding on, the name is the local, as `ae check` resolves it, but C
+ * puts the variable in scope over the typedef, so a later declaration or
+ * compound literal of the type (`Other o = (Other){...}` for `o = Other {
+ * q: "x" }`, or a local of the type a call returns) named the variable:
+ * gcc "must use 'struct' tag to refer to type 'Other'", "expected ';'".
+ * Such a local is given the C name `ae_local_<name>` from its first binding
+ * to the end of the body, as a local shadowing a function is (above); a
+ * reference before the binding is the type's, and keeps its spelling. A
+ * module variable and an actor's state are no locals and keep theirs. */
+static int binds_type_shadow(const ASTNode* n) {
+    return n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE;
+}
+
+static void rename_locals_shadowing_types_in(ASTNode* node, const NameSet* types,
+                                             const NameSet* fixed, NameSet* found) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++)
+        rename_locals_shadowing_types_in(node->children[i], types, fixed, found);
+    if (binds_type_shadow(node) && node->value &&
+        nameset_has(types, node->value) && !nameset_has(fixed, node->value))
+        nameset_add(found, node->value);
+}
+
+/* Rename `from` to `to` in every value node from the first binding of
+ * `from` on (a parameter, a local, a pattern variable). Not in a call: a
+ * call of the type's name is the type's (an actor's constructor). */
+static void rename_type_local_after_binding(ASTNode* node, const char* from, const char* to,
+                                            int* active) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++)
+        rename_type_local_after_binding(node->children[i], from, to, active);
+    if (!node->value || strcmp(node->value, from) != 0 || !is_value_name_node(node)) return;
+    if (!*active) {
+        if (!binds_type_shadow(node)) return;
+        *active = 1;
+    }
+    free(node->value);
+    node->value = prefixed_name("", to);
+}
+
+static void rename_locals_shadowing_types_scope(ASTNode* scope, const NameSet* types,
+                                                const NameSet* fixed) {
+    NameSet found = {0};
+    rename_locals_shadowing_types_in(scope, types, fixed, &found);
+    for (int i = 0; i < strmap_count(&found); i++) {
+        const char* from = strmap_key_at(&found, i);
+        char* to = prefixed_name("ae_local_", from);
+        int active = 0;
+        rename_type_local_after_binding(scope, from, to, &active);
+        free(to);
+    }
+    nameset_free(&found);
+}
+
+static void rename_locals_shadowing_types(ASTNode* program) {
+    if (!program) return;
+    NameSet types = {0};
+    NameSet globals = {0};
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || !c->value) continue;
+        switch (c->type) {
+            case AST_STRUCT_DEFINITION: case AST_MESSAGE_DEFINITION:
+            case AST_ACTOR_DEFINITION: case AST_ENUM_DEFINITION:
+            case AST_SUM_TYPE_DEF: case AST_BITSTRUCT_DEFINITION:
+                nameset_add(&types, c->value);
+                break;
+            case AST_VARIABLE_DECLARATION: case AST_CONST_DECLARATION:
+                nameset_add(&globals, c->value);
+                break;
+            default:
+                break;
+        }
+    }
+    for (int i = 0; strmap_count(&types) > 0 && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c) continue;
+        if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_MAIN_FUNCTION ||
+            c->type == AST_BUILDER_FUNCTION) {
+            rename_locals_shadowing_types_scope(c, &types, &globals);
+        } else if (c->type == AST_ACTOR_DEFINITION) {
+            NameSet fixed = {0};
+            for (int g = 0; g < strmap_count(&globals); g++) nameset_add(&fixed, strmap_key_at(&globals, g));
+            for (int k = 0; k < c->child_count; k++) {
+                ASTNode* st = c->children[k];
+                if (st && st->type == AST_STATE_DECLARATION && st->value)
+                    nameset_add(&fixed, st->value);
+            }
+            rename_locals_shadowing_types_scope(c, &types, &fixed);
+            nameset_free(&fixed);
+        }
+    }
+    nameset_free(&types);
+    nameset_free(&globals);
+}
+
 static void rename_locals_shadowing_functions(ASTNode* program) {
     if (!program) return;
     NameSet globals = {0};
@@ -9116,6 +9214,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #2683: after the function renames, so a call's name is the one its
      * C spelling is made from. */
     rename_locals_shadowing_functions(program);
+    /* And a local named like a type the C declares by that name. */
+    rename_locals_shadowing_types(program);
     /* #2746, #2994: before any pass keys an exit free or a store off a
      * local's name. */
     rename_scoped_bindings(program);

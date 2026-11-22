@@ -80,6 +80,7 @@
     <li><a href="schema.html">schema</a></li>
     <li><a href="sed.html">sed</a></li>
     <li><a href="set.html">set</a></li>
+    <li><a href="sharedmap.html">sharedmap</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
@@ -243,7 +244,7 @@
     <a href="guest.html" class="module-card">
       <h3>guest</h3>
       <p>std.guest: an Aether host running a guest in a separate, sandboxed child process, and talking to it both ways over std.ipc.</p>
-      <span class="count">22 exports</span>
+      <span class="count">36 exports</span>
     </a>
     <a href="hash.html" class="module-card">
       <h3>hash</h3>
@@ -439,6 +440,11 @@
       <h3>set</h3>
       <p>std.set - unordered set of unique strings Backed by the same hash table as std.map, so lookups are O(1) on average and items are copied on insert (the caller's string lifetime does not matter).</p>
       <span class="count">14 exports</span>
+    </a>
+    <a href="sharedmap.html" class="module-card">
+      <h3>sharedmap</h3>
+      <p>std.sharedmap — the shared map, from Aether: a token-guarded map of strings a host fills with a hosted language's inputs and reads its outputs back from (a guest bridge's aether_map_get / aether_map_put, a sandboxed child through a shared memory block).</p>
+      <span class="count">12 exports</span>
     </a>
     <a href="signal.html" class="module-card">
       <h3>signal</h3>
@@ -1302,12 +1308,26 @@
       <li class="function-item" data-name="next"><a href="guest.html#next"><span class="fn-name">next</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="close"><a href="guest.html#close"><span class="fn-name">close</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="audit"><a href="guest.html#audit"><span class="fn-name">audit</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="invoke"><a href="guest.html#invoke"><span class="fn-name">invoke</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="end"><a href="guest.html#end"><span class="fn-name">end</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="result"><a href="guest.html#result"><span class="fn-name">result</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="is_exported"><a href="guest.html#is_exported"><span class="fn-name">is_exported</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="is_serving"><a href="guest.html#is_serving"><span class="fn-name">is_serving</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="run_script"><a href="guest.html#run_script"><span class="fn-name">run_script</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="call_export"><a href="guest.html#call_export"><span class="fn-name">call_export</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="json_string"><a href="guest.html#json_string"><span class="fn-name">json_string</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="printable"><a href="guest.html#printable"><span class="fn-name">printable</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="level_name"><a href="guest.html#level_name"><span class="fn-name">level_name</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="MAX_FRAME"><a href="guest.html#MAX_FRAME"><span class="fn-name">MAX_FRAME</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="DEADLINE_MS"><a href="guest.html#DEADLINE_MS"><span class="fn-name">DEADLINE_MS</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="GRACE_MS"><a href="guest.html#GRACE_MS"><span class="fn-name">GRACE_MS</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="MAX_EXPORTS"><a href="guest.html#MAX_EXPORTS"><span class="fn-name">MAX_EXPORTS</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="MAX_EXPORT_NAME"><a href="guest.html#MAX_EXPORT_NAME"><span class="fn-name">MAX_EXPORT_NAME</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="SCRIPT"><a href="guest.html#SCRIPT"><span class="fn-name">SCRIPT</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="SERVING"><a href="guest.html#SERVING"><span class="fn-name">SERVING</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="INVOKING"><a href="guest.html#INVOKING"><span class="fn-name">INVOKING</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="ENDING"><a href="guest.html#ENDING"><span class="fn-name">ENDING</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="CANCELLED"><a href="guest.html#CANCELLED"><span class="fn-name">CANCELLED</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="fnv32"><a href="hash.html#fnv32"><span class="fn-name">fnv32</span><span class="fn-module">hash</span></a></li>
       <li class="function-item" data-name="fnv64"><a href="hash.html#fnv64"><span class="fn-name">fnv64</span><span class="fn-module">hash</span></a></li>
       <li class="function-item" data-name="murmur3_32"><a href="hash.html#murmur3_32"><span class="fn-name">murmur3_32</span><span class="fn-module">hash</span></a></li>
@@ -2606,6 +2626,18 @@
       <li class="function-item" data-name="items_free"><a href="set.html#items_free"><span class="fn-name">items_free</span><span class="fn-module">set</span></a></li>
       <li class="function-item" data-name="items_size"><a href="set.html#items_size"><span class="fn-name">items_size</span><span class="fn-module">set</span></a></li>
       <li class="function-item" data-name="items_get"><a href="set.html#items_get"><span class="fn-name">items_get</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="new"><a href="sharedmap.html#new"><span class="fn-name">new</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="token"><a href="sharedmap.html#token"><span class="fn-name">token</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="put"><a href="sharedmap.html#put"><span class="fn-name">put</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="get"><a href="sharedmap.html#get"><span class="fn-name">get</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="has"><a href="sharedmap.html#has"><span class="fn-name">has</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="count"><a href="sharedmap.html#count"><span class="fn-name">count</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="key_at"><a href="sharedmap.html#key_at"><span class="fn-name">key_at</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="value_at"><a href="sharedmap.html#value_at"><span class="fn-name">value_at</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="freeze"><a href="sharedmap.html#freeze"><span class="fn-name">freeze</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="free"><a href="sharedmap.html#free"><span class="fn-name">free</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="guest_put"><a href="sharedmap.html#guest_put"><span class="fn-name">guest_put</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="MAX_ENTRIES"><a href="sharedmap.html#MAX_ENTRIES"><span class="fn-name">MAX_ENTRIES</span><span class="fn-module">sharedmap</span></a></li>
       <li class="function-item" data-name="SIGHUP"><a href="signal.html#SIGHUP"><span class="fn-name">SIGHUP</span><span class="fn-module">signal</span></a></li>
       <li class="function-item" data-name="SIGINT"><a href="signal.html#SIGINT"><span class="fn-name">SIGINT</span><span class="fn-module">signal</span></a></li>
       <li class="function-item" data-name="SIGQUIT"><a href="signal.html#SIGQUIT"><span class="fn-name">SIGQUIT</span><span class="fn-module">signal</span></a></li>

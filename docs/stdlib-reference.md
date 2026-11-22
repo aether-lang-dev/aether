@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (92 modules)
+## Module index (93 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -36,7 +36,7 @@ header comment is the authoritative description.
 | `std.file` | File operations, re-exported from `std.fs`. | 16 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 176 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
-| `std.guest` | A guest in a sandboxed child process and the protocol to it: the host's side, with the worker's side in `std.guest.child`. | 22 | [guide](../std/guest/README.md) · [source](../std/guest/module.ae) |
+| `std.guest` | A guest in a sandboxed child process and the protocol to it: the host's side, with the worker's side in `std.guest.child`. | 36 | [guide](../std/guest/README.md) · [source](../std/guest/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 33 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 171 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
@@ -77,6 +77,7 @@ header comment is the authoritative description.
 | `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.sed` | FreeBSD's sed as a library: compile a script once, run it over strings, streams or granted files. | 23 | [guide](../std/sed/README.md) · [source](../std/sed/module.ae) |
 | `std.set` | Unordered set of unique strings. | 14 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
+| `std.sharedmap` | Token-guarded map of strings, by length, that a host shares with a guest bridge or a sandboxed child. | 12 | [guide](../std/sharedmap/README.md) · [source](../std/sharedmap/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
 | `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 5 | [guide](../std/snapshot/README.md) · [source](../std/snapshot/module.ae) |
 | `std.sort` | In-place sort and binary search over packed numeric arrays and string arrays, with optional comparators. | 12 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |

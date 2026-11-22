@@ -1,0 +1,85 @@
+// A local named like a type the generated C declares by that name (a
+// struct, an enum, a message, an actor) does not hide the type from C.
+//
+// From its binding on, the name is the local, as the checker resolves it.
+// C put the variable in scope over the typedef, so a later struct literal
+// or a local of the type named the variable: `o = Other { q: "y" }` after
+// `Other = n` was gcc "must use 'struct' tag to refer to type 'Other'"; a
+// local of an enum type a call returns, after a local named like the enum,
+// was "expected ';'". Codegen now gives such a local a C name of its own.
+// The checker took the local for the type a struct literal names, and for
+// the type of a field read (`o.q` "has no type"); it now finds the type.
+//
+// The neighbours: a parameter named like the struct (given by name at the
+// call), the type used before the binding (heap.new keeps the struct), a
+// closure capturing the local, an actor handler's local.
+
+extern exit(code: int)
+
+struct Other {
+    q: string
+}
+
+message Ping { n: int }
+
+enum Color { Red, Green }
+
+hue() -> Color {
+    return Color.Green
+}
+
+typed_local(n: int) -> string {
+    Other = n
+    o = Other { q: "t${Other}" }
+    return o.q
+}
+
+by_param(Other: int) -> string {
+    o = Other { q: "p${Other}" }
+    return o.q
+}
+
+before_and_after(n: int) -> string {
+    p = heap.new(Other)
+    p.q = "h"
+    Other = n
+    o = Other { q: "m${Other}" }
+    show = || {
+        return "c${Other}"
+    }
+    c = hue()
+    Color = 7
+    d = hue()
+    r = "${p.q} ${o.q} ${call(show)} ${c == d} ${Color}"
+    heap.free(p)
+    return r
+}
+
+actor Keeper {
+    state seen = ""
+    receive {
+        Ping(n) -> {
+            Other = n
+            o = Other { q: "a${Other}" }
+            seen = o.q
+        }
+    }
+}
+
+check(what: string, got: string, want: string) {
+    if got != want {
+        println("FAIL: ${what}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+main() {
+    check("typed local", typed_local(1), "t1")
+    check("parameter", by_param(Other: 2), "p2")
+    check("before and after", before_and_after(3), "h m3 c3 true 7")
+    k = spawn(Keeper())
+    k ! Ping { n: 4 }
+    wait_for_idle()
+    check("actor handler", k.seen, "a4")
+    println("PASS: a local named like a type does not hide it from C")
+}

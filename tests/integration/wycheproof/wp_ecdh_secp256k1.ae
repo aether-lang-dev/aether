@@ -137,6 +137,7 @@ main() {
         }
         gi = gi + 1
     }
+    json.free(root)
     println("wycheproof ecdh_secp256k1_webcrypto: ${valid_ok} valid ok, ${refused} invalid refused, ${failed} failed")
     if failed > 0 { exit(1) }
     println("ALL PASS")

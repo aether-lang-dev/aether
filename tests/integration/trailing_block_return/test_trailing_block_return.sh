@@ -14,9 +14,10 @@
 # value from a block on one path and runs off its end on another is the
 # missing-return error, not a C error.
 #
-# clash.ae: such a call is the receiver's function before a function of the
-# program or a local of the same name, in inference, the settle, the module
-# prune and codegen alike, as the checker resolves it.
+# clash.ae: a function of the program or a local of the same name comes
+# before the receiver's function, in inference, the settle, the module prune
+# and codegen alike, as the checker resolves it (the program's own names
+# shadow the receiver, #333).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -52,7 +53,7 @@ if [ $rc -ne 0 ]; then
     echo "$out" | sed 's/^/        /'
     fails=$((fails + 1))
 else
-    for want in "local 3" "clash 1001 top 104"; do
+    for want in "local 3" "clash 1004 top 15 1001 top"; do
         case "$out" in
             *"$want"*) ;;
             *) echo "  [FAIL] trailing_block_return: no \"$want\" in clash.ae's:"

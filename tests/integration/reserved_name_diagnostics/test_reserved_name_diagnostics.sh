@@ -92,6 +92,7 @@ main() {
     l = list.new()
     list.add(l, "x")
     each(l, |s: string| { println("saw ${s}") })
+    list.free(l)
 }
 AE
 got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/each.ae" 2>&1 | tail -1)"

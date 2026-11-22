@@ -208,6 +208,25 @@ void tc_lib_dir_append(const char* spec) {
     }
 }
 
+/* AETHER_LIB_DIR joins the search chain where --lib would have, when no
+ * --lib was typed: one rule for every lookup that walks tc.lib_dirs, the
+ * binary-library probe (ae_find_binimport_so) as much as the source probe,
+ * the cache key and the compiler's flags. Decided once per command, before
+ * [dependencies] and the binary imports' stub directory join the chain:
+ * asked later (it was asked first by the cache key, after the binary-import
+ * prepass), the variable was never searched for a binary library, which
+ * `--lib` found by its file name (lib<name>.so), and a project with
+ * dependencies dropped it altogether, since any entry there counted as a
+ * typed --lib. */
+void tc_lib_dirs_seed_from_env(void) {
+    static int decided = 0;
+    if (decided) return;
+    decided = 1;
+    if (tc.lib_dir_count > 0) return;
+    const char* env = getenv("AETHER_LIB_DIR");
+    if (env && *env) tc_lib_dir_append(env);
+}
+
 /* The ` --lib "<dir>"` search-path flags (one per `tc.lib_dirs` entry), in a
  * string the caller frees. Same one-flag-per-entry shape build_aetherc_cmd
  * emits; see the #413 rationale there. A diagnostic/inspect aetherc run must
@@ -3184,6 +3203,9 @@ static int dep_graph_enqueue(DepNode* nodes, int* count, TomlDocument* root_doc,
  * resolving to two places); the caller stops rather than build against one
  * of them. */
 int ae_resolve_dependencies(void) {
+    /* The typed --lib flags, or else AETHER_LIB_DIR, come before what the
+     * manifest adds. */
+    tc_lib_dirs_seed_from_env();
     if (!path_exists(ae_manifest_path())) return 0;
     TomlDocument* doc = toml_parse_file(ae_manifest_path());
     if (!doc) return 0;
@@ -13593,12 +13615,7 @@ static int cmd_lib_path(int argc, char** argv) {
      * (#3504). Walk the resolved chain directly so the output matches what
      * the real toolchain would see byte-for-byte (same normalisation, same
      * dedup, same trailing-slash rule). */
-    if (tc.lib_dir_count == 0) {
-        const char* env = getenv("AETHER_LIB_DIR");
-        if (env && *env) {
-            tc_lib_dir_append(env);
-        }
-    }
+    tc_lib_dirs_seed_from_env();
     /* Force LF-only output. On Windows, the C runtime opens stdout
      * in text mode by default, converting every `\n` to `\r\n`.
      * That breaks string-equality comparisons in shell tests

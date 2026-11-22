@@ -65,12 +65,9 @@ count_text(ud: ptr, text: ptr, len: int) {
 
 // ---- Helpers --------------------------------------------------------
 
-// Was exit(1) on first failure; now reports through the framework so the
-// remaining cases still run and report.
-fail(msg: string) {
-    println("FAIL: ${msg}")
-    exit(1)
-}
+// `fail(msg)` in the `it` blocks below is std.spec's, through the block's
+// receiver: the program defines no `fail` of its own. One of its own would
+// come first (#333), and the exit(1) the probe had would end the run.
 
 new_counters() -> *ParseCounters {
     c = malloc(sizeof(ParseCounters)) as *ParseCounters

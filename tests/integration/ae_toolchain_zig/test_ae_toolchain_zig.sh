@@ -125,13 +125,18 @@ last="$(tail -n 1 "$TMP/out" | tr -d '\r')"
 expect="$(native "$(cd "$INST" && pwd -P)")/$ZIGEXE"
 [ "$last" = "$expect" ] || fail "the last stdout line is '$last', not '$expect'"
 
-# 4. Another version fails --check.
+# 4. Another version fails --check. A fresh file, not a copy over the one
+# already run: macOS kills a Mach-O rewritten in place (its code-signature
+# cache is for the old bytes), which made --check say "failed" about one in
+# three runs instead of "reports 0.0.1".
+rm -f "$INST/$ZIGEXE"
 cp "$TMP/bin/old/$ZIGEXE" "$INST/$ZIGEXE"
 AETHER_HOME="$(native "$AH")" "$AE" toolchain zig --check >"$TMP/out" 2>"$TMP/err" \
     && fail "--check passed a zig that reports 0.0.1"
 grep -q "reports 0.0.1" "$TMP/err" || fail "--check did not name the version it found" "$TMP/err"
 
 # 5. No stamp fails --check.
+rm -f "$INST/$ZIGEXE"
 cp "$TMP/bin/good/$ZIGEXE" "$INST/$ZIGEXE"
 rm -f "$INST/.ae-toolchain"
 AETHER_HOME="$(native "$AH")" "$AE" toolchain zig --check >"$TMP/out" 2>"$TMP/err" \

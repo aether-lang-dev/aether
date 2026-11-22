@@ -1,0 +1,30 @@
+// std.guest.child exports serve_exports(h, dispatch). A worker that wrote its
+// own serve_exports(vm, h) before that export existed still means its own in
+// a child.run(h) callback: the program's name comes first. On
+// batch/guest-invoke alone this built, and panicked in the module's function.
+
+import std.guest.child
+import std.io
+import std.ipc
+import std.os
+
+struct Ctx {
+    n: int
+}
+
+serve_exports(vm: ptr, h: *child.Host) {
+    println("local serve_exports")
+}
+
+main() {
+    host, ch, _ = os.socketpair()
+    h = child.attach(ch, "own")
+    c = Ctx { n: 1 }
+    vm = &c
+    child.run(h) callback {
+        serve_exports(vm, h)
+    }
+    child.free(h)
+    io.fd_close(host)
+    io.fd_close(ch)
+}

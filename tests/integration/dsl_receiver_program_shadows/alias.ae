@@ -1,0 +1,15 @@
+// The program's own function comes before the receiver's when the module
+// is imported under an alias.
+
+import dsl as d
+
+tag(a: int) {
+    println("main.tag ${a}")
+}
+
+main() {
+    d.run(1) callback {
+        tag(1)
+        say(1, 1)
+    }
+}

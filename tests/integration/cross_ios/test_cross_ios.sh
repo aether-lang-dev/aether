@@ -25,9 +25,17 @@
 # Skips off macOS, or when Xcode's iPhoneOS SDK is absent (the Command Line
 # Tools alone do not carry one).
 #
-# NB on cost: an executable/dylib build recompiles the whole runtime and
-# stdlib for the target (~90 TUs, no per-target archive cache yet), so this
-# does exactly TWO of those. Everything that can be asserted on a single-TU
+# sweep-timeout: 900
+# (The line above raises this test's limit in the sweep above its 420 s
+# default; see tests/scripts/run_ae_sh_dir.sh.)
+#
+# NB on cost: an executable, dylib or static archive build recompiles the
+# whole runtime and stdlib for the target (~90 TUs, no per-target archive
+# cache yet), so this does exactly THREE of those. On the macOS x86_64
+# runner each takes 80 to 130 s, 283 s for the whole test on a good run and
+# 393 s on a slow one (PR #3795): the budget a 420 s default leaves is gone
+# when the first of the three is slow, which is what the "still running
+# after 77s (limit 77s)" report was: 77 s was what was left of the 420 s. Everything that can be asserted on a single-TU
 # --emit=obj is, because that path is ~100x cheaper and carries the same
 # LC_BUILD_VERSION the linked artifacts do.
 
@@ -92,7 +100,7 @@ fi
 # 420 s only when most are quick, and on a slow macOS x86_64 runner they
 # were not (2026-11-12). The sweep then killed the test mid-step, before
 # any step reached its own limit, and the hang went unexplained again.
-STEP_LIMIT="${AE_IOS_STEP_TIMEOUT:-180}"
+STEP_LIMIT="${AE_IOS_STEP_TIMEOUT:-300}"
 DEADLINE_MARGIN=30
 
 # step_limit: the seconds the next step may take.

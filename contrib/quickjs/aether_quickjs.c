@@ -24,13 +24,27 @@
  * where args is a JS array of the arguments. It returns a handle the call
  * then owns (0 for undefined), or -1 after qjs_throw.
  *
- * Handles are ints >= 1; -1 reports a JS exception, whose text qjs_error
- * gives. A runtime is used from one thread at a time.
+ * Handles are ints >= 1; -1 reports a JS exception, whose text
+ * qjs_error_data / qjs_error_len give. A runtime is used from one thread at
+ * a time.
+ *
+ * Text crosses by its length, both ways. Every string Aether hands in (a
+ * script, a filename, a property name, a message, JSON) is an `@aether
+ * string`: the C side reads its bytes and length (aether_string_data,
+ * aether_string_length), so a NUL inside it is a character, not the end. A
+ * filename is the one exception the engine forces (JS_Eval takes it as a C
+ * string): one holding a NUL is refused, never cut. Every string handed out
+ * (to_string, to_json, an error's text) is a byte count beside the bytes,
+ * NULs kept, and is valid UTF-8: the engine writes a lone surrogate as its
+ * WTF-8 bytes (ED A0..BF xx), and own_utf8_ turns each into U+FFFD (EF BF
+ * BD, the same three bytes' room). JSON is the lossless route for one
+ * (JSON.stringify writes it as a \uXXXX escape). Bytes going in that are
+ * not UTF-8 become U+FFFD, the engine's rule (JS_NewStringLen).
  *
  * Interrupts are the host's: each runtime holds an absolute deadline on the
  * monotonic clock (qjs_now_ns), which the host sets and moves itself and
- * which no entry resets, and up to two std.sync cells, cancel and stop, that
- * any thread may set. QuickJS polls interrupt_ while JavaScript runs, on the
+ * which no entry resets, a budget of interrupt polls (work, not time), and up
+ * to two std.sync cells, cancel and stop, that any thread may set. QuickJS polls interrupt_ while JavaScript runs, on the
  * runtime's own thread; it reads only this runtime's fields, the cells with
  * an acquire load. There is no process-wide state.
  */
@@ -45,6 +59,10 @@
 #include <time.h>
 #endif
 
+/* An `@aether string` parameter: the string's bytes and length (std.string). */
+extern const char *aether_string_data(const void *s);
+extern size_t aether_string_length(const void *s);
+
 /* Layout of the compiler's _AeClosure ({fn, env}); called as fn(env, args...). */
 typedef struct { void *fn; void *env; } AeQjsClosure;
 extern void aether_closure_env_free(void *env);
@@ -52,7 +70,8 @@ extern void aether_closure_env_free(void *env);
 extern int64_t aether_sync_atomic_load(void *cell);
 
 /* qjs_interrupted's answers: why JavaScript was stopped. */
-enum { QJS_INTERRUPT_NONE = 0, QJS_INTERRUPT_DEADLINE = 1, QJS_INTERRUPT_CANCEL = 2, QJS_INTERRUPT_STOP = 3 };
+enum { QJS_INTERRUPT_NONE = 0, QJS_INTERRUPT_DEADLINE = 1, QJS_INTERRUPT_CANCEL = 2, QJS_INTERRUPT_STOP = 3,
+       QJS_INTERRUPT_BUDGET = 4 };
 
 typedef struct AeQjs {
     JSRuntime *rt;
@@ -68,8 +87,10 @@ typedef struct AeQjs {
     int64_t deadline_ns;    /* absolute, on qjs_now_ns's clock; 0 = none */
     void *cancel_cell;      /* std.sync cell, the host's; nonzero stops JS */
     void *stop_cell;        /* likewise, reported apart from a cancel */
+    int64_t budget;         /* interrupt polls left; -1 = no budget */
     int interrupted;        /* the first QJS_INTERRUPT_* since cleared */
-    char *err;              /* the last exception, as text */
+    char *err;              /* the last exception, as text (NUL-terminated, may hold NULs) */
+    size_t err_len;         /* ... and its byte count */
     JSValue exc;            /* ... and as the value itself, for qjs_rethrow */
     int has_exc;
     char *scratch;          /* the last string handed out */
@@ -92,15 +113,28 @@ int64_t qjs_now_ns(void) {
 #endif
 }
 
-/* QuickJS's interrupt poll (every few thousand operations, on the thread
- * running the JavaScript). A cancel is reported over a passed deadline, and
- * both over a stop; the first reason sticks until qjs_clear_interrupted. */
+/* QuickJS's interrupt poll, on the thread running the JavaScript. quickjs-ng
+ * (0.18.0) calls it when its per-context counter, JS_INTERRUPT_COUNTER_INIT
+ * (10000), runs out: the counter is decremented at every JavaScript function
+ * call, every jump the interpreter takes or tests (a loop's back edge, an
+ * `if`), every element step of the built-ins that iterate (Array.prototype's
+ * find, map, sort, ...) and every step of a proxy chain; the regexp engine
+ * polls on its own counter of 10000 backtracking steps. Each call here spends
+ * one of the poll budget's polls. A cancel is reported over a passed deadline,
+ * a deadline over a spent budget, and all three over a stop; the first reason
+ * sticks until qjs_clear_interrupted. */
 static int interrupt_(JSContext *ctx, void *opaque) {
     AeQjs *q = (AeQjs *)opaque;
     int why = QJS_INTERRUPT_NONE;
+    int spent = 0;
     (void)ctx;
+    if (q->budget >= 0) {
+        if (q->budget > 0) q->budget--;
+        spent = q->budget == 0;
+    }
     if (q->cancel_cell && aether_sync_atomic_load(q->cancel_cell) != 0) why = QJS_INTERRUPT_CANCEL;
     else if (q->deadline_ns != 0 && qjs_now_ns() >= q->deadline_ns) why = QJS_INTERRUPT_DEADLINE;
+    else if (spent) why = QJS_INTERRUPT_BUDGET;
     else if (q->stop_cell && aether_sync_atomic_load(q->stop_cell) != 0) why = QJS_INTERRUPT_STOP;
     if (why == QJS_INTERRUPT_NONE) return 0;
     if (q->interrupted == QJS_INTERRUPT_NONE) q->interrupted = why;
@@ -123,15 +157,63 @@ static void set_err_(AeQjs *q, const char *s) {
     drop_exc_(q);
     free(q->err);
     q->err = strdup(s ? s : "");
+    q->err_len = q->err ? strlen(q->err) : 0;
 }
 
-static const char *hand_out_(AeQjs *q, const char *s, size_t n) {
+/* The engine writes a lone surrogate as its three WTF-8 bytes, ED A0..BF
+ * 80..BF, which no valid UTF-8 holds; each becomes U+FFFD, EF BF BD, in
+ * place. A surrogate pair the engine has already joined into one four-byte
+ * character. */
+static void lone_surrogates_to_fffd_(char *b, size_t n) {
+    unsigned char *u = (unsigned char *)b;
+    for (size_t i = 0; i + 2 < n; i++) {
+        if (u[i] == 0xED && u[i + 1] >= 0xA0 && u[i + 1] <= 0xBF && (u[i + 2] & 0xC0) == 0x80) {
+            u[i] = 0xEF; u[i + 1] = 0xBF; u[i + 2] = 0xBD;
+            i += 2;
+        }
+    }
+}
+
+/* String(v) as UTF-8 in a buffer of our own (malloc'd, NUL-terminated, the
+ * byte count in *n, NULs kept, lone surrogates as U+FFFD); NULL with the
+ * exception pending when the conversion threw, or with none pending when
+ * there was no memory for the copy. */
+static char *own_utf8_(AeQjs *q, JSValueConst v, size_t *n) {
+    size_t len = 0;
+    const char *c = JS_ToCStringLen(q->ctx, &len, v);
+    *n = 0;
+    if (!c) return NULL;
+    char *b = (char *)malloc(len + 1);
+    if (b) {
+        memcpy(b, c, len);
+        b[len] = '\0';
+        lone_surrogates_to_fffd_(b, len);
+        *n = len;
+    }
+    JS_FreeCString(q->ctx, c);
+    return b;
+}
+
+/* Hand out a buffer from own_utf8_ as the runtime's scratch (freeing the last). */
+static void hand_out_(AeQjs *q, char *b) {
     free(q->scratch);
-    q->scratch = (char *)malloc(n + 1);
-    if (!q->scratch) return "";
-    memcpy(q->scratch, s, n);
-    q->scratch[n] = '\0';
-    return q->scratch;
+    q->scratch = b;
+}
+
+/* An `@aether string`'s bytes and length. */
+static const char *bytes_(const void *s, size_t *n) {
+    *n = s ? aether_string_length(s) : 0;
+    const char *d = s ? aether_string_data(s) : NULL;
+    if (!d) { *n = 0; return ""; }
+    return d;
+}
+
+/* A property key from a name's bytes, NULs and all; JS_ATOM_NULL (with an
+ * exception pending) when there is no memory for it. */
+static JSAtom atom_(AeQjs *q, const void *name) {
+    size_t n;
+    const char *d = bytes_(name, &n);
+    return JS_NewAtomLen(q->ctx, d, n);
 }
 
 /* ---- the handle table ---------------------------------------------------- */
@@ -184,19 +266,37 @@ static int fail_(AeQjs *q) {
         set_err_(q, "InternalError: out of memory (the runtime's memory limit)");
         return -1;
     }
-    const char *msg = JS_ToCString(q->ctx, e);
-    char *text = strdup(msg ? msg : "exception");
-    if (msg) JS_FreeCString(q->ctx, msg);
-    if (JS_IsError(e)) {
+    /* String(e), then a newline and e.stack when e is an Error with one: by
+     * their lengths, so a NUL in the message is kept. A thrown object whose
+     * toString throws in turn is "exception" (that second exception is
+     * dropped: the value recorded is the first). */
+    size_t tn = 0;
+    char *text = own_utf8_(q, e, &tn);
+    if (!text) {
+        if (JS_HasException(q->ctx)) JS_FreeValue(q->ctx, JS_GetException(q->ctx));
+        text = strdup("exception");
+        tn = text ? strlen(text) : 0;
+    }
+    if (text && JS_IsError(e)) {
         JSValue st = JS_GetPropertyStr(q->ctx, e, "stack");
         if (JS_IsString(st)) {
-            const char *s = JS_ToCString(q->ctx, st);
-            if (s && *s) {
-                size_t n = strlen(text) + strlen(s) + 2;
-                char *both = (char *)malloc(n);
-                if (both) { snprintf(both, n, "%s\n%s", text, s); free(text); text = both; }
+            size_t sn = 0;
+            char *s = own_utf8_(q, st, &sn);
+            if (s && sn > 0) {
+                char *both = (char *)malloc(tn + 1 + sn + 1);
+                if (both) {
+                    memcpy(both, text, tn);
+                    both[tn] = '\n';
+                    memcpy(both + tn + 1, s, sn);
+                    both[tn + 1 + sn] = '\0';
+                    free(text);
+                    text = both;
+                    tn = tn + 1 + sn;
+                }
             }
-            if (s) JS_FreeCString(q->ctx, s);
+            free(s);
+        } else if (JS_IsException(st)) {
+            JS_FreeValue(q->ctx, JS_GetException(q->ctx));
         }
         JS_FreeValue(q->ctx, st);
     }
@@ -206,6 +306,7 @@ static int fail_(AeQjs *q) {
     q->has_exc = 1;
     free(q->err);
     q->err = text;
+    q->err_len = text ? tn : 0;
     return -1;
 }
 
@@ -229,6 +330,7 @@ void *qjs_new(int memory_kb, int stack_kb) {
     q->ctx = JS_NewContext(q->rt);
     if (!q->ctx) { JS_FreeRuntime(q->rt); free(q); return NULL; }
     JS_SetContextOpaque(q->ctx, q);
+    q->budget = -1;
     q->err = strdup("");
     return q;
 }
@@ -264,12 +366,39 @@ int64_t qjs_deadline_ns(void *qp) { return ((AeQjs *)qp)->deadline_ns; }
 void qjs_set_cancel_cell(void *qp, void *cell) { ((AeQjs *)qp)->cancel_cell = cell; }
 void qjs_set_stop_cell(void *qp, void *cell) { ((AeQjs *)qp)->stop_cell = cell; }
 
+/* A budget of interrupt polls: each poll spends one, and the poll that leaves
+ * none stops JavaScript (QJS_INTERRUPT_BUDGET), in this entry and every later
+ * one, until the host sets it again or clears it (-1). A budget of n stops
+ * JavaScript at its nth poll from now: after between (n - 1) * 10000 and
+ * n * 10000 of the counted steps interrupt_ describes (a fresh runtime polls
+ * at its first step, so exactly (n - 1) * 10000 then). 0 is spent: the next
+ * poll stops. Below 0, no budget. Set by the runtime's thread. */
+void qjs_set_poll_budget(void *qp, int64_t polls) { ((AeQjs *)qp)->budget = polls < 0 ? -1 : polls; }
+int64_t qjs_poll_budget(void *qp) { return ((AeQjs *)qp)->budget; }
+
 /* Why JavaScript was first interrupted since the last clear: a QJS_INTERRUPT_*. */
 int qjs_interrupted(void *qp) { return ((AeQjs *)qp)->interrupted; }
 void qjs_clear_interrupted(void *qp) { ((AeQjs *)qp)->interrupted = QJS_INTERRUPT_NONE; }
 
-/* The text of the last exception (empty if none). */
-const char *qjs_error(void *qp) { AeQjs *q = (AeQjs *)qp; return q && q->err ? q->err : ""; }
+/* The text of the last exception (empty if none): its bytes, which may hold
+ * NULs, and their count. Valid until the next failure on this runtime. */
+const void *qjs_error_data(void *qp) { AeQjs *q = (AeQjs *)qp; return q && q->err ? q->err : ""; }
+int qjs_error_len(void *qp) {
+    AeQjs *q = (AeQjs *)qp;
+    if (!q || !q->err) return 0;
+    return q->err_len > (size_t)0x7fffffff ? 0x7fffffff : (int)q->err_len;
+}
+
+/* The value the last failure threw (an eval, call, run_jobs or conversion),
+ * as a NEW handle the caller releases; it stays valid after later failures,
+ * which only change what the next call returns. 0 when the last failure had
+ * no value behind it: a host-side refusal (set_err_), or a heap too full to
+ * make the error. Runs no JavaScript. */
+int qjs_last_exception(void *qp) {
+    AeQjs *q = (AeQjs *)qp;
+    if (!q || !q->has_exc) return 0;
+    return put_(q, JS_DupValue(q->ctx, q->exc));
+}
 
 /* Handles currently held: 0 once a host has released everything it took. */
 int qjs_handles(void *qp) { return ((AeQjs *)qp)->live; }
@@ -286,13 +415,44 @@ int64_t qjs_memory_used(void *qp) {
 /* flags: 1 = a module (its result is a promise), 2 = strict, 4 = a global
  * script with top-level await (JS_EVAL_FLAG_ASYNC): its result is a promise
  * that settles to { value: <the script's completion value> }. */
-int qjs_eval(void *qp, const char *code, const char *filename, int flags) {
+int qjs_eval(void *qp, const void *code_s, const void *filename_s, int flags) {
     AeQjs *q = (AeQjs *)qp;
+    size_t n, fn;
+    const char *code = bytes_(code_s, &n);
+    const char *filename = bytes_(filename_s, &fn);
+    /* JS_Eval takes the filename as a C string: one holding a NUL would be
+     * a different, shorter name in every stack, so it is refused. */
+    if (memchr(filename, 0, fn)) { set_err_(q, "TypeError: eval: the filename holds a NUL"); return -1; }
     int f = (flags & 1) ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL;
     if (flags & 2) f |= JS_EVAL_FLAG_STRICT;
     if ((flags & 4) && !(flags & 1)) f |= JS_EVAL_FLAG_ASYNC;
+    /* The script is all n bytes, NULs too (the tokenizer reads a NUL before
+     * the end as a character). JS_Eval wants code[n] to be a NUL: a string
+     * always has one there, but a view into a longer one may not, so that
+     * case is copied. */
+    char *copy = NULL;
+    if (code[n] != '\0') {
+        copy = (char *)malloc(n + 1);
+        if (!copy) { set_err_(q, "InternalError: out of memory"); return -1; }
+        memcpy(copy, code, n);
+        copy[n] = '\0';
+        code = copy;
+    }
+    /* filename has a NUL at filename[fn], by the same rule, or came unbroken
+     * from a C string: either way it ends where the check above looked. */
+    char *fcopy = NULL;
+    if (filename[fn] != '\0') {
+        fcopy = (char *)malloc(fn + 1);
+        if (!fcopy) { free(copy); set_err_(q, "InternalError: out of memory"); return -1; }
+        memcpy(fcopy, filename, fn);
+        fcopy[fn] = '\0';
+        filename = fcopy;
+    }
     enter_(q);
-    return result_(q, JS_Eval(q->ctx, code, strlen(code), filename, f));
+    int r = result_(q, JS_Eval(q->ctx, code, n, filename, f));
+    free(copy);
+    free(fcopy);
+    return r;
 }
 
 /* Call fn with this and the elements of the array args (0: no arguments). */
@@ -371,7 +531,7 @@ static JSValue dispatch_(JSContext *ctx, JSValueConst this_val, int argc,
 
 /* A JS function named `name` that calls the Aether closure cb (the runtime
  * keeps the closure until qjs_free). */
-int qjs_function(void *qp, const char *name, int arity, AeQjsClosure cb) {
+int qjs_function(void *qp, const void *name_s, int arity, AeQjsClosure cb) {
     AeQjs *q = (AeQjs *)qp;
     if (q->nfns == q->capfns) {
         int ncap = q->capfns ? q->capfns * 2 : 16;
@@ -385,27 +545,44 @@ int qjs_function(void *qp, const char *name, int arity, AeQjsClosure cb) {
     JSValue f = JS_NewCFunctionData(q->ctx, dispatch_, arity, 0, 1, &data);
     JS_FreeValue(q->ctx, data);
     if (JS_IsException(f)) return fail_(q);
-    if (name && *name) {
-        JS_DefinePropertyValueStr(q->ctx, f, "name", JS_NewString(q->ctx, name), JS_PROP_CONFIGURABLE);
+    size_t nn;
+    const char *name = bytes_(name_s, &nn);
+    if (nn > 0) {
+        JS_DefinePropertyValueStr(q->ctx, f, "name", JS_NewStringLen(q->ctx, name, nn), JS_PROP_CONFIGURABLE);
     }
     return put_(q, f);
 }
 
-/* Throw from inside a host function; returns -1, which the function returns.
- * kind: "TypeError", "RangeError", "SyntaxError", "ReferenceError", else Error. */
-int qjs_throw(void *qp, const char *kind, const char *msg) {
-    AeQjs *q = (AeQjs *)qp;
-    if (strcmp(kind, "TypeError") == 0) JS_ThrowTypeError(q->ctx, "%s", msg);
-    else if (strcmp(kind, "RangeError") == 0) JS_ThrowRangeError(q->ctx, "%s", msg);
-    else if (strcmp(kind, "SyntaxError") == 0) JS_ThrowSyntaxError(q->ctx, "%s", msg);
-    else if (strcmp(kind, "ReferenceError") == 0) JS_ThrowReferenceError(q->ctx, "%s", msg);
-    else {
-        JSValue e = JS_NewError(q->ctx);
-        JS_DefinePropertyValueStr(q->ctx, e, "message", JS_NewString(q->ctx, msg),
-                                  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-        JS_Throw(q->ctx, e);
-    }
+static int is_kind_(const char *kind, size_t kn, const char *want) {
+    return strlen(want) == kn && memcmp(kind, want, kn) == 0;
+}
+
+/* Throw an error of `kind` whose message is the n bytes at msg, NULs kept:
+ * the error is made with an empty message (so its stack is captured here, as
+ * JS_Throw*Error would) and the message set by its length. -1. */
+static int throw_kind_(AeQjs *q, const char *kind, size_t kn, const char *msg, size_t n) {
+    JSValue e;
+    if (is_kind_(kind, kn, "TypeError")) e = JS_NewTypeError(q->ctx, "%s", "");
+    else if (is_kind_(kind, kn, "RangeError")) e = JS_NewRangeError(q->ctx, "%s", "");
+    else if (is_kind_(kind, kn, "SyntaxError")) e = JS_NewSyntaxError(q->ctx, "%s", "");
+    else if (is_kind_(kind, kn, "ReferenceError")) e = JS_NewReferenceError(q->ctx, "%s", "");
+    else e = JS_NewError(q->ctx);
+    if (JS_IsException(e)) return -1;   /* no memory: that exception is pending */
+    JS_DefinePropertyValueStr(q->ctx, e, "message", JS_NewStringLen(q->ctx, msg, n),
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_Throw(q->ctx, e);
     return -1;
+}
+
+/* Throw from inside a host function; returns -1, which the function returns.
+ * kind: "TypeError", "RangeError", "SyntaxError", "ReferenceError", else Error.
+ * The message goes in by its length. */
+int qjs_throw(void *qp, const void *kind_s, const void *msg_s) {
+    AeQjs *q = (AeQjs *)qp;
+    size_t kn, n;
+    const char *kind = bytes_(kind_s, &kn);
+    const char *msg = bytes_(msg_s, &n);
+    return throw_kind_(q, kind, kn, msg, n);
 }
 
 /* Throw the last exception again, the same value (its type, message and
@@ -422,18 +599,20 @@ int qjs_rethrow(void *qp) {
         JS_Throw(q->ctx, JS_DupValue(q->ctx, q->exc));
         return -1;
     }
+    /* A host refusal's text: set_err_'s, a C string. */
     const char *text = q->err && *q->err ? q->err : "Error: error";
+    size_t tn = strlen(text);
     static const char *const kinds[] = { "TypeError", "RangeError", "SyntaxError", "ReferenceError" };
     for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; i++) {
         size_t n = strlen(kinds[i]);
         if (strncmp(text, kinds[i], n) == 0 && text[n] == ':' && text[n + 1] == ' ')
-            return qjs_throw(q, kinds[i], text + n + 2);
+            return throw_kind_(q, kinds[i], n, text + n + 2, tn - n - 2);
     }
     if (strncmp(text, "InternalError: ", 15) == 0) {
         JS_ThrowInternalError(q->ctx, "%s", text + 15);
         return -1;
     }
-    return qjs_throw(q, "Error", text);
+    return throw_kind_(q, "Error", 5, text, tn);
 }
 
 /* ---- values -------------------------------------------------------------- */
@@ -452,36 +631,61 @@ int qjs_null(void *qp) { return put_((AeQjs *)qp, JS_NULL); }
 int qjs_bool(void *qp, int b) { return put_((AeQjs *)qp, JS_NewBool(((AeQjs *)qp)->ctx, b != 0)); }
 int qjs_int(void *qp, int n) { return put_((AeQjs *)qp, JS_NewInt32(((AeQjs *)qp)->ctx, n)); }
 int qjs_float(void *qp, double d) { return put_((AeQjs *)qp, JS_NewFloat64(((AeQjs *)qp)->ctx, d)); }
-int qjs_string(void *qp, const char *s) {
+/* A JavaScript string of all of s's bytes, NULs kept (UTF-8; a byte that is
+ * not is U+FFFD). */
+int qjs_string(void *qp, const void *s) {
     AeQjs *q = (AeQjs *)qp;
-    return result_(q, JS_NewString(q->ctx, s ? s : ""));
+    size_t n;
+    const char *d = bytes_(s, &n);
+    return result_(q, JS_NewStringLen(q->ctx, d, n));
 }
 int qjs_object(void *qp) { AeQjs *q = (AeQjs *)qp; return result_(q, JS_NewObject(q->ctx)); }
 int qjs_array(void *qp) { AeQjs *q = (AeQjs *)qp; return result_(q, JS_NewArray(q->ctx)); }
 
-/* JSON.parse(text); -1 with qjs_error on bad JSON. */
-int qjs_parse_json(void *qp, const char *text) {
+/* JSON.parse of all of text's bytes (a NUL in it is a parse error, as any
+ * stray character is); -1 with the error text on bad JSON. */
+int qjs_parse_json(void *qp, const void *text_s) {
     AeQjs *q = (AeQjs *)qp;
+    size_t n;
+    const char *text = bytes_(text_s, &n);
+    /* JS_ParseJSON, like JS_Eval, wants text[n] to be a NUL. */
+    char *copy = NULL;
+    if (text[n] != '\0') {
+        copy = (char *)malloc(n + 1);
+        if (!copy) { set_err_(q, "InternalError: out of memory"); return -1; }
+        memcpy(copy, text, n);
+        copy[n] = '\0';
+        text = copy;
+    }
     enter_(q);
-    return result_(q, JS_ParseJSON(q->ctx, text, strlen(text), "<json>"));
+    int r = result_(q, JS_ParseJSON(q->ctx, text, n, "<json>"));
+    free(copy);
+    return r;
 }
 
-/* JSON.stringify(h), or "" (with qjs_error) if it cannot be. */
-const char *qjs_to_json(void *qp, int h) {
+/* JSON.stringify(h) in the runtime's scratch (qjs_scratch): its byte count,
+ * or -1 when h has no JSON form (undefined, a function) or stringifying
+ * threw (then with the error text). */
+int qjs_to_json(void *qp, int h) {
     AeQjs *q = (AeQjs *)qp;
     enter_(q);
     JSValue s = JS_JSONStringify(q->ctx, get_(q, h), JS_UNDEFINED, JS_UNDEFINED);
-    if (JS_IsException(s)) { fail_(q); return ""; }
-    if (JS_IsUndefined(s)) return "";
+    if (JS_IsException(s)) return fail_(q);
+    if (JS_IsUndefined(s)) return -1;
     size_t n;
-    const char *c = JS_ToCStringLen(q->ctx, &n, s);
-    const char *out = c ? hand_out_(q, c, n) : "";
-    if (c) JS_FreeCString(q->ctx, c);
+    char *b = own_utf8_(q, s, &n);
     JS_FreeValue(q->ctx, s);
-    return out;
+    if (!b) {
+        if (JS_HasException(q->ctx)) return fail_(q);
+        set_err_(q, "InternalError: out of memory");
+        return -1;
+    }
+    if (n > (size_t)0x7fffffff) { free(b); set_err_(q, "RangeError: string too long"); return -1; }
+    hand_out_(q, b);
+    return (int)n;
 }
 
-/* String(h), as UTF-8 in the runtime's scratch (qjs_scratch, valid until the
+/* String(h), as valid UTF-8 (lone surrogates as U+FFFD) in the runtime's scratch (qjs_scratch, valid until the
  * next string this runtime hands out): its byte count, which may be 0 and may
  * count NUL bytes, or -1 with qjs_error when the conversion threw (a Symbol,
  * a throwing or interrupted toString) or there was no memory for it. */
@@ -489,16 +693,14 @@ int qjs_to_string(void *qp, int h) {
     AeQjs *q = (AeQjs *)qp;
     enter_(q);
     size_t n;
-    const char *c = JS_ToCStringLen(q->ctx, &n, get_(q, h));
-    if (!c) return fail_(q);
-    if (n > (size_t)0x7fffffff) {
-        JS_FreeCString(q->ctx, c);
-        set_err_(q, "RangeError: string too long");
+    char *b = own_utf8_(q, get_(q, h), &n);
+    if (!b) {
+        if (JS_HasException(q->ctx)) return fail_(q);
+        set_err_(q, "InternalError: out of memory");
         return -1;
     }
-    hand_out_(q, c, n);
-    JS_FreeCString(q->ctx, c);
-    if (!q->scratch) { set_err_(q, "InternalError: out of memory"); return -1; }
+    if (n > (size_t)0x7fffffff) { free(b); set_err_(q, "RangeError: string too long"); return -1; }
+    hand_out_(q, b);
     return (int)n;
 }
 
@@ -550,17 +752,27 @@ const char *qjs_type(void *qp, int h) {
 
 /* ---- properties ---------------------------------------------------------- */
 
-int qjs_get(void *qp, int obj, const char *name) {
+/* obj[name], the name by its length (a NUL in it is part of the key). */
+int qjs_get(void *qp, int obj, const void *name) {
     AeQjs *q = (AeQjs *)qp;
     enter_(q);
-    return result_(q, JS_GetPropertyStr(q->ctx, get_(q, obj), name));
+    JSAtom a = atom_(q, name);
+    if (a == JS_ATOM_NULL) return fail_(q);
+    JSValue v = JS_GetProperty(q->ctx, get_(q, obj), a);
+    JS_FreeAtom(q->ctx, a);
+    return result_(q, v);
 }
 
-/* obj[name] = val (val stays held by its handle too); 1, or -1. */
-int qjs_set(void *qp, int obj, const char *name, int val) {
+/* obj[name] = val (val stays held by its handle too), the name by its
+ * length; 1, or -1. */
+int qjs_set(void *qp, int obj, const void *name, int val) {
     AeQjs *q = (AeQjs *)qp;
     enter_(q);
-    if (JS_SetPropertyStr(q->ctx, get_(q, obj), name, JS_DupValue(q->ctx, get_(q, val))) < 0) return fail_(q);
+    JSAtom a = atom_(q, name);
+    if (a == JS_ATOM_NULL) return fail_(q);
+    int r = JS_SetProperty(q->ctx, get_(q, obj), a, JS_DupValue(q->ctx, get_(q, val)));
+    JS_FreeAtom(q->ctx, a);
+    if (r < 0) return fail_(q);
     return 1;
 }
 

@@ -45,15 +45,67 @@ main() {
   without leaving handles behind. One C dispatcher serves them all, so
   there is no C to write per function.
 - **Errors** come back as `(value, error)`: the error is the exception's
-  text with its stack, e.g. `TypeError: cannot read property 'x' of null`.
-  An `InternalError` (out of memory, interrupted, a host function that
-  failed without throwing) cannot be caught by the script, so it always
-  reaches the host.
+  text with its stack, e.g. `TypeError: cannot read property 'x' of null`,
+  for showing a person (`quickjs.last_error(q)` is the same text). An
+  `InternalError` (out of memory, interrupted, a host function that failed
+  without throwing) cannot be caught by the script, so it always reaches the
+  host.
+- **The exception itself**: `quickjs.last_exception(q) -> int` is the value
+  the last failure threw, as a new handle the caller releases, so its parts
+  are read apart rather than cut out of the text (a message can itself hold
+  a newline, or `"\n    at "`):
+
+  ```aether
+  _v, err = quickjs.eval(q, "throw new TypeError('bad\\nvalue')", "x.js")
+  e = quickjs.last_exception(q)          // 0: the failure had no value
+  m, _me = quickjs.get(q, e, "message")  // "bad\nvalue", whole
+  quickjs.release(q, m)
+  quickjs.release(q, e)
+  ```
+
+  Ownership: the handle is the caller's (release it, or return it from a
+  host function, which hands it to the engine; `dispose` frees it
+  otherwise). A later failure does not change a handle already taken, only
+  what the next call returns. It is 0 when the failure had no value behind
+  it: the host's own refusal (`TypeError: not a function`, a filename
+  holding a NUL) or a heap too full to make the error.
 - **Strings**: `quickjs.to_string(q, h) -> (string, string)` is
   `String(h)`, which runs a `toString` and can throw (a Symbol, a throwing
   or interrupted `toString`): `("", error)` then, so an empty string is told
-  apart from a failure. NUL bytes in a JavaScript string are kept.
-  `arg_string` stays a plain string, `""` when the argument has none.
+  apart from a failure. `arg_string` stays a plain string, `""` when the
+  argument has none. Strings cross by their length both ways: see below.
+
+## Strings, NUL and UTF-8
+
+An Aether `string` carries its length, and so does a JavaScript string, so
+every string crossing the module is carried whole, NUL bytes included:
+
+- **Going in**: `new_string`, `eval`, `eval_async`, `eval_module`,
+  `parse_json`, `throw_error`'s message, `function`'s name and the property
+  names of `get`, `set`, `get_global` and `set_global` all take every byte of
+  the string. A script holding a NUL runs all of it (a NUL inside a string
+  literal is a character; outside one it is a `SyntaxError`, as JavaScript
+  says), JSON holding one is a parse error, and a name holding one is a
+  different key from the name cut at it.
+- **Refused**: a filename holding a NUL. The engine takes it as a C string
+  and would put a shorter name in every stack, so `eval` returns
+  `(0, "TypeError: eval: the filename holds a NUL")` instead.
+- **Coming out**: `to_string`, `arg_string`, `to_json`, `last_error` and the
+  error half of every `(value, error)` keep every byte, a NUL in an error's
+  message included (`throw new Error('x\0y')` reads back as `Error: x\0y`).
+
+UTF-8 fidelity, explicitly:
+
+| what | in (Aether to JavaScript) | out (JavaScript to Aether) |
+|---|---|---|
+| a character outside the BMP (U+1F600) | 4 UTF-8 bytes become one code point, a surrogate pair | a surrogate pair becomes 4 UTF-8 bytes |
+| a lone surrogate (`'\uD800'`) | cannot be written in UTF-8 | U+FFFD (`EF BF BD`): what the module hands out is always valid UTF-8 |
+| bytes that are not UTF-8 (`"\xff"`) | U+FFFD for each bad byte (the engine's rule) | cannot happen |
+
+The engine itself writes a lone surrogate as its WTF-8 bytes (`ED A0 80`),
+which are not UTF-8; the module turns each into U+FFFD, the same three
+bytes' room. JSON is the lossless route for one: `to_json` writes it as an
+escape (`"\ud800"`), and `parse_json` reads that back as the surrogate.
 
 ## Bytes
 
@@ -89,8 +141,9 @@ sum = quickjs.function(q, "sum", 1, | q: ptr, this_h: int, args: int | {
 
 ## Limits
 
-- The interrupt, below: a deadline and cancel/stop cells that stop running
-  JavaScript with `InternalError: interrupted`; the runtime stays usable.
+- The interrupt, below: a deadline, a poll budget and cancel/stop cells that
+  stop running JavaScript with `InternalError: interrupted`; the runtime
+  stays usable.
 - `quickjs.runtime(memory_kb, ...)`: allocation past the cap fails with
   `InternalError: out of memory`.
 - `stack_kb` caps the JavaScript stack (`RangeError: Maximum call stack
@@ -109,24 +162,56 @@ resets it behind the host's back:
 - `quickjs.set_cancel_cell(q, cell)`: a `std.sync` cell
   (`sync.atomic_new(0)`) whose nonzero value stops JavaScript. Any thread may
   set it: an Esc key, a SIGINT watch, a watchdog.
+- `quickjs.set_poll_budget(q, polls)`: a budget of work rather than time
+  (below). `quickjs.clear_poll_budget(q)` removes it; `quickjs.poll_budget(q)`
+  reads what is left (0: spent, -1: none).
 - `quickjs.set_stop_cell(q, cell)`: a second cell, reported apart from a
   cancel, for a stop that is not the user's (a replay that diverged from
   its recording, whose outcome is what the script threw, not "canceled").
 - `quickjs.interrupted(q) -> int`: why JavaScript was first stopped since
   the runtime was made or `quickjs.clear_interrupted(q)`:
   `quickjs.INTERRUPTED_NONE` (0), `INTERRUPTED_DEADLINE` (1),
-  `INTERRUPTED_CANCEL` (2), `INTERRUPTED_STOP` (3). When several hold at
-  once, a cancel is reported over a deadline and both over a stop. The
-  reason stays while the host reads errors and values afterwards.
+  `INTERRUPTED_CANCEL` (2), `INTERRUPTED_STOP` (3), `INTERRUPTED_BUDGET` (4).
+  When several hold at once, a cancel is reported over a deadline, a
+  deadline over a spent budget, and all three over a stop. The reason stays
+  while the host reads errors and values afterwards.
 
 Every entry honours them: an eval, a call, `run_jobs`, and the conversions
 that can run JavaScript (`to_string` running a `toString`, `to_int` a
 `valueOf`, `get` a getter, `length`, `keys`). The interrupt is uncatchable
 by the script. In an `eval_async` script it is not a rejection: before the
 first `await` the eval returns the error, after it `run_jobs` does, and the
-promise stays pending. QuickJS polls every few thousand operations, so a
-busy loop stops within microseconds of a cell being set; one long native
-call (a huge regexp, say) is not interrupted midway.
+promise stays pending. QuickJS polls every 10,000 counted steps (see the poll budget below), so a
+busy loop stops within microseconds of a cell being set; a regexp polls on
+its own counter, so a runaway backtracking regexp is stopped too. One long
+native call that does not iterate in the engine (a huge
+`String.prototype.repeat`, say) is not interrupted midway.
+
+### A budget of work: polls
+
+A deadline stops a script after so much time, which a slow machine and a
+fast one reach after different amounts of work. `set_poll_budget(q, n)`
+stops it after so much work, the same everywhere: the unit is the engine's
+interrupt poll. quickjs-ng (0.18.0) polls once every 10,000 counted steps,
+where a step is a JavaScript function call, a jump the interpreter takes or
+tests (each loop iteration, each `if`), an element step of a built-in that
+iterates (`find`, `map`, `sort`, ...) or a step of a proxy chain; a regexp
+polls once every 10,000 of its own backtracking steps. Each poll spends one
+of the budget, and the poll that leaves none stops JavaScript. So:
+
+- a budget of `n` stops JavaScript after between `(n - 1) * 10000` and
+  `n * 10000` counted steps from when it is set; in a fresh runtime, which
+  polls at its first step, exactly `(n - 1) * 10000` (`for (;;) i++` takes
+  one step per iteration and stops at `i == 100000` under a budget of 11);
+- it is spent across entries, like the deadline, until the host sets it
+  again or clears it, and a spent budget (0) stops the next poll;
+- straight-line code with no call and no jump is not counted (it is finite),
+  and one native call that does not iterate in the engine (a huge
+  `String.prototype.repeat`, say) is one step.
+
+A budget in polls is what the Lua, Python and Tcl bridges call an
+instruction limit's `every`: a guest-language bridge can offer
+`vm_set_instruction_limit(vm, budget, every)` as `ceil(budget / 10000)` polls.
 
 A budget of JavaScript time across many entries, which pauses while the
 host waits on other work, is the host setting the deadline when JS starts

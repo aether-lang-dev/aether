@@ -1,11 +1,12 @@
-// A bare call in a builder's block is the receiver's function before it is
-// a function of the program, or a local, of the same name (#333), and every
-// pass resolves it so. The inference pass typed `note(n)` by the program's
-// `note`, an int, so `noting` was declared `int` around the bare `return`
-// the checker made of `return note(n)` (blk.note returns nothing): gcc
-// "'return' with no value, in function returning non-void". `sized` was
-// declared `const char*` around blk.size's int. The settle took a local
-// `note` for the callee, and the module prune dropped blk.note.
+// A bare call in a builder's block is a name the program binds itself, a
+// function of the program or a local, before it is the receiver's function
+// of the same name (#333), and every pass resolves it so: inference, the
+// settle of which functions return a value, the module prune and codegen,
+// as the checker does. The receiver was asked first, so `return note(n)`
+// was blk.note (returns nothing) here although the program defines `note`.
+// When the passes disagreed, `noting` was declared of the wrong type around
+// the return the checker made of it (gcc "'return' with no value, in
+// function returning non-void").
 
 import blk
 
@@ -17,22 +18,24 @@ size() -> string {
     return "top"
 }
 
-// blk.note returns nothing: so does this.
-noting(n: int) {
+// The program's note returns an int: so does this.
+noting(n: int) -> int {
     blk.run("noting") {
         return note(n)
     }
+    return 0
 }
 
-// blk.size returns an int: so does this.
-sized() {
+// The program's size returns a string: so does this.
+sized() -> string {
     blk.run("sized") {
         return size()
     }
+    return ""
 }
 
-// The block's receiver comes before a local of the function.
-noting_local(n: int) {
+// A local of the function comes before the block's receiver too.
+noting_local(n: int) -> int {
     note = | x: int | {
         return x * 3
     }
@@ -40,11 +43,12 @@ noting_local(n: int) {
     blk.run("local") {
         return note(n)
     }
+    return 0
 }
 
 main() {
-    noting(4)
+    a = noting(4)
     s = sized()
-    noting_local(5)
-    println("clash ${note(1)} ${size()} ${s}")
+    b = noting_local(5)
+    println("clash ${a} ${s} ${b} ${note(1)} ${size()}")
 }

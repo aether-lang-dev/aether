@@ -61,15 +61,20 @@ main() {
     berr = http.server_set_tls_backend(raw, backend)
     if berr != "" {
         println("FAIL: server_set_tls_backend: ${berr}")
+        http.server_free(raw)
         exit(1)
     }
     tls_err = http.server_set_tls(raw, os.getenv("CERT_PATH"), os.getenv("KEY_PATH"))
     if tls_err != "" {
         println("FAIL: server_set_tls: ${tls_err}")
+        // Freed before exit: a leak makes LeakSanitizer end the process
+        // before libc flushes stdout, and the line above is lost.
+        http.server_free(raw)
         exit(1)
     }
     if http.server_bind(raw, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
+        http.server_free(raw)
         exit(1)
     }
     println("READY ${http.server_port(raw)}")

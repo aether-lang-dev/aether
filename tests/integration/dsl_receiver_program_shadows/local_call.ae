@@ -1,0 +1,12 @@
+// A local the program binds hides the receiver's function of its name, as
+// it hides the program's own function outside a block: refused, naming
+// the receiver's function.
+
+import dsl
+
+main() {
+    tag = 3
+    dsl.run(1) callback {
+        tag(tag)
+    }
+}

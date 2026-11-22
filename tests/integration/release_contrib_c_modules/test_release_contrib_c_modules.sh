@@ -17,6 +17,11 @@
 # QuickJS amalgamations (a no-op when they are already in the tree); offline,
 # with neither there, the test skips. contrib.avcodec is checked where
 # FFmpeg's development libraries are installed, except on Windows (below).
+# sweep-timeout: 900
+# It stages a release and compiles the SQLite amalgamation and the contrib C
+# from source into it: 140 s of CPU on ae-x64 (Ubuntu 22.04, 4 cores) with a
+# cold cache, 393 s of wall time there while other jobs held the load at 11,
+# against the sweep's 420 s default, which it hit inside a full sweep.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

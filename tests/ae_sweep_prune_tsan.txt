@@ -24,6 +24,7 @@
 tests/integration/sandbox_
 tests/integration/contrib_host_stunt/
 tests/integration/std_guest/
+tests/integration/std_guest_invoke/
 
 # RSS
 tests/integration/bytes_finish_return_no_leak/
