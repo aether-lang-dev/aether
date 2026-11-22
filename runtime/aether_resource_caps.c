@@ -137,6 +137,12 @@ static int64_t ns_after_ms(int64_t ms) {
  * them than slots; after that two share one, which an atomic add keeps
  * right. */
 static inline _Atomic int64_t* caps_use_slot(void) {
+#if defined(AETHER_NO_THREADING)
+    /* No threads: one slot, which the tasks of a cooperative build with
+     * task contexts share through the atomic add (t_use_slot would be a
+     * plain global they all wrote). */
+    return &g_use_slots[0].bytes;
+#endif
     unsigned s = t_use_slot;
     if (__builtin_expect(s == 0, 0)) {
         s = atomic_fetch_add_explicit(&g_use_next, 1, memory_order_relaxed) % CAPS_USE_SLOTS + 1;
