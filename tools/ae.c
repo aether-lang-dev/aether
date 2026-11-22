@@ -3820,6 +3820,70 @@ static const char* bracket_depth_flags(const char* cc) {
     return answer;
 }
 
+/* #3779: GCC caps how far inlining may grow one translation unit, at
+ * inline-unit-growth percent of the unit (40 by default). The cap is sized
+ * for a C file of ordinary length, and aetherc emits a whole program, its
+ * modules and std included, as one unit: once a large program's inlining has
+ * grown it 40%, GCC refuses every later candidate in it, hot or not. In
+ * aephysics' joint grid that left the small maths of the solvers (a
+ * rotation, a quaternion product, a 3x3 solve, each emitted static inline)
+ * as real calls, `--param inline-unit-growth limit reached` on 2,671 call
+ * sites, and a step 38% slower than with the cap raised. The budget is
+ * AETHER_GCC_INLINE_UNIT_GROWTH percent, chosen by measurement (see
+ * docs/build-system.md, "The inlining budget and GCC").
+ *
+ * GCC only: Clang has no such unit cap, and warns of a --param it does not
+ * use. The compiler is asked once (and the answer kept by its identity, as
+ * bracket_depth_flags keeps its own) whether it is GCC and takes the option.
+ * Optimising builds only: -O0 inlines nothing, and --size asks for bytes,
+ * which the default cap already weighs. The flag goes ahead of the user's
+ * cflags, so a `--param inline-unit-growth=` of their own comes later on the
+ * line and wins. It changes the binary, and the build cache key reads it
+ * through ae's own content hash: the number is compiled into ae. */
+#define AETHER_GCC_INLINE_UNIT_GROWTH 100
+#define AETHER_GCC_INLINE_CFLAGS " --param inline-unit-growth=" AE_DEPTH_TEXT(AETHER_GCC_INLINE_UNIT_GROWTH)
+static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
+    static char* asked = NULL;
+    static const char* answer = "";
+    if (!optimize || g_coverage || g_size || !cc || !*cc) return "";
+    if (asked && strcmp(asked, cc) == 0) return answer;
+    free(asked);
+    asked = strdup(cc);
+    answer = "";
+    int known = cache_probe_memo_get(cc, AETHER_GCC_INLINE_CFLAGS);
+    if (known >= 0) {
+        if (known) answer = AETHER_GCC_INLINE_CFLAGS;
+        return answer;
+    }
+    char probe_c[1100];
+    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "ae_inline_probe.c")) return answer;
+    FILE* f = fopen(probe_c, "w");
+    if (!f) return answer;
+    /* Clang defines __GNUC__ too, and so does a compiler built on it (icx,
+     * zig cc): __clang__ tells them apart. AE_PROBE_ANY lets the control
+     * compile below pass on any compiler. */
+    fputs("#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
+          "#error not GCC\n"
+          "#endif\n"
+          "int ae_inline_probe;\n", f);
+    fclose(f);
+    char* probe = ae_strdup_printf("%s%s -fsyntax-only \"%s\"", cc, AETHER_GCC_INLINE_CFLAGS,
+                                   probe_c);
+    int takes = probe && run_cmd_quiet(probe) == 0;
+    if (takes) answer = AETHER_GCC_INLINE_CFLAGS;
+    free(probe);
+    /* A refusal is remembered only when the compiler runs at all. */
+    int settled = takes;
+    if (!takes) {
+        char* control = ae_strdup_printf("%s -DAE_PROBE_ANY -fsyntax-only \"%s\"", cc, probe_c);
+        settled = control && run_cmd_quiet(control) == 0;
+        free(control);
+    }
+    if (settled) cache_probe_memo_put(cc, AETHER_GCC_INLINE_CFLAGS, takes);
+    remove(probe_c);
+    return answer;
+}
+
 #ifndef _WIN32
 /* The C compiler a POSIX build drives (build_gcc_cmd chooses it the same
  * way, and says why): $AE_CC, then $CC, else gcc, else cc; NULL for none.
@@ -5493,13 +5557,16 @@ void build_gcc_cmd(char* cmd, size_t size,
          * std.http.script_gateway could not reach a script's
          * aether_script_handle. Strong here too, for the same one-TU reason. */
         ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_WEAK_DEF= -DAETHER_NO_LIB_MAIN " : "";
+    /* The inlining budget ahead of the user's cflags, so theirs wins. */
     if (user_cflags[0])
-        opt = ae_strdup_printf("-static %s%s%s%s %s%s%s%s", emit_lib_flags, opt_flags(optimize),
+        opt = ae_strdup_printf("-static %s%s%s%s%s %s%s%s%s", emit_lib_flags, opt_flags(optimize),
+                               gcc_inline_budget_flags(s_gcc_cmd, optimize),
                                harden_cflags(optimize), harden_ldflags(), user_cflags,
                                win_avx_stack_flags(user_cflags), trace_def,
                                bracket_depth_flags(s_gcc_cmd));
     else
-        opt = ae_strdup_printf("-static %s%s%s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
+        opt = ae_strdup_printf("-static %s%s%s%s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
+                               gcc_inline_budget_flags(s_gcc_cmd, optimize),
                                harden_cflags(optimize), harden_ldflags(),
                                win_avx_stack_flags(""), trace_def,
                                bracket_depth_flags(s_gcc_cmd));
@@ -5721,12 +5788,15 @@ void build_gcc_cmd(char* cmd, size_t size,
 #endif
     const char* size_link = (g_size && !g_emit_obj && !g_emit_csrc)
                             ? size_link_flags : "";
+    /* The inlining budget ahead of the user's cflags, so theirs wins. */
     if (user_cflags[0])
-        opt = ae_strdup_printf("%s%s%s%s%s%s %s%s%s", emit_lib_flags, base_opt,
+        opt = ae_strdup_printf("%s%s%s%s%s%s%s %s%s%s", emit_lib_flags, base_opt,
+                               gcc_inline_budget_flags(cc, optimize),
                                harden_cflags(optimize), harden_link, harden_pie, size_link,
                                user_cflags, trace_def, bracket_depth_flags(cc));
     else
-        opt = ae_strdup_printf("%s%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
+        opt = ae_strdup_printf("%s%s%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
+                               gcc_inline_budget_flags(cc, optimize),
                                harden_cflags(optimize), harden_link, harden_pie, size_link,
                                trace_def, bracket_depth_flags(cc));
     if (!opt) {

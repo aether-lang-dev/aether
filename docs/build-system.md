@@ -319,6 +319,45 @@ aetherc app.ae app.c
 cc app.c $(ae cflags) -o app        # -fbracket-depth=2048 where cc is Clang
 ```
 
+## The inlining budget and GCC
+
+`aetherc` emits a whole program, its modules and the std modules it imports, as
+one C translation unit. GCC caps how far inlining may grow one unit:
+`--param inline-unit-growth`, 40 percent of the unit by default, a limit sized
+for a C file of ordinary length. Once a large program's inlining has used it,
+GCC refuses every later candidate in the unit, hot or not, with
+`--param inline-unit-growth limit reached` (`-fopt-info-inline-missed` shows
+it). In aephysics' joint grid that left the small maths of the solvers (a
+rotation, a quaternion product, a 3x3 solve), each emitted `static inline`, as
+real calls on 2,671 call sites (#3779).
+
+So `ae` gives GCC `--param inline-unit-growth=100` on the optimising builds of
+generated C: `ae build` (the executable and `--emit=lib`, `--profile`
+included) and `ae examples`. It does not on `-O0` builds (`ae run`, `ae test`,
+`--quick`, `--coverage`), which inline
+nothing, nor with `--size`, which asks for bytes. It goes ahead of the
+project's `[build] cflags` and `AETHER_CFLAGS_EXTRA`, so a
+`--param inline-unit-growth=` of the project's own is the one GCC uses. Clang
+has no such cap and gets nothing; neither does a cross build (`zig cc` and
+`xcrun clang` are Clang) or the wasm backend (emcc). Whether the compiler is
+GCC is asked once, by compiling a probe, and the answer is kept in the cache
+directory by the compiler's identity. The runtime, libaether and the std's C
+are built by the Makefile and keep its flags.
+
+100 is measured. aephysics at `-O3 -ffp-contract=off`, its own budget
+parameters removed, MinGW GCC 16.2, least of 10 alternated runs:
+
+| budget | joint grid, ms a step | large pyramid | ragdoll rain | physics_world executable | its build |
+|---|---|---|---|---|---|
+| 40 (GCC's default) | 15.18 | 7.06 | 5.62 | 1.23 MB | 13.6 s |
+| 100 | 11.02 | 6.37 | 4.67 | 1.41 MB | 17.0 s |
+| 200 (400 emits the same code) | 11.15 | 6.36 | 4.72 | 1.55 MB | 18.9 s |
+| aephysics' own `max-inline-insns-auto=400 inline-unit-growth=400` | 11.11 | 6.20 | 4.67 | 1.59 MB | 19.7 s |
+
+At 100 the three scenes step as fast as with aephysics' own parameters, in
+less code and build time than any larger budget. Raising
+`early-inlining-insns` as well measured within the noise, so `ae` leaves it.
+
 ## Binary Hardening
 
 `ae build` asks the C toolchain for the mitigations whose cost is a rounding
