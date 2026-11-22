@@ -197,6 +197,19 @@ main() {
             list.free(values)
             list.free(seen)
         }
+        spec.it("refuses an INVOKE larger than the frame limit before sending it: the guest serves on") callback {
+            g = serving(stub, "big-arg", log, "def echo\nreturn $args\nend")
+            big = ""
+            while string.length(big) < 100000 { big = "${big}0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+            v, err = guest.call_export(&g, "echo", "[\"${big}\"]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_err_contains(err, "over the frame limit of 65536 bytes", "refused, with why")
+            spec.assert_true(guest.is_serving(&g), "still serving")
+            v, err = guest.call_export(&g, "echo", "[1]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${v}|${err}", "[1]|", "and the next call works")
+            guest.close(&g)
+        }
         spec.it("guest-export-raises: RAISE, and the guest serves on") callback {
             g = serving(stub, "raises", log, "def bad\nraise boom\nend\ndef echo\nreturn $args\nend")
             v, err = guest.call_export(&g, "bad", "[]") callback | h: *guest.Guest, ev: guest.Event | {

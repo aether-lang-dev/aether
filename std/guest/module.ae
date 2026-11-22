@@ -491,7 +491,8 @@ fn finish(g: *Guest) {
 // deadline that passes cancels the guest, which ends it. "" when sent, or
 // why nothing was: the guest is not serving (its script, an invocation or
 // a host call it waits on is still running, or it is ending), it does not
-// export `name`, or `args` is not an array. A frame the idle guest sent
+// export `name`, `args` is not an array, or the INVOKE frame would be
+// longer than MAX_FRAME, the most a worker reads. A frame the idle guest sent
 // unasked is a protocol error: the host hangs up and says so.
 invoke(g: *Guest, name: string, args: string) -> string {
     if g.over == 1 { return "invoke: the guest has finished" }
@@ -499,13 +500,17 @@ invoke(g: *Guest, name: string, args: string) -> string {
     if refused != "" { return refused }
     if !is_exported(g, name) { return "invoke: the guest does not export '${printable(name)}'" }
     if !is_array_text(args) { return "invoke: the arguments are a JSON array, not '${printable(args)}'" }
+    frame = "INVOKE ${name} ${args}"
+    if string.length(frame) > MAX_FRAME {
+        return "invoke: the INVOKE frame would be ${string.length(frame)} bytes, over the frame limit of ${MAX_FRAME} bytes a worker reads"
+    }
     uerr = unsolicited_while_idle(g)
     if uerr != "" {
         hang_up(g, uerr)
         return "invoke: ${uerr}"
     }
     audit(g, "INVOKE ${name}")
-    err = ipc.write_frame(g.ch, "INVOKE ${name} ${args}")
+    err = ipc.write_frame(g.ch, frame)
     if err == "" { g.phase = INVOKING }
     return err
 }

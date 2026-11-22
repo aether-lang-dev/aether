@@ -369,6 +369,26 @@ main() {
                 spec.assert_str_eq("${e.kind} ${e.text}", "KILLED frame refused: ipc.read_frame: frame longer than max", "refused")
                 io.fd_close(w)
             }
+            spec.it("refuses an INVOKE the worker could not read, sending nothing: the guest serves on") callback {
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                ipc.write_frame(w, "READY [\"f\"]")
+                guest.next(&g)
+                big = ""
+                while string.length(big) < 100000 { big = "${big}0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+                spec.assert_err_contains(guest.invoke(&g, "f", "[\"${big}\"]"), "over the frame limit of 65536 bytes", "100 KB of arguments refused")
+                ready, _ = ipc.wait_readable(w, 0)
+                spec.assert_eq(ready, 0, "nothing sent")
+                spec.assert_true(guest.is_serving(&g), "still serving")
+                // "INVOKE f [\"...\"]" is 13 bytes and the string: one byte
+                // past the limit (a frame of exactly the limit is sent: the
+                // integration test's 60 KB values).
+                over = string.substring(big, 0, 65536 - 12)
+                spec.assert_err_contains(guest.invoke(&g, "f", "[\"${over}\"]"), "would be 65537 bytes", "one byte over")
+                ready, _ = ipc.wait_readable(w, 0)
+                spec.assert_eq(ready, 0, "nothing sent for it either")
+                io.fd_close(w)
+            }
             spec.it("turns the end of an invocation into (value, err)") callback {
                 v, err = guest.result(guest.Event { kind: "DONE", name: "", text: "", code: 0, tags: "" })
                 spec.assert_str_eq("[${v}] ${err}", "[] the guest ended (DONE 0)", "DONE")
