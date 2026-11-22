@@ -262,11 +262,11 @@ const char* aether_shared_map_value_at(AetherSharedMap* map, int i, size_t* len)
     if (len) *len = map->entries[i].value_len;
     return map->entries[i].value;
 }
-long aether_shared_map_key_len_at(AetherSharedMap* map, int i) {
-    return (map && i >= 0 && i < map->count) ? (long)map->entries[i].key_len : -1;
+int64_t aether_shared_map_key_len_at(AetherSharedMap* map, int i) {
+    return (map && i >= 0 && i < map->count) ? (int64_t)map->entries[i].key_len : -1;
 }
-long aether_shared_map_value_len_at(AetherSharedMap* map, int i) {
-    return (map && i >= 0 && i < map->count) ? (long)map->entries[i].value_len : -1;
+int64_t aether_shared_map_value_len_at(AetherSharedMap* map, int i) {
+    return (map && i >= 0 && i < map->count) ? (int64_t)map->entries[i].value_len : -1;
 }
 int aether_shared_map_count_by_token(uint64_t token) {
     return aether_shared_map_count(find_by_token(token));

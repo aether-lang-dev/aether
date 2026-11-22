@@ -63,8 +63,8 @@ void aether_shared_map_freeze_inputs_by_token(uint64_t token);
 int aether_shared_map_count(AetherSharedMap* map);
 const char* aether_shared_map_key_at(AetherSharedMap* map, int index, size_t* len);
 const char* aether_shared_map_value_at(AetherSharedMap* map, int index, size_t* len);
-long aether_shared_map_key_len_at(AetherSharedMap* map, int index);
-long aether_shared_map_value_len_at(AetherSharedMap* map, int index);
+int64_t aether_shared_map_key_len_at(AetherSharedMap* map, int index);
+int64_t aether_shared_map_value_len_at(AetherSharedMap* map, int index);
 
 // Token-based iteration
 int aether_shared_map_count_by_token(uint64_t token);
