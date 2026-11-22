@@ -137,6 +137,45 @@ TEST_CATEGORY(accounts_free_credits_the_ancestors, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(0, child_after_block);
 }
 
+/* An allocation refused because an ancestor would pass its allowance trips
+ * the account in use too, as libaether.h says ("aether_exec_account_tripped
+ * has AETHER_ACCOUNT_TRIPPED_MEMORY" of the account in use), and every account
+ * between them: a library that asks whether its account ran out before it
+ * hands back what it built saw 0 when only the parent was marked, returned
+ * its handle, and the handle was lost with the interrupted export's result.
+ * The ancestors above the one that ran out are not marked: the bytes never
+ * reached them. */
+TEST_CATEGORY(accounts_refusal_by_ancestor_trips_account_in_use, TEST_CATEGORY_RUNTIME) {
+    AetherExecAccount* top = ea_new(0, 0, AETHER_DEADLINE_ELAPSED, NULL);
+    AetherExecAccount* p = ea_new(1000, 0, AETHER_DEADLINE_ELAPSED, top);
+    AetherExecAccount* m = ea_new(1 << 20, 0, AETHER_DEADLINE_ELAPSED, p);
+    AetherExecAccount* c = ea_new(1 << 20, 0, AETHER_DEADLINE_ELAPSED, m);
+    ASSERT_NOT_NULL(c);
+    aether_exec_use(c, NULL);
+    void* fits = aether_caps_malloc(600);
+    void* refused = aether_caps_malloc(600);
+    aether_exec_use(NULL, NULL);
+    int child = aether_exec_account_tripped(c);
+    int middle = aether_exec_account_tripped(m);
+    int parent = aether_exec_account_tripped(p);
+    int above = aether_exec_account_tripped(top);
+    uint64_t used = aether_exec_account_used(c);
+    if (fits) aether_caps_free(fits, 600);
+    if (refused) aether_caps_free(refused, 600);
+    aether_exec_account_free(c);
+    aether_exec_account_free(m);
+    aether_exec_account_free(p);
+    aether_exec_account_free(top);
+
+    ASSERT_NOT_NULL(fits);
+    ASSERT_NULL(refused);
+    ASSERT_EQ(600, used);
+    ASSERT_EQ(AETHER_ACCOUNT_TRIPPED_MEMORY, parent);
+    ASSERT_EQ(AETHER_ACCOUNT_TRIPPED_MEMORY, middle);
+    ASSERT_EQ(AETHER_ACCOUNT_TRIPPED_MEMORY, child);
+    ASSERT_EQ(0, above);
+}
+
 /* #3409: time spent in an execution nested inside another, both under one
  * ACTIVE account (and under a child of it), is charged to it once: never
  * more than the time the two took, read on the clock the runtime charges
