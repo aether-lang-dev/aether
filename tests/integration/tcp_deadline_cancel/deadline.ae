@@ -136,6 +136,22 @@ fn stopped_in_time(t: *Tally, what: string, err: string, want: string, el: long,
     check(t, what, ok, "error [${err}] after ${el} ms; want [${want}] at ${due_after} ms (+${STOP_SLACK_MS})")
 }
 
+// write_all `data` again and again until a call ends with an error, or 30 s:
+// (bytes in all, bytes the last call sent, its error). On POSIX the first
+// call fills the buffers and waits; Windows' loopback took a whole 64 MiB in
+// 15 ms (GitHub's runners), so there it is the next call, made after the
+// deadline or the cancel, that ends at once, as every bounded call then does.
+fn write_until_stopped(sock: ptr, data: byte[]) -> (long, int, string) {
+    total = 0 as long
+    start = now()
+    while now() - start < 30000 {
+        sent, we = tcp.write_all(sock, data)
+        total = total + sent
+        if we != "" { return total, sent, we }
+    }
+    return total, 0, ""
+}
+
 // Trip `c` from another thread `after_ms` from now.
 // The canceller holds a reference of its own (cancel_retain, taken before it
 // starts), so its trip is ordered before whichever cancel_free drops the
@@ -283,9 +299,9 @@ main() {
     if e11 == "" {
         a = now()
         tcp.set_deadline(s11, a + 600, null)
-        sent, we = tcp.write_all(s11, huge)
+        total, sent, we = write_until_stopped(s11, huge)
         stopped_in_time(&t, "write_all to a peer that does not read: the deadline ends it", we, tcp.DEADLINE_EXCEEDED, now() - a, 600)
-        check(&t, "  ...short, with what went counted", sent > 0 && sent < 67108864, "${sent} bytes")
+        check(&t, "  ...short, with what went counted", total > 0 && sent < 67108864, "${total} bytes in all, ${sent} in the last call")
         tcp.close(s11)
     }
     s12, e12 = tcp.connect("127.0.0.1", pn.port)
@@ -294,7 +310,7 @@ main() {
         tcp.set_deadline(s12, 0, c12)
         a = now()
         trip_later(c12, 300)
-        _sent, we = tcp.write_all(s12, huge)
+        _total, _sent, we = write_until_stopped(s12, huge)
         stopped_in_time(&t, "write_all blocked with no deadline: a cancel from another thread ends it", we, tcp.CANCELLED, now() - a, 300)
         tcp.close(s12)
         tcp.cancel_free(c12)
