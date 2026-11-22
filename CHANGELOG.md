@@ -14,6 +14,66 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.936.0]
+
+### Added
+
+- **`std.cryptography.tls13_client`: TLS 1.3 with an external PSK.**
+  `tls13_client.connect_psk(host, port, identity, key)` and
+  `connect_socket_psk(sock, identity, key)` run a handshake authenticated by
+  a key the two ends were given out of band (RFC 8446 2.2), for a device
+  with no certificate path, such as a smart plug and its phone controller:
+  a 32-byte SHA-256 key and a 1 to 64-byte identity (any bytes, NUL
+  included), psk_dhe_ke only, so every session has a fresh ECDHE secret and
+  a psk_ke answer is refused. The binder is keyed with "ext binder", never
+  the resumption's "res binder" (new `tls13_ks.external_binder_key`), and is
+  computed again after a HelloRetryRequest; the ClientHello offers the two
+  SHA-256 suites alone (`tls13_hs.client_hello_psk` takes `only_sha256`).
+  A server that does not take the PSK, sends a Certificate, selects another
+  identity or answers in TLS 1.2 is refused: there is no certificate
+  fallback. The key is copied and the copy wiped on every path; the socket
+  handed to `connect_socket_psk` is the call's from then on, closed by it on
+  every failure. Tested against `openssl s_server -psk`, Python 3.13's
+  `set_psk_server_callback` and a scripted peer that misbehaves on purpose.
+
+- **`std.tcp`: one deadline per connection, and a cancel handle.**
+  `tcp.connect_until(host, port, due_ms, cancel)` and
+  `tcp.set_deadline(sock, due_ms, cancel)` bind an absolute deadline on the
+  monotonic clock and a cancel handle (`tcp.cancel_new`, `tcp.cancel`,
+  `tcp.cancelled`, `tcp.cancel_retain`, `tcp.cancel_free`) to a connection: the dial and every
+  read and write after end by the deadline however slowly the peer trickles,
+  and a cancel from any thread wakes a blocked call at once. They end with
+  `tcp.DEADLINE_EXCEEDED` or `tcp.CANCELLED`, distinct from `"timeout"` and
+  from a close, and both are sticky. Neither closes anything: the cancel
+  writes to its own descriptor (eventfd, pipe, or a loopback pair on
+  Windows), polled beside the socket, and the owner closes, so a cancel
+  racing a close cannot close a reused descriptor. The handle is counted:
+  each other thread that may trip it takes its own reference with
+  `tcp.cancel_retain` and drops it with `tcp.cancel_free`. Per connection, passed
+  explicitly; see `docs/design/tcp-tls-deadlines-and-cancellation.md`.
+
+- **`std.cryptography.tls13_client`: deadlines and cancellation end to end.**
+  `connect`, `connect_mtls`, `connect_psk`, `connect_resume` and
+  `connect_resume_0rtt` take `due_ms` and `cancel` (defaulted to none), and
+  `conn_set_deadline(conn, due_ms, cancel)` rebinds them after the
+  handshake; the socket variants, `connect_socket_psk` included, honour what
+  the caller bound with `tcp.set_deadline`. One absolute deadline covers the
+  dial, the handshake and every read and write, so a server that trickles a
+  record a byte at a time is still cut off, and a cancel from another thread
+  ends a blocked handshake, read or write at once. The error is exactly
+  `tcp.DEADLINE_EXCEEDED` or `tcp.CANCELLED` whichever step it cut short,
+  never an EOF or a TLS alert; the socket is closed once, by its owner, and
+  secrets are wiped as on any failure. A stopped connection stays failed.
+  The #3703 meaning of the socket's own receive timeout is unchanged.
+
+- **Task execution contexts: more than one FreeRTOS task can enter a cooperative runtime, each with its own execution state.** A cooperative build (`AETHER_NO_THREADING`, as on an ESP32) kept one block of execution state that every task entering Aether shared, so two tasks crossed each other's try and execution frames, deadlines, outcomes, accounts in use and caller identities (a panic on one could jump into the other's stack). A host now installs a task-context port (`aether_context_port_install`; on ESP-IDF `aether_freertos_contexts_install`, a FreeRTOS thread-local pointer slot) and calls `aether_context_attach` / `aether_context_detach` on each task that enters Aether; the runtime owns each context, a task without one stops the program, actors stay on the installing task, and tasks that never enter Aether carry nothing of it on their stacks. Without a port nothing changes, and threaded builds are untouched. Generated C for a cooperative runtime keeps its builder blocks' stack per context (runtime ABI revision 6). See docs/design/task-execution-contexts.md.
+
+### Fixed
+
+- **A cooperative build keeps no thread-locals of std's or the runtime's, and its tasks no longer share their per-call state.** Under `AETHER_NO_THREADING` (an ESP32 build) std still had raw thread-locals, which ESP-IDF places on every FreeRTOS task's stack (std.net's 8 KiB joined-header buffer, the HTTP server's request-body read, std.fs's caches, std.os's and std.ipc's error texts, std.cryptography's, std.regex's, std.yaml's and the compression modules' buffers), and its `AETHER_TLS` variables became one global for every task: std.net's pinned clock, and the sandbox's levels, so one task's sandbox level refused another task's calls. Each is now a block of the calling task's execution context there (threaded builds keep their thread-locals), and the HTTP client's connection pool and std.net's address-family memo, shared on purpose, take a real lock instead of the no-op mutex a build without threads had. `make ci-coop` now fails on any thread-local in the cooperative stdlib.
+
+- **A stdlib built without networking links its shared runtime on macOS again.** With `AETHER_NO_NETWORKING` the HTTP server's parser and dispatch are left out, but the event-loop driver and the HTTP/2 session code were still compiled in full and called them, so `libaether.dylib` (which must resolve every symbol, unlike a Linux `.so`) failed to link with 45 undefined symbols, and `make ci-coop` stopped at its no-filesystem, no-networking step on macOS. Both now compile to their stubs without networking.
+
 ## [0.935.0]
 
 ### Added
