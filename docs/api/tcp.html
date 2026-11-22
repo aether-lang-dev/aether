@@ -68,6 +68,26 @@
     <li><a href="#wait_writable">wait_writable</a></li>
     <li><a href="#write_some">write_some</a></li>
     <li><a href="#close_drained">close_drained</a></li>
+    <li><a href="#connect_until_raw">connect_until_raw</a></li>
+    <li><a href="#set_deadline_raw">set_deadline_raw</a></li>
+    <li><a href="#deadline_raw">deadline_raw</a></li>
+    <li><a href="#stop_raw">stop_raw</a></li>
+    <li><a href="#cancel_new_raw">cancel_new_raw</a></li>
+    <li><a href="#cancel_raw">cancel_raw</a></li>
+    <li><a href="#cancel_tripped_raw">cancel_tripped_raw</a></li>
+    <li><a href="#cancel_retain_raw">cancel_retain_raw</a></li>
+    <li><a href="#cancel_free_raw">cancel_free_raw</a></li>
+    <li><a href="#connect_until">connect_until</a></li>
+    <li><a href="#set_deadline">set_deadline</a></li>
+    <li><a href="#deadline">deadline</a></li>
+    <li><a href="#stopped">stopped</a></li>
+    <li><a href="#cancel_new">cancel_new</a></li>
+    <li><a href="#cancel">cancel</a></li>
+    <li><a href="#cancelled">cancelled</a></li>
+    <li><a href="#cancel_retain">cancel_retain</a></li>
+    <li><a href="#cancel_free">cancel_free</a></li>
+    <li><a href="#DEADLINE_EXCEEDED">DEADLINE_EXCEEDED</a></li>
+    <li><a href="#CANCELLED">CANCELLED</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -338,7 +358,7 @@
     </div>
     <div class="function" id="write" data-name="write">
       <h3 class="function-name">write <span class="kind">fn</span></h3>
-      <pre class="usage"><code>write(sock, data) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <pre class="usage"><code>write(sock, data) <span class="arrow">-&gt;</span> (int, _1)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, data: string</span></p>
       <p class="doc">Write data to a socket. Returns (bytes_sent, &quot;&quot;) on success, (0, error) on failure. Note: named `write`/`read` (not `send`/`receive`) because `send` and `receive` are reserved actor keywords in Aether. The `tcp.send_raw` extern is still available under the old name for direct use.</p>
     </div>
@@ -350,19 +370,19 @@
     </div>
     <div class="function" id="write_slice" data-name="write_slice">
       <h3 class="function-name">write_slice <span class="kind">fn</span></h3>
-      <pre class="usage"><code>write_slice(sock, s) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <pre class="usage"><code>write_slice(sock, s) <span class="arrow">-&gt;</span> (int, _1)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, s: byte[]</span></p>
       <p class="doc">Write a `byte[]` slice's bytes, binary-safe: the length travels with the slice (#2301). Returns (bytes_sent, &quot;&quot;) or (0, &quot;send failed&quot;). The count is one send(2) and may be SHORT, as with write_n: a caller that needs the whole slice delivered calls write_all. An empty slice sends nothing and returns (0, &quot;&quot;). A slice with no bound panics.</p>
     </div>
     <div class="function" id="write_all" data-name="write_all">
       <h3 class="function-name">write_all <span class="kind">fn</span></h3>
-      <pre class="usage"><code>write_all(sock, data) <span class="arrow">-&gt;</span> (_0, string)</code></pre>
+      <pre class="usage"><code>write_all(sock, data) <span class="arrow">-&gt;</span> (_0, _1)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, data: byte[]</span></p>
       <p class="doc">Write every byte of a `byte[]` slice (#3108), as many sends as it takes: one send can accept fewer bytes than asked, when the socket's send timeout (30 s) expires while the peer reads slowly, or a signal cuts it short. Returns (data.len, &quot;&quot;) once every byte is out, or (sent, &quot;send failed&quot;) with the bytes sent before a send failed or timed out having sent nothing. An empty slice sends nothing and returns (0, &quot;&quot;); a slice with no bound panics.</p>
     </div>
     <div class="function" id="read" data-name="read">
       <h3 class="function-name">read <span class="kind">fn</span></h3>
-      <pre class="usage"><code>read(sock, max_bytes) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <pre class="usage"><code>read(sock, max_bytes) <span class="arrow">-&gt;</span> (string, _1)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, max_bytes: int</span></p>
       <p class="doc">Read up to max_bytes from a socket. Returns (data, &quot;&quot;) on success, (&quot;&quot;, error) on transport failure or connection close. The caller owns the data, which keeps the length received; read_n also returns it.</p>
     </div>
@@ -370,7 +390,7 @@
       <h3 class="function-name">read_n <span class="kind">fn</span></h3>
       <pre class="usage"><code>read_n(sock, max_bytes) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, max_bytes: int</span></p>
-      <p class="doc">Binary-safe read. Returns (bytes, length, &quot;&quot;) on success, with the byte buffer stored in a length-aware AetherString. The returned length is authoritative; callers should pass it to length-aware consumers rather than re-derive length with strlen-shaped APIs. Error discipline (#1092): a quiet-but-alive peer (recv-timeout / would-block) returns (&quot;&quot;, 0, &quot;timeout&quot;) and leaves the socket connected — retry or poll, do NOT treat it as a close. Only an orderly FIN or a hard error returns &quot;connection closed or receive failed&quot;; that is the terminal state. A full-duplex relay must branch on the &quot;timeout&quot; sentinel rather than collapsing all non-empty errors into &quot;closed.&quot;</p>
+      <p class="doc">Binary-safe read. Returns (bytes, length, &quot;&quot;) on success, with the byte buffer stored in a length-aware AetherString. The returned length is authoritative; callers should pass it to length-aware consumers rather than re-derive length with strlen-shaped APIs. Error discipline (#1092): a quiet-but-alive peer (recv-timeout / would-block) returns (&quot;&quot;, 0, &quot;timeout&quot;) and leaves the socket connected — retry or poll, do NOT treat it as a close. Only an orderly FIN or a hard error returns &quot;connection closed or receive failed&quot;; that is the terminal state. A full-duplex relay must branch on the &quot;timeout&quot; sentinel rather than collapsing all non-empty errors into &quot;closed.&quot; On a socket with a deadline or a cancel bound (set_deadline), the read also ends with (&quot;&quot;, 0, DEADLINE_EXCEEDED) or (&quot;&quot;, 0, CANCELLED), the socket still connected and still its owner's to close.</p>
     </div>
     <div class="function" id="read_into" data-name="read_into">
       <h3 class="function-name">read_into <span class="kind">fn</span></h3>
@@ -467,6 +487,112 @@
       <pre class="usage"><code>close_drained(sock)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr</span></p>
       <p class="doc">Close `sock` once what the peer has already sent is read and dropped. A socket closed with bytes unread ends with a reset, and a peer that gets one may discard what it had not read yet: an alert just sent, which the peer then sees as a bare close. Bounded: at most 256 KiB, and 5 ms for each more to arrive. For the close after an error the peer must still read (the pure TLS stack's, #3368); a plain close is tcp.close.</p>
+    </div>
+    <div class="function" id="connect_until_raw" data-name="connect_until_raw">
+      <h3 class="function-name">connect_until_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>connect_until_raw(host, port, due_ms, cancel) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int, due_ms: long, cancel: ptr</span></p>
+    </div>
+    <div class="function" id="set_deadline_raw" data-name="set_deadline_raw">
+      <h3 class="function-name">set_deadline_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>set_deadline_raw(sock, due_ms, cancel) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, due_ms: long, cancel: ptr</span></p>
+    </div>
+    <div class="function" id="deadline_raw" data-name="deadline_raw">
+      <h3 class="function-name">deadline_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>deadline_raw(sock) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+    </div>
+    <div class="function" id="stop_raw" data-name="stop_raw">
+      <h3 class="function-name">stop_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>stop_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+    </div>
+    <div class="function" id="cancel_new_raw" data-name="cancel_new_raw">
+      <h3 class="function-name">cancel_new_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>cancel_new_raw() <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+    </div>
+    <div class="function" id="cancel_raw" data-name="cancel_raw">
+      <h3 class="function-name">cancel_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>cancel_raw(cancel) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">cancel: ptr</span></p>
+    </div>
+    <div class="function" id="cancel_tripped_raw" data-name="cancel_tripped_raw">
+      <h3 class="function-name">cancel_tripped_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>cancel_tripped_raw(cancel) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">cancel: ptr</span></p>
+    </div>
+    <div class="function" id="cancel_retain_raw" data-name="cancel_retain_raw">
+      <h3 class="function-name">cancel_retain_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>cancel_retain_raw(cancel) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">cancel: ptr</span></p>
+    </div>
+    <div class="function" id="cancel_free_raw" data-name="cancel_free_raw">
+      <h3 class="function-name">cancel_free_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>cancel_free_raw(cancel)</code></pre>
+      <p class="signature"><span class="sig-params">cancel: ptr</span></p>
+    </div>
+    <div class="function" id="connect_until" data-name="connect_until">
+      <h3 class="function-name">connect_until <span class="kind">fn</span></h3>
+      <pre class="usage"><code>connect_until(host, port, due_ms, cancel) <span class="arrow">-&gt;</span> (ptr, _1)</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int, due_ms: long, cancel: ptr</span></p>
+      <p class="doc">connect, bounded by the absolute deadline `due_ms` (os.now_monotonic_ms's clock; 0 for none) and ended early by the cancel handle `cancel` (null for none), every address the host resolves to; the socket comes back with both bound (set_deadline), so the same deadline covers what follows. Returns (socket, &quot;&quot;) or (null, error): DEADLINE_EXCEEDED, CANCELLED, or connect's and connect_timeout's errors. Resolving the name is not interrupted (the system resolver cannot be): the deadline and the cancel are checked before and after it, so a numeric address is the wholly bounded dial.</p>
+    </div>
+    <div class="function" id="set_deadline" data-name="set_deadline">
+      <h3 class="function-name">set_deadline <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_deadline(sock, due_ms, cancel) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, due_ms: long, cancel: ptr</span></p>
+      <p class="doc">Bind the absolute deadline `due_ms` (os.now_monotonic_ms's clock, 0 for none) and the cancel handle `cancel` (null for none) to `sock`, replacing what was bound and clearing stopped(sock). An adopted socket, one a caller connected some other way, gets its bound this way before it is handed on (tls13_client.connect_socket_psk honours it). The socket holds its own reference to `cancel` until it is closed or rebound. Returns &quot;&quot; or why not (a null handle, a negative `due_ms`). Call it from the thread that owns the socket, not while another thread is in a read or write on it.</p>
+    </div>
+    <div class="function" id="deadline" data-name="deadline">
+      <h3 class="function-name">deadline <span class="kind">fn</span></h3>
+      <pre class="usage"><code>deadline(sock) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+      <p class="doc">The deadline bound to `sock`, 0 for none.</p>
+    </div>
+    <div class="function" id="stopped" data-name="stopped">
+      <h3 class="function-name">stopped <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stopped(sock) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+      <p class="doc">What ended the last call that a bound deadline or cancel stopped on `sock`: DEADLINE_EXCEEDED, CANCELLED, or &quot;&quot; when none has.</p>
+    </div>
+    <div class="function" id="cancel_new" data-name="cancel_new">
+      <h3 class="function-name">cancel_new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cancel_new() <span class="arrow">-&gt;</span> (ptr, _1)</code></pre>
+      <p class="doc">A fresh cancel handle: (handle, &quot;&quot;) or (null, why). The creator owns it and frees it with cancel_free; sockets bound to it hold references of their own, so freeing it while a connection is still open is safe. It holds a descriptor or two of its own (an eventfd on Linux, a pipe on macOS, iOS and the BSDs, a loopback socket pair on Windows).</p>
+    </div>
+    <div class="function" id="cancel" data-name="cancel">
+      <h3 class="function-name">cancel <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cancel(c)</code></pre>
+      <p class="signature"><span class="sig-params">c: ptr</span></p>
+      <p class="doc">Trip `c`: every socket bound to it ends what it is waiting for at once, and every bounded call on it after ends before starting, with CANCELLED. From any thread or actor; any number of times. It writes to the handle's own descriptor and never touches a socket's: the sockets' owners close them. Only while the caller holds a reference: the creator until its cancel_free, any other thread from cancel_retain to its own cancel_free.</p>
+    </div>
+    <div class="function" id="cancelled" data-name="cancelled">
+      <h3 class="function-name">cancelled <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cancelled(c) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">c: ptr</span></p>
+      <p class="doc">true once `c` has been tripped.</p>
+    </div>
+    <div class="function" id="cancel_retain" data-name="cancel_retain">
+      <h3 class="function-name">cancel_retain <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cancel_retain(c) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">c: ptr</span></p>
+      <p class="doc">Another reference to `c`, for a thread, task or actor that may trip it: take it before handing `c` over, and that holder drops it with cancel_free once it can no longer trip it. Without its own reference, a canceller's trip could meet the creator's cancel_free: the last reference to drop closes the descriptors the trip writes to. Returns &quot;&quot; or why.</p>
+    </div>
+    <div class="function" id="cancel_free" data-name="cancel_free">
+      <h3 class="function-name">cancel_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cancel_free(c)</code></pre>
+      <p class="signature"><span class="sig-params">c: ptr</span></p>
+      <p class="doc">Drop one reference to `c`, the creator's or one cancel_retain took (null is ignored). Its descriptors close, and the handle is freed, when the last reference drops, every socket bound to it holding one until it is closed.</p>
+    </div>
+    <div class="function" id="DEADLINE_EXCEEDED" data-name="DEADLINE_EXCEEDED">
+      <h3 class="function-name">DEADLINE_EXCEEDED <span class="kind">const</span></h3>
+      <pre class="usage"><code>DEADLINE_EXCEEDED = &quot;deadline exceeded&quot;</code></pre>
+      <p class="doc">The two errors a bound deadline or cancel ends an operation with (see set_deadline), each distinct from &quot;timeout&quot; (the socket's own per-call timeout), from a close and from every other failure. Compare with ==.</p>
+    </div>
+    <div class="function" id="CANCELLED" data-name="CANCELLED">
+      <h3 class="function-name">CANCELLED <span class="kind">const</span></h3>
+      <pre class="usage"><code>CANCELLED = &quot;cancelled&quot;</code></pre>
     </div>
   </div>
 </main>

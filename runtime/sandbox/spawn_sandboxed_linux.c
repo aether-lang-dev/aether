@@ -14,6 +14,9 @@
 #if defined(__linux__) && !defined(__ANDROID__)
 
 #include <stdio.h>
+#if defined(AETHER_NO_THREADING)
+#include "../actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -253,7 +256,21 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
 
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
 
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_context_local), not a thread-local; one shared only when there was
+ * no memory for it (a diagnostic). */
+typedef struct { char text[1024]; } SpawnSocketErr;
+static const char spawn_socket_err_key = 0;
+static SpawnSocketErr spawn_socket_err_no_memory;
+static SpawnSocketErr* spawn_socket_err_here(void) {
+    SpawnSocketErr* e = (SpawnSocketErr*)aether_context_local(&spawn_socket_err_key, sizeof(SpawnSocketErr), NULL);
+    return e ? e : &spawn_socket_err_no_memory;
+}
+#define spawn_socket_err (spawn_socket_err_here()->text)
+#else
 static __thread char spawn_socket_err[1024];
+#endif
 
 // A message that does not fit is cut short with "..." (a diagnostic, never a
 // path that is used).

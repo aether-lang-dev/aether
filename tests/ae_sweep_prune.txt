@@ -113,6 +113,9 @@ tests/integration/emit_lib_accounts/
 # #3392: steps.ae is a library with no main; the driver builds it into a C
 # host, on threads and (make ci-coop) on the cooperative scheduler.
 tests/integration/emit_lib_actor_step_context/
+# Task contexts: ctxlib.ae is a library with no main; the driver builds it
+# into a C host on the cooperative runtime (and tests/esp32/contexts on ESP-IDF).
+tests/integration/coop_task_contexts/
 # #3388: results.ae and words.ae are libraries with no main, and app.ae
 # imports words.ae in binary form; the driver builds them and fails an
 # allocation in each call.
@@ -344,6 +347,9 @@ tests/integration/sandbox_nested_libraries/
 # #3336, #3352: resumepeer.ae is the scripted PSK/0-RTT server resumeclient.ae
 # connects to; the driver runs them together and against openssl s_server.
 tests/integration/crypto_tls13_resume/
+# The external-PSK client: pskpeer.ae is the scripted server pskclient.ae and
+# ownclient.ae connect to; the driver runs them, openssl s_server and Python.
+tests/integration/crypto_tls13_external_psk/
 # #2956: frames.ae is a library and app.ae its importer; the driver builds both
 # and its C host loads the library.
 tests/integration/emit_lib_execution_frame/
@@ -396,3 +402,6 @@ tests/integration/http_server_slow_clients/
 tests/integration/http_client_max_response/
 # probe.ae calls the host in shim.c (--extra); test_http_server_h2_drain_host.sh builds and runs them together.
 tests/integration/http_server_h2_drain_host/
+# deadline.ae runs from its driver, which also runs it with BROKEN_CANCELLER=1
+# to show the descriptor race check can fail.
+tests/integration/tcp_deadline_cancel/

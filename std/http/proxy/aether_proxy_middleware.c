@@ -32,6 +32,9 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <time.h>
+#if defined(AETHER_NO_THREADING)
+#include "../../../runtime/actors/aether_panic.h"   /* aether_context_local */
+#endif
 #if defined(_WIN32)
 #  include <windows.h>
 #else
@@ -51,7 +54,21 @@
  * Windows RAND_MAX is 32767. Seeded once per thread from the clock, the
  * process id and a stack address, which differ across processes and
  * threads; the values need to be distinct, not secret. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: the state is a block of the calling task's execution
+ * context (aether_context_local), not a thread-local on every task's stack;
+ * with no memory for it, one shared state (the values need to be distinct,
+ * not secret). */
+static const char proxy_rng_key = 0;
+static uint64_t proxy_rng_no_memory;
+static uint64_t* proxy_rng_here(void) {
+    uint64_t* r = (uint64_t*)aether_context_local(&proxy_rng_key, sizeof(uint64_t), NULL);
+    return r ? r : &proxy_rng_no_memory;
+}
+#define proxy_rng_state (*proxy_rng_here())
+#else
 static _Thread_local uint64_t proxy_rng_state = 0;
+#endif
 
 static uint64_t proxy_rng_next(void) {
     if (proxy_rng_state == 0) {

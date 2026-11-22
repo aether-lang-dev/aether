@@ -51,7 +51,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
 exports(
-    early_secret, early_secret_psk, psk_from_resumption, binder_key, early_traffic_secret,
+    early_secret, early_secret_psk, psk_from_resumption, binder_key, external_binder_key, early_traffic_secret,
     handshake_secret, master_secret,
     traffic_secret, next_traffic_secret, key_update, free_secret, write_key, write_iv,
     IV_LEN
@@ -110,9 +110,22 @@ psk_from_resumption(algo: string, res_master: ptr, rm_len: int, nonce: byte[]) -
 // (RFC 8446 §7.1). Used to key the binder Finished MAC over the truncated
 // ClientHello. `early` is early_secret_psk(...).
 binder_key(algo: string, early: ptr) -> ptr {
+    return binder_key_labelled(algo, early, "res binder")
+}
+
+// The binder key of an EXTERNAL PSK, one provisioned out of band rather
+// than taken from a NewSessionTicket: Derive-Secret(early, "ext binder", "")
+// (RFC 8446 7.1). The two labels keep a key that was used as one kind of
+// PSK from verifying a binder made as the other (4.2.11). `early` is
+// early_secret_psk(...) of the external key. Fresh; free with free_secret.
+external_binder_key(algo: string, early: ptr) -> ptr {
+    return binder_key_labelled(algo, early, "ext binder")
+}
+
+fn binder_key_labelled(algo: string, early: ptr, label: string) -> ptr {
     hl = hlen(algo)
     empty_th = empty_transcript_hash(algo)
-    bk = tls13_kdf.derive_secret(algo, bytes.view(early)[0..hl], "res binder", bytes.view(empty_th)[0..hl])
+    bk = tls13_kdf.derive_secret(algo, bytes.view(early)[0..hl], label, bytes.view(empty_th)[0..hl])
     bytes.wipe_free(empty_th)
     return bk
 }

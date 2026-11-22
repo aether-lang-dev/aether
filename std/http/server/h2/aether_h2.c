@@ -22,6 +22,7 @@
 
 #include "aether_h2.h"
 #include "../../../mem/aether_grow.h"
+#include "../../../../runtime/config/aether_optimization_config.h"   /* AETHER_HAS_NETWORKING */
 
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +39,9 @@ int64_t aether_h2_now_ms(void) {
     return (int64_t)time(NULL) * 1000;
 }
 
-#ifdef AETHER_HAS_NGHTTP2
+/* Without networking (AETHER_NO_NETWORKING) the HTTP server it dispatches
+ * into is left out, so the stubs below stand in there too. */
+#if defined(AETHER_HAS_NGHTTP2) && AETHER_HAS_NETWORKING
 
 #include <nghttp2/nghttp2.h>
 #include "../../../net/aether_http_server.h"
@@ -1464,7 +1467,7 @@ AetherH2Session* aether_h2_session_from_h2c_upgrade(
     return sess;
 }
 
-#else  /* !AETHER_HAS_NGHTTP2 — no-op stubs */
+#else  /* no libnghttp2, or no networking — no-op stubs */
 
 AetherH2Session* aether_h2_session_new(struct HttpServer* server,
                                        void* conn_userdata) {
@@ -1521,4 +1524,4 @@ AetherH2Session* aether_h2_session_from_h2c_upgrade(
     return NULL;
 }
 
-#endif  /* AETHER_HAS_NGHTTP2 */
+#endif  /* AETHER_HAS_NGHTTP2 && AETHER_HAS_NETWORKING */

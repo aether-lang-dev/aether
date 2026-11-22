@@ -1,6 +1,7 @@
 #include "aether_zlib.h"
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/actors/aether_panic.h"   /* AETHER_CONTEXT_CAPS_BUFFER */
 
 #include <stdlib.h>
 #include <string.h>
@@ -34,12 +35,30 @@ static inline const unsigned char* zlib_unwrap_bytes(const char* data, int lengt
  * `compressBound` over-allocated relative to the actual compressed
  * size; `_cap` holds the allocator's view (the count that must
  * round-trip to free), `_len` holds the payload's view. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(tls_deflate)
+#define tls_deflate_buf (tls_deflate_here()->buf)
+#define tls_deflate_cap (tls_deflate_here()->cap)
+#define tls_deflate_len (tls_deflate_here()->len)
+#else
 static _Thread_local unsigned char* tls_deflate_buf = NULL;
 static _Thread_local size_t         tls_deflate_cap = 0;
 static _Thread_local int            tls_deflate_len = 0;
+#endif
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(tls_inflate)
+#define tls_inflate_buf (tls_inflate_here()->buf)
+#define tls_inflate_cap (tls_inflate_here()->cap)
+#define tls_inflate_len (tls_inflate_here()->len)
+#else
 static _Thread_local unsigned char* tls_inflate_buf = NULL;
 static _Thread_local size_t         tls_inflate_cap = 0;
 static _Thread_local int            tls_inflate_len = 0;
+#endif
 
 static void free_deflate_tls(void) {
     if (tls_deflate_buf) {

@@ -1,0 +1,136 @@
+// The pure TLS client's deadline and cancel (tcp.connect_until,
+// tcp.set_deadline, tls13_client.conn_set_deadline) over the external-PSK
+// paths, against pskpeer.ae at 127.0.0.1 PSK_PORT made to stall. CASE:
+//   hs-deadline     connect_psk with a deadline; the peer never answers
+//   hs-cancel       connect_psk with only a cancel, tripped from a thread
+//   hs-adopted      connect_socket_psk over a socket bound by set_deadline
+//   after-deadline  handshake done, conn_set_deadline, conn_recv stalls
+//   after-cancel    the same, a cancel from a thread
+//   trickle         conn_recv of a record trickled a byte per 100 ms
+//   write-deadline  conn_send of 1 MiB at a time to a peer that does not read
+//   write-cancel    the same, a cancel from a thread
+//   ordinary        a deadline and a cancel bound, nothing stalls
+//   wrong-key       a wrong key with a deadline far off: not a stop
+//   dial-deadline   connect_psk to STALL_ADDR (a dial that stalls)
+// Prints "RESULT <case> err=[<error>] ms=<from start to the error>" and,
+// after a stop, what the connection's next call and close say.
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+import std.worker
+import std.cryptography.tls13_client
+
+extern string_char_at(str: string, index: int) -> int
+
+fn now() -> long {
+    return os.now_monotonic_ms()
+}
+
+fn key_of(b: int) -> ptr {
+    k = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(k, i, b)
+        i = i + 1
+    }
+    return k
+}
+
+// The canceller holds a reference of its own (cancel_retain, taken before it
+// starts), so its trip is ordered before whichever cancel_free drops the
+// last one and closes the handle's descriptors.
+fn trip_later(c: @keep ptr, after_ms: int) {
+    tcp.cancel_retain(c)
+    worker.run_detached(|| {
+            sleep(after_ms)
+            tcp.cancel(c)
+            tcp.cancel_free(c)
+            return null
+        })
+}
+
+main() {
+    which = os.getenv("CASE")
+    port, _pe = string.to_int(os.getenv("PSK_PORT"))
+    host = "127.0.0.1"
+    if which == "dial-deadline" {
+        host = os.getenv("STALL_ADDR")
+        port = 9
+    }
+    keyb = 0x11
+    if which == "wrong-key" { keyb = 0x22 }
+    key = key_of(keyb)
+    id = bytes.new(7)
+    bytes.copy_from_string(id, 0, "plug-01", 7)
+    c, _ce = tcp.cancel_new()
+    start = now()
+    conn = null
+    err = ""
+    if which == "hs-deadline" || which == "dial-deadline" {
+        conn, err = tls13_client.connect_psk(host, port, bytes.view(id)[0..7], bytes.view(key)[0..32], due_ms: start + 700)
+    } else if which == "hs-cancel" {
+        trip_later(c, 400)
+        conn, err = tls13_client.connect_psk(host, port, bytes.view(id)[0..7], bytes.view(key)[0..32], cancel: c)
+    } else if which == "hs-adopted" {
+        sock, de = tcp.connect(host, port)
+        if de != "" {
+            println("RESULT ${which} err=[dial: ${de}] ms=0")
+            exit(1)
+        }
+        tcp.set_deadline(sock, start + 700, c)
+        conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..7], bytes.view(key)[0..32])
+    } else {
+        conn, err = tls13_client.connect_psk(host, port, bytes.view(id)[0..7], bytes.view(key)[0..32], due_ms: start + 20000, cancel: c)
+    }
+    bytes.wipe_free(key)
+    bytes.wipe_free(id)
+    if err != "" {
+        println("RESULT ${which} err=[${err}] ms=${now() - start}")
+        tcp.cancel_free(c)
+        exit(0)
+    }
+    // Established: the stall comes after.
+    start = now()
+    if which == "after-deadline" || which == "trickle" || which == "write-deadline" {
+        tls13_client.conn_set_deadline(conn, start + 1000, c)
+    }
+    if which == "after-cancel" || which == "write-cancel" {
+        tls13_client.conn_set_deadline(conn, 0, c)
+        trip_later(c, 400)
+    }
+    if which == "write-deadline" || which == "write-cancel" {
+        // 1 MiB at a time, up to 64 MiB, so the sealing of each piece (slow
+        // under a sanitizer) is a small part of the time to the stop.
+        chunk = make([]byte, 1048576)
+        sent = 0
+        while err == "" && sent < 64 {
+            err = tls13_client.conn_send(conn, chunk)
+            sent = sent + 1
+        }
+    } else {
+        err = tls13_client.conn_send(conn, string.bytes("hello"))
+        if err == "" {
+            data, n, rerr = tls13_client.conn_recv(conn)
+            err = rerr
+            if err == "" && data != null {
+                println("RECV ${bytes.to_string(data, n)}")
+                bytes.wipe_free(data)
+            }
+        }
+    }
+    println("RESULT ${which} err=[${err}] ms=${now() - start}")
+    if err != "" {
+        a = now()
+        _d, _n, again = tls13_client.conn_recv(conn)
+        println("AFTER recv=[${again}]")
+        tls13_client.close_conn(conn)
+        println("CLOSED in ${now() - a} ms")
+    } else {
+        tls13_client.close_conn(conn)
+    }
+    tcp.cancel_free(c)
+}
+
+extern exit(code: int)

@@ -264,7 +264,7 @@ main() {
     tkt_i = 0
     while tkt_i < 16 { bytes.set(tkt, tkt_i, 0xAB); tkt_i = tkt_i + 1 }
     pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
-    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt)[0..16], 0, 32, 0, &pch)
+    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt)[0..16], 0, 32, 0, 0, &pch)
     pok = 1
     if g8(pch.buf, 0) != 1 { pok = 0 } // client_hello type
     if pch.binder_off <= 0 { pok = 0 }
@@ -289,8 +289,8 @@ main() {
     while tk2i < 16 { bytes.set(tkt2, tk2i, 0xCD); tk2i = tk2i + 1 }
     pch_no = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
     pch_ed = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
-    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt2)[0..16], 0, 32, 0, &pch_no)
-    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt2)[0..16], 0, 32, 1, &pch_ed)
+    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt2)[0..16], 0, 32, 0, 0, &pch_no)
+    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "example.com", bytes.view(tkt2)[0..16], 0, 32, 1, 0, &pch_ed)
     // The early_data extension is 4 bytes (type 42 + zero length), so the
     // 0-RTT CH is exactly 4 bytes longer and still begins with client_hello.
     if g8(pch_ed.buf, 0) == 1 && pch_ed.buf_len == pch_no.buf_len + 4 {
@@ -299,6 +299,37 @@ main() {
     bytes.free(tkt2)
     bytes.free(pch_no.buf)
     bytes.free(pch_ed.buf)
+
+    // --- external PSK: the SHA-256 suites alone (only_sha256) ---
+    // cipher_suites follows version(2), random(32) and the 32-byte session
+    // id; with only_sha256 it is 4 bytes, ChaCha20 then AES-128-GCM, and no
+    // TLS_AES_256_GCM_SHA384 (0x1302), which an external SHA-256 PSK cannot
+    // key; without it the list is the resumption's 6 bytes.
+    tkt3 = bytes.new(4)
+    bytes.set(tkt3, 0, 0)
+    bytes.set(tkt3, 1, 0x41)
+    bytes.set(tkt3, 2, 0)
+    bytes.set(tkt3, 3, 0x42)
+    pch_x = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+    pch_r = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "", bytes.view(tkt3)[0..4], 0, 32, 0, 1, &pch_x)
+    tls13_hs.client_hello_psk(random, bytes.view(sid)[0..32], pub, "", bytes.view(tkt3)[0..4], 0, 32, 0, 0, &pch_r)
+    cso = 4 + 2 + 32 + 1 + 32
+    xl = g16(pch_x.buf, cso)
+    rl = g16(pch_r.buf, cso)
+    xs1 = g16(pch_x.buf, cso + 2)
+    xs2 = g16(pch_x.buf, cso + 4)
+    if xl == 4 && rl == 6 && xs1 == 0x1303 && xs2 == 0x1301 && pch_x.buf_len == pch_r.buf_len - 2 {
+        println("ok   an external-PSK CH offers the SHA-256 suites alone")
+    } else { println("FAIL external-PSK CH suites: len ${xl} (${xs1}, ${xs2}), resumption len ${rl}"); total_ok = 0 }
+    // The identity goes in verbatim, NUL bytes included: 00 41 00 42.
+    po, pl = ch_ext(pch_x.buf, 41)
+    if po >= 0 && g16(pch_x.buf, po + 2) == 4 && g8(pch_x.buf, po + 4) == 0 && g8(pch_x.buf, po + 5) == 0x41 && g8(pch_x.buf, po + 6) == 0 && g8(pch_x.buf, po + 7) == 0x42 {
+        println("ok   a PSK identity with NUL bytes goes in whole")
+    } else { println("FAIL a PSK identity with NUL bytes was not carried whole (ext at ${po}, ${pl} bytes)"); total_ok = 0 }
+    bytes.free(tkt3)
+    bytes.free(pch_x.buf)
+    bytes.free(pch_r.buf)
 
     // --- post-quantum X25519MLKEM768 ClientHello (client_hello_pq) ---
     // Fake 1216-byte hybrid share (ML-KEM ek 1184 || x25519 pub 32).

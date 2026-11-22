@@ -1,0 +1,768 @@
+// A scripted TLS 1.3 server for the pure client's EXTERNAL PSK (RFC 8446
+// 2.2, 4.2.11): it holds a 32-byte key (PSK_KEY_HEX, default the byte 0x11
+// repeated) under an identity (PSK_IDENTITY_HEX, default "plug-01"),
+// checks the identity and the client's binder against both binder labels,
+// and runs the abbreviated handshake, every secret computed here from the
+// RFC 8446 7.1 schedule apart from tls13_client (the binder keys from
+// tls13_kdf.derive_secret with the label named here, not tls13_ks's
+// helpers). It exists for what a real server will not do on purpose: each
+// PEER_CASE knob (";"-separated) makes it misbehave one way.
+//   ignore_binder=1  go on whatever the binder (a server that skipped it)
+//   suite=HEX        the ServerHello's cipher suite (default 1301)
+//   psk_id=N         the selected_identity it names (default 0)
+//   nopsk=1          no pre_shared_key in the ServerHello (PSK not taken)
+//   nokeyshare=1     no key_share in the ServerHello (psk_ke)
+//   group=HEX        the ServerHello's key_share names this group
+//   hrr=group:HEX    a HelloRetryRequest for that group first
+//   cert=1           a Certificate between EncryptedExtensions and Finished
+//   badfinished=1    a server Finished with one bit flipped
+//   tls12=1          a TLS 1.2 ServerHello (no supported_versions)
+//   stall=1          after the ClientHello, send nothing and wait to be closed
+//   stall_after=1    complete the handshake, then neither send nor read
+//                    (HOLD_MS, default 20000); noread=1 is the same, for a
+//                    client that writes
+//   trickle=1        answer the client's data with a 200-byte record sent a
+//                    byte every 100 ms
+// Writes its port to PEER_PORT_OUT, serves one connection, and prints a line
+// per step: "CH id=<ok|bad> binder=<ext|res|bad> suites=<hex list>", then
+// what the client sent: "ALERT <n>", "FINISHED <ok|bad>", "DATA <text>",
+// "CLOSED". After the client's data it sends "hi" under its own keys.
+
+import std.os
+import std.fs
+import std.tcp
+import std.bytes
+import std.string
+import std.cryptography
+import std.cryptography.x25519
+import std.cryptography.p256
+import std.cryptography.hmac
+import std.cryptography.sha2
+import std.cryptography.tls13_hs
+import std.cryptography.tls13_ks
+import std.cryptography.tls13_kdf
+import std.cryptography.tls13_record
+import std.cryptography.tls13_client
+
+extern exit(code: int)
+extern fflush(stream: ptr) -> int
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+extern string_char_at(str: string, index: int) -> int
+
+const HRR_RANDOM = "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c"
+
+// Exit with what was printed flushed first: the peer leaves on many paths
+// without freeing what it holds, and under LeakSanitizer an exit that
+// reports a leak ends the process before stdio is flushed.
+fn quit(code: int) {
+    fflush(null)
+    exit(code)
+}
+
+// ---- knobs, hex, buffers, records (as peer.ae) ----
+
+fn knob(name: string) -> string {
+    spec = os.getenv("PEER_CASE")
+    if spec == "" { return "" }
+    parts = string.split(spec, ";")
+    n = string.array_size(parts)
+    out = ""
+    i = 0
+    while i < n {
+        p = string.array_get(parts, i)
+        pre = "${name}="
+        if string.starts_with(p, pre) == 1 { out = string.substring(p, string.length(pre), string.length(p)) }
+        i = i + 1
+    }
+    string.array_free(parts)
+    return out
+}
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    return h - 55
+}
+
+fn from_hex(s: string) -> ptr {
+    n = string.length(s) / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(s, 2 * i)) * 16 + hexval(string_char_at(s, 2 * i + 1)))
+        i = i + 1
+    }
+    return b
+}
+
+fn hex16(s: string) -> int {
+    b = from_hex(s)
+    v = ((bytes.get(b, 0) & 0xFF) << 8) | (bytes.get(b, 1) & 0xFF)
+    bytes.free(b)
+    return v
+}
+
+struct Buf {
+    b: ptr
+    n: int
+}
+
+fn buf_new() -> *Buf {
+    h = malloc(sizeof(Buf)) as *Buf
+    h.b = bytes.new(64)
+    h.n = 0
+    return h
+}
+
+fn put8(w: *Buf, v: int) {
+    bytes.set(w.b, w.n, v & 0xFF)
+    w.n = w.n + 1
+}
+
+fn put16(w: *Buf, v: int) {
+    put8(w, v >> 8)
+    put8(w, v)
+}
+
+fn put24(w: *Buf, v: int) {
+    put8(w, v >> 16)
+    put8(w, v >> 8)
+    put8(w, v)
+}
+
+fn put_bytes(w: *Buf, src: ptr, off: int, n: int) {
+    if n > 0 { bytes.copy_from_bytes(w.b, w.n, src, off, n) }
+    w.n = w.n + n
+}
+
+fn buf_take(w: *Buf) -> ptr {
+    out = bytes.new(w.n)
+    if w.n > 0 { bytes.copy_from_bytes(out, 0, w.b, 0, w.n) }
+    bytes.free(w.b)
+    free(w as ptr)
+    return out
+}
+
+struct Reader {
+    sock: ptr
+    buf: ptr
+    len: int
+    off: int
+}
+
+fn next_record(r: *Reader) -> ptr {
+    while 1 == 1 {
+        avail = r.len - r.off
+        if avail >= 5 {
+            plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
+            if avail >= 5 + plen {
+                rec = bytes.new(5 + plen)
+                bytes.copy_from_bytes(rec, 0, r.buf, r.off, 5 + plen)
+                r.off = r.off + 5 + plen
+                return rec
+            }
+        }
+        chunk = bytes.new(16384)
+        bytes.set(chunk, 16383, 0)
+        got, err = tcp.read_into(r.sock, bytes.view(chunk)[0..16384])
+        if err != "" || got <= 0 {
+            bytes.free(chunk)
+            return null
+        }
+        bytes.copy_from_bytes(r.buf, r.len, chunk, 0, got)
+        r.len = r.len + got
+        bytes.free(chunk)
+    }
+}
+
+fn send_raw(sock: ptr, rec: ptr) {
+    _n, _e = tcp.write_all(sock, bytes.view(rec)[0..bytes.length(rec)])
+}
+
+fn send_plain(sock: ptr, ct: int, msg: ptr) {
+    w = buf_new()
+    put8(w, ct)
+    put16(w, 0x0303)
+    put16(w, bytes.length(msg))
+    put_bytes(w, msg, 0, bytes.length(msg))
+    rec = buf_take(w)
+    send_raw(sock, rec)
+    bytes.free(rec)
+}
+
+fn send_sealed(sock: ptr, ctx: ptr, ct: int, msg: ptr) {
+    rec = tls13_record.seal_record(ctx, ct, bytes.view(msg)[0..bytes.length(msg)])
+    send_raw(sock, rec)
+    bytes.free(rec)
+}
+
+fn hs_msg(typ: int, body: ptr) -> ptr {
+    w = buf_new()
+    put8(w, typ)
+    put24(w, bytes.length(body))
+    put_bytes(w, body, 0, bytes.length(body))
+    return buf_take(w)
+}
+
+fn suite_params(cs: int) -> (int, int, string, int) {
+    if cs == tls13_hs.TLS_AES_256_GCM_SHA384 { return tls13_record.AEAD_AES_256_GCM, 32, "sha384", 48 }
+    if cs == tls13_hs.TLS_CHACHA20_POLY1305_SHA256 { return tls13_record.AEAD_CHACHA20_POLY1305, 32, "sha256", 32 }
+    return tls13_record.AEAD_AES_128_GCM, 16, "sha256", 32
+}
+
+fn ctx_of(algo: string, hl: int, aead: int, klen: int, s: ptr) -> ptr {
+    k = tls13_ks.write_key(algo, bytes.view(s)[0..hl], klen)
+    iv = tls13_ks.write_iv(algo, s)
+    ctx = tls13_record.new_aead(aead, bytes.view(k)[0..klen], iv)
+    bytes.free(k)
+    bytes.free(iv)
+    return ctx
+}
+
+fn hash_of(algo: string, b: ptr, n: int) -> ptr {
+    ctx, _e = sha2.new(algo)
+    sha2.update(ctx, bytes.view(b)[0..n])
+    return sha2.final_bytes(ctx)
+}
+
+// ---- the ClientHello ----
+
+// Where the extensions of ClientHello `ch` start, and end.
+fn ch_exts(ch: ptr) -> (int, int) {
+    p = 4 + 2 + 32
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    p = p + 2 + (((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF))
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    el = ((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF)
+    return p + 2, p + 2 + el
+}
+
+fn g16(b: ptr, p: int) -> int {
+    return ((bytes.get(b, p) & 0xFF) << 8) | (bytes.get(b, p + 1) & 0xFF)
+}
+
+// The offset of extension `t`'s body in `ch`, and its length; (-1, 0) if absent.
+fn find_ext(ch: ptr, t: int) -> (int, int) {
+    p, end = ch_exts(ch)
+    while p + 4 <= end {
+        et = g16(ch, p)
+        el = g16(ch, p + 2)
+        if et == t { return p + 4, el }
+        p = p + 4 + el
+    }
+    return -1, 0
+}
+
+// The key share of `group` in `ch`: (offset, length), or (-1, 0).
+fn find_share(ch: ptr, group: int) -> (int, int) {
+    d, n = find_ext(ch, 51)
+    if d < 0 { return -1, 0 }
+    q = d + 2
+    while q + 4 <= d + n {
+        g = g16(ch, q)
+        kl = g16(ch, q + 2)
+        if g == group { return q + 4, kl }
+        q = q + 4 + kl
+    }
+    return -1, 0
+}
+
+// The next handshake record's payload, skipping change_cipher_spec, or null.
+fn next_hello(r: *Reader) -> ptr {
+    rec = next_record(r)
+    while rec != null && (bytes.get(rec, 0) & 0xFF) == 0x14 {
+        bytes.free(rec)
+        rec = next_record(r)
+    }
+    if rec == null { return null }
+    if (bytes.get(rec, 0) & 0xFF) == 0x15 {
+        println("ALERT ${bytes.get(rec, 6) & 0xFF}")
+        quit(0)
+    }
+    n = bytes.length(rec) - 5
+    m = bytes.new(n)
+    bytes.copy_from_bytes(m, 0, rec, 5, n)
+    bytes.free(rec)
+    return m
+}
+
+// What the client sent next, in the clear or under `ctx`: "ALERT n",
+// "CLOSED", or the opened record (content type, plaintext).
+fn client_record(r: *Reader, ctx: ptr) -> (int, ptr) {
+    while 1 == 1 {
+        rec = next_record(r)
+        if rec == null {
+            println("CLOSED")
+            quit(0)
+        }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct == 0x15 {
+            println("ALERT ${bytes.get(rec, 6) & 0xFF}")
+            quit(0)
+        }
+        if ct == 0x17 {
+            o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+            oe = tls13_record.open_record(ctx, bytes.view(rec)[0..bytes.length(rec)], &o)
+            bytes.free(rec)
+            if oe != "" {
+                println("UNREADABLE: ${oe}")
+                quit(0)
+            }
+            if o.content_type == 21 {
+                println("ALERT ${bytes.get(o.plaintext, 1) & 0xFF}")
+                quit(0)
+            }
+            return o.content_type, o.plaintext
+        }
+        bytes.free(rec)
+    }
+}
+
+fn text_of(b: ptr) -> string {
+    return bytes.to_string(b, bytes.length(b))
+}
+
+// The PSK this peer holds: PSK_KEY_HEX, else 32 bytes of 0x11.
+fn peer_key() -> ptr {
+    h = os.getenv("PSK_KEY_HEX")
+    if h != "" { return from_hex(h) }
+    k = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(k, i, 0x11)
+        i = i + 1
+    }
+    return k
+}
+
+// The identity this peer holds: PSK_IDENTITY_HEX, else "plug-01".
+fn peer_identity() -> ptr {
+    h = os.getenv("PSK_IDENTITY_HEX")
+    if h == "" { h = "706c75672d3031" }
+    return from_hex(h)
+}
+
+// The binder (HMAC(finished key of Derive-Secret(early, `label`, ""),
+// Transcript-Hash(prefix, ClientHello up to its binders))) that `ch` should
+// carry, compared with the one it does: 1 when they match.
+fn binder_is(ch: ptr, prefix: ptr, early: ptr, label: string) -> int {
+    d, _n = find_ext(ch, 41)
+    if d < 0 { return 0 }
+    il = g16(ch, d)
+    trunc = d + 2 + il
+    t = tls13_client.transcript_new()
+    if bytes.length(prefix) > 0 { tls13_client.transcript_add(t, bytes.view(prefix)[0..bytes.length(prefix)]) }
+    tls13_client.transcript_add(t, bytes.view(ch)[0..trunc])
+    th = tls13_client.transcript_hash_algo(t, "sha256")
+    tls13_client.transcript_free(t)
+    empty = bytes.new(0)
+    eh = hash_of("sha256", empty, 0)
+    bk = tls13_kdf.derive_secret("sha256", bytes.view(early)[0..32], label, bytes.view(eh)[0..32])
+    fk = tls13_kdf.expand_label("sha256", bytes.view(bk)[0..32], "finished", bytes.view(empty)[0..0], 32)
+    want = hmac.bytes("sha256", bytes.view(fk)[0..32], bytes.view(th)[0..32])
+    ok = 1
+    if (bytes.get(ch, trunc + 2) & 0xFF) != 32 { ok = 0 }
+    i = 0
+    while i < 32 && ok == 1 {
+        if (bytes.get(ch, trunc + 3 + i) & 0xFF) != (bytes.get(want, i) & 0xFF) { ok = 0 }
+        i = i + 1
+    }
+    bytes.free(th); bytes.free(eh); bytes.free(bk); bytes.free(empty); bytes.free(fk); bytes.free(want)
+    return ok
+}
+
+// What the binder of `ch` is keyed with: "ext", "res" or "bad".
+fn binder_kind(ch: ptr, prefix: ptr, early: ptr) -> string {
+    if binder_is(ch, prefix, early, "ext binder") == 1 { return "ext" }
+    if binder_is(ch, prefix, early, "res binder") == 1 { return "res" }
+    return "bad"
+}
+
+// "ok" when the one PskIdentity of `ch` is `id`, byte for byte.
+fn identity_kind(ch: ptr, id: ptr) -> string {
+    d, _n = find_ext(ch, 41)
+    if d < 0 { return "none" }
+    il = g16(ch, d + 2)
+    if il != bytes.length(id) { return "bad" }
+    i = 0
+    while i < il {
+        if (bytes.get(ch, d + 4 + i) & 0xFF) != (bytes.get(id, i) & 0xFF) { return "bad" }
+        i = i + 1
+    }
+    return "ok"
+}
+
+fn hex_digit(d: int) -> string {
+    return string.substring("0123456789abcdef", d, d + 1)
+}
+
+// `v` as four hex digits.
+fn hex4(v: int) -> string {
+    return "${hex_digit((v >> 12) & 15)}${hex_digit((v >> 8) & 15)}${hex_digit((v >> 4) & 15)}${hex_digit(v & 15)}"
+}
+
+// The cipher suites `ch` offers, as hex, comma-separated.
+fn suites_of(ch: ptr) -> string {
+    p = 4 + 2 + 32
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    n = g16(ch, p)
+    out = ""
+    q = p + 2
+    while q < p + 2 + n {
+        h = hex4(g16(ch, q))
+        if out != "" { out = "${out}," }
+        out = "${out}${h}"
+        q = q + 2
+    }
+    return out
+}
+
+fn send_alert_plain(sock: ptr, desc: int) {
+    m = bytes.new(2)
+    bytes.set(m, 0, 2)
+    bytes.set(m, 1, desc)
+    send_plain(sock, 21, m)
+    bytes.free(m)
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: ${lerr}")
+        quit(1)
+    }
+    _pw = fs.write(os.getenv("PEER_PORT_OUT"), "${tcp.server_port(srv)}")
+    sock, aerr = tcp.accept(srv)
+    // One connection is all the peer serves.
+    tcp.server_close(srv)
+    if aerr != "" {
+        println("FAIL: ${aerr}")
+        quit(1)
+    }
+    r = Reader { sock: sock, buf: bytes.new(4096), len: 0, off: 0 }
+
+    key = peer_key()
+    early = tls13_ks.early_secret_psk("sha256", bytes.view(key)[0..bytes.length(key)])
+    bytes.wipe_free(key)
+    id = peer_identity()
+
+    ch = next_hello(&r)
+    if ch == null {
+        println("CLOSED before a ClientHello")
+        quit(0)
+    }
+    empty = bytes.new(0)
+    idk = identity_kind(ch, id)
+    bk = binder_kind(ch, empty, early)
+    bytes.free(empty)
+    ed_d, _edn = find_ext(ch, 42)
+    eflag = 0
+    if ed_d >= 0 { eflag = 1 }
+    println("CH id=${idk} binder=${bk} suites=${suites_of(ch)} early=${eflag}")
+    if knob("stall") != "" {
+        // Read until the client closes; never answer.
+        rest = next_record(&r)
+        while rest != null {
+            bytes.free(rest)
+            rest = next_record(&r)
+        }
+        println("CLOSED")
+        quit(0)
+    }
+    if (idk != "ok" || bk != "ext") && knob("ignore_binder") == "" {
+        // A server checking the binder refuses here (RFC 8446 4.2.11).
+        send_alert_plain(sock, 51)
+        println("REFUSED")
+        quit(0)
+    }
+
+    tr = tls13_client.transcript_new()
+    tls13_client.transcript_add(tr, bytes.view(ch)[0..bytes.length(ch)])
+    sid_off = 4 + 2 + 32
+    sid_len = bytes.get(ch, sid_off) & 0xFF
+    sid = bytes.new(sid_len)
+    bytes.copy_from_bytes(sid, 0, ch, sid_off + 1, sid_len)
+
+    suite = 0x1301
+    sk = knob("suite")
+    if sk != "" { suite = hex16(sk) }
+    aead, klen, algo, hl = suite_params(suite)
+    group = tls13_hs.GROUP_X25519
+
+    hk = knob("hrr")
+    if hk != "" {
+        // A HelloRetryRequest asking for a share of the group, then the
+        // second ClientHello, whose binder is over message_hash and it.
+        group = hex16(string.substring(hk, 6, string.length(hk)))
+        w = buf_new()
+        put16(w, 0x0303)
+        rnd = from_hex(HRR_RANDOM)
+        put_bytes(w, rnd, 0, 32)
+        bytes.free(rnd)
+        put8(w, sid_len)
+        put_bytes(w, sid, 0, sid_len)
+        put16(w, suite)
+        put8(w, 0)
+        put16(w, 12)
+        put16(w, 0x002b)
+        put16(w, 2)
+        put16(w, 0x0304)
+        put16(w, 0x0033)
+        put16(w, 2)
+        put16(w, group)
+        hb = buf_take(w)
+        hrr = hs_msg(2, hb)
+        bytes.free(hb)
+        send_plain(sock, 22, hrr)
+        th1 = tls13_client.transcript_hash_algo(tr, algo)
+        tls13_client.transcript_free(tr)
+        mw = buf_new()
+        put8(mw, 254)
+        put24(mw, hl)
+        put_bytes(mw, th1, 0, hl)
+        put_bytes(mw, hrr, 0, bytes.length(hrr))
+        prefix = buf_take(mw)
+        bytes.free(th1)
+        bytes.free(hrr)
+        tr = tls13_client.transcript_new()
+        tls13_client.transcript_add(tr, bytes.view(prefix)[0..bytes.length(prefix)])
+        bytes.free(ch)
+        ch = next_hello(&r)
+        if ch == null {
+            println("CLOSED")
+            quit(0)
+        }
+        b2 = binder_kind(ch, prefix, early)
+        println("CH2 id=${identity_kind(ch, id)} binder=${b2}")
+        bytes.free(prefix)
+        if b2 != "ext" && knob("ignore_binder") == "" {
+            send_alert_plain(sock, 51)
+            println("REFUSED")
+            quit(0)
+        }
+        tls13_client.transcript_add(tr, bytes.view(ch)[0..bytes.length(ch)])
+    }
+
+    // The ECDHE share: x25519, or secp256r1 after a HelloRetryRequest for it.
+    shared = null
+    ks = null
+    so, sl = find_share(ch, group)
+    if so < 0 {
+        println("FAIL: no key share for group ${group}")
+        quit(1)
+    }
+    cpub = bytes.new(sl)
+    bytes.copy_from_bytes(cpub, 0, ch, so, sl)
+    bytes.free(ch)
+    priv, _rerr = cryptography.random_buffer(32)
+    if group == tls13_hs.GROUP_SECP256R1 {
+        px, py = p256.scalar_mult_base(priv)
+        ks = bytes.new(65)
+        bytes.set(ks, 0, 4)
+        bytes.copy_from_bytes(ks, 1, px, 0, 32)
+        bytes.copy_from_bytes(ks, 33, py, 0, 32)
+        cx = bytes.new(32)
+        cy = bytes.new(32)
+        bytes.copy_from_bytes(cx, 0, cpub, 1, 32)
+        bytes.copy_from_bytes(cy, 0, cpub, 33, 32)
+        shared = p256.ecdh(priv, cx, cy)
+        bytes.free(px); bytes.free(py); bytes.free(cx); bytes.free(cy)
+    } else {
+        ks = x25519.base_point(priv)
+        s2, _xerr = x25519.agree(priv, cpub)
+        shared = s2
+    }
+    bytes.wipe_free(priv)
+    bytes.free(cpub)
+
+    // The ServerHello: supported_versions, key_share, pre_shared_key.
+    sgroup = group
+    gk = knob("group")
+    if gk != "" { sgroup = hex16(gk) }
+    exts = buf_new()
+    if knob("tls12") == "" {
+        put16(exts, 0x002b)
+        put16(exts, 2)
+        put16(exts, 0x0304)
+    }
+    if knob("nokeyshare") == "" {
+        put16(exts, 0x0033)
+        put16(exts, 4 + bytes.length(ks))
+        put16(exts, sgroup)
+        put16(exts, bytes.length(ks))
+        put_bytes(exts, ks, 0, bytes.length(ks))
+    }
+    if knob("nopsk") == "" {
+        pid = 0
+        pk = knob("psk_id")
+        if pk != "" { pid, _pe = string.to_int(pk) }
+        put16(exts, 0x0029)
+        put16(exts, 2)
+        put16(exts, pid)
+    }
+    e = buf_take(exts)
+    bytes.free(ks)
+    w2 = buf_new()
+    put16(w2, 0x0303)
+    srnd, _sr = cryptography.random_buffer(32)
+    put_bytes(w2, srnd, 0, 32)
+    put8(w2, sid_len)
+    put_bytes(w2, sid, 0, sid_len)
+    put16(w2, suite)
+    put8(w2, 0)
+    put16(w2, bytes.length(e))
+    put_bytes(w2, e, 0, bytes.length(e))
+    bytes.free(e)
+    shb = buf_take(w2)
+    bytes.free(srnd)
+    bytes.free(sid)
+    sh = hs_msg(2, shb)
+    bytes.free(shb)
+    send_plain(sock, 22, sh)
+    tls13_client.transcript_add(tr, bytes.view(sh)[0..bytes.length(sh)])
+    bytes.free(sh)
+
+    // A client that refuses the ServerHello answers now, in the clear.
+    ready, _perr = tcp.poll(sock, 300)
+    if ready {
+        _ct, _cp = client_record(&r, null)
+        println("UNEXPECTED")
+        quit(0)
+    }
+
+    // The handshake keys: the PSK's early secret, then the ECDHE.
+    th = tls13_client.transcript_hash_algo(tr, algo)
+    hsec = tls13_ks.handshake_secret(algo, early, bytes.view(shared)[0..bytes.length(shared)])
+    tls13_ks.free_secret(early)
+    bytes.wipe_free(shared)
+    c_hs = tls13_ks.traffic_secret(algo, hsec, "c hs traffic", bytes.view(th)[0..hl])
+    s_hs = tls13_ks.traffic_secret(algo, hsec, "s hs traffic", bytes.view(th)[0..hl])
+    bytes.free(th)
+    srv_ctx = ctx_of(algo, hl, aead, klen, s_hs)
+    cli_ctx = ctx_of(algo, hl, aead, klen, c_hs)
+
+    // EncryptedExtensions (no extensions), maybe a Certificate, Finished.
+    eew = buf_new()
+    put16(eew, 0)
+    eeb = buf_take(eew)
+    ee = hs_msg(8, eeb)
+    bytes.free(eeb)
+    send_sealed(sock, srv_ctx, 22, ee)
+    tls13_client.transcript_add(tr, bytes.view(ee)[0..bytes.length(ee)])
+    bytes.free(ee)
+    if knob("cert") != "" {
+        // An empty-context Certificate with one tiny entry: a PSK flight
+        // has no Certificate at all (RFC 8446 2.2), whatever it holds.
+        cw = buf_new()
+        put8(cw, 0)
+        put24(cw, 3 + 3 + 2)
+        put24(cw, 3)
+        put8(cw, 0x30)
+        put8(cw, 0x01)
+        put8(cw, 0x00)
+        put16(cw, 0)
+        cb = buf_take(cw)
+        cm = hs_msg(11, cb)
+        bytes.free(cb)
+        send_sealed(sock, srv_ctx, 22, cm)
+        tls13_client.transcript_add(tr, bytes.view(cm)[0..bytes.length(cm)])
+        bytes.free(cm)
+    }
+    th_ee = tls13_client.transcript_hash_algo(tr, algo)
+    svd = tls13_client.finished_verify_data_algo(s_hs, bytes.view(th_ee)[0..hl], algo, hl)
+    bytes.free(th_ee)
+    tls13_ks.free_secret(s_hs)
+    fin = tls13_hs.finished_msg(svd, hl)
+    if knob("badfinished") != "" {
+        // One bit of the last verify_data byte.
+        bytes.set(fin, 3 + hl, (bytes.get(fin, 3 + hl) & 0xFF) ^ 1)
+    }
+    send_sealed(sock, srv_ctx, 22, fin)
+    tls13_client.transcript_add(tr, bytes.view(fin)[0..bytes.length(fin)])
+    bytes.free(fin)
+    bytes.wipe_free(svd)
+
+    th_sf = tls13_client.transcript_hash_algo(tr, algo)
+    ms = tls13_ks.master_secret(algo, hsec)
+    c_ap = tls13_ks.traffic_secret(algo, ms, "c ap traffic", bytes.view(th_sf)[0..hl])
+    s_ap = tls13_ks.traffic_secret(algo, ms, "s ap traffic", bytes.view(th_sf)[0..hl])
+    bytes.free(th_sf)
+    tls13_ks.free_secret(ms)
+    tls13_ks.free_secret(hsec)
+
+    th_cf = tls13_client.transcript_hash_algo(tr, algo)
+    want = tls13_client.finished_verify_data_algo(c_hs, bytes.view(th_cf)[0..hl], algo, hl)
+    bytes.free(th_cf)
+    tls13_ks.free_secret(c_hs)
+    tls13_client.transcript_free(tr)
+    t2, p2 = client_record(&r, cli_ctx)
+    fok = "bad"
+    if t2 == 22 && bytes.length(p2) == 4 + hl && (bytes.get(p2, 0) & 0xFF) == 20 {
+        same = 1
+        i = 0
+        while i < hl {
+            if (bytes.get(p2, 4 + i) & 0xFF) != (bytes.get(want, i) & 0xFF) { same = 0 }
+            i = i + 1
+        }
+        if same == 1 { fok = "ok" }
+    }
+    println("FINISHED ${fok}")
+    bytes.wipe_free(want)
+    bytes.free(p2)
+
+    if knob("stall_after") != "" || knob("noread") != "" {
+        // Established, then nothing: no reply, and nothing read, until
+        // HOLD_MS (default 20000) has passed or the driver ends this.
+        hold, _he = string.to_int(os.getenv("HOLD_MS"))
+        if hold <= 0 { hold = 20000 }
+        println("HOLDING")
+        sleep(hold)
+        quit(0)
+    }
+
+    // The client's data under its application keys, then ours.
+    actx = ctx_of(algo, hl, aead, klen, c_ap)
+    sctx = ctx_of(algo, hl, aead, klen, s_ap)
+    tls13_ks.free_secret(c_ap)
+    tls13_ks.free_secret(s_ap)
+    t3, p3 = client_record(&r, actx)
+    if t3 == 23 { println("DATA ${string.trim(text_of(p3))}") } else { println("RECORD ${t3}") }
+    bytes.free(p3)
+    hi = from_hex("6869")
+    if knob("trickle") != "" {
+        // The reply record a byte every 100 ms: each read gets something
+        // well inside any per-read timeout, and the record takes 20 s.
+        big = bytes.new(200)
+        k = 0
+        while k < 200 {
+            bytes.set(big, k, 0x61)
+            k = k + 1
+        }
+        rec = tls13_record.seal_record(sctx, 23, bytes.view(big)[0..200])
+        bytes.free(big)
+        q = 0
+        going = 1
+        while q < bytes.length(rec) && going == 1 {
+            _tn, te = tcp.write_all(sock, bytes.view(rec)[q..q + 1])
+            if te != "" { going = 0 }
+            q = q + 1
+            sleep(100)
+        }
+        println("TRICKLED ${q}")
+        bytes.free(rec)
+    } else {
+        send_sealed(sock, sctx, 23, hi)
+    }
+    bytes.free(hi)
+    nr = next_record(&r)
+    if nr != null { bytes.free(nr) }
+    tcp.close(sock)
+    tls13_record.free_ctx(srv_ctx)
+    tls13_record.free_ctx(cli_ctx)
+    tls13_record.free_ctx(actx)
+    tls13_record.free_ctx(sctx)
+    bytes.free(r.buf)
+    bytes.free(id)
+    quit(0)
+}

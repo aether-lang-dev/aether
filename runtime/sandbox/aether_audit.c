@@ -53,9 +53,31 @@ static int64_t denied_total = 0;
 #define QUERY_NONE     0
 #define QUERY_CATEGORY 1
 #define QUERY_RESOURCE 2
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build has no thread-locals (AETHER_TLS_SHARED is empty), so
+ * with task contexts one task's read could move another's: the read is a
+ * block of the calling task's execution context instead
+ * (aether_context_local), and one shared only when there was no memory. */
+#include "../actors/aether_panic.h"   /* aether_context_local */
+typedef struct { audit_entry snapshot; int index_plus_one; int phase; } AuditQuery;
+static const char audit_query_key = 0;
+static AuditQuery audit_query_no_memory;
+static AuditQuery* audit_query_here(void) {
+    AuditQuery* q = (AuditQuery*)aether_context_local(&audit_query_key, sizeof(AuditQuery), NULL);
+    return q ? q : &audit_query_no_memory;
+}
+#define query_snapshot (audit_query_here()->snapshot)
+#define query_phase    (audit_query_here()->phase)   /* QUERY_NONE is 0 */
+/* -1 as the thread-local starts: the block is zeroed, so it keeps the index plus one. */
+#define query_index_get()  (audit_query_here()->index_plus_one - 1)
+#define query_index_set(i) (audit_query_here()->index_plus_one = (i) + 1)
+#else
 static AETHER_TLS_SHARED audit_entry query_snapshot;
 static AETHER_TLS_SHARED int query_index = -1;
 static AETHER_TLS_SHARED int query_phase = QUERY_NONE;
+#define query_index_get()  (query_index)
+#define query_index_set(i) (query_index = (i))
+#endif
 
 // One mutex guards both the sink-mode resolution and the ring buffer.
 // Audit is off the hot path of normal execution (it fires only inside
@@ -165,7 +187,7 @@ static void snapshot_entry_locked(int i) {
     if (i >= 0 && i < ring_count) {
         query_snapshot = ring[logical_to_physical(i)];
     }
-    query_index = i;
+    query_index_set(i);
 }
 
 int aether_audit_count(void) {
@@ -184,7 +206,7 @@ const char* aether_audit_entry_category(int i) {
 }
 
 const char* aether_audit_entry_resource(int i) {
-    if (query_phase != QUERY_CATEGORY || query_index != i) {
+    if (query_phase != QUERY_CATEGORY || query_index_get() != i) {
         pthread_mutex_lock(audit_lock_get());
         snapshot_entry_locked(i);
         pthread_mutex_unlock(audit_lock_get());
@@ -195,7 +217,7 @@ const char* aether_audit_entry_resource(int i) {
 
 int aether_audit_entry_allowed(int i) {
     if ((query_phase != QUERY_CATEGORY && query_phase != QUERY_RESOURCE) ||
-        query_index != i) {
+        query_index_get() != i) {
         pthread_mutex_lock(audit_lock_get());
         snapshot_entry_locked(i);
         pthread_mutex_unlock(audit_lock_get());

@@ -16,6 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local */
+#endif
 #ifdef AETHER_HAS_YAML
 #ifdef AETHER_VENDOR_YAML
 /* The vendored library's symbols are all renamed aether_<name> (see
@@ -42,8 +45,26 @@
 // Error reporting
 // ---------------------------------------------------------------------------
 
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build has no thread-locals of Aether's own (ESP-IDF would put
+ * one on every FreeRTOS task's stack): the error and the emit buffer are a
+ * block of the calling task's execution context (aether_context_local, docs/
+ * design/task-execution-contexts.md), the buffer given back with it. No
+ * memory for the block is a panic, never another task's buffer. */
+typedef struct { char err_buf[256]; int err_set; char* emit_buf; size_t emit_cap; } YamlState;
+static const char g_yaml_key = 0;
+static void yaml_state_release(void* p) { free(((YamlState*)p)->emit_buf); }
+static YamlState* yaml_state_here(void) {
+    YamlState* y = (YamlState*)aether_context_local(&g_yaml_key, sizeof(YamlState), yaml_state_release);
+    if (!y) aether_panic("yaml: no memory for this task's error and emit buffer");
+    return y;
+}
+#define g_yaml_err_buf (yaml_state_here()->err_buf)
+#define g_yaml_err_set (yaml_state_here()->err_set)
+#else
 static YAML_THREAD_LOCAL char g_yaml_err_buf[256];
 static YAML_THREAD_LOCAL int  g_yaml_err_set = 0;
+#endif
 
 const char* yaml_last_error(void) {
     return g_yaml_err_set ? g_yaml_err_buf : "";
@@ -54,8 +75,13 @@ const char* yaml_last_error(void) {
 // Emission thread-local buffer to avoid memory leaks
 // ---------------------------------------------------------------------------
 
+#if defined(AETHER_NO_THREADING)
+#define g_yaml_emit_buf (yaml_state_here()->emit_buf)
+#define g_yaml_emit_cap (yaml_state_here()->emit_cap)
+#else
 static YAML_THREAD_LOCAL char *g_yaml_emit_buf = NULL;
 static YAML_THREAD_LOCAL size_t g_yaml_emit_cap = 0;
+#endif
 
 static const char *store_emit_string(char *str) {
     if (!str) return NULL;

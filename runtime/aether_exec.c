@@ -59,6 +59,8 @@ static void (*const exec_host_api[])(void) = {
     (void (*)(void))aether_exec_cancel,          (void (*)(void))aether_exec_account_new,
     (void (*)(void))aether_exec_account_free,    (void (*)(void))aether_exec_use,
     (void (*)(void))aether_exec_account_used,    (void (*)(void))aether_exec_account_tripped,
+    (void (*)(void))aether_context_port_install, (void (*)(void))aether_context_attach,
+    (void (*)(void))aether_context_detach,       (void (*)(void))aether_context_task_ended,
 };
 
 /* The two the public header (libaether.h) declares: exported however the
@@ -383,6 +385,100 @@ AETHER_EXEC_API AetherExecToken aether_exec_token(void) {
     t.serial = F->exec_depth > F->exec_floor ? F->exec[F->exec_depth - 1].serial : F->serial + 1;
     return t;
 }
+
+/* ---------------------------------------------------------------------------
+ * Task contexts (libaether.h; docs/design/task-execution-contexts.md)
+ * ---------------------------------------------------------------------------
+ * A cooperative build's tasks, each with execution state of its own: the
+ * built-in context stays the installing task's (the one that owns the
+ * actors), and every other task that enters Aether is given a context by
+ * aether_context_attach, made here and freed here. aether_unwind.c keeps the
+ * built-in context and the port, and reaches the calling task's context. */
+#if defined(AETHER_NO_THREADING)
+extern const AetherContextPort* aether_context_port;   /* aether_unwind.c */
+
+/* A cell a detached context gave back, taken for a new one; NULL: none. */
+static AetherCancelCell* cell_take_unowned(void) {
+    for (AetherCancelCell* c = atomic_load_explicit(&g_cells, memory_order_acquire); c; c = c->next) {
+        int one = 1;
+        if (atomic_compare_exchange_strong_explicit(&c->unowned, &one, 0, memory_order_acq_rel,
+                                                    memory_order_relaxed))
+            return c;
+    }
+    return NULL;
+}
+
+/* `F`'s state given back, on whichever task: its account in use let go,
+ * its cell freed for the next context, its buffers freed. */
+static void context_let_go(AetherFrames* F) {
+    aether_accounts_frames_ended(F);
+    if (F->cell) {
+        AetherCancelCell* c = F->cell;
+        c->serial_floor = F->serial;
+        atomic_store_explicit(&c->pending, 0, memory_order_relaxed);
+        F->cell = NULL;
+        atomic_store_explicit(&c->unowned, 1, memory_order_release);
+    }
+    aether_frames_release(F);
+}
+
+AETHER_EXEC_API int aether_context_port_install(const AetherContextPort* port) {
+    if (!port || !port->current || !port->set_current || aether_context_port) return -1;
+    if (port->set_current(aether_context_builtin()) != 0) return -1;
+    aether_context_port = port;
+    return 0;
+}
+
+AETHER_EXEC_API int aether_context_attach(void) {
+    const AetherContextPort* p = aether_context_port;
+    if (!p || p->current()) return -1;
+    struct AetherExecContext* ctx = (struct AetherExecContext*)calloc(1, aether_context_size());
+    if (!ctx) return -1;
+    AetherFrames* F = aether_context_frames(ctx);
+    AetherCancelCell* c = cell_take_unowned();
+    if (c) {
+        F->cell = c;
+        F->serial = c->serial_floor;
+    }
+    if (p->set_current(ctx) != 0) {
+        if (c) atomic_store_explicit(&c->unowned, 1, memory_order_release);
+        free(ctx);
+        return -1;
+    }
+    return 0;
+}
+
+AETHER_EXEC_API int aether_context_detach(void) {
+    const AetherContextPort* p = aether_context_port;
+    if (!p) return -1;
+    struct AetherExecContext* ctx = p->current();
+    if (!ctx || ctx == aether_context_builtin()) return -1;
+    AetherFrames* F = aether_context_frames(ctx);
+    if (F->depth != 0 || F->exec_depth != 0) return -1;   /* inside a call into Aether */
+    if (p->set_current(NULL) != 0) return -1;
+    context_let_go(F);
+    free(ctx);
+    return 0;
+}
+
+AETHER_EXEC_API void aether_context_task_ended(AetherExecContext* ctx) {
+    if (!ctx) return;
+    /* The installing task ended: the built-in context is the program's, and
+     * stays (with whatever it holds) for no task. */
+    if (ctx == aether_context_builtin()) return;
+    context_let_go(aether_context_frames(ctx));
+    free(ctx);
+}
+#else
+/* A threaded runtime's threads have their own execution state already. */
+AETHER_EXEC_API int aether_context_port_install(const AetherContextPort* port) {
+    (void)port;
+    return -1;
+}
+AETHER_EXEC_API int aether_context_attach(void) { return 0; }
+AETHER_EXEC_API int aether_context_detach(void) { return 0; }
+AETHER_EXEC_API void aether_context_task_ended(AetherExecContext* ctx) { (void)ctx; }
+#endif
 
 AETHER_EXEC_API int aether_exec_cancel(AetherExecToken token) {
     AetherCancelCell* c = (AetherCancelCell*)token.cell;

@@ -72,7 +72,12 @@ stub hands `aether_exec_enter_at` its own `__builtin_longjmp` with its
 `__builtin_setjmp` buffer, and a panic jumps back through it, because the
 buffer's layout depends on `-fcf-protection` and the library's C and the
 runtime are not always compiled alike (a protected runtime's jump into an
-unprotected stub's buffer ran `incsspq` and died of SIGILL).
+unprotected stub's buffer ran `incsspq` and died of SIGILL); 6, C generated
+for a cooperative runtime (`AETHER_NO_THREADING`) keeps its builder blocks'
+stack in a block of the task's execution context through a new entry point,
+`aether_context_local`, so that tasks with task contexts
+([design/task-execution-contexts.md](design/task-execution-contexts.md)) do
+not share one stack; a threaded build's generated C is unchanged.
 
 **Shared facilities.** A library without `--shared-runtime` brings a copy
 of the runtime, and copies in one process share the sandbox levels and the

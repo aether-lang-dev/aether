@@ -19,6 +19,9 @@
 #endif
 
 #include "aether_script_gateway.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../../runtime/actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 #include "../../net/aether_http_server.h"
 #include "../../dl/aether_dl.h"
 #include "../../../runtime/aether_sandbox.h"
@@ -110,7 +113,22 @@ static int sg_readable(const char* path) {
  * NULL when the runtime is shared, or the reason it is not. */
 
 /* The reason a script was refused, per thread like std.dl's last error. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: AETHER_TLS is empty there, which made this one
+ * slot for every task with task contexts. It is a block of the calling
+ * task's execution context instead (aether_context_local), and one shared
+ * only when there was no memory for it, as std.json's error is. */
+typedef struct { char text[512]; } SgErr;
+static const char g_sg_err_key = 0;
+static SgErr g_sg_err_no_memory;
+static SgErr* sg_err_here(void) {
+    SgErr* e = (SgErr*)aether_context_local(&g_sg_err_key, sizeof(SgErr), NULL);
+    return e ? e : &g_sg_err_no_memory;
+}
+#define g_sg_err (sg_err_here()->text)
+#else
 static AETHER_TLS char g_sg_err[512];
+#endif
 
 /* Whether the loaded image `mod` imports from the DLL named `dll_name`,
  * read from its import directory. */
@@ -187,7 +205,22 @@ static const char* sg_script_runtime_check(void* script, const char* so_path) {
 }
 #else
 /* The reason a script was refused, per thread like std.dl's last error. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: AETHER_TLS is empty there, which made this one
+ * slot for every task with task contexts. It is a block of the calling
+ * task's execution context instead (aether_context_local), and one shared
+ * only when there was no memory for it, as std.json's error is. */
+typedef struct { char text[512]; } SgErr;
+static const char g_sg_err_key = 0;
+static SgErr g_sg_err_no_memory;
+static SgErr* sg_err_here(void) {
+    SgErr* e = (SgErr*)aether_context_local(&g_sg_err_key, sizeof(SgErr), NULL);
+    return e ? e : &g_sg_err_no_memory;
+}
+#define g_sg_err (sg_err_here()->text)
+#else
 static AETHER_TLS char g_sg_err[512];
+#endif
 
 static const void* sg_image_of(const void* addr) {
     Dl_info info;

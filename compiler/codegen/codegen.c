@@ -10586,9 +10586,27 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * deep again (half, so blocks going in and out at the edge do not
      * allocate each time), so a thread whose blocks have all ended holds
      * none of it. */
+    /* A cooperative build (AETHER_NO_THREADING) has no thread-locals, and
+     * its tasks, each with a task context (docs/design/
+     * task-execution-contexts.md), must not share one stack: there the
+     * stack is a block of the task's context (aether_context_local, runtime
+     * ABI revision 6), and the names below read its fields. A threaded build
+     * keeps the thread-locals, and its code is what it was. */
+    print_line(gen, "#define _AE_CTX_INLINE 64");
+    print_line(gen, "typedef void (*_aether_ctx_release_fn)(void*);");
     print_line(gen, "#if defined(AETHER_NO_THREADING)");
-    print_line(gen, "#  define _AE_CTX_TLS");
-    print_line(gen, "#elif defined(_MSC_VER)");
+    print_line(gen, "typedef struct { void* inl[_AE_CTX_INLINE]; _aether_ctx_release_fn rel_inl[_AE_CTX_INLINE]; void** heap; _aether_ctx_release_fn* rel_heap; int depth; int cap; } _AeCtxStack;");
+    print_line(gen, "static void _aether_ctx_stack_release(void* p) { _AeCtxStack* s = (_AeCtxStack*)p; free(s->heap); free((void*)s->rel_heap); }");
+    print_line(gen, "static const char _aether_ctx_key = 0;");
+    print_line(gen, "static _AeCtxStack* _aether_ctx_state(void) { _AeCtxStack* s = (_AeCtxStack*)aether_context_local(&_aether_ctx_key, sizeof(_AeCtxStack), _aether_ctx_stack_release); if (!s) aether_panic(\"builder blocks: no memory for this task's stack\"); return s; }");
+    print_line(gen, "#define _aether_ctx_inline (_aether_ctx_state()->inl)");
+    print_line(gen, "#define _aether_ctx_release_inline (_aether_ctx_state()->rel_inl)");
+    print_line(gen, "#define _aether_ctx_heap (_aether_ctx_state()->heap)");
+    print_line(gen, "#define _aether_ctx_release_heap (_aether_ctx_state()->rel_heap)");
+    print_line(gen, "#define _aether_ctx_depth (_aether_ctx_state()->depth)");
+    print_line(gen, "#define _aether_ctx_cap (_aether_ctx_state()->cap)");
+    print_line(gen, "#else");
+    print_line(gen, "#if defined(_MSC_VER)");
     print_line(gen, "#  define _AE_CTX_TLS __declspec(thread)");
     print_line(gen, "#elif defined(__GNUC__) && !defined(_WIN32) && !defined(__APPLE__)");
     print_line(gen, "#  define _AE_CTX_TLS __thread __attribute__((tls_model(\"global-dynamic\")))");
@@ -10599,14 +10617,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#else");
     print_line(gen, "#  define _AE_CTX_TLS");
     print_line(gen, "#endif");
-    print_line(gen, "#define _AE_CTX_INLINE 64");
-    print_line(gen, "typedef void (*_aether_ctx_release_fn)(void*);");
     print_line(gen, "static _AE_CTX_TLS void* _aether_ctx_inline[_AE_CTX_INLINE];");
     print_line(gen, "static _AE_CTX_TLS _aether_ctx_release_fn _aether_ctx_release_inline[_AE_CTX_INLINE];");
     print_line(gen, "static _AE_CTX_TLS void** _aether_ctx_heap = 0;");
     print_line(gen, "static _AE_CTX_TLS _aether_ctx_release_fn* _aether_ctx_release_heap = 0;");
     print_line(gen, "static _AE_CTX_TLS int _aether_ctx_depth = 0;");
     print_line(gen, "static _AE_CTX_TLS int _aether_ctx_cap = 0;");
+    print_line(gen, "#endif");
     print_line(gen, "#define _aether_ctx_stack (_aether_ctx_heap ? _aether_ctx_heap : _aether_ctx_inline)");
     print_line(gen, "#define _aether_ctx_release (_aether_ctx_release_heap ? _aether_ctx_release_heap : _aether_ctx_release_inline)");
     print_line(gen, "static inline void _aether_ctx_grow(void) { int cap = _aether_ctx_heap ? _aether_ctx_cap * 2 : _AE_CTX_INLINE * 2; void** s = (void**)malloc(sizeof(void*) * (size_t)cap); _aether_ctx_release_fn* r = (_aether_ctx_release_fn*)malloc(sizeof(_aether_ctx_release_fn) * (size_t)cap); if (!s || !r) aether_panic(\"builder blocks nest deeper than memory allows\"); memcpy(s, _aether_ctx_stack, sizeof(void*) * (size_t)_aether_ctx_depth); memcpy(r, _aether_ctx_release, sizeof(_aether_ctx_release_fn) * (size_t)_aether_ctx_depth); free(_aether_ctx_heap); free((void*)_aether_ctx_release_heap); _aether_ctx_heap = s; _aether_ctx_release_heap = r; _aether_ctx_cap = cap; }");

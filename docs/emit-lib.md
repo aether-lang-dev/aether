@@ -721,6 +721,12 @@ host that runs many scripts on one thread, each yielding to it and resumed
 later (a game's scripts, an editor's plugins), needs a budget that belongs
 to the script: an execution account.
 
+Everything here is per thread: the account in use, the call deadline, the
+last outcome, the cancel token and the caller info. A cooperative runtime
+(`AETHER_NO_THREADING`, an ESP32) has no threads; a host that calls in from
+more than one FreeRTOS task gives each its own of all of these with a task
+context ([design/task-execution-contexts.md](design/task-execution-contexts.md)).
+
 ```c
 AetherExecLimits lim = { 256 * 1024, 5000, AETHER_DEADLINE_ACTIVE, NULL };
 AetherExecAccount* script = aether_exec_account_new(&lim);

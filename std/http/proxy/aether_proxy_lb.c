@@ -24,6 +24,9 @@
  */
 
 #include "aether_proxy_internal.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../../runtime/actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 
 #include <string.h>
 #include <stdint.h>
@@ -97,7 +100,16 @@ static const char* cookie_value(HttpRequest* req, const char* name) {
     if (!name || !*name) return NULL;
     const char* hdr = http_get_header(req, "Cookie");
     if (!hdr || !*hdr) return NULL;
+#if defined(AETHER_NO_THREADING)
+    /* A cooperative build: a block of the calling task's execution context
+     * (aether_context_local), not a thread-local on every task's stack. */
+    static const char buf_key = 0;
+    char (*buf_block)[256] = (char (*)[256])aether_context_local(&buf_key, 256, NULL);
+    if (!buf_block) return NULL;
+#define buf (*buf_block)
+#else
     static __thread char buf[256];
+#endif
 
     size_t name_len = strlen(name);
     const char* p = hdr;
@@ -125,6 +137,7 @@ static const char* cookie_value(HttpRequest* req, const char* name) {
     }
     return NULL;
 }
+#undef buf
 
 /* The client identity IP_HASH hashes, the rate limiter's (#3173): the
  * peer the request reports, the connection's or, after use_real_ip, the

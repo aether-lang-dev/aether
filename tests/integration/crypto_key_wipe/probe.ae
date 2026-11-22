@@ -30,6 +30,9 @@ import std.cryptography.shield
 import std.cryptography.x25519
 import std.cryptography.tls13_ks
 import std.cryptography.tls13_kdf
+import std.cryptography.tls13_client
+import std.tcp
+import std.os
 
 extern key_probe_supported() -> int
 extern key_probe_scan(pattern: ptr, lo: int, hi: int, blocks: int) -> int
@@ -294,6 +297,39 @@ fn key_schedule() -> int {
     return scan_after("TLS key schedule", w)
 }
 
+// An external PSK (tls13_client.connect_socket_psk) whose handshake a
+// deadline stops after the ClientHello and its binder went: the call's copy
+// of the key, the early and binder secrets derived from it, wiped. The
+// caller wipes its own buffer, as the API says it must. The peer is a
+// listener here that never accepts, so the kernel completes the connection
+// and nothing answers.
+fn external_psk() -> int {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL external PSK: listen: ${lerr}")
+        return 1
+    }
+    sock, derr = tcp.connect("127.0.0.1", tcp.server_port(srv))
+    if derr != "" {
+        tcp.server_close(srv)
+        println("FAIL external PSK: dial: ${derr}")
+        return 1
+    }
+    tcp.set_deadline(sock, os.now_monotonic_ms() + 300, null)
+    key = hexbytes("7e57b1d0c0ffee5ec2e7f00dfeedfacecafebabedeadbeef0123456789abcdef", 32)
+    id = hexbytes("6964", 2)
+    conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..2], bytes.view(key)[0..32])
+    if conn != null { tls13_client.close_conn(conn) }
+    bytes.wipe_free(key)
+    bytes.free(id)
+    tcp.server_close(srv)
+    if err != tcp.DEADLINE_EXCEEDED {
+        println("FAIL external PSK: the handshake ended with [${err}], not the deadline")
+        return 1
+    }
+    return scan_after("external PSK, a handshake stopped by its deadline", window("feedfacecafebabedeadbeef01234567"))
+}
+
 main() {
     if key_probe_supported() == 0 {
         println("SKIP: freed memory must not be read here (a sanitizer or Valgrind)")
@@ -321,6 +357,8 @@ main() {
     // The key exchange and the key schedule (#3414).
     fails = fails + exchange()
     fails = fails + key_schedule()
+    // The external PSK's copy of the key (tls13_client.connect_socket_psk).
+    fails = fails + external_psk()
     if fails != 0 { exit(1) }
     if shield_unchecked == 1 {
         println("key loading, signing, HMAC, the key exchange and schedule: no copy left in freed memory (control found ${c1}, ${c2}); the shield was not checked here")

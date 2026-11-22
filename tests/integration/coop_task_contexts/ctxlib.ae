@@ -1,0 +1,87 @@
+// The library of the cooperative task-context test: exports two tasks call
+// at once, each under an execution account of its own. One is driven past
+// its memory allowance, its deadline, a cancel and a panic; the other must
+// finish every call it makes with the right result, nothing charged to its
+// account afterwards, and its own caller identity.
+import std.string
+import std.host
+import std.actors
+
+message Ping { n: int }
+
+actor Echo {
+    receive {
+        Ping(n) -> { reply n + 1 }
+    }
+}
+
+fn build(n: int) -> string {
+    s = ""
+    i = 0
+    while i < n {
+        s = string.concat(s, "0123456789abcdef")
+        i = i + 1
+    }
+    return s
+}
+
+// The length of a string of n * 16 bytes, which the call frees.
+grow(n: int) -> int {
+    return string.length(build(n))
+}
+
+// A loop that runs until a deadline or a cancel ends it (or n rounds). The
+// sum starts again past a billion, so a long spin never overflows an int
+// (UBSan stopped it at about 92,000 rounds); a short one, as the checks use,
+// never reaches that.
+spin(n: int) -> int {
+    i = 0
+    s = 0
+    while i < n {
+        if i % 2 == 0 {
+            s = s + i
+        } else {
+            s = s - 1
+        }
+        if s > 1000000000 {
+            s = 0
+        }
+        i = i + 1
+    }
+    return s
+}
+
+// A panic no try catches: the call ends PANICKED.
+boom(n: int) -> int {
+    if n > 0 {
+        panic("boom")
+    }
+    return n
+}
+
+// A panic the script catches itself: the call ends OK with 7.
+caught(n: int) -> int {
+    try {
+        if n > 0 {
+            panic("inner")
+        }
+    } catch e {
+        return 7
+    }
+    return 0
+}
+
+// The identity the host set for this call.
+who() -> string {
+    return host.caller_identity()
+}
+
+// Spawns an actor and asks it: only the task that owns the actors may.
+ask_echo(n: int) -> int {
+    e = spawn(Echo())
+    v, err = e ? Ping { n: n }
+    if err != "" {
+        return -1
+    }
+    return v
+}

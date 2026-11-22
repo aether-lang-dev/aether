@@ -6,6 +6,9 @@
 // itself is thread-local on glibc/musl. Each entry point captures
 // the platform error into the TLS slot before returning.
 #include "aether_dl.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -36,7 +39,22 @@ __attribute__((used)) static void (*const dl_library_api[])(void) = {
 };
 #endif
 
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: AETHER_TLS is empty there, which made this one
+ * slot for every task with task contexts. It is a block of the calling
+ * task's execution context instead (aether_context_local), and one shared
+ * only when there was no memory for it, as std.json's error is. */
+typedef struct { char text[AETHER_DL_ERR_CAP]; } DlErr;
+static const char g_dl_last_err_key = 0;
+static DlErr g_dl_last_err_no_memory;
+static DlErr* dl_err_here(void) {
+    DlErr* e = (DlErr*)aether_context_local(&g_dl_last_err_key, sizeof(DlErr), NULL);
+    return e ? e : &g_dl_last_err_no_memory;
+}
+#define g_dl_last_err (dl_err_here()->text)
+#else
 static AETHER_TLS char g_dl_last_err[AETHER_DL_ERR_CAP];
+#endif
 
 static void dl_clear_error(void) {
     g_dl_last_err[0] = '\0';

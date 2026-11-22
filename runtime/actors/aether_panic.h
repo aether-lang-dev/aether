@@ -285,6 +285,40 @@ void aether_fnptr_mark(const void* s);
 // Whether r is the marked pointer; clears the mark either way.
 int aether_fnptr_claim(const void* r);
 
+// A block of `size` zeroed bytes kept in the calling thread's execution state
+// under `key` (the address of something of the caller's own), made at its
+// first use and returned again for the same key after; `release`, when not
+// NULL, runs on it before it is freed with the thread, or with the task's
+// context on a cooperative build with task contexts (docs/design/
+// task-execution-contexts.md). NULL when there is no memory. For state that
+// a threaded build keeps in a thread-local and a cooperative build must keep
+// per task: the builder blocks' stack of generated code, std's last-error
+// buffers.
+void* aether_context_local(const void* key, size_t size, void (*release)(void*));
+
+#if defined(AETHER_NO_THREADING)
+// A cooperative build's stand-in for the thread-local result buffer of a std
+// module's split accessors (a pointer from aether_caps_malloc, its capacity
+// and its length): a context-local block whose buffer is given back with the
+// task's context. Defines NAME_here(), whose ->buf, ->cap and ->len the
+// module names as it named its thread-locals; no memory for the block is a
+// panic, never another task's buffer. The module includes
+// aether_resource_caps.h (aether_caps_free).
+#define AETHER_CONTEXT_CAPS_BUFFER(NAME)                                            \
+    typedef struct { unsigned char* buf; size_t cap; int len; } NAME##_block_t;      \
+    static const char NAME##_key = 0;                                                 \
+    static void NAME##_release(void* p) {                                             \
+        NAME##_block_t* b = (NAME##_block_t*)p;                                       \
+        if (b->buf) aether_caps_free(b->buf, b->cap);                                 \
+    }                                                                                 \
+    static NAME##_block_t* NAME##_here(void) {                                        \
+        NAME##_block_t* b = (NAME##_block_t*)aether_context_local(                    \
+            &NAME##_key, sizeof(NAME##_block_t), NAME##_release);                     \
+        if (!b) aether_panic("no memory for this task's " #NAME " buffer");           \
+        return b;                                                                     \
+    }
+#endif
+
 /* How the panic and the step barrier reach a copy of the sandbox, which
  * they do not link (#2955, #3393): its unwind of the levels pushed inside a
  * frame a panic leaves, and how a step puts this thread's levels aside and

@@ -2,6 +2,7 @@
 #include "lzf.h"
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/actors/aether_panic.h"   /* AETHER_CONTEXT_CAPS_BUFFER */
 
 #include <limits.h>
 #include <stdint.h>
@@ -23,12 +24,30 @@ static inline const unsigned char* lzf_unwrap_bytes(const char* data, int length
 /* Resource-caps tracking (#343): like the zlib path, length and
  * capacity differ when the LZF compressor produces a result smaller
  * than its safety bound; `_cap` is what aether_caps_free needs.  */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(tls_compress)
+#define tls_compress_buf (tls_compress_here()->buf)
+#define tls_compress_cap (tls_compress_here()->cap)
+#define tls_compress_len (tls_compress_here()->len)
+#else
 static _Thread_local unsigned char* tls_compress_buf = NULL;
 static _Thread_local size_t         tls_compress_cap = 0;
 static _Thread_local int            tls_compress_len = 0;
+#endif
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(tls_decompress)
+#define tls_decompress_buf (tls_decompress_here()->buf)
+#define tls_decompress_cap (tls_decompress_here()->cap)
+#define tls_decompress_len (tls_decompress_here()->len)
+#else
 static _Thread_local unsigned char* tls_decompress_buf = NULL;
 static _Thread_local size_t         tls_decompress_cap = 0;
 static _Thread_local int            tls_decompress_len = 0;
+#endif
 
 static void free_compress_tls(void) {
     if (tls_compress_buf) {

@@ -83,17 +83,16 @@ static void aether_jump_to(AetherJmpFrame* f) {
 AETHER_TLS_SHARED int g_aether_in_actor_step = 0;
 AETHER_TLS_SHARED int g_aether_current_actor_id = -1;
 /* #2586: the string a fn-pointer callee handed over; see aether_fnptr_mark
- * in aether_panic.h. Static: the generated code reaches it only through the
- * two functions below (#2687). */
-static AETHER_TLS_SHARED const void* g_aether_fnptr_owned = NULL;
-
+ * in aether_panic.h. In the thread's execution state (aether_frames.h): the
+ * generated code reaches it only through the two functions below (#2687). */
 void aether_fnptr_mark(const void* s) {
-    g_aether_fnptr_owned = s;
+    aether_frames_here()->fnptr_owned = s;
 }
 
 int aether_fnptr_claim(const void* r) {
-    int owned = r && r == g_aether_fnptr_owned;
-    g_aether_fnptr_owned = NULL;
+    AetherFrames* F = aether_frames_here();
+    int owned = r && r == F->fnptr_owned;
+    F->fnptr_owned = NULL;
     return owned;
 }
 
@@ -185,8 +184,24 @@ static void unwind_sandbox_levels(void) {
 // tail-call + noreturn collapse the caller frame, and backtrace()
 // inside aether_panic alone walks an already-truncated stack.
 #define AETHER_PANIC_TRACE_MAX 64
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build has no thread-locals: the trace is a block of the
+ * task's execution context (aether_context_local), so two tasks with task
+ * contexts do not write one trace; one shared only when there was no
+ * memory for it. */
+typedef struct { void* frames[AETHER_PANIC_TRACE_MAX]; int n; } AetherPanicTrace;
+static const char k_panic_trace_key = 0;
+static AetherPanicTrace k_panic_trace_no_memory;
+static AetherPanicTrace* panic_trace_here(void) {
+    AetherPanicTrace* t = (AetherPanicTrace*)aether_context_local(&k_panic_trace_key, sizeof(*t), NULL);
+    return t ? t : &k_panic_trace_no_memory;
+}
+#define tls_panic_trace   (panic_trace_here()->frames)
+#define tls_panic_trace_n (panic_trace_here()->n)
+#else
 static AETHER_TLS_SHARED void* tls_panic_trace[AETHER_PANIC_TRACE_MAX];
 static AETHER_TLS_SHARED int   tls_panic_trace_n = 0;
+#endif
 
 #if defined(AETHER_STACK_TRACE_DLOPEN)
 // libexecinfo's backtrace/backtrace_symbols, resolved on first use. glibc's

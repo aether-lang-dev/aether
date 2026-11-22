@@ -196,8 +196,49 @@ socket, so there, and on Windows, the socket is non-blocking for the one
 send and put back (blocking, on Windows, which cannot read the mode back).
 Do not send on the same socket from another thread at the same time.
 
+## One deadline for a whole conversation, and cancellation
+
+A per-call timeout bounds each read, so a peer that trickles a byte just
+inside it holds a connection for as long as it likes. A **deadline** is one
+absolute time on the monotonic clock (`os.now_monotonic_ms`) that covers the
+dial and every read and write after it, however many calls they take; a
+**cancel handle** is something another thread trips to wake a connection
+blocked in any of them, at once. Both belong to one connection and are
+passed explicitly ([design](../../docs/design/tcp-tls-deadlines-and-cancellation.md)).
+
+```aether,fragment
+c, cerr = tcp.cancel_new()
+due = os.now_monotonic_ms() + 10000          // ten seconds for everything
+sock, err = tcp.connect_until("192.0.2.7", 8080, due, c)
+if err == tcp.DEADLINE_EXCEEDED { println("no connection within 10 s") }
+// ... reads and writes on sock end by `due`, or when any thread calls tcp.cancel(c):
+data, n, rerr = tcp.read_n(sock, 4096)
+if rerr == tcp.CANCELLED { println("cancelled") }
+tcp.close(sock)                               // the owner closes, always
+tcp.cancel_free(c)                            // the creator's reference
+```
+
+`set_deadline(sock, due_ms, cancel)` binds them to a socket made any other
+way (an adopted descriptor, an accepted connection) and clears `stopped`.
+`read`, `read_n`, `read_into` and every `write` end with `DEADLINE_EXCEEDED`
+or `CANCELLED` (exact strings, distinct from `"timeout"` and from a close),
+and `stopped(sock)` says which ended the last one. Both are sticky. Neither
+closes the socket: it stays its owner's to close, so a cancel racing a
+close never closes a descriptor number the system has handed to something
+else. The handle is counted: a bound socket keeps it alive until closed, so
+`cancel_free` while a connection is open is safe. Every other thread
+that may trip it holds a reference of its own: `cancel_retain(c)` before
+it is handed `c`, and its own `cancel_free(c)` once it can no longer trip
+it, so no trip can meet the close of the handle's descriptors. `poll`, `poll2`, `wait_writable` and `server_poll`
+take their own timeout and do not consult the deadline; name resolution in
+`connect_until` is checked before and after, not interrupted, so a numeric
+address is the wholly bounded dial. The TLS client takes the same pair
+(`tls13_client.connect_psk(..., due_ms: due, cancel: c)`,
+`conn_set_deadline`).
+
 ## Exports
 
+`connect_until`, `set_deadline`, `deadline`, `stopped`, `cancel_new`, `cancel`, `cancelled`, `cancel_retain`, `cancel_free`, `DEADLINE_EXCEEDED`, `CANCELLED`,
 `connect`, `connect_buffered`, `connect_timeout`, `connect_unix`, `listen`, `listen_on`, `listen_unix`, `accept`, `available`, `read`, `read_n`, `read_into`,
 `write`, `write_n`, `write_slice`, `write_all`, `write_some`, `poll`, `poll2`, `wait_writable`, `server_poll`, `server_port`, `set_nodelay`,
 `set_read_buffer`, `fd`, `server_fd`, `close_drained`, `tcp_close`, `tcp_server_close`.

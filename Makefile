@@ -2405,7 +2405,13 @@ $(BUILD_DIR)/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(
 # Format: one path per non-comment, non-empty line. Paths are
 # relative to share/aether/ in the install layout (and to the repo
 # root in the source tree). Lines starting with `#` are comments.
-$(BUILD_DIR)/MANIFEST: Makefile | $(BUILD_DIR)
+#
+# The list depends on the flags as well as on this file: EXTRA_CFLAGS with
+# AETHER_NO_THREADING (make ci-coop's stdlib builds) swaps the multicore
+# scheduler for the cooperative one. Made from the Makefile alone, a ci-coop
+# stopped before its last step left the cooperative scheduler listed, and the
+# next ordinary `make stdlib` kept it: the flags stamp moves with them.
+$(BUILD_DIR)/MANIFEST: Makefile $(BUILD_FLAGS_STAMP) | $(BUILD_DIR)
 	@echo "Generating MANIFEST..."
 	@( \
 	  echo "# Aether MANIFEST — link-suitable C source files for"; \
@@ -3989,6 +3995,22 @@ ci-coop: clean compiler ae
 		cat /tmp/ae_coop_out.txt | head -10; \
 		fail=$$((fail + 1)); \
 	fi; \
+	printf "  %-50s " "two tasks, each with its own execution context"; \
+	if sh tests/integration/coop_task_contexts/test_coop_task_contexts.sh >/tmp/ae_coop_out.txt 2>&1; then \
+		echo "PASS"; \
+		pass=$$((pass + 1)); \
+	else \
+		echo "FAIL"; \
+		cat /tmp/ae_coop_out.txt | head -10; \
+		fail=$$((fail + 1)); \
+	fi; \
+	printf "  %-50s " "no thread-locals in the cooperative stdlib"; \
+	sh tests/integration/coop_task_contexts/check_no_tls.sh $(BUILD_DIR)/libaether.a >/tmp/ae_coop_out.txt 2>&1; \
+	case $$? in \
+		0) echo "PASS"; pass=$$((pass + 1)) ;; \
+		2) echo "SKIP (no readelf)" ;; \
+		*) echo "FAIL"; head -10 /tmp/ae_coop_out.txt; fail=$$((fail + 1)) ;; \
+	esac; \
 	echo ""; \
 	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi

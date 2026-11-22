@@ -1,4 +1,7 @@
 #include "aether_fs.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/utils/aether_compiler.h"
 #include "../../runtime/aether_sandbox.h"
@@ -669,9 +672,18 @@ int64_t fs_pwrite_raw(File* file, const char* data, int length, int64_t offset) 
  * Per-thread so concurrent positional reads on different threads
  * don't clobber. Lifetime is until the next call on the same thread
  * or an explicit release. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(g_pread)
+#define g_pread_buf (g_pread_here()->buf)
+#define g_pread_cap (g_pread_here()->cap)
+#define g_pread_len (g_pread_here()->len)
+#else
 static __thread unsigned char* g_pread_buf = NULL;
 static __thread size_t         g_pread_cap = 0;
 static __thread int            g_pread_len = 0;
+#endif
 
 static void release_pread_locked(void) {
     if (g_pread_buf) aether_caps_free(g_pread_buf, g_pread_cap);
@@ -2003,6 +2015,24 @@ int fs_stat_raw(const char* path, int* out_kind,
 // allocating C out-params. The trio is called sequentially by the
 // Aether-side file_stat wrapper, so the cache only has to survive
 // that short window on the calling thread.
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build has no thread-locals of Aether's own: ESP-IDF would put
+ * each on every FreeRTOS task's stack. The caches below are blocks of the
+ * calling task's execution context instead (aether_context_local, docs/
+ * design/task-execution-contexts.md), made at first use; with no memory for
+ * one the call panics rather than share another task's. */
+static void* fs_context_block(const void* key, size_t size, void (*release)(void*)) {
+    void* b = aether_context_local(key, size, release);
+    if (!b) aether_panic("fs: no memory for this task's result cache");
+    return b;
+}
+typedef struct { int kind; int64_t size; int64_t mtime; } FsStatCache;
+static const char s_last_key = 0;
+#define fs_stat_cache() ((FsStatCache*)fs_context_block(&s_last_key, sizeof(FsStatCache), NULL))
+#define s_last_kind  (fs_stat_cache()->kind)
+#define s_last_size  (fs_stat_cache()->size)
+#define s_last_mtime (fs_stat_cache()->mtime)
+#else
 #if defined(__GNUC__) || defined(__clang__)
   #define AETHER_FS_TLS __thread
 #else
@@ -2011,6 +2041,7 @@ int fs_stat_raw(const char* path, int* out_kind,
 static AETHER_FS_TLS int     s_last_kind  = 0;
 static AETHER_FS_TLS int64_t s_last_size  = 0;
 static AETHER_FS_TLS int64_t s_last_mtime = 0;
+#endif
 
 int fs_try_stat(const char* path) {
     int k = 0;
@@ -2034,9 +2065,18 @@ int64_t fs_get_stat_mtime(void) { return s_last_mtime; }
  * bytes; `avail` is the space usable by an unprivileged process (f_bavail),
  * which is the one callers usually want for "how much can I actually write".
  * Not available on Windows (no statvfs) — stubbed there to return 0/failure. */
+#if defined(AETHER_NO_THREADING)
+typedef struct { int64_t total; int64_t free_bytes; int64_t avail; } FsVfsCache;
+static const char s_vfs_key = 0;
+#define fs_vfs_cache() ((FsVfsCache*)fs_context_block(&s_vfs_key, sizeof(FsVfsCache), NULL))
+#define s_vfs_total (fs_vfs_cache()->total)
+#define s_vfs_free  (fs_vfs_cache()->free_bytes)
+#define s_vfs_avail (fs_vfs_cache()->avail)
+#else
 static AETHER_FS_TLS int64_t s_vfs_total = 0;
 static AETHER_FS_TLS int64_t s_vfs_free  = 0;
 static AETHER_FS_TLS int64_t s_vfs_avail = 0;
+#endif
 
 int fs_try_statvfs(const char* path) {
     s_vfs_total = 0; s_vfs_free = 0; s_vfs_avail = 0;
@@ -2086,8 +2126,26 @@ typedef struct {
     char* options;
 } AetherMountEntry;
 
+#if defined(AETHER_NO_THREADING)
+typedef struct { AetherMountEntry* mounts; int count; } FsMountTable;
+static const char s_mounts_key = 0;
+static void fs_mount_table_release(void* p) {
+    FsMountTable* t = (FsMountTable*)p;
+    for (int i = 0; i < t->count; i++) {
+        free(t->mounts[i].source);
+        free(t->mounts[i].point);
+        free(t->mounts[i].fstype);
+        free(t->mounts[i].options);
+    }
+    free(t->mounts);
+}
+#define fs_mount_table() ((FsMountTable*)fs_context_block(&s_mounts_key, sizeof(FsMountTable), fs_mount_table_release))
+#define s_mounts      (fs_mount_table()->mounts)
+#define s_mount_count (fs_mount_table()->count)
+#else
 static AETHER_FS_TLS AetherMountEntry* s_mounts = NULL;
 static AETHER_FS_TLS int s_mount_count = 0;
+#endif
 
 void fs_release_mounts(void) {
     for (int i = 0; i < s_mount_count; i++) {
@@ -2279,9 +2337,22 @@ const char* fs_get_mount_options(int i) { return fs_mount_field(i, offsetof(Aeth
  * platforms return 0: per the stdlib's graceful-degradation
  * convention the caller gets an error, never a fabricated answer. */
 
+#if defined(AETHER_NO_THREADING)
+typedef struct { int64_t size; int removable; char transport[16]; int made; } FsBlkCache;
+static const char s_blk_key = 0;
+static FsBlkCache* fs_blk_cache(void) {
+    FsBlkCache* b = (FsBlkCache*)fs_context_block(&s_blk_key, sizeof(FsBlkCache), NULL);
+    if (!b->made) { b->removable = -1; b->made = 1; }   /* as the thread-local starts */
+    return b;
+}
+#define s_blk_size      (fs_blk_cache()->size)
+#define s_blk_removable (fs_blk_cache()->removable)
+#define s_blk_transport (fs_blk_cache()->transport)
+#else
 static AETHER_FS_TLS int64_t s_blk_size = 0;
 static AETHER_FS_TLS int     s_blk_removable = -1;
 static AETHER_FS_TLS char    s_blk_transport[16] = "";
+#endif
 
 #if defined(__linux__)
 /* Reads under /sys are file reads like any other, checked as fs_try_mounts
@@ -2386,9 +2457,18 @@ const char* fs_get_block_transport(void)  { return s_blk_transport; }
 #define AETHER_FS_READ_FAIL_TRUNCATED 7  /* short read, no error: file shrank */
 #define AETHER_FS_READ_FAIL_UNAVAIL   8  /* built without filesystem support */
 
+#if defined(AETHER_NO_THREADING)
+typedef struct { int why; int err; char msg[512]; int os_error; } FsReadFail;
+static const char s_read_fail_key = 0;
+#define fs_read_fail() ((FsReadFail*)fs_context_block(&s_read_fail_key, sizeof(FsReadFail), NULL))
+#define s_read_fail_why   (fs_read_fail()->why)   /* AETHER_FS_READ_FAIL_NONE is 0 */
+#define s_read_fail_errno (fs_read_fail()->err)
+#define s_read_fail_msg   (fs_read_fail()->msg)
+#else
 static AETHER_FS_TLS int  s_read_fail_why   = AETHER_FS_READ_FAIL_NONE;
 static AETHER_FS_TLS int  s_read_fail_errno = 0;
 static AETHER_FS_TLS char s_read_fail_msg[512];
+#endif
 
 /* #1378: the raw OS code behind the portable kind — see fs_last_os_error().
  *
@@ -2398,7 +2478,11 @@ static AETHER_FS_TLS char s_read_fail_msg[512];
  * of 's_last_os_error'", because __thread objects do not get C's
  * tentative-definition treatment there. Both Windows CI jobs caught this after
  * Linux, Clang and macOS all built clean. */
+#if defined(AETHER_NO_THREADING)
+#define s_last_os_error (fs_read_fail()->os_error)
+#else
 static AETHER_FS_TLS int s_last_os_error = 0;
+#endif
 
 /* Thread-safe strerror into a caller buffer. Plain strerror() shares a static
  * buffer, which is exactly wrong for a runtime that spawns actor, scheduler,
@@ -2620,8 +2704,18 @@ char* fs_read_binary_raw(const char* path, int* out_len) {
 // until the next fs_try_read_binary call or until fs_release_read_binary
 // explicitly releases it. Aether callers copy the bytes out before
 // issuing another read.
+#if defined(AETHER_NO_THREADING)
+typedef struct { char* buf; int len; } FsReadBinary;
+static const char s_read_binary_key = 0;
+static void fs_read_binary_release(void* p) { free(((FsReadBinary*)p)->buf); }
+#define fs_read_binary_cache() \
+    ((FsReadBinary*)fs_context_block(&s_read_binary_key, sizeof(FsReadBinary), fs_read_binary_release))
+#define s_read_binary_buf (fs_read_binary_cache()->buf)
+#define s_read_binary_len (fs_read_binary_cache()->len)
+#else
 static AETHER_FS_TLS char* s_read_binary_buf = NULL;
 static AETHER_FS_TLS int   s_read_binary_len = 0;
+#endif
 
 void fs_release_read_binary(void) {
     free(s_read_binary_buf);
