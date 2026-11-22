@@ -101,11 +101,10 @@ _Static_assert(((CAPS_SLOW_CAP | CAPS_SLOW_TEST) & AETHER_CAPS_STEP_BITS) == 0 &
                "the step's bits and the allocation's share only the accounts bit");
 _Atomic unsigned aether_caps_slow = 0;
 
-/* Per-thread. The deadline is monotonic-clock nanoseconds; 0 means
- * "no deadline armed". The tripped flag is sticky once set, until
- * aether_caps_set_deadline_ms is called again. */
-static AETHER_TLS_SHARED int64_t g_deadline_at_ns = 0;
-static AETHER_TLS_SHARED int     g_tripped        = 0;
+/* The deadline is this thread's (its execution state's, aether_frames.h):
+ * monotonic-clock nanoseconds, 0 meaning "no deadline armed", and a tripped
+ * flag that is sticky once set, until aether_caps_set_deadline_ms is called
+ * again. */
 
 /* Monotonic nanoseconds since an arbitrary epoch; only differences
  * matter. Delegates to aether_now_ns so Windows goes through the
@@ -245,22 +244,24 @@ static inline void caps_arm(void) {
 }
 
 void aether_caps_set_deadline_ms(int64_t ms) {
+    AetherFrames* F = aether_frames_here();
     if (ms > 0) caps_arm();
     if (ms <= 0) {
-        g_deadline_at_ns = 0;
+        F->deadline_at_ns = 0;
     } else {
-        g_deadline_at_ns = ns_after_ms(ms);
+        F->deadline_at_ns = ns_after_ms(ms);
     }
     /* Reset the sticky flag — a fresh deadline is a fresh chance. */
-    g_tripped = 0;
+    F->deadline_tripped = 0;
 }
 
 int aether_caps_deadline_tripped(void) {
-    if (g_tripped) return 1;
-    if (g_deadline_at_ns == 0) return 0;
-    if (now_ns() >= g_deadline_at_ns) {
+    AetherFrames* F = aether_frames_here();
+    if (F->deadline_tripped) return 1;
+    if (F->deadline_at_ns == 0) return 0;
+    if (now_ns() >= F->deadline_at_ns) {
         caps_arm();
-        g_tripped = 1;
+        F->deadline_tripped = 1;
         return 1;
     }
     return 0;
@@ -268,18 +269,20 @@ int aether_caps_deadline_tripped(void) {
 
 void __aether_abort_call(void) {
     caps_arm();
-    g_tripped = 1;
+    aether_frames_here()->deadline_tripped = 1;
 }
 
 void aether_caps_deadline_save(AetherDeadlineState* out) {
-    out->at_ns = g_deadline_at_ns;
-    out->tripped = g_tripped;
+    AetherFrames* F = aether_frames_here();
+    out->at_ns = F->deadline_at_ns;
+    out->tripped = F->deadline_tripped;
 }
 
 void aether_caps_deadline_restore(const AetherDeadlineState* s) {
+    AetherFrames* F = aether_frames_here();
     if (s->at_ns || s->tripped) caps_arm();
-    g_deadline_at_ns = s->at_ns;
-    g_tripped = s->tripped;
+    F->deadline_at_ns = s->at_ns;
+    F->deadline_tripped = s->tripped;
 }
 
 AetherDeadlineState aether_caps_deadline_for_ms(int64_t ms) {
@@ -290,7 +293,7 @@ AetherDeadlineState aether_caps_deadline_for_ms(int64_t ms) {
 }
 
 int aether_caps_deadline_flag(void) {
-    return g_tripped;
+    return aether_frames_here()->deadline_tripped;
 }
 
 uint64_t aether_caps_used_bytes(void) {
@@ -318,13 +321,13 @@ uint64_t aether_caps_used_bytes(void) {
  * which holds memory and may hold a lock. */
 
 /* aether_test_fail_alloc_after: one global load per allocation while no
- * test has asked, the count per thread so a test is deterministic. The flag
- * is read by generated code too (_aether_alloc, #3377), so it is exported. */
+ * test has asked, the count per thread (in its execution state) so a test
+ * is deterministic. The flag is read by generated code too (_aether_alloc,
+ * #3377), so it is exported. */
 _Atomic int aether_alloc_test_armed = 0;
-static AETHER_TLS_SHARED int t_alloc_fail_after = 0;
 
 void aether_test_fail_alloc_after(int n) {
-    t_alloc_fail_after = n > 0 ? n : 0;
+    aether_frames_here()->alloc_fail_after = n > 0 ? n : 0;
     if (n > 0) {
         atomic_store_explicit(&aether_alloc_test_armed, 1, memory_order_relaxed);
         atomic_fetch_or_explicit(&aether_caps_slow, CAPS_SLOW_TEST, memory_order_relaxed);
@@ -333,8 +336,9 @@ void aether_test_fail_alloc_after(int n) {
 
 int aether_alloc_test_refuses(void) {
     if (!atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed)) return 0;
-    if (t_alloc_fail_after <= 0) return 0;
-    return --t_alloc_fail_after == 0;
+    AetherFrames* F = aether_frames_here();
+    if (F->alloc_fail_after <= 0) return 0;
+    return --F->alloc_fail_after == 0;
 }
 
 void aether_alloc_failed(int why) {
@@ -660,49 +664,46 @@ int64_t aether_caps_now_ns(void) {
     return now_ns();
 }
 
-/* The ACTIVE accounts this thread is timing (#3409), innermost last: each
- * since the start of the outermost execution open here under it or under a
- * descendant of it, and held until that execution ends. An execution nested
- * inside one that already times an account adds no time of its own to it,
- * so time spent in executions under an account is charged once, however
- * they nest, across runtime copies too: they all time through the copy
- * whose accounts they share. The first ACCT_TIMED_INLINE are kept here, the
- * rest in a block that grows as needed (plain malloc, no account's), freed
- * when this thread times none. Under the lock, this thread's only. */
-#define ACCT_TIMED_INLINE 8
-typedef struct { AetherExecAccount* a; int64_t since; } AcctTimed;
-static AETHER_TLS_SHARED AcctTimed t_timed_inline[ACCT_TIMED_INLINE];
-static AETHER_TLS_SHARED AcctTimed* t_timed_more;   /* entries past the inline ones */
-static AETHER_TLS_SHARED int t_timed_more_cap;
-static AETHER_TLS_SHARED int t_timed_n;
+/* The ACTIVE accounts this thread is timing (#3409), innermost last, in its
+ * execution state (aether_frames.h): each since the start of the outermost
+ * execution open here under it or under a descendant of it, and held until
+ * that execution ends. An execution nested inside one that already times an
+ * account adds no time of its own to it, so time spent in executions under
+ * an account is charged once, however they nest, across runtime copies too:
+ * they all time through the copy whose accounts they share. The first
+ * AETHER_ACCT_TIMED_INLINE are kept in the block, the rest in a block that
+ * grows as needed (plain malloc, no account's), freed when this thread
+ * times none. Under the lock, this thread's only. */
+typedef AetherAcctTimed AcctTimed;
+#define ACCT_TIMED_INLINE AETHER_ACCT_TIMED_INLINE
 
-static inline AcctTimed* timed_at(int i) {
-    return i < ACCT_TIMED_INLINE ? &t_timed_inline[i] : &t_timed_more[i - ACCT_TIMED_INLINE];
+static inline AcctTimed* timed_at(AetherFrames* F, int i) {
+    return i < ACCT_TIMED_INLINE ? &F->timed_inline[i] : &F->timed_more[i - ACCT_TIMED_INLINE];
 }
 
 /* Under the lock: when this thread began timing `a`, or -1. */
-static int64_t timed_since(const AetherExecAccount* a) {
-    for (int i = t_timed_n - 1; i >= 0; i--)
-        if (timed_at(i)->a == a) return timed_at(i)->since;
+static int64_t timed_since(AetherFrames* F, const AetherExecAccount* a) {
+    for (int i = F->timed_n - 1; i >= 0; i--)
+        if (timed_at(F, i)->a == a) return timed_at(F, i)->since;
     return -1;
 }
 
 /* Under the lock: `a` timed from `now` (and held). 0 when there was no room
  * and none could be had. */
-static int timed_push(AetherExecAccount* a, int64_t now) {
-    int i = t_timed_n;
-    if (i >= ACCT_TIMED_INLINE && i - ACCT_TIMED_INLINE >= t_timed_more_cap) {
-        int cap = t_timed_more_cap ? t_timed_more_cap * 2 : ACCT_TIMED_INLINE;
+static int timed_push(AetherFrames* F, AetherExecAccount* a, int64_t now) {
+    int i = F->timed_n;
+    if (i >= ACCT_TIMED_INLINE && i - ACCT_TIMED_INLINE >= F->timed_more_cap) {
+        int cap = F->timed_more_cap ? F->timed_more_cap * 2 : ACCT_TIMED_INLINE;
         /* A checked allocation: the test hook refuses it as it does any. */
         if (aether_alloc_test_refuses()) return 0;
-        AcctTimed* more = (AcctTimed*)realloc(t_timed_more, sizeof(AcctTimed) * (size_t)cap);
+        AcctTimed* more = (AcctTimed*)realloc(F->timed_more, sizeof(AcctTimed) * (size_t)cap);
         if (!more) return 0;
-        t_timed_more = more;
-        t_timed_more_cap = cap;
+        F->timed_more = more;
+        F->timed_more_cap = cap;
     }
-    timed_at(i)->a = a;
-    timed_at(i)->since = now;
-    t_timed_n = i + 1;
+    timed_at(F, i)->a = a;
+    timed_at(F, i)->since = now;
+    F->timed_n = i + 1;
     a->refs++;
     return 1;
 }
@@ -715,6 +716,7 @@ static int timed_push(AetherExecAccount* a, int64_t now) {
  * be timed (no memory for the thread's list): the execution must not run,
  * or its account's budget would go unenforced. */
 static int own_exec_begin(AetherExecAccount* a, int64_t* at_out, int* tripped, int* timed) {
+    AetherFrames* F = aether_frames_here();
     int64_t at = 0, now = now_ns();
     int tr = 0, n = 0, ok = 1;
     acct_lock();
@@ -723,9 +725,9 @@ static int own_exec_begin(AetherExecAccount* a, int64_t* at_out, int* tripped, i
     for (AetherExecAccount* x = a; x; x = x->parent) {
         int64_t own = 0;
         if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
-            int64_t since = timed_since(x);
+            int64_t since = timed_since(F, x);
             if (since < 0) {
-                if (!timed_push(x, now)) { ok = 0; break; }
+                if (!timed_push(F, x, now)) { ok = 0; break; }
                 n++;
                 since = now;
             }
@@ -757,11 +759,12 @@ static int own_exec_begin(AetherExecAccount* a, int64_t* at_out, int* tripped, i
  * accounts it began timing are charged the time since, and let go; the
  * trip, where a deadline on the chain passed, recorded. */
 static void own_exec_end(AetherExecAccount* a, int timed, int tripped) {
+    AetherFrames* F = aether_frames_here();
     int64_t now = now_ns();
     AetherExecAccount* gone = NULL;   /* let go for the last time, freed after the lock */
     acct_lock();
-    for (int i = 0; i < timed && t_timed_n > 0; i++) {
-        AcctTimed e = *timed_at(--t_timed_n);
+    for (int i = 0; i < timed && F->timed_n > 0; i++) {
+        AcctTimed e = *timed_at(F, --F->timed_n);
         AetherExecAccount* x = e.a;
         /* Nothing is charged to an account the host freed meanwhile. */
         if (!atomic_load_explicit(&x->dead, memory_order_relaxed)) {
@@ -775,10 +778,10 @@ static void own_exec_end(AetherExecAccount* a, int timed, int tripped) {
             gone = x;
         }
     }
-    if (t_timed_n == 0 && t_timed_more) {
-        free(t_timed_more);
-        t_timed_more = NULL;
-        t_timed_more_cap = 0;
+    if (F->timed_n == 0 && F->timed_more) {
+        free(F->timed_more);
+        F->timed_more = NULL;
+        F->timed_more_cap = 0;
     }
     /* An account trips on its own deadline: the call's trip flag is only the
      * sign that a safe point saw one pass. The ACTIVE ones an enclosing
@@ -787,7 +790,7 @@ static void own_exec_end(AetherExecAccount* a, int timed, int tripped) {
         for (AetherExecAccount* x = a; x; x = x->parent) {
             int own = 0;
             if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
-                int64_t since = timed_since(x);
+                int64_t since = timed_since(F, x);
                 own = since >= 0 && x->active_budget_ns &&
                       atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed) + (now - since) >=
                           x->active_budget_ns;

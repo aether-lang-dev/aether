@@ -380,16 +380,12 @@ void aether_unwind_exit_frame(void) {
 
 typedef void (*AetherTeardown)(void* obj);
 
-static AETHER_TLS_SHARED void** tls_teardown_queue = NULL;
-static AETHER_TLS_SHARED int tls_teardown_count = 0;
-static AETHER_TLS_SHARED int tls_teardown_capacity = 0;
-static AETHER_TLS_SHARED int tls_teardown_running = 0;
-
 void aether_teardown(void* obj) {
-    if (tls_teardown_running) {
-        if (tls_teardown_count == tls_teardown_capacity) {
-            int cap = tls_teardown_capacity ? tls_teardown_capacity * 2 : 16;
-            void** q = (void**)realloc(tls_teardown_queue, (size_t)cap * sizeof(void*));
+    AetherFrames* F = &t_frames;
+    if (F->teardown_running) {
+        if (F->teardown_count == F->teardown_capacity) {
+            int cap = F->teardown_capacity ? F->teardown_capacity * 2 : 16;
+            void** q = (void**)realloc(F->teardown_queue, (size_t)cap * sizeof(void*));
             if (!q) {
                 /* No memory to queue it (#2956): torn down here instead, on
                  * the stack. The process used to stop, and a library call
@@ -397,28 +393,49 @@ void aether_teardown(void* obj) {
                 (*(AetherTeardown*)obj)(obj);
                 return;
             }
-            if (!tls_teardown_capacity) unwind_mark_thread();
-            tls_teardown_queue = q;
-            tls_teardown_capacity = cap;
+            if (!F->teardown_capacity) unwind_mark_thread();
+            F->teardown_queue = q;
+            F->teardown_capacity = cap;
         }
-        tls_teardown_queue[tls_teardown_count++] = obj;
+        F->teardown_queue[F->teardown_count++] = obj;
         return;
     }
-    tls_teardown_running = 1;
+    F->teardown_running = 1;
     (*(AetherTeardown*)obj)(obj);
-    while (tls_teardown_count > 0) {
-        void* next = tls_teardown_queue[--tls_teardown_count];
+    /* The block again: a teardown runs Aether code (drops, death hooks),
+     * which reaches the block as this frame did. */
+    F = &t_frames;
+    while (F->teardown_count > 0) {
+        void* next = F->teardown_queue[--F->teardown_count];
         (*(AetherTeardown*)next)(next);
     }
-    tls_teardown_running = 0;
+    F->teardown_running = 0;
+}
+
+/* aether_frames.h. The caller info's views are none here: every execution
+ * that made one has returned. */
+void aether_frames_release(AetherFrames* F) {
+    free(F->journal);
+    F->journal = NULL;
+    F->journal_count = 0;
+    F->journal_capacity = 0;
+    free(F->teardown_queue);
+    F->teardown_queue = NULL;
+    F->teardown_count = 0;
+    F->teardown_capacity = 0;
+    free(F->timed_more);
+    F->timed_more = NULL;
+    F->timed_more_cap = 0;
+    free(F->caller);
+    F->caller = NULL;
+    free(F->callback_reason);
+    F->callback_reason = NULL;
 }
 
 void aether_unwind_thread_cleanup(void) {
-    free(t_frames.journal);
-    t_frames.journal = NULL;
-    t_frames.journal_count = 0;
-    t_frames.journal_capacity = 0;
-    free(tls_teardown_queue);
-    tls_teardown_queue = NULL;
-    tls_teardown_capacity = 0;
+    aether_frames_release(&t_frames);
+}
+
+void aether_frames_mark_thread(void) {
+    unwind_mark_thread();
 }

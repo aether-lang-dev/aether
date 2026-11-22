@@ -83,17 +83,16 @@ static void aether_jump_to(AetherJmpFrame* f) {
 AETHER_TLS_SHARED int g_aether_in_actor_step = 0;
 AETHER_TLS_SHARED int g_aether_current_actor_id = -1;
 /* #2586: the string a fn-pointer callee handed over; see aether_fnptr_mark
- * in aether_panic.h. Static: the generated code reaches it only through the
- * two functions below (#2687). */
-static AETHER_TLS_SHARED const void* g_aether_fnptr_owned = NULL;
-
+ * in aether_panic.h. In the thread's execution state (aether_frames.h): the
+ * generated code reaches it only through the two functions below (#2687). */
 void aether_fnptr_mark(const void* s) {
-    g_aether_fnptr_owned = s;
+    aether_frames_here()->fnptr_owned = s;
 }
 
 int aether_fnptr_claim(const void* r) {
-    int owned = r && r == g_aether_fnptr_owned;
-    g_aether_fnptr_owned = NULL;
+    AetherFrames* F = aether_frames_here();
+    int owned = r && r == F->fnptr_owned;
+    F->fnptr_owned = NULL;
     return owned;
 }
 

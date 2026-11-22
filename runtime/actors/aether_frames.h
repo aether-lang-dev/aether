@@ -43,7 +43,28 @@ typedef struct AetherCancelCell {
 #define AETHER_OUTCOME_TEXT_MAX 1024
 
 struct AetherUnwindEntry;   /* aether_unwind.c's */
+struct AetherCallerState;   /* aether_host.c's */
 
+/* An ACTIVE account a thread is timing (aether_resource_caps.c, #3409): when
+ * this thread began timing it. The first AETHER_ACCT_TIMED_INLINE are kept
+ * in the block, the rest in a block that grows as needed. */
+#define AETHER_ACCT_TIMED_INLINE 8
+typedef struct {
+    struct AetherExecAccount* a;
+    int64_t since;
+} AetherAcctTimed;
+
+/* The execution state of one thread (of one task, on a cooperative build
+ * with task contexts: docs/design/task-execution-contexts.md). Everything a
+ * call into Aether reads or changes about how it runs, rather than what it
+ * computes, is here: its try and execution frames, the executions' records
+ * and outcome, the cancel cell, the account in use and the accounts being
+ * timed, the deadline, the caller info, the allocation journal, the
+ * teardown queue, the fn-pointer ownership mark and the last refusing
+ * callback's reason. The heap parts (the journal, the teardown queue, the
+ * timing list past its inline entries, the caller info, the callback
+ * reason) are made on first use and given back by aether_frames_release
+ * when the thread ends or the task's context is detached. */
 typedef struct {
     AetherJmpFrame   frames[AETHER_PANIC_MAX_DEPTH];
     int              depth;    /* live frames; the innermost is frames[depth-1] */
@@ -64,7 +85,38 @@ typedef struct {
     struct AetherUnwindEntry* journal;
     int              journal_count;
     int              journal_capacity;
+    /* The deadline of this thread's calls (aether_resource_caps.c):
+     * monotonic-clock ns, 0 for none, and the sticky trip flag. */
+    int64_t          deadline_at_ns;
+    int              deadline_tripped;
+    /* aether_test_fail_alloc_after's count on this thread. */
+    int              alloc_fail_after;
+    /* The ACTIVE accounts this thread is timing, innermost last. */
+    AetherAcctTimed  timed_inline[AETHER_ACCT_TIMED_INLINE];
+    AetherAcctTimed* timed_more;
+    int              timed_more_cap;
+    int              timed_n;
+    /* The caller info (aether_host.c), made at the first aether_set_caller. */
+    struct AetherCallerState* caller;
+    /* Why this thread's last refusing callback refused (aether_callbacks.c),
+     * made at the first one; NULL reads as "". */
+    char*            callback_reason;
+    /* The string a fn-pointer callee handed over (aether_fnptr_mark). */
+    const void*      fnptr_owned;
+    /* Actors torn down while a teardown runs (aether_teardown). */
+    void**           teardown_queue;
+    int              teardown_count;
+    int              teardown_capacity;
+    int              teardown_running;
 } AetherFrames;
+
+/* The heap parts of `F` given back (the thread ended, or its task's
+ * context is detached): no execution or frame may be open in it. */
+void aether_frames_release(AetherFrames* F);
+
+/* The calling thread's heap parts are given back when it ends: called by a
+ * file that gives its block a heap part, the first time it does. */
+void aether_frames_mark_thread(void);
 
 /* This thread's block. The block is a `static` thread-local of
  * aether_unwind.c, the one file that owns it (with the try frames' push and

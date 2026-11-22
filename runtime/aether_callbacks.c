@@ -19,11 +19,13 @@
  * drops the newest registration (the runtime's own definition then stays in
  * use) rather than allocate in a constructor. */
 
+#include "actors/aether_frames.h"
 #include "aether_callbacks.h"
 #include "utils/aether_compiler.h"
 
 #include <stdatomic.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define AETHER_CALLBACK_MAX 256
@@ -61,17 +63,27 @@ void* aether_callback_lookup(const char* name) {
     return NULL;
 }
 
-/* Why the thread's last refusing callback refused (#3426): see the header. */
-static AETHER_TLS_SHARED char t_callback_reason[512];
+/* Why the thread's last refusing callback refused (#3426): see the header.
+ * Kept in the thread's execution state (aether_frames.h), made at the
+ * first reason set; a thread that never had one reads "". */
+#define CALLBACK_REASON_MAX 512
 
 void aether_callback_set_reason(const char* reason) {
-    if (!reason) { t_callback_reason[0] = '\0'; return; }
+    AetherFrames* F = aether_frames_here();
+    if (!F->callback_reason) {
+        if (!reason) return;
+        F->callback_reason = (char*)malloc(CALLBACK_REASON_MAX);
+        if (!F->callback_reason) return;   /* no room: the reason reads "" */
+        aether_frames_mark_thread();
+    }
+    if (!reason) { F->callback_reason[0] = '\0'; return; }
     size_t n = strlen(reason);
-    if (n >= sizeof(t_callback_reason)) n = sizeof(t_callback_reason) - 1;
-    memcpy(t_callback_reason, reason, n);
-    t_callback_reason[n] = '\0';
+    if (n >= CALLBACK_REASON_MAX) n = CALLBACK_REASON_MAX - 1;
+    memcpy(F->callback_reason, reason, n);
+    F->callback_reason[n] = '\0';
 }
 
 const char* aether_callback_reason(void) {
-    return t_callback_reason;
+    const char* r = aether_frames_here()->callback_reason;
+    return r ? r : "";
 }
