@@ -99,7 +99,7 @@ fn peer_start(mode: int) -> Peer {
         exit(1)
     }
     stop = sync.atomic_new(0)
-    live = sync.atomic_new(1)   // the accept thread, below
+    live = sync.atomic_new(1) // the accept thread, below
     port = tcp.server_port(srv)
     worker.run_detached(|| { return serve(srv, mode, stop, live) })
     return Peer { port: port, stop: stop, live: live }
@@ -334,7 +334,7 @@ main() {
         sock, de = tcp.connect_until("127.0.0.1", pe.port, now() + 3 + jitter, c)
         if de != "" { why = "dial: ${de}" }
         old_fd = tcp.fd(sock)
-        tcp.cancel_retain(c)   // the canceller's own reference
+        tcp.cancel_retain(c) // the canceller's own reference
         worker.run_detached(|| {
                 sleep(((now() / 3) % 9) as int)
                 tcp.cancel(c)
