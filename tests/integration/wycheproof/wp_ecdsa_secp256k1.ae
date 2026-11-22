@@ -165,6 +165,7 @@ main() {
         gi = gi + 1
     }
 
+    json.free(root)
     println("wycheproof ecdsa_secp256k1_p1363: ${passed} ok, ${rejected_invalid} invalid rejected, ${failed} failed (stride ${stride})")
     if failed > 0 { exit(1) }
     println("ALL PASS")

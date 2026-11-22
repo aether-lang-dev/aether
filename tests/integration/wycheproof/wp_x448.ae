@@ -135,6 +135,7 @@ main() {
         gi = gi + 1
     }
 
+    json.free(root)
     println("wycheproof x448: ${passed} matched, ${rejected_acceptable} rejected-acceptable, ${failed} failed")
     if failed > 0 { exit(1) }
     println("ALL PASS")

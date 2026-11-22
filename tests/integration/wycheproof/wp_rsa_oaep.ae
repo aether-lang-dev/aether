@@ -150,6 +150,7 @@ main() {
         gi = gi + 1
     }
 
+    json.free(root)
     println("wycheproof rsa_oaep_2048_sha256: ${passed} valid ok, ${rejected_invalid} invalid rejected, ${skipped_label} skipped (label unsupported), ${failed} failed")
     if failed > 0 { exit(1) }
     println("ALL PASS")
