@@ -2696,6 +2696,38 @@ int is_c_reserved_word(const char* name) {
            function-like macros, so a user `major(seg: string)` was rewritten
            by the preprocessor and did not compile. */
         "major", "minor", "makedev",
+        /* #3806: <stdatomic.h>, which every generated program includes. Its
+           generic functions are function-like macros, so a user
+           `atomic_load(p: ptr) -> int` was rewritten by the preprocessor
+           ("expected identifier before '__extension__'"); its types and
+           memory_order constants are names a function or variable cannot
+           take either. An imported module's function hid this, its C name
+           carrying the module's prefix; `ae pad --verify`, which compiles a
+           module alone, did not. */
+        "atomic_init", "atomic_load", "atomic_load_explicit", "atomic_store",
+        "atomic_store_explicit", "atomic_exchange", "atomic_exchange_explicit",
+        "atomic_compare_exchange_strong", "atomic_compare_exchange_strong_explicit",
+        "atomic_compare_exchange_weak", "atomic_compare_exchange_weak_explicit",
+        "atomic_fetch_add", "atomic_fetch_add_explicit", "atomic_fetch_sub",
+        "atomic_fetch_sub_explicit", "atomic_fetch_or", "atomic_fetch_or_explicit",
+        "atomic_fetch_xor", "atomic_fetch_xor_explicit", "atomic_fetch_and",
+        "atomic_fetch_and_explicit", "atomic_flag_test_and_set",
+        "atomic_flag_test_and_set_explicit", "atomic_flag_clear",
+        "atomic_flag_clear_explicit", "atomic_thread_fence", "atomic_signal_fence",
+        "atomic_is_lock_free", "kill_dependency",
+        "atomic_flag", "atomic_bool", "atomic_char", "atomic_schar", "atomic_uchar",
+        "atomic_short", "atomic_ushort", "atomic_int", "atomic_uint", "atomic_long",
+        "atomic_ulong", "atomic_llong", "atomic_ullong", "atomic_char16_t",
+        "atomic_char32_t", "atomic_wchar_t", "atomic_int_least8_t",
+        "atomic_uint_least8_t", "atomic_int_least16_t", "atomic_uint_least16_t",
+        "atomic_int_least32_t", "atomic_uint_least32_t", "atomic_int_least64_t",
+        "atomic_uint_least64_t", "atomic_int_fast8_t", "atomic_uint_fast8_t",
+        "atomic_int_fast16_t", "atomic_uint_fast16_t", "atomic_int_fast32_t",
+        "atomic_uint_fast32_t", "atomic_int_fast64_t", "atomic_uint_fast64_t",
+        "atomic_intptr_t", "atomic_uintptr_t", "atomic_size_t", "atomic_ptrdiff_t",
+        "atomic_intmax_t", "atomic_uintmax_t", "memory_order", "memory_order_relaxed",
+        "memory_order_consume", "memory_order_acquire", "memory_order_release",
+        "memory_order_acq_rel", "memory_order_seq_cst",
         NULL
     };
     static const char** sorted = NULL;

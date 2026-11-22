@@ -914,8 +914,42 @@ static int pad_fix_file(PadRun* run, int idx, const PadOpts* o, int* fixed) {
     return rc;
 }
 
+/* What a failed --verify of one file was (#3806). */
+enum { PAD_VERIFY_OK = 0, PAD_VERIFY_MISMATCH = 1, PAD_VERIFY_BROKEN = 2 };
+
+/* Whether the log of a failed -fsyntax-only run names a failed static
+ * assertion (the layout report disagrees with the compiler) rather than C
+ * that does not compile for another reason. With `show`, the lines that
+ * say so (the assertions, or the first errors) go to stderr, indented. */
+static int pad_verify_explain(const char* log, int show) {
+    FILE* f = fopen(log, "rb");
+    if (!f) return 0;
+    char line[1024];
+    int asserted = 0, shown = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "static assertion") || strstr(line, "static_assert failed")) {
+            asserted = 1;
+            break;
+        }
+    }
+    rewind(f);
+    while (show && fgets(line, sizeof(line), f) && shown < 4) {
+        int wanted = asserted ? (strstr(line, "static assert") || strstr(line, "static_assert") != NULL)
+                              : (strstr(line, "error") != NULL);
+        if (!wanted) continue;
+        fprintf(stderr, "        %s", line);
+        if (!strchr(line, '\n')) fputc('\n', stderr);
+        shown++;
+    }
+    fclose(f);
+    return asserted;
+}
+
 /* `--verify` on one file: its C with the report's numbers as
- * _Static_asserts, compiled -fsyntax-only by the C compiler ae builds with. */
+ * _Static_asserts, compiled -fsyntax-only by the C compiler ae builds with.
+ * PAD_VERIFY_OK, or what failed: an assertion (the report and the compiler
+ * disagree on a layout) or the C itself (an ae pad defect, not a layout
+ * one), each said as such. */
 static int pad_verify_file(const char* path, const PadOpts* o, int* asserts) {
     static int seq = 0;
     char cpath[1200], name[64];
@@ -928,10 +962,10 @@ static int pad_verify_file(const char* path, const PadOpts* o, int* asserts) {
     snprintf(flags, sizeof(flags), "--emit=layout --layout-asserts%s", o->layout_flags);
     char* text = NULL;
     if (aetherc_capture_stdout_whole(flags, path, cpath, &text) != 0) {
-        fprintf(stderr, "ae pad: %s does not compile; not verified\n", path);
+        fprintf(stderr, "ae pad: %s does not compile as Aether; not verified\n", path);
         free(text);
         remove(cpath);
-        return 1;
+        return PAD_VERIFY_BROKEN;
     }
     int n = 0;
     for (const char* p = text; (p = strstr(p, "_Static_assert(")) != NULL; p++) n++;
@@ -939,9 +973,9 @@ static int pad_verify_file(const char* path, const PadOpts* o, int* asserts) {
     int ok = f && fputs(text, f) >= 0;
     if (f && fclose(f) != 0) ok = 0;
     free(text);
-    if (!ok) { fprintf(stderr, "ae pad: cannot write %s\n", cpath); remove(cpath); return 1; }
+    if (!ok) { fprintf(stderr, "ae pad: cannot write %s\n", cpath); remove(cpath); return PAD_VERIFY_BROKEN; }
     char* cmd = (char*)malloc(AE_CMD_BUF);
-    if (!cmd) { remove(cpath); return 1; }
+    if (!cmd) { remove(cpath); return PAD_VERIFY_BROKEN; }
     /* --ptr=4 asks the compiler for 32-bit x86. MinGW's i686 layout is the
      * Microsoft one, which aligns int64_t and double to 8 inside a struct;
      * the i386 SysV placement the table models is asked for by name. GCC
@@ -953,14 +987,24 @@ static int pad_verify_file(const char* path, const PadOpts* o, int* asserts) {
     const char* m32 = " -m32 -Wno-psabi";
 #endif
     build_syntax_check_cmd(cmd, AE_CMD_BUF, cpath, o->ptr4 ? m32 : "");
-    int rc = run_cmd(cmd);
+    char log[1300];
+    snprintf(log, sizeof(log), "%s.log", cpath);
+    int rc = run_cmd_capture_all(cmd, log);
     free(cmd);
     remove(cpath);
     if (rc != 0) {
-        fprintf(stderr, "ae pad: %s: the C compiler does not agree with the layout report "
-                        "(the failed _Static_assert names the number)\n", path);
-        return 1;
+        int kind = pad_verify_explain(log, 0) ? PAD_VERIFY_MISMATCH : PAD_VERIFY_BROKEN;
+        if (kind == PAD_VERIFY_MISMATCH)
+            fprintf(stderr, "ae pad: %s: the C compiler does not agree with the layout report:\n",
+                    path);
+        else
+            fprintf(stderr, "ae pad: %s: its C did not compile, so nothing was verified; this is "
+                            "an ae pad defect, not a layout one (please report it):\n", path);
+        pad_verify_explain(log, 1);
+        remove(log);
+        return kind;
     }
+    remove(log);
     *asserts += n;
     printf("verified: %s (%d asserts)\n", path, n);
     return 0;
@@ -1065,7 +1109,8 @@ int cmd_pad(int argc, char** argv) {
     PadTotals t;
     memset(&t, 0, sizeof(t));
     int report = (!o.fix && !o.verify) || o.min_waste > 0;
-    int fixed = 0, asserts = 0, verified = 0;
+    int fixed = 0, asserts = 0, verified = 0, mismatched = 0, broken = 0, nfailed = 0;
+    const char* failed_names[8];
     char flags[600];
     snprintf(flags, sizeof(flags), "--emit=layout%s%s", o.json ? " --json" : "", o.layout_flags);
     if (o.fix) {
@@ -1084,8 +1129,15 @@ int cmd_pad(int argc, char** argv) {
     for (int i = 0; i < files.n; i++) {
         const char* path = files.v[i];
         if (o.verify) {
-            if (pad_verify_file(path, &o, &asserts) != 0) bad = 1;
-            else verified++;
+            int v = pad_verify_file(path, &o, &asserts);
+            if (v == PAD_VERIFY_OK) {
+                verified++;
+            } else {
+                bad = 1;
+                if (v == PAD_VERIFY_MISMATCH) mismatched++;
+                else broken++;
+                if (nfailed < 8) failed_names[nfailed++] = path;
+            }
         }
         if (!report) continue;
         char* text = NULL;
@@ -1122,9 +1174,17 @@ int cmd_pad(int argc, char** argv) {
                t.largest ? t.largest_name : "", t.all_saving);
     }
     if (o.fix) printf("ae pad --fix: %d struct%s rewritten\n", fixed, fixed == 1 ? "" : "s");
-    if (o.verify)
-        printf("ae pad --verify: %d file%s, %d asserts held\n", verified,
+    if (o.verify) {
+        printf("ae pad --verify: %d file%s verified (%d asserts held)", verified,
                verified == 1 ? "" : "s", asserts);
+        if (mismatched + broken > 0) {
+            printf("; %d FAILED (%d disagree with the layout report, %d did not compile):",
+                   mismatched + broken, mismatched, broken);
+            for (int k = 0; k < nfailed; k++) printf(" %s", failed_names[k]);
+            if (mismatched + broken > nfailed) printf(" ...");
+        }
+        printf("\n");
+    }
     int gate = 0;
     if (o.min_waste > 0 && t.largest >= o.min_waste) {
         fprintf(stderr, "ae pad: struct %s in %s can save %lld bytes, at least the %lld "

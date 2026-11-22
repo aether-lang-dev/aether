@@ -949,7 +949,8 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
 
 /* Runs a command string: split by ae_split_command, then spawned.
  * quiet=0: show all output, 1: hide stdout and stderr, 2: hide stdout only
- * (keep stderr for warnings), 3: stdout to the file `capture`. */
+ * (keep stderr for warnings), 3: stdout to the file `capture`, 4: stdout and
+ * stderr both to the file `capture` (a compiler's diagnostics, to read). */
 static int run_command(const char* cmd_str, int quiet, const char* capture) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
     char** argv = ae_split_command(cmd_str, NULL);
@@ -1004,9 +1005,10 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
     } else if (quiet == 2) {
         // Hide stdout but keep stderr (so gcc warnings are visible)
         posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-    } else if (quiet == 3 && capture) {
+    } else if ((quiet == 3 || quiet == 4) && capture) {
         posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, capture,
                                          O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (quiet == 4) posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
     }
 
     pid_t pid;
@@ -1342,11 +1344,19 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
         int nul = _open("nul", _O_WRONLY);
         if (nul >= 0) { _dup2(nul, 1); _close(nul); }
     }
-    if (quiet == 3 && capture) {
+    if ((quiet == 3 || quiet == 4) && capture) {
         fflush(stdout);
         saved_stdout = _dup(1);
         int fd = _open(capture, _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE);
-        if (fd >= 0) { _dup2(fd, 1); _close(fd); }
+        if (fd >= 0) {
+            _dup2(fd, 1);
+            if (quiet == 4) {
+                fflush(stderr);
+                saved_stderr = _dup(2);
+                _dup2(fd, 2);
+            }
+            _close(fd);
+        }
     }
     if (quiet == 1) {
         fflush(stderr);
@@ -1482,6 +1492,13 @@ static const char* compile_log_path(char* buf, size_t size) {
 int run_cmd_capture_stdout(const char* cmd, const char* path) {
     if (!path || !path[0]) return run_command(cmd, 2, NULL);   /* nowhere to capture to */
     return run_command(cmd, 3, path);
+}
+
+/* Both stdout and stderr of `cmd` into the file `path`, for a caller that
+ * reads the diagnostics before deciding what to say (#3806). */
+int run_cmd_capture_all(const char* cmd, const char* path) {
+    if (!path || !path[0]) return run_command(cmd, 0, NULL);
+    return run_command(cmd, 4, path);
 }
 
 /* Print a captured stdout log to stderr, so it interleaves with the
@@ -1768,10 +1785,9 @@ void mkdirs(const char* path) {
 
 // Stream-copy src → dst, preserving the source file's permission bits
 // so executables stay executable and libs stay non-executable. Returns
-// 1 on success, 0 on any I/O failure. Used by the build cache to
-// materialise a cached binary at the user-requested output path (and
-// the inverse to store a freshly built binary in the cache slot).
-static int copy_file(const char* src, const char* dst) {
+// 1 on success, 0 on any I/O failure. Rewrites dst in place: copy_file
+// below is what callers use.
+static int copy_file_in_place(const char* src, const char* dst) {
     FILE* in = fopen(src, "rb");
     if (!in) return 0;
     FILE* out = fopen(dst, "wb");
@@ -1794,6 +1810,48 @@ static int copy_file(const char* src, const char* dst) {
     }
 #endif
     return ok;
+}
+
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
+// src copied to dst as a new file: into a temporary beside dst, created
+// exclusively, then renamed over it (#3801). Rewritten in place, a program
+// that had run kept its inode with new bytes, and macOS killed the next run
+// of it (SIGKILL, exit 137) though its bytes and signature were fine: the
+// build cache materialises a cached binary over the previous one at every
+// hit. Used for every file ae writes from another (a cached binary, a
+// shared library, a DLL beside a program, a package's files), so none is
+// rewritten under a reader. A symlinked destination is written through,
+// as before, and where the rename cannot be made (a running program on
+// Windows, a directory that takes no new file) the copy is made in place,
+// which is what those cases did before. Returns 1 on success.
+static int copy_file(const char* src, const char* dst) {
+#ifndef _WIN32
+    struct stat lst;
+    if (lstat(dst, &lst) == 0 && S_ISLNK(lst.st_mode)) return copy_file_in_place(src, dst);
+#endif
+    size_t need = strlen(dst) + 48;
+    char* tmp = (char*)malloc(need);
+    if (!tmp) return copy_file_in_place(src, dst);
+    static unsigned seq = 0;
+    int fd = -1;
+    for (int tries = 0; tries < 100 && fd < 0; tries++) {
+        snprintf(tmp, need, "%s.ae-tmp-%ld-%u", dst, (long)getpid(), seq++);
+        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0700);
+        if (fd < 0 && errno != EEXIST) break;
+    }
+    if (fd >= 0) {
+        close(fd);
+        if (copy_file_in_place(src, tmp) && ae_replace_file(tmp, dst) == 0) {
+            free(tmp);
+            return 1;
+        }
+        remove(tmp);
+    }
+    free(tmp);
+    return copy_file_in_place(src, dst);
 }
 
 static char* get_basename(const char* path) {

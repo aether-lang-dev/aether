@@ -134,6 +134,7 @@ extern char s_cache_dir[512];   /* resolved once by init_cache_dir (ae_cache.c) 
 
 int  run_cmd_show_warnings(const char* cmd);
 int  run_cmd_capture_stdout(const char* cmd, const char* path);
+int  run_cmd_capture_all(const char* cmd, const char* path);   /* stdout and stderr (#3806) */
 void dump_captured_stdout(const char* path);
 bool path_exists(const char* path);
 void mkdirs(const char* path);

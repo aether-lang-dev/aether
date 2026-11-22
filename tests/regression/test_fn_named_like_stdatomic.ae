@@ -1,0 +1,45 @@
+// Regression (#3806): a function or variable named like a <stdatomic.h>
+// name compiles and is called.
+//
+// Every generated program includes <stdatomic.h>, whose generic functions
+// (`atomic_load`, `atomic_store`, ...) are function-like macros and whose
+// types and memory_order constants are names of their own. A program's
+// `atomic_load(p: ptr) -> int` reached C under that name and the
+// preprocessor rewrote it ("expected identifier before '__extension__'").
+// An imported module's function hid it, its C name carrying the module's
+// prefix; the same function in the program itself, or a module compiled
+// alone (`ae pad --verify`), did not compile.
+
+extern exit(code: int)
+
+atomic_load(p: ptr) -> int {
+    return 7
+}
+
+atomic_store(p: ptr, v: int) -> int {
+    return v + 1
+}
+
+atomic_fetch_add(a: int, b: int) -> int {
+    return a + b
+}
+
+kill_dependency(x: int) -> int {
+    return x * 2
+}
+
+memory_order(x: int) -> int {
+    return x - 1
+}
+
+main() {
+    atomic_int = 3
+    memory_order_relaxed = 4
+    got = atomic_load(null) + atomic_store(null, 1) + atomic_fetch_add(atomic_int, memory_order_relaxed) +
+    kill_dependency(5) + memory_order(10)
+    if got != 7 + 2 + 7 + 10 + 9 {
+        println("FAIL: got ${got}")
+        exit(1)
+    }
+    println("PASS: names from <stdatomic.h> are the program's own")
+}

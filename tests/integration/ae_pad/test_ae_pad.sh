@@ -88,6 +88,43 @@ else
     echo "  [SKIP] ae_pad: --verify --ptr=4 ($CC does not take -m32 here)"
 fi
 
+# #3806: a module compiled alone, its function named like a <stdatomic.h>
+# macro, verifies: its C names the function as the program's own, not by
+# the macro's name. And a run with a file that does not compile says so in
+# its summary, and exits non-zero, rather than reading like a pass.
+mkdir -p atom
+cat > atom/module.ae <<'AE'
+exports (atomic_load, Pair)
+
+struct Pair {
+    a: int
+    b: long
+}
+
+atomic_load(p: ptr) -> int {
+    return 0
+}
+AE
+if ! "$AE" pad --verify atom > atom.out 2>&1; then
+    echo "  [FAIL] ae_pad: --verify of a module with a function named atomic_load failed"
+    sed 's/^/        /' atom.out | head -10
+    fail=1
+fi
+cat > broken.ae <<'AE'
+main() {
+    this does not parse
+}
+AE
+if "$AE" pad --verify atom broken.ae > mixed.out 2>&1; then
+    echo "  [FAIL] ae_pad: --verify with a file that does not compile exited 0"
+    fail=1
+fi
+if ! grep -q "1 file verified" mixed.out || ! grep -q "1 FAILED (0 disagree with the layout report, 1 did not compile): broken.ae" mixed.out; then
+    echo "  [FAIL] ae_pad: the --verify summary does not name the failed file"
+    sed 's/^/        /' mixed.out | head -10
+    fail=1
+fi
+
 # 3. --min-waste: Rec saves 16 bytes, the largest saving.
 "$AE" pad --min-waste=16 pad_fixture.ae > /dev/null 2> gate.err
 if [ $? -ne 1 ] || ! grep -q "struct Rec in pad_fixture.ae can save 16 bytes" gate.err; then
