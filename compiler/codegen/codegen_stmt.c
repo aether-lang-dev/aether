@@ -9512,8 +9512,10 @@ void emit_defer_thunks(CodeGenerator* gen) {
     free(tail);
     free(g_udefer_node);
     free(g_udefer_id);
+    free(g_udefer_by_mark);
     g_udefer_node = NULL;
     g_udefer_id = NULL;
+    g_udefer_by_mark = NULL;
     g_udefer_count = 0;
 }
 

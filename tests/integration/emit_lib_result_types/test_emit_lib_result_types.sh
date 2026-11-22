@@ -44,6 +44,10 @@ export high() -> bit_set[Bit] {
 export count(n: int) -> int {
     return n + 1
 }
+
+export keep(it: Isolated[int]) -> int {
+    return 1
+}
 AE
 
 # The generated C: no alias for the slice result, a uint64_t one for the
@@ -70,6 +74,24 @@ else
     fi
     if ! grep -q "^int32_t aether_count(" "$TMP/lib.c"; then
         echo "  [FAIL] emit_lib_result_types: the int export lost its alias"
+        fail=1
+    fi
+    # The symbol catalog lists only aliases that exist: a skipped one,
+    # advertised, sent a host's dlsym to a symbol the library lacks.
+    if grep -q '"aether_view"' "$TMP/lib.c"; then
+        echo "  [FAIL] emit_lib_result_types: the catalog lists the skipped aether_view"
+        grep -m2 '"aether_view"' "$TMP/lib.c" | sed 's/^/        /'
+        fail=1
+    fi
+    if ! grep -q '"aether_count"' "$TMP/lib.c"; then
+        echo "  [FAIL] emit_lib_result_types: the catalog does not list aether_count"
+        fail=1
+    fi
+    # Isolated[T] is a move-only compile-time wrapper with no C ABI
+    # spelling: its export is skipped, not lowered to the element type.
+    if grep -q " aether_keep(" "$TMP/lib.c"; then
+        echo "  [FAIL] emit_lib_result_types: an alias was emitted for an Isolated parameter"
+        grep -m2 " aether_keep(" "$TMP/lib.c" | sed 's/^/        /'
         fail=1
     fi
 fi

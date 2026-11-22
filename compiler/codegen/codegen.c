@@ -2858,6 +2858,15 @@ static int is_c_header_macro_name(const char* name) {
     for (int i = 0; macros[i]; i++) {
         if (strcmp(name, macros[i]) == 0) return 1;
     }
+    /* #3806: the <stdatomic.h> names is_c_reserved_word lists. A local
+     * spelled `memory_order_relaxed` shadowed the enum constant the
+     * runtime's atomic macros pass, and one spelled `atomic_int` the type
+     * they declare, so code after it in the same scope compiled against
+     * the user's variable. */
+    if ((strncmp(name, "atomic_", 7) == 0 || strncmp(name, "memory_order", 12) == 0 ||
+         strcmp(name, "kill_dependency") == 0) &&
+        is_c_reserved_word(name))
+        return 1;
     return 0;
 }
 
@@ -3207,8 +3216,7 @@ static const char* get_abi_type(Type* type) {
          * was cut to 32 bits, a bitstruct is its backing word. */
         case TYPE_ENUM:   return "int32_t";
         case TYPE_BITSET: return "uint64_t";
-        case TYPE_BITSTRUCT:
-        case TYPE_ISOLATED: return get_abi_type(type->element_type);
+        case TYPE_BITSTRUCT: return get_abi_type(type->element_type);
         default:          return NULL;
     }
 }
@@ -3320,6 +3328,17 @@ static int lib_fn_signature(CodeGenerator* gen, ASTNode* fn, LibSig* sig, const 
     }
     if (sig->result && sig->result->kind == TYPE_TUPLE) {
         *why = "tuple";
+        return 0;
+    }
+    /* #3808: a result of a type the ABI does not carry (a slice, an
+     * optional, a sum, an actor reference) is refused as a parameter of one
+     * is. Decided here, so the alias, the catalog's record of it and the
+     * function's linkage (lib_fn_is_local) agree: decided in the alias
+     * emitter alone, the catalog advertised a c_symbol that did not exist.
+     * An untyped result keeps the int32_t fallback. */
+    if (sig->result && sig->result->kind != TYPE_UNKNOWN && sig->result->kind != TYPE_VOID &&
+        !get_abi_type(sig->result)) {
+        *why = "result";
         return 0;
     }
     return 1;
@@ -3823,26 +3842,8 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         const char* ret_abi = result && result->kind == TYPE_STRING ? "const void*"
                                                                     : get_abi_type(result);
         int returns_value = result != NULL;
-        if (!ok) {
-            const char* msg = "";
-            msg = aether_internf(
-                     "function '%s' returns a tuple; --emit=lib alias stub skipped (tuples aren't part of the public ABI)",
-                     fn->value);
-            AetherError w = {NULL, NULL, fn->line, fn->column, msg,
-                             "wrap the tuple-returning function with one that returns a single ABI-safe value if it should be exposed across the library boundary",
-                             NULL, AETHER_ERR_NONE};
-            aether_warning_report(&w);
-            lib_sig_free(&sig);
-            continue;
-        }
-        /* #3808: a result of a type the ABI does not carry (a slice, an
-         * optional, a sum, an actor reference) is refused as a parameter
-         * of one is: the alias is skipped, saying why. It fell back to
-         * int32_t, which did not compile for a slice and cut an actor
-         * reference, a pointer, to 32 bits. An untyped result keeps the
-         * int32_t fallback (the internal rule of defaulting unknown returns
-         * to int). */
-        if (!ret_abi && returns_value && result->kind != TYPE_UNKNOWN) {
+        if (!ok && strcmp(why, "result") == 0) {
+            /* #3808: lib_fn_signature refused the result type. */
             const char* msg = aether_internf(
                      "function '%s' returns a type that isn't representable in the --emit=lib ABI; "
                      "skipping alias stub", fn->value);
@@ -3850,6 +3851,18 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                              "return int, long, uint64, float, bool, byte, string, ptr, a *Struct, a "
                              "struct by value, or a fn(...) -> R function pointer from public API "
                              "functions; a slice crosses as a ptr and its length",
+                             NULL, AETHER_ERR_NONE};
+            aether_warning_report(&w);
+            lib_sig_free(&sig);
+            continue;
+        }
+        if (!ok) {
+            const char* msg = "";
+            msg = aether_internf(
+                     "function '%s' returns a tuple; --emit=lib alias stub skipped (tuples aren't part of the public ABI)",
+                     fn->value);
+            AetherError w = {NULL, NULL, fn->line, fn->column, msg,
+                             "wrap the tuple-returning function with one that returns a single ABI-safe value if it should be exposed across the library boundary",
                              NULL, AETHER_ERR_NONE};
             aether_warning_report(&w);
             lib_sig_free(&sig);
