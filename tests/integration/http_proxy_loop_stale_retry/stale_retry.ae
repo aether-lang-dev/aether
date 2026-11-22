@@ -20,8 +20,15 @@ import std.http
 import std.http.proxy
 import std.string
 import std.tcp
+import std.os
 
 extern exit(code: int)
+
+// #3809: when each drain's first byte came, or that none came and whether
+// the connection was closed, for the failure messages: an intermittent
+// macOS failure did not say whether the answer was late or lost. The
+// window is still one quiet second.
+var timing: string = ""
 
 handle_slow(req: ptr, res: ptr, ud: ptr) {
     sleep(300)
@@ -69,13 +76,17 @@ gateway(up_url: string, worker: int) -> ptr {
 drain(sock: ptr) -> string {
     wire = ""
     quiet = 0
+    t0 = os.now_monotonic_ns()
+    note = ""
     while quiet < 10 {
         ready, _perr = tcp.poll(sock, 100)
         if ready {
             chunk, rerr = tcp.read(sock, 4096)
             if rerr != "" || string.length(chunk) == 0 {
+                if note == "" { note = "closed after ${(os.now_monotonic_ns() - t0) / 1000000} ms" }
                 quiet = 10
             } else {
+                if note == "" { note = "first byte after ${(os.now_monotonic_ns() - t0) / 1000000} ms" }
                 wire = string.concat(wire, chunk)
                 quiet = 0
             }
@@ -83,6 +94,8 @@ drain(sock: ptr) -> string {
             quiet = quiet + 1
         }
     }
+    if note == "" { note = "silent for ${(os.now_monotonic_ns() - t0) / 1000000} ms" }
+    timing = string.concat(timing, "[${note}] ")
     return wire
 }
 
@@ -115,6 +128,7 @@ main() {
         sleep(100)
         http.client_pool_clear()
 
+        timing = ""
         // Two at once, so the proxy holds two upstream connections.
         a, aerr = tcp.connect("127.0.0.1", port)
         b, berr = tcp.connect("127.0.0.1", port)
@@ -139,7 +153,7 @@ main() {
         got = "${first} then ${status(drain(c))}"
         tcp.close(c)
         if got != "200 200 then 200" {
-            println("  FAIL after the upstream closed both pooled connections (${names[g]}): got '${got}', expected '200 200 then 200'")
+            println("  FAIL after the upstream closed both pooled connections (${names[g]}): got '${got}', expected '200 200 then 200'; ${timing}")
             bad = bad + 1
         } else {
             println("  PASS after the upstream closed both pooled connections (${names[g]})")
@@ -154,6 +168,7 @@ main() {
             exit(1)
         }
         rounds = ""
+        timing = ""
         r = 0
         while r < 3 {
             tcp.write(k, "GET /p HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -163,7 +178,7 @@ main() {
         }
         tcp.close(k)
         if rounds != "200 200 200 " {
-            println("  FAIL every request on a kept connection after a stale one (${names[g]}): got '${rounds}', expected '200 200 200 '")
+            println("  FAIL every request on a kept connection after a stale one (${names[g]}): got '${rounds}', expected '200 200 200 '; ${timing}")
             bad = bad + 1
         } else {
             println("  PASS every request on a kept connection after a stale one (${names[g]})")
