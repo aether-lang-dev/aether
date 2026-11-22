@@ -19,6 +19,8 @@
 #   serve.ae       the program's function of the receiver's arity with other
 #                  argument types (std.guest.child's serve_exports shape):
 #                  built, and panicked in the module's function
+#   guest_child.ae the same with the real std.guest.child: a worker's own
+#                  serve_exports(vm, h) in a child.run(h) block stays its own
 #   local_call.ae  a non-callable local hides the receiver's function, as it
 #                  hides the program's own outside a block: refused by name
 
@@ -46,6 +48,7 @@ expect main.ae "main.tag 1 main.say 6 var local param p main.closure 2 main.tag 
 expect fallback.ae "dsl.tag 1 dsl.say 3 dsl.label inner.tag 2 inner.note 3 dsl.say 4 build b opt=o dsl.tag 4"
 expect alias.ae "main.tag 1 dsl.say 2"
 expect serve.ae "main.serve 5"
+expect guest_child.ae "local serve_exports"
 
 out=$( cd "$SCRIPT_DIR" && AETHER_HOME="$ROOT" "$AE" build --lib lib local_call.ae -o /dev/null 2>&1 )
 if [ $? -eq 0 ]; then
