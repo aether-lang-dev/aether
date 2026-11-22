@@ -110,6 +110,26 @@ if ! "$AE" pad --verify atom > atom.out 2>&1; then
     sed 's/^/        /' atom.out | head -10
     fail=1
 fi
+# The verify C told apart: a failed static assertion is a layout mismatch,
+# C that does not compile is an ae pad defect (AE_PAD_VERIFY_APPEND adds
+# the text to the verify C, a test hook).
+AE_PAD_VERIFY_APPEND='_Static_assert(0, "ae_pad_test_injected_mismatch");' \
+    "$AE" pad --verify atom > inj_assert.out 2>&1
+if [ $? -eq 0 ] || ! grep -q "does not agree with the layout report" inj_assert.out ||
+   ! grep -q "1 FAILED (1 disagree with the layout report, 0 did not compile)" inj_assert.out; then
+    echo "  [FAIL] ae_pad: a failed static assertion is not reported as a layout mismatch"
+    sed 's/^/        /' inj_assert.out | head -10
+    fail=1
+fi
+AE_PAD_VERIFY_APPEND='int ae_pad_test_injected_error = ;' \
+    "$AE" pad --verify atom > inj_error.out 2>&1
+if [ $? -eq 0 ] || ! grep -q "its C did not compile, so nothing was verified" inj_error.out ||
+   ! grep -q "1 FAILED (0 disagree with the layout report, 1 did not compile)" inj_error.out; then
+    echo "  [FAIL] ae_pad: C that does not compile is not reported as an ae pad defect"
+    sed 's/^/        /' inj_error.out | head -10
+    fail=1
+fi
+
 cat > broken.ae <<'AE'
 main() {
     this does not parse

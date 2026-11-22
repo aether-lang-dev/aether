@@ -956,7 +956,7 @@ static int pad_verify_file(const char* path, const PadOpts* o, int* asserts) {
     snprintf(name, sizeof(name), "ae_pad_verify_%d.c", seq++);
     if (!ae_private_temp_path(cpath, sizeof(cpath), name)) {
         fprintf(stderr, "ae pad: no temporary directory\n");
-        return 1;
+        return PAD_VERIFY_BROKEN;   /* nothing was compared */
     }
     char flags[600];
     snprintf(flags, sizeof(flags), "--emit=layout --layout-asserts%s", o->layout_flags);
@@ -971,6 +971,10 @@ static int pad_verify_file(const char* path, const PadOpts* o, int* asserts) {
     for (const char* p = text; (p = strstr(p, "_Static_assert(")) != NULL; p++) n++;
     FILE* f = fopen(cpath, "ab");
     int ok = f && fputs(text, f) >= 0;
+    /* Test hook: text appended to the verify C, so the tests can show a
+     * failed assertion and C that does not compile told apart (#3806). */
+    const char* extra = getenv("AE_PAD_VERIFY_APPEND");
+    if (ok && extra && *extra) ok = fputs("\n", f) >= 0 && fputs(extra, f) >= 0 && fputs("\n", f) >= 0;
     if (f && fclose(f) != 0) ok = 0;
     free(text);
     if (!ok) { fprintf(stderr, "ae pad: cannot write %s\n", cpath); remove(cpath); return PAD_VERIFY_BROKEN; }

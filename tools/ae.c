@@ -1831,6 +1831,12 @@ static int copy_file(const char* src, const char* dst) {
 #ifndef _WIN32
     struct stat lst;
     if (lstat(dst, &lst) == 0 && S_ISLNK(lst.st_mode)) return copy_file_in_place(src, dst);
+#else
+    /* A symlink or junction destination (a reparse point): written through,
+     * as on POSIX; MoveFileEx would replace the link itself. */
+    DWORD dattr = GetFileAttributesA(dst);
+    if (dattr != INVALID_FILE_ATTRIBUTES && (dattr & FILE_ATTRIBUTE_REPARSE_POINT))
+        return copy_file_in_place(src, dst);
 #endif
     size_t need = strlen(dst) + 48;
     char* tmp = (char*)malloc(need);
@@ -1843,8 +1849,33 @@ static int copy_file(const char* src, const char* dst) {
         if (fd < 0 && errno != EEXIST) break;
     }
     if (fd >= 0) {
-        close(fd);
-        if (copy_file_in_place(src, tmp) && ae_replace_file(tmp, dst) == 0) {
+        /* Written through the descriptor the exclusive create gave, never
+         * reopened by name: in a directory others may write, the name could
+         * be made a symlink between the create and a reopen, and the copy
+         * (and the mode) would land in the file it points at. */
+        int ok = 1;
+#ifndef _WIN32
+        struct stat sst;
+        if (stat(src, &sst) == 0 && fchmod(fd, sst.st_mode & 07777) != 0) ok = 0;
+#endif
+        FILE* out = ok ? fdopen(fd, "wb") : NULL;
+        FILE* in = out ? fopen(src, "rb") : NULL;
+        if (!out || !in) ok = 0;
+        if (ok) {
+            char buf[8192];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+                if (fwrite(buf, 1, n, out) != n) { ok = 0; break; }
+            }
+            if (ferror(in)) ok = 0;
+        }
+        if (in) fclose(in);
+        if (out) {
+            if (fclose(out) != 0) ok = 0;
+        } else {
+            close(fd);
+        }
+        if (ok && ae_replace_file(tmp, dst) == 0) {
             free(tmp);
             return 1;
         }
