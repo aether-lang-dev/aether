@@ -12,6 +12,7 @@
 
 #include "aether_http_evloop.h"
 #include "aether_http_server.h"
+#include "../../runtime/config/aether_optimization_config.h"   /* AETHER_HAS_THREADS, _NETWORKING */
 
 /* The driver needs three things: threads to run on, a poller to wait in, and
  * a pipe to hand it a descriptor without a lock. Windows has no descriptor a
@@ -22,7 +23,11 @@
 #define AETHER_EVLOOP_SUPPORTED 1
 #endif
 
-#if defined(AETHER_EVLOOP_SUPPORTED) && AETHER_HAS_THREADS
+/* Nor is it without networking (AETHER_NO_NETWORKING): the driver calls the
+ * HTTP server's parser and dispatch, which such a build leaves out, so a
+ * shared runtime that must resolve every symbol (macOS's libaether.dylib in
+ * make ci-coop's no-network stdlib) did not link. */
+#if defined(AETHER_EVLOOP_SUPPORTED) && AETHER_HAS_THREADS && AETHER_HAS_NETWORKING
 
 #include "aether_http.h"
 #include "aether_http_internal.h"
@@ -2493,7 +2498,7 @@ void http_evloop_stop(HttpEvLoop* loop) {
     aether_aligned_heap_free(loop);
 }
 
-#else /* no threads, no poller, or no pipe: the worker path is unchanged */
+#else /* no threads, no poller, no pipe or no networking: the worker path is unchanged */
 
 HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     (void)server; (void)threads;
@@ -2508,4 +2513,4 @@ int64_t http_evloop_wakeups(HttpEvLoop* loop) { (void)loop; return 0; }
 struct HttpResolver* http_evloop_resolver(HttpEvLoop* loop) { (void)loop; return NULL; }
 void http_evloop_stop(HttpEvLoop* loop)   { (void)loop; }
 
-#endif /* AETHER_EVLOOP_SUPPORTED && AETHER_HAS_THREADS */
+#endif /* AETHER_EVLOOP_SUPPORTED && AETHER_HAS_THREADS && AETHER_HAS_NETWORKING */
