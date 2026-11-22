@@ -1,0 +1,278 @@
+// Regression (#3787): a slice place is journaled for a caught panic only
+// while its value holds a reference, by the value's own mark
+// (AETHER_SLICE_MADE, AETHER_SLICE_STRING), and every one that holds a
+// reference is still given back once, on the panic's path and on the
+// normal one.
+//
+// Every slice local bound to a call, every call's slice read in place and
+// every one passed straight to a call was journaled where it was set and
+// forgotten at its exit, two out-of-line calls each, even when the value
+// was a view of memory no count covers that a function returned, which a
+// drain would have had nothing to give back for (3.6% of an aephysics
+// collide step, in its hull accessors).
+// tests/integration/slice_journal_by_mark checks the generated C; this
+// checks what runs:
+//
+// - inside a `try`, the journal (aether_unwind_journal_size) grows by
+//   nothing for a returned view (bound, read in place, passed, iterated)
+//   and by one for a `make` buffer, a copy of one, a sub-slice of one
+//   (which carries the mark) and a place that held a view and is given a
+//   counted value;
+// - outside every `try` nothing is journaled;
+// - a panic after those bindings gives each counted buffer back once: a
+//   buffer the caller still holds reads back what it was given after a
+//   churn of same-sized buffers filled with -7 (one given back twice would
+//   be freed under the caller), and, where the heap count is exact
+//   (mem.heap_in_use_exact), rounds of it on both paths leave the heap
+//   where they found it (one never given back would grow it), a push
+//   into a place included;
+// - a local declared outside a `try` and stored into inside it keeps
+//   what it was given past a panic the `try` catches.
+
+import std.mem
+
+extern exit(code: int)
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern aether_unwind_journal_size() -> int
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3787: ${what}")
+        exit(1)
+    }
+}
+
+struct Hull {
+    data: ptr
+    count: int
+}
+
+var base = 0
+
+faces(h: *Hull) -> int[] {
+    return h.data as int[]
+}
+
+bounded(h: *Hull) -> int[] {
+    return (h.data as int[])[0..h.count]
+}
+
+fresh(n: int, v: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = v + i
+    }
+    return xs
+}
+
+same(xs: int[]) -> int[] {
+    return xs
+}
+
+sub_of(n: int) -> int[] {
+    xs = fresh(n, 5)
+    return xs[1..3]
+}
+
+journal() -> int {
+    return aether_unwind_journal_size()
+}
+
+// How many entries the place adds while it is live.
+seen_by(xs: int[]) -> int {
+    return journal() - base
+}
+
+bound_view(h: *Hull) -> int {
+    before = journal()
+    f = faces(h)
+    d = journal() - before
+    check(f[1] == 1, "a bound view reads its memory")
+    return d
+}
+
+bound_fresh() -> int {
+    before = journal()
+    f = fresh(4, 1)
+    d = journal() - before
+    check(f[3] == 4, "a bound buffer reads back")
+    return d
+}
+
+bound_copy(xs: int[]) -> int {
+    before = journal()
+    c = same(xs)
+    d = journal() - before
+    check(c[0] == xs[0], "a copy reads back")
+    return d
+}
+
+bound_sub() -> int {
+    before = journal()
+    s = sub_of(4)
+    d = journal() - before
+    check(s[0] == 6, "a sub-slice of a counted buffer reads back")
+    return d
+}
+
+// A place that holds a view and is then given a counted value: nothing
+// until the store, one entry from it.
+replaced(h: *Hull) -> int {
+    before = journal()
+    v = faces(h)
+    a = journal() - before
+    v = fresh(3, 2)
+    b = journal() - before
+    check(v[2] == 4, "the stored buffer reads back")
+    return a * 10 + b
+}
+
+in_place(h: *Hull) -> int {
+    before = journal()
+    x = faces(h)[2]
+    a = journal() - before
+    y = fresh(2, 7)[1]
+    b = journal() - before
+    check(x + y == 10, "values read in place")
+    return a * 10 + b
+}
+
+passed(h: *Hull) -> int {
+    base = journal()
+    a = seen_by(faces(h))
+    base = journal()
+    b = seen_by(fresh(2, 1))
+    return a * 10 + b
+}
+
+looped(h: *Hull) -> int {
+    before = journal()
+    a = 0
+    for _x in bounded(h) {
+        a = journal() - before
+    }
+    b = 0
+    for _x in fresh(2, 1) {
+        b = journal() - before
+    }
+    return a * 10 + b
+}
+
+// The journal's growth for each shape, as one number per shape.
+shapes(h: *Hull, xs: int[]) -> int[] {
+    r = make([]int, 8)
+    r[0] = bound_view(h)
+    r[1] = bound_fresh()
+    r[2] = bound_copy(xs)
+    r[3] = bound_sub()
+    r[4] = replaced(h)
+    r[5] = in_place(h)
+    r[6] = passed(h)
+    r[7] = looped(h)
+    return r
+}
+
+// Views, counted values, a sub-slice of one, a place a view is replaced
+// in and one grown in place, all held when the panic comes (or not: `k` 0
+// returns normally). Each counted one shares `kept`'s buffer, so a release
+// too many frees it under the caller.
+throws(h: *Hull, kept: int[], k: int) -> int {
+    f = faces(h)
+    c = same(kept)
+    s = kept[1..3]
+    v = bounded(h)
+    v = same(kept)
+    t = faces(h)[0] + fresh(2, 0).len + seen_by(faces(h)) + seen_by(same(kept))
+    int[] grown = []
+    grown.push(t)
+    if k > 0 {
+        panic("boom ${f[0] + c[0] + s[0] + v[0] + grown[0]}")
+    }
+    return c[1] + s[1] + v[2]
+}
+
+churn() -> int {
+    t = 0
+    for r in 0..64 {
+        b = make([]int, 4)
+        for i in 0..4 {
+            b[i] = -7
+        }
+        t = t + b[0]
+    }
+    return t
+}
+
+// A local declared outside a `try` and stored into inside it: its entry
+// is its declaration's, so a panic the `try` catches leaves it holding
+// what the store gave it. Journaled at the store, the entry would be the
+// `try`'s, and the panic would give the buffer back under the local.
+stored_in_try(h: *Hull) -> int {
+    v = faces(h)
+    try {
+        v = fresh(3, 30)
+        panic("inner")
+    } catch e {
+        check(e == "inner", "the inner panic")
+    }
+    churn()
+    return v[2]
+}
+
+one_round(h: *Hull, top: int) -> int {
+    for i in 0..h.count {
+        bounded(h)[i] = i
+    }
+    xs = fresh(2, 9)
+    // Called from `main` (top), no frame is live: nothing is journaled.
+    outside = shapes(h, xs)
+    checked = 8 * top
+    for i in 0..checked {
+        check(outside[i] == 0, "shape ${i} journaled ${outside[i]} outside every try")
+    }
+    caught = 0
+    try {
+        inside = shapes(h, xs)
+        check(inside[0] == 0, "a bound view was journaled")
+        check(inside[1] == 1, "a bound make buffer was not journaled: ${inside[1]}")
+        check(inside[2] == 1, "a bound copy was not journaled: ${inside[2]}")
+        check(inside[3] == 1, "a bound sub-slice of a counted buffer was not journaled: ${inside[3]}")
+        check(inside[4] == 1, "a view then a counted value journaled ${inside[4]}, not 01")
+        check(inside[5] == 1, "values read in place journaled ${inside[5]}, not 01")
+        check(inside[6] == 1, "values passed journaled ${inside[6]}, not 01")
+        check(inside[7] == 1, "values iterated journaled ${inside[7]}, not 01")
+    } catch e {
+        check(false, "the shapes panicked: ${e}")
+    }
+    kept = fresh(4, 40)
+    for r in 0..4 {
+        try {
+            throws(h, kept, 1)
+        } catch e {
+            caught = caught + 1
+        }
+        check(throws(h, kept, 0) == 41 + 42 + 42, "the normal path")
+    }
+    churn()
+    check(caught == 4, "every panic caught")
+    check(stored_in_try(h) == 32, "a store in a try kept its buffer past the panic")
+    for i in 0..4 {
+        check(kept[i] == 40 + i, "the caller's buffer was given back too often: ${kept[i]}")
+    }
+    return 1
+}
+
+main() {
+    h = Hull { data: calloc(16, 4), count: 6 }
+    one_round(&h, 1)
+    if mem.heap_in_use_exact() {
+        one_round(&h, 1)
+        grown = mem.steady_growth(|| {
+                one_round(&h, 0)
+            }, 5)
+        check(grown == 0, "a round grew the heap by ${grown} bytes in every window")
+    }
+    free(h.data)
+    println("OK")
+}

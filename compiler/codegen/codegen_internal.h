@@ -119,6 +119,8 @@ void own_rebound_binding_take(CodeGenerator* gen, const char* name, Type* t, AST
                               int line, int column);
 void push_builder_config_exit_release(CodeGenerator* gen, ASTNode* builder, ASTNode* body);
 const char* user_defer_ctx(ASTNode* body);
+const char* user_defer_token(ASTNode* body);   /* #3787 */
+const char* slice_place_store_journal(CodeGenerator* gen, const ASTNode* place);   /* #3787 */
 void emit_defer_thunks(CodeGenerator* gen);
 int control_prelude_depth(void);
 void control_prelude_end(int depth);

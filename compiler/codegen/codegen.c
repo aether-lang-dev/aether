@@ -1740,8 +1740,10 @@ static int try_emit_scoped_slice_free(CodeGenerator* gen, ASTNode* deferred) {
     if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
     const char* name = deferred->annotation + plen;
     print_indent(gen);
-    fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
-            "aether_slice_release(&%s);\n", name, name);
+    /* #3787: forgotten only when its value was journaled (`<name>_j`,
+     * emit_slice_temp_set_close), and the token cleared with it. */
+    fprintf(gen->output, "/* deferred */ aether_unwind_forget_tok(%s_j, (const void*)&%s); %s_j = 0; "
+            "aether_slice_release(&%s);\n", name, name, name, name);
     return 1;
 }
 
@@ -1918,7 +1920,10 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
                 mode == DEFER_TRY ? " (try)" : mode == DEFER_CATCH ? " (catch)" : "");
         gen->indent_level++;
         const char* jctx = mode == DEFER_ALWAYS ? user_defer_ctx(deferred) : NULL;
-        if (jctx) print_line(gen, "aether_unwind_forget((const void*)%s);", jctx);
+        /* #3787: only an entry the registration wrote is forgotten. */
+        if (jctx)
+            print_line(gen, "aether_unwind_forget_tok(%s, (const void*)%s);",
+                       user_defer_token(deferred), jctx);
         enter_scope(gen);
         generate_statement(gen, deferred);
         exit_scope(gen);
@@ -10053,10 +10058,40 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * release never touches the journal: a value may be held by several
      * places, and the journal knows places, not values. */
     print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
-    print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
+    print_line(gen, "extern int aether_unwind_track(const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_track_place(const void*, const void*, AetherUnwindFree);");
     print_line(gen, "extern int aether_unwind_track_owned_place(const void*, void (*)(void*));");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
+    /* #3787: a journal token, one per place the journal may name. 1: the
+     * place was journaled, and its exit forgets it. 0: it was not, because
+     * a defer's registration found no live frame, or a slice place's value
+     * carries no count (a drain would have nothing to give back), and a
+     * store may still journal that place. -1: a slice place's counted value
+     * found no live frame, and the place is not asked again. The forget
+     * runs only on 1. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void aether_unwind_forget_tok(int tok, const void* p) {");
+    print_line(gen, "    if (tok > 0) aether_unwind_forget(p);");
+    print_line(gen, "}");
+    /* The slice's own mark says whether it holds a reference (R1, #3568):
+     * a counted buffer's slices carry AETHER_SLICE_MADE, a counted string's
+     * bytes AETHER_SLICE_STRING, and a view of memory no count covers
+     * neither, so aether_slice_release gives back nothing for it. Such a
+     * value is not journaled: the drain's release would do nothing. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int aether_slice_journal(const void* entry, AetherSlice v, AetherUnwindFree fn) {");
+    print_line(gen, "    if (!(v.flags & (AETHER_SLICE_MADE | AETHER_SLICE_STRING))) return 0;");
+    print_line(gen, "    return aether_unwind_track(entry, fn) ? 1 : -1;");
+    print_line(gen, "}");
+    /* A store into a slice place journaled by its mark: the place is
+     * journaled when the value it is given is the first counted one. A
+     * token of -1 was refused for want of a frame, and the frame depth a
+     * place's stores run at is the one its declaration ran at (a store in a
+     * `try` the declaration is outside keeps the place journaled from its
+     * declaration, slice_place_journals_by_mark), so it is not asked again. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AetherSlice aether_slice_set_journal(AetherSlice* p, AetherSlice v, int* tok, const void* entry, AetherUnwindFree fn) {");
+    print_line(gen, "    aether_slice_release(p);");
+    print_line(gen, "    if (!*tok) *tok = aether_slice_journal(entry, v, fn);");
+    print_line(gen, "    return v;");
+    print_line(gen, "}");
     print_line(gen, "extern void aether_teardown(void*);");
     /* Is `s` a counted AetherString, the one shape string_release frees?
      * The same byte-by-byte probe as aether_heap_str_free below. */

@@ -41,7 +41,10 @@ extern "C" {
 #endif
 
 typedef void (*AetherUnwindFree)(const void* p);
-void aether_unwind_track(const void* p, AetherUnwindFree free_fn);
+// 1 when `p` is journaled, 0 when nothing was (no frame is live, or no room
+// for the entry): an exit given 0 has nothing to forget, and skips the call
+// (#3787, runtime ABI revision 7).
+int aether_unwind_track(const void* p, AetherUnwindFree free_fn);
 void aether_unwind_forget(const void* p);
 // #2923: journal a PLACE, the address of a slot that holds a value, with the
 // address of the flag that says the slot owns it (NULL: it owns whatever it

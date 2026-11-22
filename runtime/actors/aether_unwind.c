@@ -253,7 +253,7 @@ void aether_exec_defer_interruption(void) {
     if (!x->stop) x->stop = why;
 }
 
-static void journal_at(const void* p, AetherUnwindFree free_fn, int depth);
+static int journal_at(const void* p, AetherUnwindFree free_fn, int depth);
 
 /* The journal and the teardown queue are this thread's, and go back when it
  * ends (#3539). A scheduler thread gives them back itself
@@ -333,10 +333,13 @@ AETHER_DESTRUCTOR static void unwind_exit_key_delete(void) {
 #endif
 #endif /* __APPLE__ */
 
-void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
+/* 1 when `p` is in the journal, an entry of its own or the one it had
+ * updated; 0 when nothing was journaled (no frame is live, or no room), so
+ * the place's exit has nothing to forget (#3787). */
+int aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
     AetherFrames* F = &t_frames;
-    if (F->depth == 0 || !p || !free_fn) return;
-    journal_at(p, free_fn, F->depth);
+    if (F->depth == 0 || !p || !free_fn) return 0;
+    return journal_at(p, free_fn, F->depth);
 }
 
 void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release) {
@@ -380,7 +383,7 @@ int aether_unwind_track_owned_place(const void* place, AetherUnwindDropPtr drop)
     return 1;
 }
 
-static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
+static int journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
     AetherFrames* F = &t_frames;
     // Re-tracking an already-journaled pointer updates in place: the
     // ownership handoff shapes (callee returns, caller re-arms its own
@@ -389,7 +392,7 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
         if (F->journal[i].ptr == p) {
             F->journal[i].free_fn = free_fn;
             F->journal[i].depth = depth;
-            return;
+            return 1;
         }
     }
     if (F->journal_count == F->journal_capacity) {
@@ -397,7 +400,7 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
         AetherUnwindEntry* grown =
             (AetherUnwindEntry*)realloc(F->journal,
                                         (size_t)cap * sizeof(AetherUnwindEntry));
-        if (!grown) return;  // OOM: skip journaling; worst case is the old leak
+        if (!grown) return 0;  // OOM: skip journaling; worst case is the old leak
         if (!F->journal_capacity) unwind_mark_thread();
         F->journal = grown;
         F->journal_capacity = cap;
@@ -410,6 +413,7 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
     F->journal[F->journal_count].place = 0;
     F->journal[F->journal_count].draining = 0;
     F->journal_count++;
+    return 1;
 }
 
 void aether_unwind_forget(const void* p) {
