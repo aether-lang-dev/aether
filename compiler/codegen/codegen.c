@@ -3197,6 +3197,13 @@ static const char* get_abi_type(Type* type) {
          * --emit=csrc header does not get the layout, so those prototypes
          * are left out of the header (emit_lib_alias_stubs). */
         case TYPE_STRUCT: return type->struct_name;
+        /* #3808: these crossed as the int32_t a NULL fell back to, which a
+         * C enum is and the others are not: a bit set is a 64-bit word and
+         * was cut to 32 bits, a bitstruct is its backing word. */
+        case TYPE_ENUM:   return "int32_t";
+        case TYPE_BITSET: return "uint64_t";
+        case TYPE_BITSTRUCT:
+        case TYPE_ISOLATED: return get_abi_type(type->element_type);
         default:          return NULL;
     }
 }
@@ -3818,6 +3825,26 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                      fn->value);
             AetherError w = {NULL, NULL, fn->line, fn->column, msg,
                              "wrap the tuple-returning function with one that returns a single ABI-safe value if it should be exposed across the library boundary",
+                             NULL, AETHER_ERR_NONE};
+            aether_warning_report(&w);
+            lib_sig_free(&sig);
+            continue;
+        }
+        /* #3808: a result of a type the ABI does not carry (a slice, an
+         * optional, a sum, an actor reference) is refused as a parameter
+         * of one is: the alias is skipped, saying why. It fell back to
+         * int32_t, which did not compile for a slice and cut an actor
+         * reference, a pointer, to 32 bits. An untyped result keeps the
+         * int32_t fallback (the internal rule of defaulting unknown returns
+         * to int). */
+        if (!ret_abi && returns_value && result->kind != TYPE_UNKNOWN) {
+            const char* msg = aether_internf(
+                     "function '%s' returns a type that isn't representable in the --emit=lib ABI; "
+                     "skipping alias stub", fn->value);
+            AetherError w = {NULL, NULL, fn->line, fn->column, msg,
+                             "return int, long, uint64, float, bool, byte, string, ptr, a *Struct, a "
+                             "struct by value, or a fn(...) -> R function pointer from public API "
+                             "functions; a slice crosses as a ptr and its length",
                              NULL, AETHER_ERR_NONE};
             aether_warning_report(&w);
             lib_sig_free(&sig);

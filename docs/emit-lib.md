@@ -328,6 +328,9 @@ public ABI:
 | `float` | `double` | IEEE 754 binary64, as everywhere in Aether |
 | `f32` | `float` | IEEE 754 binary32 |
 | `bool` | `int32_t` | `0` = false, `1` = true |
+| an enum | `int32_t` | Its members' values |
+| `bit_set[E]` | `uint64_t` | One bit per member, at the member's value (#3808: it was cut to 32 bits) |
+| a bitstruct | its backing word | `uint8_t` to `uint64_t`, as declared |
 | `string` (parameter) | `const char*` | Borrowed for the call |
 | `string` (result) | `const void*` | A string the caller owns; see below |
 | `ptr` / `list` / `map` | `AetherValue*` | Opaque handle; walk with `aether_config_*` accessors |
@@ -363,9 +366,12 @@ the string for you, and a binary import copies it into the program's
 runtime and releases the library's reference.
 
 Functions whose parameters or returns use types outside this table
-(tuples, optionals, actor refs, enums) compile but **don't get an
+(tuples, optionals, sums, actor refs, slices) compile but **don't get an
 `aether_<name>` alias**. `aetherc` prints a warning naming the skipped
-function. You can still use those types internally; they just can't
+function and whether the parameter or the result is the reason. A slice
+crosses as a `ptr` and its length. (A result of such a type used to get an
+alias anyway, declared `int32_t`: for a slice it did not compile, and an
+actor reference was cut to 32 bits, #3808.) You can still use those types internally; they just can't
 cross the FFI boundary yet.
 
 Two private-helper conventions also opt out of the `aether_<name>`
