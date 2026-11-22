@@ -100,7 +100,11 @@ if build "$TMP/proj" o0 p.ae --quick -o pq; then
 fi
 
 # Clang, where one is installed: no budget, and the build still passes.
-if command -v clang > /dev/null 2>&1; then
+# Not under a sanitizer sweep: there libaether.a is built by the sweep's
+# GCC with -fsanitize, and Clang links none of GCC's sanitizer runtime.
+if [ -n "${AETHER_SANITIZER:-}" ]; then
+    echo "  [SKIP] $NAME: the Clang leg (libaether.a is built for $AETHER_SANITIZER by GCC)"
+elif command -v clang > /dev/null 2>&1; then
     AE_CC=clang
     export AE_CC
     if build "$TMP/proj" clang p.ae -o pc; then
