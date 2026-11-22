@@ -13,6 +13,9 @@
 #   CODE-SHAPE  reads the compiled code (inlining, vector instructions,
 #               FORTIFY's abort, debug info, -Werror warnings), which ASan's
 #               instrumentation and the sweep's -g change
+#   FOREIGN-HOST loads the instrumented library into a program ASan did not
+#               build (a JVM), where ASan's runtime, not first in that
+#               program's libraries, ends it with a memory map and no result
 
 # RSS
 tests/integration/bytes_finish_return_no_leak/
@@ -21,7 +24,9 @@ tests/integration/heap_leak_interp_as_arg/
 tests/integration/heap_tracker_nested_tuple_err_no_leak/
 tests/integration/heap_tracker_return_escape_no_leak/
 tests/integration/panic_unwind_no_leak/
+tests/integration/std_strbuilder_csv/
 tests/integration/std_strbuilder_no_leak/
+tests/integration/string_new_with_length_no_leak/
 tests/integration/string_substring_n_no_leak/
 
 # SANDBOX
@@ -29,7 +34,12 @@ tests/integration/sandbox_
 tests/integration/contrib_host_stunt/
 tests/integration/std_guest/
 
+# FOREIGN-HOST
+tests/integration/embedded_java_trading_e2e/
+tests/integration/namespace_java/
+
 # CODE-SHAPE
+tests/integration/ae_buffers_whole/
 tests/integration/build_profile_flag/
 tests/integration/checksec_hardening/
 tests/integration/destructure_unused_local/
