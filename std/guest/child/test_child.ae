@@ -173,6 +173,38 @@ main() {
                 io.fd_close(host)
                 io.fd_close(ch)
             }
+            spec.it("holds RETURN and RAISE to the host's frame limit (MAXFRAME), refusing a RETURN it cannot send") callback {
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                spec.assert_eq(h.max_frame, 65536, "MAX_FRAME by default")
+                ipc.write_frame(host, "MAXFRAME 100")
+                ipc.write_frame(host, "SCRIPT s")
+                spec.assert_str_eq(child.read_script(h), "", "read")
+                spec.assert_eq(h.max_frame, 100, "the host's limit")
+                fits = "\"${string.substring("0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789", 0, 91)}\""
+                spec.assert_str_eq(child.returned(h, fits), "", "a RETURN of exactly 100 bytes goes")
+                spec.assert_eq(string.length(heard(host)), 100, "whole")
+                over = "${fits}0"
+                spec.assert_str_eq(child.returned(h, over), "the value is 94 bytes, over the frame limit of 100 bytes", "one byte more is refused")
+                spec.assert_eq(waiting(host), 0, "and not sent")
+                child.raised(h, "${over}${over}")
+                data = heard(host)
+                spec.assert_eq(string.length(data), 100, "a long RAISE is cut to fit")
+                spec.assert_true(string.starts_with(data, "RAISE \"0123") == 1, "from its start")
+                child.free(h)
+                bad = ["MAXFRAME 63", "MAXFRAME 65537", "MAXFRAME x"]
+                i = 0
+                while i < 3 {
+                    b = child.attach(ch, "spec")
+                    ipc.write_frame(host, bad[i])
+                    spec.assert_err_contains(child.read_script(b), "protocol: MAXFRAME wants 64..65536", bad[i])
+                    heard(host)
+                    child.free(b)
+                    i = i + 1
+                }
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
             spec.it("polls for a CANCEL without waiting, applying a LOGLEVEL on the way") callback {
                 host, ch, _ = os.socketpair()
                 h = child.attach(ch, "spec")

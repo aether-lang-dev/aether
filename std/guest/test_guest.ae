@@ -389,6 +389,25 @@ main() {
                 spec.assert_eq(ready, 0, "nothing sent for it either")
                 io.fd_close(w)
             }
+            spec.it("tells the worker a frame limit lower than MAX_FRAME before the script, and nothing otherwise") callback {
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                g.max_frame = 1000
+                guest.start(&g, "s")
+                data, _ = ipc.read_frame(w, 65536)
+                spec.assert_str_eq(data, "MAXFRAME 1000", "the host's limit first")
+                data, _ = ipc.read_frame_timeout(w, 65536, 200)
+                spec.assert_str_eq(data, "SCRIPT s", "then the script")
+                io.fd_close(w)
+                io.fd_close(h)
+                a, b, _ = os.socketpair()
+                d = paired(b, "")
+                guest.start(&d, "s")
+                data, _ = ipc.read_frame(a, 65536)
+                spec.assert_str_eq(data, "SCRIPT s", "at the default, only the script: the wire as before")
+                io.fd_close(a)
+                io.fd_close(b)
+            }
             spec.it("turns the end of an invocation into (value, err)") callback {
                 v, err = guest.result(guest.Event { kind: "DONE", name: "", text: "", code: 0, tags: "" })
                 spec.assert_str_eq("[${v}] ${err}", "[] the guest ended (DONE 0)", "DONE")

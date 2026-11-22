@@ -91,6 +91,9 @@ struct Host {
     probe: int
     // The host's log threshold: -1 off, 0 trace .. 5 fatal.
     log_level: int
+    // The longest frame the host reads: MAX_FRAME, or less when the host
+    // said so (MAXFRAME, before the script). returned holds to it.
+    max_frame: int
     // "" until the host cancels (or breaks the protocol while the script
     // runs, which cancels too): the reason.
     cancel: string
@@ -146,6 +149,7 @@ attach(ch: int, name: string) -> *Host {
     h.source = ""
     h.probe = 0
     h.log_level = -1
+    h.max_frame = MAX_FRAME
     h.cancel = ""
     h.mounts = list.new()
     h.exported = ""
@@ -162,9 +166,9 @@ free(h: @frees *Host) {
     heap.free(h)
 }
 
-// What the host sends before the script: MOUNT, PROBE and LOGLEVEL, up to
-// and including SCRIPT. "" with h.source, h.mounts, h.probe and
-// h.log_level set; or the protocol error, which has also been sent to the
+// What the host sends before the script: MOUNT, PROBE, LOGLEVEL and
+// MAXFRAME, up to and including SCRIPT. "" with h.source, h.mounts,
+// h.probe, h.log_level and h.max_frame set; or the protocol error, which has also been sent to the
 // host as ERROR (the worker exits).
 read_script(h: *Host) -> string {
     while true {
@@ -182,6 +186,14 @@ read_script(h: *Host) -> string {
             }
             "PROBE" -> { h.probe = 1 }
             "LOGLEVEL" -> { err = set_level(h, rest) }
+            "MAXFRAME" -> {
+                limit, lerr = string.to_int(rest)
+                if lerr != "" || limit < 64 || limit > MAX_FRAME {
+                    err = "protocol: MAXFRAME wants 64..${MAX_FRAME}, got '${rest}'"
+                } else {
+                    h.max_frame = limit
+                }
+            }
             _ -> { err = "protocol: expected MOUNT, PROBE, LOGLEVEL or SCRIPT, got '${verb}'" }
         }
         if err != "" {
@@ -460,19 +472,30 @@ serve(h: *Host) -> Invocation {
     }
 }
 
-// The invoked function returned `json`, a JSON value. The guest serves
-// again.
-returned(h: *Host, json: string) {
+// The invoked function returned `json`, a JSON value: "" when sent and
+// the guest serves again. A RETURN frame longer than the host reads
+// (h.max_frame) is not sent: the reason comes back instead, and the
+// invocation is still the worker's to answer, with raised(h, why) (the
+// host would refuse the frame and kill the worker).
+returned(h: *Host, json: string) -> string {
+    size = string.length(json)
+    if size + 7 > h.max_frame {
+        return "the value is ${size} bytes, over the frame limit of ${h.max_frame} bytes"
+    }
     h.invoked = ""
     report_refusals(h)
     tell(h, "RETURN ${json}")
+    return ""
 }
 
-// The invoked function raised `why`. The guest still serves.
+// The invoked function raised `why`. The guest still serves. A message
+// longer than a frame the host reads is cut to fit.
 raised(h: *Host, why: string) {
     h.invoked = ""
     report_refusals(h)
-    tell(h, "RAISE ${why}")
+    text = why
+    if string.length(text) + 6 > h.max_frame { text = string.substring(text, 0, h.max_frame - 6) }
+    tell(h, "RAISE ${text}")
 }
 
 // FILE: the descriptor rides on the next byte; read it, close it, and give

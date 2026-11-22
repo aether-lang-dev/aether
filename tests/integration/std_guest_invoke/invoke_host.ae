@@ -245,6 +245,32 @@ main() {
             }
             spec.assert_str_eq("[${v}] ${err}", "[] KILLED frame refused: ipc.read_frame: frame longer than max", "refused")
         }
+        spec.it("a worker that knows its value is too large for a frame raises instead, and serves on, at the host's limit") callback {
+            g = serving(stub, "polite", log, "def big\nreturn-big 70000\nend\ndef mid\nreturn-big 5000\nend\ndef echo\nreturn $args\nend")
+            v, err = guest.call_export(&g, "big", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("[${v}] ${err}", "[] the value is 70002 bytes, over the frame limit of 65536 bytes", "RAISE, not a kill")
+            v, err = guest.call_export(&g, "mid", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_eq(string.length(v), 5002, "5000 bytes fit the default limit")
+            guest.close(&g)
+            // The host reads at most 4096 a frame: the worker learns it
+            // (MAXFRAME, before the script) and holds to it.
+            s = begin(stub, "polite-4k", log)
+            s.max_frame = 4096
+            e = guest.run_script(&s, "def mid\nreturn-big 5000\nend\ndef echo\nreturn $args\nend") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq(e.kind, "READY", "serving")
+            v, err = guest.call_export(&s, "mid", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("[${v}] ${err}", "[] the value is 5002 bytes, over the frame limit of 4096 bytes", "the host's own limit")
+            v, err = guest.call_export(&s, "echo", "[2]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${v}|${err}", "[2]|", "and it serves on")
+            guest.end(&s)
+            e = guest.next(&s)
+            spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "DONE")
+        }
         spec.it("guest-reenters-while-called: a host handler cannot invoke the guest that is calling it") callback {
             g = serving(stub, "reenter", log, "def calls\ncall! ask []\nreturn $last\nend")
             refused = list.new()

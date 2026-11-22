@@ -204,6 +204,10 @@ What holds a serving guest:
   `end`) is unsolicited: the host hangs up. A `RETURN` or `RAISE` with no
   `INVOKE`, a second `READY`, and anything but `DONE` after `END` hang up
   too. A guest never sends `INVOKE`.
+- `invoke` refuses an `INVOKE` frame longer than the 64 KiB a worker
+  reads, saying why, and sends nothing. A worker refuses a `RETURN` longer
+  than the host reads (`child.returned`), so it can `RAISE` and serve on;
+  one that sends it anyway is still killed.
 - `invoke` and `end` are refused, and send nothing, unless the guest
   serves: so a host function's handler cannot invoke the guest that is
   calling it.
@@ -263,7 +267,7 @@ runs `h.source`. Everything else is a call the engine makes:
 | sets up | `h.source`, `mount_count(h)`, `mount_at(h, i)` (name and arity), `is_mounted(h, name)`, `h.probe`, `h.log_level` |
 | ends a script that left functions behind | `ready(h, names_json)` instead of `done`, then serves |
 | serves | `serve(h)` waits, with no deadline, and returns an `Invocation`: `INVOKE` (`name`, `args` a JSON array, also `h.invoked`), `END` (answer `done(h, 0)`) or `CANCEL` (`args` the reason: answer `error`) |
-| answers an invocation | `returned(h, json)` or `raised(h, why)`; the guest serves on after either |
+| answers an invocation | `returned(h, json)` or `raised(h, why)`; the guest serves on after either. `returned` gives back `""`, or, for a value whose frame is longer than the host reads (`h.max_frame`: 64 KiB, or the host's `MAXFRAME`), why it sent nothing, so the worker can `raised` that instead of being killed; `raised` cuts a message to fit |
 | is done with the Host | `free(h)`: the Host, its mounts and its strings; the channel stays open |
 
 Two kinds of engine meet the cancel two ways. One that runs a script in
@@ -323,6 +327,7 @@ speaks it with a socket and nothing else.
 | `MOUNT <name> <min> <max>` | before `SCRIPT` | a host function taking `min..max` arguments; `0 <= min <= max`. Whether the name is one the engine can mount is the engine's to say (`ERROR`) |
 | `PROBE` | before `SCRIPT` | run the self-check once locked down |
 | `LOGLEVEL <n>` | any time | log threshold: `-1` off (the default), `0` trace .. `5` fatal. While the script runs it holds from the next step; while a `CALL` waits, from the answer |
+| `MAXFRAME <n>` | before `SCRIPT`, only when the host's `max_frame` is below 64 KiB | the longest frame the host reads, 64..65536: the worker holds its `RETURN` and `RAISE` to it. At the default it is not sent, so the wire is as before; a worker that does not know the verb refuses it as any unknown verb before the script |
 | `SCRIPT <source>` | last before the script | the rest of the frame is the script, newlines and all: lock down and run it |
 | `REPLY <json>` | answers a `CALL` | the function's value |
 | `FAIL <message>` | answers a `CALL` | the function failed (`host function failed` when empty) |

@@ -8,7 +8,9 @@
 //   call! NAME JSON   the same, but a FAIL stops: the script ends with
 //                     ERROR, an export RAISEs "NAME: MESSAGE"
 //   log LEVEL TEXT    a log message at LEVEL (0..5), with a tag
-//   big N             a SAY of N bytes (in an export: RETURN a string of N)
+//   big N             a SAY of N bytes (in an export: a RETURN of a string
+//                     of N, written straight down the socket, as a worker
+//                     that ignores the frame limit would)
 //   spin              loops until the host cancels, polling for it
 //   deaf              stops answering: reads every frame, CANCEL
 //                     included, and replies to none
@@ -21,7 +23,9 @@
 //   end               a script with a def ends with READY and its names
 //                     (in order) instead of DONE, and serves
 //   return JSON       in an export: RETURN JSON (falling off the end
-//                     returns null)
+//                     returns null); one too large for the host's frame
+//                     limit RAISEs why instead, as child.returned says
+//   return-big N      in an export: return a string of N bytes, so
 //   raise TEXT        in an export: RAISE TEXT
 //   keep JSON         remembers JSON, across invocations
 //   require-kept      in an export: RAISE "unknown txn ARGS" unless its
@@ -253,7 +257,7 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
             out = ""
             while string.length(out) < size { out = "${out}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }
             if in_export {
-                child.returned(h, "\"${out}\"")
+                if ipc.write_frame(h.ch, "RETURN \"${out}\"") != "" { exit(1) }
                 return ANSWERED
             }
             child.say(h, out)
@@ -278,8 +282,16 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
             code, _ = string.to_int(rest)
             child.done(h, code)
             return FINISHED
-        } else if cmd == "return" && in_export {
-            child.returned(h, rest)
+        } else if (cmd == "return" || cmd == "return-big") && in_export {
+            value = rest
+            if cmd == "return-big" {
+                size, _ = string.to_int(rest)
+                value = ""
+                while string.length(value) < size { value = "${value}yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" }
+                value = "\"${string.substring(value, 0, size)}\""
+            }
+            rerr = child.returned(h, value)
+            if rerr != "" { child.raised(h, rerr) }
             return ANSWERED
         } else if cmd == "raise" && in_export {
             child.raised(h, rest)

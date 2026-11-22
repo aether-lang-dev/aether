@@ -50,10 +50,10 @@ if ! "$TMP/invoke_host" "$TMP/stub_guest" "$TMP" > "$TMP/out.log" 2>&1; then
     tail -60 "$TMP/out.log" | sed 's/^/    /'
     exit 1
 fi
-if ! grep -q "15 passing" "$TMP/out.log" || grep -q "failing" "$TMP/out.log"; then
-    echo "  [FAIL] std_guest_invoke: expected 15 passing, none failing"
+if ! grep -q "16 passing" "$TMP/out.log" || grep -q "failing" "$TMP/out.log"; then
+    echo "  [FAIL] std_guest_invoke: expected 16 passing, none failing"
     tail -60 "$TMP/out.log" | sed 's/^/    /'
     exit 1
 fi
-echo "  [PASS] std_guest_invoke: 15 specs, $(uname -s) ($(if [ "$(uname -s)" = Linux ]; then echo contained; else echo uncontained by name; fi))"
+echo "  [PASS] std_guest_invoke: 16 specs, $(uname -s) ($(if [ "$(uname -s)" = Linux ]; then echo contained; else echo uncontained by name; fi))"
 exit 0

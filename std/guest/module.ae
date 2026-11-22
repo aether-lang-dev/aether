@@ -248,8 +248,17 @@ log_level(g: *Guest, level: int) -> string {
     return ipc.write_frame(g.ch, "LOGLEVEL ${level}")
 }
 
-// Sends the script; the guest locks itself down and runs it.
+// Sends the script; the guest locks itself down and runs it. A max_frame
+// set below MAX_FRAME goes first, as MAXFRAME, so the worker holds what it
+// sends to the limit this host will read: a RETURN it cannot send whole it
+// can RAISE instead (std.guest.child, returned). At the default nothing
+// extra is sent. A max_frame lowered after start the worker does not hear
+// of: its frames over it are refused here, and the guest killed.
 start(g: *Guest, source: string) -> string {
+    if g.max_frame < MAX_FRAME {
+        err = ipc.write_frame(g.ch, "MAXFRAME ${g.max_frame}")
+        if err != "" { return err }
+    }
     return ipc.write_frame(g.ch, "SCRIPT ${source}")
 }
 

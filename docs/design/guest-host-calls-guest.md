@@ -282,8 +282,12 @@ audit log that reads as what happened.
 | `RAISE <message>` | worker to host | answers `INVOKE` | the function failed; the guest serves again |
 | `END` | host to worker | only while the guest serves | the host is finished; the worker answers `DONE 0` and exits |
 
-Unchanged from the prototype on branch `explore/guest-host-calls-guest`
-(cc2f4b6af): every frame keeps its shape, so a worker written against the
+One frame is new beside the five: `MAXFRAME <n>`, host to worker before
+`SCRIPT`, sent only when the host's `max_frame` is below 64 KiB, so the
+worker holds what it sends to what the host reads (at the default nothing
+extra goes, and the wire is the prototype's). Otherwise unchanged from the
+prototype on branch `explore/guest-host-calls-guest` (cc2f4b6af): every
+frame keeps its shape, so a worker written against the
 prototype speaks this protocol. Two things are stricter on the host, and
 neither changes a frame a correct worker sends: a frame from an idle guest
 hangs up (the prototype read it as the next invocation's answer), and
@@ -350,6 +354,8 @@ The new surface is on the host, and each rule has a test:
 | An export that loops | `deadline_ms` per exchange inside the invocation, then `CANCEL`, which ends the guest | `guest-export-slow` (integration); `std/guest/test_guest.ae` "cancels an invocation that outlives the deadline" |
 | An export that blocks where no cancel is heard | `grace_ms`, then the kill | `guest-export-silent` |
 | An oversized `RETURN` or `RAISE` | `max_frame`, as for every frame: refused, killed | `guest-export-oversize`; "refuses a RETURN over max_frame" |
+| An `INVOKE` larger than a worker reads | `invoke` refuses a frame over `MAX_FRAME` and sends nothing; the guest serves on | "refuses an INVOKE larger than the frame limit" (both levels) |
+| A value too large for a frame, from a polite worker | `child.returned` refuses a `RETURN` over the host's limit (64 KiB, or a lower `max_frame` the host sent as `MAXFRAME` before the script), and the worker raises why and serves on; `raised` cuts a message to fit | "a worker that knows its value is too large ... raises instead"; `test_child` "holds RETURN and RAISE to the host's frame limit" |
 | An unbounded or bogus export list | `READY` checked: 1 to 256 distinct names, letters, digits, `_`, `.`, at most 128 bytes, JSON spacing allowed; else `KILLED protocol: READY ...` | `guest-export-flood`, `guest-export-malformed`; "checks the READY list" (twelve refusals, the bounds accepted) |
 | The host re-entering the guest from a host function's handler | `invoke` and `end` are refused, and send nothing, unless the guest serves | `guest-reenters-while-called`; "refuses invoke and end unless the guest serves" |
 | A guest answering what was not asked | `RETURN`/`RAISE` with no `INVOKE`, a second `READY`, anything but `DONE` after `END`: hang up | "hangs up on what nobody asked for" |

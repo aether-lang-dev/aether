@@ -200,7 +200,7 @@
       <h3 class="function-name">start <span class="kind">fn</span></h3>
       <pre class="usage"><code>start(g, source) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">g: *Guest, source: string</span></p>
-      <p class="doc">Sends the script; the guest locks itself down and runs it.</p>
+      <p class="doc">Sends the script; the guest locks itself down and runs it. A max_frame set below MAX_FRAME goes first, as MAXFRAME, so the worker holds what it sends to the limit this host will read: a RETURN it cannot send whole it can RAISE instead (std.guest.child, returned). At the default nothing extra is sent. A max_frame lowered after start the worker does not hear of: its frames over it are refused here, and the guest killed.</p>
     </div>
     <div class="function" id="answer" data-name="answer">
       <h3 class="function-name">answer <span class="kind">fn</span></h3>
@@ -253,7 +253,7 @@
       <h3 class="function-name">invoke <span class="kind">fn</span></h3>
       <pre class="usage"><code>invoke(g, name, args) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">g: *Guest, name: string, args: string</span></p>
-      <p class="doc">Calls the guest's exported function `name` with `args`, a JSON array. Only while the guest serves: after READY, and after the RETURN or RAISE that ended the last invocation. The host then reads the invocation's events with next as it reads a script's: SAY, LOG, CALL (answer each), and at the end RETURN or RAISE, each exchange bounded by deadline_ms. A deadline that passes cancels the guest, which ends it. &quot;&quot; when sent, or why nothing was: the guest is not serving (its script, an invocation or a host call it waits on is still running, or it is ending), it does not export `name`, or `args` is not an array. A frame the idle guest sent unasked is a protocol error: the host hangs up and says so.</p>
+      <p class="doc">Calls the guest's exported function `name` with `args`, a JSON array. Only while the guest serves: after READY, and after the RETURN or RAISE that ended the last invocation. The host then reads the invocation's events with next as it reads a script's: SAY, LOG, CALL (answer each), and at the end RETURN or RAISE, each exchange bounded by deadline_ms. A deadline that passes cancels the guest, which ends it. &quot;&quot; when sent, or why nothing was: the guest is not serving (its script, an invocation or a host call it waits on is still running, or it is ending), it does not export `name`, `args` is not an array, or the INVOKE frame would be longer than MAX_FRAME, the most a worker reads. A frame the idle guest sent unasked is a protocol error: the host hangs up and says so.</p>
     </div>
     <div class="function" id="end" data-name="end">
       <h3 class="function-name">end <span class="kind">fn</span></h3>
