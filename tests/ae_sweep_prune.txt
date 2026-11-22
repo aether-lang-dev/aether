@@ -34,6 +34,7 @@ tests/integration/bin_name_lookup_and_walkup/
 tests/integration/bin_path_match/
 tests/integration/binary_import/
 tests/integration/binary_import_actors/
+tests/integration/binary_import_lib_dir/
 tests/integration/binary_import_package/
 tests/integration/bitstruct_cross_module/
 tests/integration/bitstruct_reject/
@@ -86,6 +87,8 @@ tests/integration/derive_schema_cross_module/
 tests/integration/distinct_types/
 tests/integration/quote_errors/
 tests/integration/quote_helper_module/
+tests/integration/dsl_block_capture_param/
+tests/integration/dsl_receiver_program_shadows/
 tests/integration/dsl_receiver_scoping/
 tests/integration/dsl_receiver_scoping_edge/
 tests/integration/dsl_receiver_scoping_nested/

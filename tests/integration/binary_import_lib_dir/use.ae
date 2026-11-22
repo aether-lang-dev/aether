@@ -1,0 +1,5 @@
+import other
+
+main() {
+    println("${other.twice(21)}")
+}

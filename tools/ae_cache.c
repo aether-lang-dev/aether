@@ -1021,20 +1021,6 @@ static int fold_depfile(const char* depfile, unsigned long long* acc) {
 // Hashing extra-file *content* (not just mtime) closes a real correctness
 // gap: editing an FFI shim like `--extra renderer.c` would otherwise let
 // a stale cache entry mask the change.
-/* Fold AETHER_LIB_DIR into tc.lib_dirs[] if no `--lib` flags were
- * passed. Matches the resolution priority documented in `ae lib-path`
- * (CLI flags win; env var seeds; default = `lib`). Without this, an
- * `ae run` invoked with `AETHER_LIB_DIR=...` would see lib_dir_count=0
- * and compute_cache_key couldn't include the env-resolved modules'
- * mtimes — so an edit to a vendored module behind that env var would
- * never invalidate the cache. Idempotent: skips if already populated. */
-
-static void tc_seed_lib_dirs_from_env(void) {
-    if (tc.lib_dir_count > 0) return;
-    const char* env = getenv("AETHER_LIB_DIR");
-    if (env && *env) tc_lib_dir_append(env);
-}
-
 /* The cold cache key's walk of a source tree: every .ae/.c/.h file under a
  * root, its path relative to the root and its CONTENT folded in. Modules live
  * in SUBDIRECTORIES of a lib dir (`std/string/module.ae`,
@@ -1703,7 +1689,10 @@ unsigned long long compute_cache_key(const char* ae_file,
     if (!extra_salt) return 0;
     unsigned long long src_hash = file_hash(ae_file);
     if (src_hash == 0) return 0;
-    tc_seed_lib_dirs_from_env();
+    /* The modules behind AETHER_LIB_DIR are part of the key: an edit to a
+     * vendored module there must invalidate the cache. Normally decided
+     * already, by the command's dependency resolution. */
+    tc_lib_dirs_seed_from_env();
 
     KeyText key = { NULL, 0, 0, 0 };
     int complete = 1;

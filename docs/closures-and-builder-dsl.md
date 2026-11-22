@@ -302,16 +302,26 @@ When a trailing closure is bound to a member-access call,
 inside `body` fall back through the receiver's namespace before
 erroring as undefined. Resolution order:
 
-1. Block-local definitions (closure params, `let` bindings).
-2. `<receiver>_<name>` looked up walking the scope chain.
-3. The current file's scope (existing imports, top-level decls).
+1. A name the program binds itself, walking out from the block: the
+   block's own locals and closure params, the locals and parameters of
+   the function (and of any block) it is written in, and the program's
+   own top-level functions, types, constants and `var`s, declared before
+   or after the call.
+2. `<receiver>_<name>`, the innermost block's receiver first, then the
+   receivers of the blocks around it.
+3. What else the file scope holds: builtins, names the program's imports
+   bound.
 4. Otherwise: undefined-name error.
 
-So the receiver's function also comes before a local of the function the
-block is written in, and before a top-level function of the same name: in
-`blk.run("x") { return note(n) }`, `note` is `blk.note` even beside a
-`note(n: int) -> int` of the program, and the function returns what
-`blk.note` returns.
+So a program's own function comes before the receiver's of the same
+name: in `blk.run("x") { return note(n) }` beside the program's
+`note(n: int) -> int`, `note` is the program's, and the function returns
+its int. Where the program binds nothing of that name, `note` is
+`blk.note`. A local of the name hides the receiver's function as it hides
+the program's own outside a block: `note = 3` and then `note(n)` in the
+block is refused, naming `blk.note`; call it `blk.note(n)` or rename the
+local. Inside a module's body, the module's own functions are its
+program.
 
 Pre-fix, every downstream project consuming an SDK module had to
 write a two-line import preamble:
@@ -348,8 +358,8 @@ main() {
 Pure additive. Existing code with explicit selective imports
 keeps working unchanged; existing qualified calls
 (`bash.script("x")` inside the block) still resolve via the
-`module.func` path; explicit local definitions still shadow the
-receiver fallback.
+`module.func` path; the program's own definitions (locals, parameters,
+top-level functions) still shadow the receiver fallback.
 
 Receiver resolution: the prefix is checked first as a visible
 namespace (the `bash` case above); if not, the prefix's typed-value
@@ -359,8 +369,7 @@ Nested DSL blocks stack naturally: `outer.method(o) { mark("o");
 inner.method(i) { note("i") } }` resolves `mark` as
 `outer_mark` and `note` as `inner_note` the inner block's
 receiver wins for inner-namespace names; outer's receiver applies
-to outer-namespace names by the natural scope-walk in
-`lookup_symbol`.
+to outer-namespace names. A name the program binds comes before both.
 
 ## Higher-Order Functions
 

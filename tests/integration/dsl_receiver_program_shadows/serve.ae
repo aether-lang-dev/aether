@@ -1,0 +1,23 @@
+// The silent case: the program's own function of the receiver's arity, with
+// arguments of other types. `serve(vm, h)` in the block is the program's
+// loop; taken for dsl.serve(h, dispatch) it built, and dsl.serve called the
+// program's pointer as a closure ("unbox_closure() on a value that was
+// never boxed"). The shape std.guest.child's serve_exports has.
+
+import dsl
+
+struct Host {
+    n: int
+}
+
+serve(vm: ptr, h: *Host) {
+    println("main.serve ${h.n}")
+}
+
+main() {
+    h = Host { n: 5 }
+    vm = &h
+    dsl.run(1) callback {
+        serve(vm, &h)
+    }
+}

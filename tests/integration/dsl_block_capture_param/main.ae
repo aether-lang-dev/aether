@@ -1,0 +1,27 @@
+// A parameter `cb` that a closure in the block captures, or that the block
+// passes on as a value, is the parameter, not the receiver's `cb` setter.
+
+import gui
+
+reorderable(cb: fn) {
+    gui.panel("p") {
+        on_drop(| i: int | {
+                call(cb, i)
+            })
+    }
+}
+
+reorderable_value(cb: fn) {
+    gui.panel("q") {
+        gui.fire(cb)
+    }
+}
+
+main() {
+    reorderable(| i: int | {
+            println("program cb ${i}")
+        })
+    reorderable_value(| i: int | {
+            println("program cb value ${i}")
+        })
+}

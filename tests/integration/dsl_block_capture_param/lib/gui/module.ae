@@ -1,0 +1,22 @@
+// Fixture: a UI-shaped DSL with a `cb` setter (aether-ui's had one), a
+// setter that calls the closure it is handed, and a function that does.
+exports(panel, cb, on_drop, fire)
+
+import std.map
+
+builder panel(name: string) {
+    defer map.free(_builder)
+    println("panel ${name}")
+}
+
+cb(_ctx: ptr, f: fn) {
+    println("gui.cb setter")
+}
+
+on_drop(_ctx: ptr, f: fn) {
+    call(f, 7)
+}
+
+fire(f: fn) {
+    call(f, 8)
+}

@@ -178,6 +178,11 @@ int is_visible_namespace(const char* name, SymbolTable* table);
  * stamps the block with it, the settle of which functions return a value,
  * and the inference pass, so the three resolve such a call alike. */
 const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table);
+/* Is `name`, where `table` is, bound by the program itself: a local, a
+ * parameter, a name an enclosing block binds, or the program's own
+ * top-level function, type, constant or `var`? Such a name shadows a DSL
+ * block's receiver (#333); a builtin or a name an import bound does not. */
+int dsl_name_is_programs(SymbolTable* table, const char* name);
 /* Is `name` a builtin codegen lowers by name (`println`, `exit`, `sleep`,
  * ...)? Such a name belongs to no module and needs no import. */
 int is_builtin_function_name(const char* name);

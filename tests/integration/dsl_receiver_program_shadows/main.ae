@@ -1,0 +1,63 @@
+// A name the program binds itself comes before the trailing block's
+// receiver (#333): the program's function, declared before main or after
+// it, of another arity or of the same one; a local; a closure bound to a
+// local; a parameter; in a block nested in another block; in a builder's
+// block. Where the program binds nothing of the name, the receiver's
+// function is what the bare name means, as before.
+
+import dsl
+import inner
+import user
+
+// The same arity as dsl.tag: without the rule this built, and called dsl's.
+tag(a: int) {
+    println("main.tag ${a}")
+}
+
+// Its own `opt`, not the builder's setter.
+opt(v: string) {
+    println("main.opt ${v}")
+}
+
+show(label: string) {
+    dsl.run(1) callback {
+        println("param ${label}")
+    }
+}
+
+main() {
+    dsl.run(1) callback {
+        tag(1)
+        say(1, 2, 3)
+    }
+    label = "local"
+    dsl.run(1) callback {
+        println("var ${label}")
+    }
+    show("p")
+    note = | a: int | {
+        println("main.closure ${a}")
+    }
+    dsl.run(1) callback {
+        note(2)
+    }
+    dsl.run(1) callback {
+        inner.run() callback {
+            tag(3)
+            note(4)
+            say(3, 4, 5)
+        }
+    }
+    dsl.build("b") {
+        opt("o")
+    }
+    user.go()
+    tag(9)
+    dsl.tag(10)
+}
+
+// Declared after main, with another arity than dsl.say: the arity was
+// checked against dsl.say's two.
+say(a: int, b: int, c: int) {
+    println("main.say ${a + b + c}")
+}

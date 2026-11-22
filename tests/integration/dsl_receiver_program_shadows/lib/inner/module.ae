@@ -1,0 +1,14 @@
+// A second receiver, for a block nested in a block of dsl's.
+exports(tag, note, run)
+
+tag(a: int) {
+    println("inner.tag ${a}")
+}
+
+note(a: int) {
+    println("inner.note ${a}")
+}
+
+run(body: fn) {
+    call(body)
+}

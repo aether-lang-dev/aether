@@ -1,0 +1,15 @@
+// A module of its own with a function named like one of dsl's, called in a
+// block it passes to dsl: the module's own function is the one it means.
+exports(go)
+
+import dsl
+
+tag(a: int) {
+    println("user.tag ${a}")
+}
+
+go() {
+    dsl.run(1) callback {
+        tag(40)
+    }
+}

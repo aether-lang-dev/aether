@@ -625,21 +625,25 @@ static ASTNode* called_closure_literal(ASTNode* call, InferenceContext* ctx) {
 }
 
 /* The function a bare call `name` in the DSL blocks being walked resolves
- * to through a block's receiver, or NULL for any other call. Block by
- * block from the innermost, as lookup_symbol walks the checker's scopes: a
- * name the block binds itself keeps it (NULL), and a receiver that has a
- * `<receiver>_<name>` takes it, ahead of the enclosing function's names
- * and the program's function of that name. */
+ * to through a block's receiver, or NULL for any other call, as
+ * lookup_symbol resolves it in the checker's scopes: a name the program
+ * binds itself keeps it (NULL): a name the block binds, the enclosing
+ * function's locals and parameters, the program's own function of that
+ * name. Otherwise, block by block from the innermost, a receiver that has
+ * a `<receiver>_<name>` takes it. */
 static Symbol* dsl_block_callee(InferenceContext* ctx, const char* name) {
     if (!ctx->symbols || ctx->dsl_depth == 0 || !name || strchr(name, '.')) return NULL;
     Symbol* from = ctx->symbols->symbols;
     for (int d = ctx->dsl_depth - 1; d >= 0; d--) {
         for (Symbol* s = from; s && s != ctx->dsl_heads[d]; s = s->next)
             if (s->name && strcmp(s->name, name) == 0) return NULL;
+        from = ctx->dsl_heads[d];
+    }
+    if (dsl_name_is_programs(ctx->symbols, name)) return NULL;
+    for (int d = ctx->dsl_depth - 1; d >= 0; d--) {
         /* As long as the two names are (#3569). */
         Symbol* f = lookup_symbol(ctx->symbols, aether_internf("%s_%s", ctx->dsl_receivers[d], name));
         if (f && f->is_function) return f;
-        from = ctx->dsl_heads[d];
     }
     return NULL;
 }
@@ -1218,7 +1222,9 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             // Struct literal: StructName{ field: value, ... }
             // Look up struct definition to propagate field types
             if (node->value && ctx->symbols) {
-                Symbol* struct_sym = lookup_symbol(ctx->symbols, node->value);
+                /* The type the literal names, also beside a local named
+                 * like it (`Other = n` before `o = Other { ... }`). */
+                Symbol* struct_sym = lookup_type_symbol(ctx->symbols, node->value);
                 
                 if (struct_sym && struct_sym->type && struct_sym->type->kind == TYPE_STRUCT) {
                     // Set the struct literal's type to the struct type
