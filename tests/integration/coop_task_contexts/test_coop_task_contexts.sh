@@ -111,11 +111,19 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# A bound on each run where the host has timeout(1) (gtimeout from Homebrew's
+# coreutils); macOS has neither by default, and GitHub's macOS runners ran
+# every mode as "timeout: command not found" (exit 127).
+TIMEOUT=""
+if command -v timeout > /dev/null 2>&1; then TIMEOUT="timeout 300"
+elif command -v gtimeout > /dev/null 2>&1; then TIMEOUT="gtimeout 300"
+fi
 fail=0
 HOST="$TMP/host"
 expect() {   # mode, exit status wanted, stdout wanted, stderr text wanted ("" for none)
     # In a shell of its own, so an expected abort is not reported here.
-    sh -c 'timeout 300 "$0" "$1" > "$2" 2> "$3"' "$HOST" "$1" "$TMP/out" "$TMP/err" 2> /dev/null
+    # shellcheck disable=SC2016
+    sh -c "$TIMEOUT"' "$0" "$1" > "$2" 2> "$3"' "$HOST" "$1" "$TMP/out" "$TMP/err" 2> /dev/null
     rc=$?
     got="$(tr -d '\r' < "$TMP/out")"
     if [ "$got" != "$3" ] || { [ "$2" = 0 ] && [ $rc -ne 0 ]; } || { [ "$2" != 0 ] && [ $rc -eq 0 ]; } ||
