@@ -285,6 +285,17 @@ void aether_fnptr_mark(const void* s);
 // Whether r is the marked pointer; clears the mark either way.
 int aether_fnptr_claim(const void* r);
 
+// A block of `size` zeroed bytes kept in the calling thread's execution state
+// under `key` (the address of something of the caller's own), made at its
+// first use and returned again for the same key after; `release`, when not
+// NULL, runs on it before it is freed with the thread, or with the task's
+// context on a cooperative build with task contexts (docs/design/
+// task-execution-contexts.md). NULL when there is no memory. For state that
+// a threaded build keeps in a thread-local and a cooperative build must keep
+// per task: the builder blocks' stack of generated code, std's last-error
+// buffers.
+void* aether_context_local(const void* key, size_t size, void (*release)(void*));
+
 /* How the panic and the step barrier reach a copy of the sandbox, which
  * they do not link (#2955, #3393): its unwind of the levels pushed inside a
  * frame a panic leaves, and how a step puts this thread's levels aside and

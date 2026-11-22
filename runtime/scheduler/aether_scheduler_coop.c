@@ -15,6 +15,12 @@
 #include "../actors/aether_actor_inbox.h"
 #include "../actors/aether_step_barrier.h"
 #include "../aether_resource_caps.h"
+#include "../actors/aether_frames.h"   /* the actors' task (task contexts) */
+#if !defined(AETHER_NO_THREADING)
+/* Linked where threads exist but the build asked for this scheduler: there
+ * are no task contexts, and every thread may run the actors. */
+#  define AETHER_ACTORS_TASK_CHECK(what) ((void)0)
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -222,6 +228,7 @@ uint64_t scheduler_full_drops(void) {
 }
 
 static void coop_send(ActorBase* actor, Message msg) {
+    AETHER_ACTORS_TASK_CHECK("a send to an actor");
     if (actor && atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed) &&
         !aether_mailbox_admit(actor, msg.type)) {
         aether_message_drop(actor, &msg);
@@ -454,6 +461,7 @@ static int register_actor(ActorBase* actor, int preferred_core) {
 
 ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size) {
     (void)preferred_core;
+    AETHER_ACTORS_TASK_CHECK("a spawn");
     scheduler_init(1);  // no-op once initialized; see g_coop_initialized
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
@@ -603,6 +611,7 @@ static int coop_timeout_armed(void) {
  * this scheduler runs after a step still polls nested and returns: the one
  * thread here steps every actor, and is in no step then. */
 void scheduler_wait(void) {
+    AETHER_ACTORS_TASK_CHECK("a wait for the actors");
     if (g_aether_in_actor_step || aether_in_actor_thread) aether_panic(AETHER_WAIT_IN_STEP_REASON);
     uint64_t give_up = aether_now_ns() + 100ULL * 1000000000ULL;
     for (;;) {
@@ -733,6 +742,7 @@ void scheduler_countdown_enter(void) {}
 void scheduler_countdown_leave(void) {}
 
 int aether_scheduler_poll(int max_per_actor) {
+    AETHER_ACTORS_TASK_CHECK("the scheduler's poll");
     int total = 0;
     int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
     g_coop_walk_depth++;
@@ -805,6 +815,7 @@ static void coop_forget_slot(ActorBase* target, ActorReplySlot* slot) {
 
 void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
                                    int timeout_ms, int* status) {
+    AETHER_ACTORS_TASK_CHECK("an ask of an actor");
     int why_dummy;
     if (!status) status = &why_dummy;
     *status = AETHER_ASK_DEAD;

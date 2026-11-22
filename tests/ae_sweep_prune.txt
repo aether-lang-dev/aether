@@ -113,6 +113,9 @@ tests/integration/emit_lib_accounts/
 # #3392: steps.ae is a library with no main; the driver builds it into a C
 # host, on threads and (make ci-coop) on the cooperative scheduler.
 tests/integration/emit_lib_actor_step_context/
+# Task contexts: ctxlib.ae is a library with no main; the driver builds it
+# into a C host on the cooperative runtime (and tests/esp32/contexts on ESP-IDF).
+tests/integration/coop_task_contexts/
 # #3388: results.ae and words.ae are libraries with no main, and app.ae
 # imports words.ae in binary form; the driver builds them and fails an
 # allocation in each call.

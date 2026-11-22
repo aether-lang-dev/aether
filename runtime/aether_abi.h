@@ -21,7 +21,7 @@
 
 #include "aether_version.h"
 
-#define AETHER_RUNTIME_ABI_REV 5
+#define AETHER_RUNTIME_ABI_REV 6
 
 #define AETHER_ABI_STR2(x) #x
 #define AETHER_ABI_STR(x) AETHER_ABI_STR2(x)

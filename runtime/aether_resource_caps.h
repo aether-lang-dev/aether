@@ -206,6 +206,11 @@ AetherExecAccount* aether_account_hold(void);
 /* An execution ends: the account in use when it began (the one held) is in
  * use again, unless the host freed it meanwhile, and is let go. */
 void aether_account_restore(AetherExecAccount* account);
+/* A cooperative build's task context is detached or its task ended
+ * (aether_exec.c): the account in use in `frames` is let go, from whichever
+ * task. Its executions have all returned. */
+struct AetherFrames;
+void aether_accounts_frames_ended(struct AetherFrames* frames);
 /* An actor step begins and ends (aether_step_barrier.h): the account in use
  * is put aside for the step, still this thread's, and is in use again after
  * it; one the step left in use is let go. */
