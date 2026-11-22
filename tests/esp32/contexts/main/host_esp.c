@@ -73,6 +73,7 @@ static void interrupted_task(void* arg) {
     if (!acct || aether_exec_use(acct, NULL) != 0) g_i_bad += 1000;
     (void)aether_set_caller("I", NULL, NULL, 0, 0);
     for (int r = 0; r < ROUNDS; r++) {
+        while (g_w_rounds <= r) vTaskDelay(1);   /* W made a round more since the last */
         int v = aether_grow(100000), o = aether_last_outcome();
         if (o != AETHER_MEMORY_CAP || v != 0) { g_i_bad++; note_bad("I", "quota", o); }
         if (aether_exec_account_used(acct) != 0) { g_i_bad++; note_bad("I", "leftover", (int)aether_exec_account_used(acct)); }

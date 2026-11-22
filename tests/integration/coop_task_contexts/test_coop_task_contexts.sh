@@ -67,7 +67,7 @@ fi
 fail=0
 expect() {   # mode, exit status wanted, stdout wanted, stderr text wanted ("" for none)
     # In a shell of its own, so an expected abort is not reported here.
-    sh -c 'exec timeout 300 "$0" "$1" > "$2" 2> "$3"' "$TMP/host" "$1" "$TMP/out" "$TMP/err" 2> /dev/null
+    sh -c 'timeout 300 "$0" "$1" > "$2" 2> "$3"' "$TMP/host" "$1" "$TMP/out" "$TMP/err" 2> /dev/null
     rc=$?
     got="$(tr -d '\r' < "$TMP/out")"
     if [ "$got" != "$3" ] || { [ "$2" = 0 ] && [ $rc -ne 0 ]; } || { [ "$2" != 0 ] && [ $rc -eq 0 ]; } ||

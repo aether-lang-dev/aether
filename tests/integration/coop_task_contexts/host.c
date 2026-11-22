@@ -34,6 +34,7 @@
  *                   thread that does not own the actors tries (must abort)
  */
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -135,6 +136,9 @@ static void* interrupted_task(void* arg) {
     (void)aether_set_caller("I", NULL, NULL, 0, 0);
     for (int r = 0; r < ROUNDS; r++) {
         int v, o;
+        /* The worker has made a round more since the last: the two overlap
+         * all along, however the scheduler starts them. */
+        while (atomic_load(&g_w_rounds) <= r) sched_yield();
         if (mode_all) {
             /* Past its allowance: 100,000 * 16 bytes. */
             v = aether_grow(100000);
