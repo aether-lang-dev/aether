@@ -18,6 +18,7 @@ stopped(sock: ptr) -> string            // "", DEADLINE_EXCEEDED or CANCELLED
 cancel_new() -> (ptr, string)
 cancel(c: ptr)
 cancelled(c: ptr) -> bool
+cancel_retain(c: ptr) -> string
 cancel_free(c: ptr)
 const DEADLINE_EXCEEDED = "deadline exceeded"
 const CANCELLED = "cancelled"
@@ -52,9 +53,10 @@ explicitly; there is no process-wide setting.
   loopback pair on Windows), which every wait polls beside the socket, and
   never touches the socket. So neither a double close nor the close of a
   reused descriptor is possible; no duplicated descriptor is needed. The
-  handle is reference-counted (creator plus each bound socket), so its own
-  descriptors outlive every wait; the host frees it with `cancel_free` after
-  the last thread that may trip it.
+  handle is reference-counted (creator, each bound socket, and each other
+  thread that may trip it, which takes its own reference with
+  `cancel_retain` before it is handed the handle and drops it with
+  `cancel_free`), so its descriptors outlive every wait and every trip.
 - **Distinguishable errors.** A stop is exactly `tcp.DEADLINE_EXCEEDED` or
   `tcp.CANCELLED`, whichever handshake step or I/O it cut short, compared
   with `==`; never an EOF message, a TLS alert or an authentication error,
@@ -142,6 +144,8 @@ native hook removed.
   timeout and ignore the bound deadline and cancel. Making them honour the
   cancel would help relays; it changes their meaning, so it is left for a
   decision.
-- A cancel after `cancel_free` is a use after free. A handle a canceller
-  thread holds a reference to of its own (`cancel_retain`) would remove that
-  misuse; not added without a caller that needs it.
+- (Settled.) `cancel_retain` was left open here and is now shipped: in
+  GitHub CI's TSan job a canceller thread holding no reference raced the
+  creator's `cancel_free` (the eventfd's write against its close, and two
+  frees), in this branch's own tests. Each canceller now holds its own
+  reference.

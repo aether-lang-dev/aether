@@ -75,6 +75,7 @@
     <li><a href="#cancel_new_raw">cancel_new_raw</a></li>
     <li><a href="#cancel_raw">cancel_raw</a></li>
     <li><a href="#cancel_tripped_raw">cancel_tripped_raw</a></li>
+    <li><a href="#cancel_retain_raw">cancel_retain_raw</a></li>
     <li><a href="#cancel_free_raw">cancel_free_raw</a></li>
     <li><a href="#connect_until">connect_until</a></li>
     <li><a href="#set_deadline">set_deadline</a></li>
@@ -83,6 +84,7 @@
     <li><a href="#cancel_new">cancel_new</a></li>
     <li><a href="#cancel">cancel</a></li>
     <li><a href="#cancelled">cancelled</a></li>
+    <li><a href="#cancel_retain">cancel_retain</a></li>
     <li><a href="#cancel_free">cancel_free</a></li>
     <li><a href="#DEADLINE_EXCEEDED">DEADLINE_EXCEEDED</a></li>
     <li><a href="#CANCELLED">CANCELLED</a></li>
@@ -520,6 +522,11 @@
       <pre class="usage"><code>cancel_tripped_raw(cancel) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">cancel: ptr</span></p>
     </div>
+    <div class="function" id="cancel_retain_raw" data-name="cancel_retain_raw">
+      <h3 class="function-name">cancel_retain_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>cancel_retain_raw(cancel) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">cancel: ptr</span></p>
+    </div>
     <div class="function" id="cancel_free_raw" data-name="cancel_free_raw">
       <h3 class="function-name">cancel_free_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>cancel_free_raw(cancel)</code></pre>
@@ -558,7 +565,7 @@
       <h3 class="function-name">cancel <span class="kind">fn</span></h3>
       <pre class="usage"><code>cancel(c)</code></pre>
       <p class="signature"><span class="sig-params">c: ptr</span></p>
-      <p class="doc">Trip `c`: every socket bound to it ends what it is waiting for at once, and every bounded call on it after ends before starting, with CANCELLED. From any thread or actor; any number of times. It writes to the handle's own descriptor and never touches a socket's: the sockets' owners close them. Not after cancel_free.</p>
+      <p class="doc">Trip `c`: every socket bound to it ends what it is waiting for at once, and every bounded call on it after ends before starting, with CANCELLED. From any thread or actor; any number of times. It writes to the handle's own descriptor and never touches a socket's: the sockets' owners close them. Only while the caller holds a reference: the creator until its cancel_free, any other thread from cancel_retain to its own cancel_free.</p>
     </div>
     <div class="function" id="cancelled" data-name="cancelled">
       <h3 class="function-name">cancelled <span class="kind">fn</span></h3>
@@ -566,11 +573,17 @@
       <p class="signature"><span class="sig-params">c: ptr</span></p>
       <p class="doc">true once `c` has been tripped.</p>
     </div>
+    <div class="function" id="cancel_retain" data-name="cancel_retain">
+      <h3 class="function-name">cancel_retain <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cancel_retain(c) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">c: ptr</span></p>
+      <p class="doc">Another reference to `c`, for a thread, task or actor that may trip it: take it before handing `c` over, and that holder drops it with cancel_free once it can no longer trip it. Without its own reference, a canceller's trip could meet the creator's cancel_free: the last reference to drop closes the descriptors the trip writes to. Returns &quot;&quot; or why.</p>
+    </div>
     <div class="function" id="cancel_free" data-name="cancel_free">
       <h3 class="function-name">cancel_free <span class="kind">fn</span></h3>
       <pre class="usage"><code>cancel_free(c)</code></pre>
       <p class="signature"><span class="sig-params">c: ptr</span></p>
-      <p class="doc">Drop the creator's reference to `c` (null is ignored). Its descriptors close when the last socket bound to it is closed too.</p>
+      <p class="doc">Drop one reference to `c`, the creator's or one cancel_retain took (null is ignored). Its descriptors close, and the handle is freed, when the last reference drops, every socket bound to it holding one until it is closed.</p>
     </div>
     <div class="function" id="DEADLINE_EXCEEDED" data-name="DEADLINE_EXCEEDED">
       <h3 class="function-name">DEADLINE_EXCEEDED <span class="kind">const</span></h3>

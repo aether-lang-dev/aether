@@ -22,9 +22,10 @@ explicitly; there is no process-wide setting:
 c, _ = tcp.cancel_new()
 due = os.now_monotonic_ms() + 10000
 conn, err = tls13_client.connect_psk(addr, port, id, key, due_ms: due, cancel: c)
-// ... conn_send / conn_recv: all held to `due`; another thread may tcp.cancel(c)
+// ... conn_send / conn_recv: all held to `due`; another thread that took
+//     tcp.cancel_retain(c) before it started may tcp.cancel(c), then tcp.cancel_free(c)
 tls13_client.close_conn(conn)      // the owner closes, on every path
-tcp.cancel_free(c)                 // after the last thread that may trip it
+tcp.cancel_free(c)                 // the creator's reference
 ```
 
 An operation a deadline stops ends with `tcp.DEADLINE_EXCEEDED`
@@ -45,7 +46,7 @@ The API, all additive:
 | `connect_until(host, port, due_ms, cancel)` | the dial bounded; the socket comes back with both bound |
 | `set_deadline(sock, due_ms, cancel)` | bind both to any socket, an adopted one included |
 | `deadline(sock)`, `stopped(sock)` | what is bound; what stopped the last call |
-| `cancel_new()`, `cancel(c)`, `cancelled(c)`, `cancel_free(c)` | the handle |
+| `cancel_new()`, `cancel(c)`, `cancelled(c)`, `cancel_retain(c)`, `cancel_free(c)` | the handle |
 
 | tls13_client | |
 |---|---|
@@ -72,10 +73,9 @@ So the race the esp32 workaround guarded against with a duplicated descriptor
 (a timer closing a descriptor number that the owner had closed and the
 system had handed to something else) cannot happen: there is no second
 closer. The cancel handle is reference-counted (the creator's reference,
-plus one per bound socket), so its own descriptors outlive every wait on
-them whichever is freed first; the one misuse left is tripping a handle after
-`cancel_free`, which the host avoids by freeing it after the last thread
-that may trip it has finished. `tests/integration/tcp_deadline_cancel` races
+plus one per bound socket, plus one per other thread that may trip it), so
+its own descriptors outlive every wait and every trip on them whichever is
+freed first. `cancel_retain(c)` gives each other thread (task, actor) that may trip the handle a reference of its own, taken before the handle is handed to it and dropped with its own `cancel_free` once it can no longer trip it; the last reference to drop closes the descriptors and frees the handle, so a trip is always ordered before that close. ThreadSanitizer showed why it is needed (CI, 2026-11-22): a canceller thread holding no reference wrote to the eventfd while the creator's `cancel_free` closed it. `tests/integration/tcp_deadline_cancel` races
 expiry and cancel against close for hundreds of rounds, opening decoy
 connections in the gap (some take the number just closed) and checking each
 still carries its own traffic; with a canceller that closes by number, the

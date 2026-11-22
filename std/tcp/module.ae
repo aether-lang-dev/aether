@@ -19,9 +19,9 @@ exports(
     close_drained,
     // Deadlines and cancellation (docs/design/tcp-tls-deadlines-and-cancellation.md)
     tcp_connect_until_raw, tcp_set_deadline_raw, tcp_deadline_raw, tcp_stop_raw,
-    tcp_cancel_new_raw, tcp_cancel_raw, tcp_cancel_tripped_raw, tcp_cancel_free_raw,
+    tcp_cancel_new_raw, tcp_cancel_raw, tcp_cancel_tripped_raw, tcp_cancel_retain_raw, tcp_cancel_free_raw,
     connect_until, set_deadline, deadline, stopped,
-    cancel_new, cancel, cancelled, cancel_free,
+    cancel_new, cancel, cancelled, cancel_retain, cancel_free,
     DEADLINE_EXCEEDED, CANCELLED
 )
 
@@ -70,6 +70,7 @@ extern tcp_stop_raw(sock: ptr) -> int
 extern tcp_cancel_new_raw() -> (ptr, string)
 extern tcp_cancel_raw(cancel: ptr) -> int
 extern tcp_cancel_tripped_raw(cancel: ptr) -> int
+extern tcp_cancel_retain_raw(cancel: ptr) -> int
 extern tcp_cancel_free_raw(cancel: ptr)
 
 // The two errors a bound deadline or cancel ends an operation with (see
@@ -513,9 +514,12 @@ server_fd(server: ptr) -> int {
 //   due = os.now_monotonic_ms() + 10000             // 10 s from now, for everything
 //   sock, err = tcp.connect_until("192.0.2.7", 443, due, c)
 //   ...                                             // reads and writes end by `due`
-//   tcp.cancel(c)                                   // any thread: wakes a blocked read at once
+//   tcp.cancel_retain(c)                            // a reference for the canceller,
+//   ...                                             //   taken before it is handed c
+//   tcp.cancel(c)                                   // canceller: wakes a blocked read at once
+//   tcp.cancel_free(c)                              // canceller: done with it
 //   tcp.close(sock)                                 // the owner closes, always
-//   tcp.cancel_free(c)
+//   tcp.cancel_free(c)                              // the creator's reference
 //
 // What ends: read, read_n, read_into, write, write_n, write_slice and
 // write_all, each with DEADLINE_EXCEEDED or CANCELLED. poll, poll2,
@@ -595,7 +599,8 @@ cancel_new() -> {
 // and every bounded call on it after ends before starting, with CANCELLED.
 // From any thread or actor; any number of times. It writes to the handle's
 // own descriptor and never touches a socket's: the sockets' owners close
-// them. Not after cancel_free.
+// them. Only while the caller holds a reference: the creator until its
+// cancel_free, any other thread from cancel_retain to its own cancel_free.
 cancel(c: ptr) {
     tcp_cancel_raw(c)
 }
@@ -605,8 +610,21 @@ cancelled(c: ptr) -> bool {
     return tcp_cancel_tripped_raw(c) == 1
 }
 
-// Drop the creator's reference to `c` (null is ignored). Its descriptors
-// close when the last socket bound to it is closed too.
+// Another reference to `c`, for a thread, task or actor that may trip it:
+// take it before handing `c` over, and that holder drops it with cancel_free
+// once it can no longer trip it. Without its own reference, a canceller's
+// trip could meet the creator's cancel_free: the last reference to drop
+// closes the descriptors the trip writes to. Returns "" or why.
+cancel_retain(c: ptr) -> string {
+    if tcp_cancel_retain_raw(c) != 0 {
+        return "cancel_retain: null handle"
+    }
+    return ""
+}
+
+// Drop one reference to `c`, the creator's or one cancel_retain took (null is
+// ignored). Its descriptors close, and the handle is freed, when the last
+// reference drops, every socket bound to it holding one until it is closed.
 cancel_free(c: ptr) {
     tcp_cancel_free_raw(c)
 }

@@ -38,10 +38,15 @@ fn key_of(b: int) -> ptr {
     return k
 }
 
+// The canceller holds a reference of its own (cancel_retain, taken before it
+// starts), so its trip is ordered before whichever cancel_free drops the
+// last one and closes the handle's descriptors.
 fn trip_later(c: @keep ptr, after_ms: int) {
+    tcp.cancel_retain(c)
     worker.run_detached(|| {
             sleep(after_ms)
             tcp.cancel(c)
+            tcp.cancel_free(c)
             return null
         })
 }

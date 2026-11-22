@@ -66,6 +66,7 @@ TcpOpenResult tcp_cancel_new_raw(void) {
 }
 int tcp_cancel_raw(TcpCancel* c) { (void)c; return -1; }
 int tcp_cancel_tripped_raw(TcpCancel* c) { (void)c; return 0; }
+int tcp_cancel_retain_raw(TcpCancel* c) { (void)c; return -1; }
 void tcp_cancel_free_raw(TcpCancel* c) { (void)c; }
 void aether_net_init(void) {}
 int aether_net_wouldblock(void) { return 0; }
@@ -313,9 +314,23 @@ int tcp_cancel_tripped_raw(TcpCancel* c) {
     return c && atomic_load(&c->tripped) ? 1 : 0;
 }
 
-/* Drop the creator's reference. A socket still bound to the handle keeps it
- * until that socket is closed, so freeing it while a connection is open is
- * safe; tripping it after this call is not (the caller's last use of it). */
+/* Another reference to `c`, for a thread (or task, or actor) that may trip
+ * it: it calls this before it is handed the handle and tcp_cancel_free_raw
+ * once it can no longer trip it. Each holder's last use is then ordered
+ * before the final drop that closes the descriptors and frees the handle
+ * (the count is a sequentially consistent atomic), so a canceller's write
+ * can never meet the owner's close. 0, or -1 for a null handle. */
+int tcp_cancel_retain_raw(TcpCancel* c) {
+    if (!c) return -1;
+    net_cancel_ref(c);
+    return 0;
+}
+
+/* Drop one reference: the creator's, or one taken by tcp_cancel_retain_raw.
+ * A socket still bound to the handle keeps it until that socket is closed,
+ * so freeing it while a connection is open is safe; tripping it after this
+ * holder's call is not (its last use of it). The descriptors close and the
+ * handle is freed when the last reference drops. */
 void tcp_cancel_free_raw(TcpCancel* c) {
     if (c) net_cancel_unref(c);
 }

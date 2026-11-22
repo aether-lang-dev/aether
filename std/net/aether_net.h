@@ -155,8 +155,11 @@ int tcp_send_some_raw(TcpSocket* sock, const void* data, int length);
 // tcp_cancel_raw: trip it, from any thread (on POSIX, a signal handler
 //                too); idempotent. It never touches a socket's descriptor.
 // tcp_cancel_tripped_raw: 1 once tripped.
-// tcp_cancel_free_raw: drop the creator's reference; a bound socket keeps
-//                the handle alive until it is closed.
+// tcp_cancel_retain_raw: another reference, for each other thread that may
+//                trip the handle; 0, or -1 for a null handle.
+// tcp_cancel_free_raw: drop one reference (the creator's or a retained
+//                one); a bound socket keeps the handle alive until it is
+//                closed, and the last drop closes and frees it.
 TcpOpenResult tcp_connect_until_raw(const char* host, int port, long long due_ms, TcpCancel* cancel);
 int tcp_set_deadline_raw(TcpSocket* sock, long long due_ms, TcpCancel* cancel);
 long long tcp_deadline_raw(TcpSocket* sock);
@@ -164,6 +167,7 @@ int tcp_stop_raw(TcpSocket* sock);
 TcpOpenResult tcp_cancel_new_raw(void);
 int tcp_cancel_raw(TcpCancel* cancel);
 int tcp_cancel_tripped_raw(TcpCancel* cancel);
+int tcp_cancel_retain_raw(TcpCancel* cancel);
 void tcp_cancel_free_raw(TcpCancel* cancel);
 
 // Shared by std.udp (#2201): one-time platform socket init (WSAStartup on
