@@ -3774,13 +3774,70 @@ const char* c_backend_env_override(void) {
     return NULL;
 }
 
+/* Whether compiler `cc` takes `flags` (a leading space, as the build lines
+ * carry them): `text` is compiled with them, and when that fails, compiled
+ * again without them and with AE_PROBE_ANY defined (the control). A refusal
+ * is a failing probe whose control passes; a control that fails as well
+ * says nothing about the flags, only that this form of compile does not run
+ * on `cc`.
+ *
+ * #3810: so each form is tried in turn. -fsyntax-only first, as it writes
+ * nothing; then -c into an object in the private temp directory, for a
+ * driver that cannot check without writing: `zig cc` adds -c and its own
+ * output path to every clang command and reads the object back from its
+ * cache, so under -fsyntax-only, where clang writes none, every compile
+ * failed with "FileNotFound", flags or not. That read as a refusal, and a
+ * program nested past 256 brackets did not build with AE_CC="zig cc".
+ * When no form tells, the answer is no for this process and nothing is
+ * remembered.
+ *
+ * #3600: an answer that is told is remembered in the cache directory by
+ * the compiler's identity, under `flags`, so later builds compile nothing.
+ * `name` names the probe's files (`<name>.c`, `<name>.o`); the -v log shows
+ * each command, by that name. */
+static int cc_probe_takes(const char* cc, const char* flags, const char* name, const char* text) {
+    int known = cache_probe_memo_get(cc, flags);
+    if (known >= 0) return known;
+    char file[200], probe_c[1100], probe_o[1100];
+    snprintf(file, sizeof(file), "%s.c", name);
+    if (!ae_private_temp_path(probe_c, sizeof(probe_c), file)) return 0;   /* #3745 */
+    snprintf(file, sizeof(file), "%s.o", name);
+    if (!ae_private_temp_path(probe_o, sizeof(probe_o), file)) return 0;
+    FILE* f = fopen(probe_c, "w");
+    if (!f) return 0;
+    fputs(text, f);
+    fclose(f);
+    int answer = -1;
+    for (int form = 0; form < 2 && answer < 0; form++) {
+        char* out = form == 0 ? ae_strdup_printf(" -fsyntax-only")
+                              : ae_strdup_printf(" -c -o \"%s\"", probe_o);
+        char* probe = out ? ae_strdup_printf("%s%s%s \"%s\"", cc, flags, out, probe_c) : NULL;
+        if (probe && run_cmd_quiet(probe) == 0) {
+            answer = 1;
+        } else {
+            char* control = out ? ae_strdup_printf("%s -DAE_PROBE_ANY%s \"%s\"", cc, out, probe_c)
+                                : NULL;
+            if (control && run_cmd_quiet(control) == 0) answer = 0;
+            free(control);
+        }
+        free(probe);
+        free(out);
+        remove(probe_o);
+    }
+    remove(probe_c);
+    if (answer < 0) return 0;
+    cache_probe_memo_put(cc, flags, answer);
+    return answer;
+}
+
 /* #3574: " -fbracket-depth=N" when compiler `cc` takes it (Clang, Apple's
  * included), else "" (GCC refuses an option it does not know, and sets no
  * such limit). Blocks nest in the C as deep as in the source, and Clang
  * refuses C nested past 256 brackets unless told otherwise, so a program
  * the parser takes did not build there (AETHER_CLANG_DEPTH_CFLAGS says
  * what the number is). `cc` is asked once per process, by compiling an
- * empty file with the option. */
+ * empty file with the option (cc_probe_takes, which remembers the answer
+ * per compiler). */
 static const char* bracket_depth_flags(const char* cc) {
     static char* asked = NULL;
     static const char* answer = "";
@@ -3789,34 +3846,9 @@ static const char* bracket_depth_flags(const char* cc) {
     free(asked);
     asked = strdup(cc);
     answer = "";
-    /* #3600: and once per compiler, not once per build: the answer is kept
-     * in the cache directory by the compiler's identity. */
-    int known = cache_probe_memo_get(cc, AETHER_CLANG_DEPTH_CFLAGS);
-    if (known >= 0) {
-        if (known) answer = AETHER_CLANG_DEPTH_CFLAGS;
-        return answer;
-    }
-    char probe_c[1100];
-    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "ae_bracket_probe.c")) return answer;   /* #3745 */
-    FILE* f = fopen(probe_c, "w");
-    if (!f) return answer;
-    fputs("int ae_bracket_probe;\n", f);
-    fclose(f);
-    char* probe = ae_strdup_printf("%s%s -fsyntax-only \"%s\"", cc, AETHER_CLANG_DEPTH_CFLAGS,
-                                   probe_c);
-    int takes = probe && run_cmd_quiet(probe) == 0;
-    if (takes) answer = AETHER_CLANG_DEPTH_CFLAGS;
-    free(probe);
-    /* A refusal is remembered only when the same compile without the flag
-     * passes: a compiler that could not run at all said nothing about it. */
-    int settled = takes;
-    if (!takes) {
-        char* control = ae_strdup_printf("%s -fsyntax-only \"%s\"", cc, probe_c);
-        settled = control && run_cmd_quiet(control) == 0;
-        free(control);
-    }
-    if (settled) cache_probe_memo_put(cc, AETHER_CLANG_DEPTH_CFLAGS, takes);
-    remove(probe_c);
+    if (cc_probe_takes(cc, AETHER_CLANG_DEPTH_CFLAGS, "ae_bracket_probe",
+                       "int ae_bracket_probe;\n"))
+        answer = AETHER_CLANG_DEPTH_CFLAGS;
     return answer;
 }
 
@@ -3850,37 +3882,15 @@ static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
     free(asked);
     asked = strdup(cc);
     answer = "";
-    int known = cache_probe_memo_get(cc, AETHER_GCC_INLINE_CFLAGS);
-    if (known >= 0) {
-        if (known) answer = AETHER_GCC_INLINE_CFLAGS;
-        return answer;
-    }
-    char probe_c[1100];
-    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "ae_inline_probe.c")) return answer;
-    FILE* f = fopen(probe_c, "w");
-    if (!f) return answer;
     /* Clang defines __GNUC__ too, and so does a compiler built on it (icx,
-     * zig cc): __clang__ tells them apart. AE_PROBE_ANY lets the control
-     * compile below pass on any compiler. */
-    fputs("#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
-          "#error not GCC\n"
-          "#endif\n"
-          "int ae_inline_probe;\n", f);
-    fclose(f);
-    char* probe = ae_strdup_printf("%s%s -fsyntax-only \"%s\"", cc, AETHER_GCC_INLINE_CFLAGS,
-                                   probe_c);
-    int takes = probe && run_cmd_quiet(probe) == 0;
-    if (takes) answer = AETHER_GCC_INLINE_CFLAGS;
-    free(probe);
-    /* A refusal is remembered only when the compiler runs at all. */
-    int settled = takes;
-    if (!takes) {
-        char* control = ae_strdup_printf("%s -DAE_PROBE_ANY -fsyntax-only \"%s\"", cc, probe_c);
-        settled = control && run_cmd_quiet(control) == 0;
-        free(control);
-    }
-    if (settled) cache_probe_memo_put(cc, AETHER_GCC_INLINE_CFLAGS, takes);
-    remove(probe_c);
+     * zig cc): __clang__ tells them apart. The control compile defines
+     * AE_PROBE_ANY, so it passes on any compiler. */
+    if (cc_probe_takes(cc, AETHER_GCC_INLINE_CFLAGS, "ae_inline_probe",
+                       "#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
+                       "#error not GCC\n"
+                       "#endif\n"
+                       "int ae_inline_probe;\n"))
+        answer = AETHER_GCC_INLINE_CFLAGS;
     return answer;
 }
 
