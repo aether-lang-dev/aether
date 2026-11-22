@@ -34,6 +34,7 @@ runtime/aether_runtime.c
 runtime/aether_numa.c
 runtime/aether_host.c
 runtime/aether_exec.c
+runtime/aether_context_freertos.c
 runtime/libaether_caps.c
 runtime/aether_resource_caps.c
 runtime/aether_callbacks.c

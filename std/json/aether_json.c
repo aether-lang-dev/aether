@@ -98,22 +98,45 @@
 #define AETHER_JSON_KIND_OUT_OF_MEMORY  2   // arena allocation failed during parse
 #define AETHER_JSON_KIND_INVALID_INPUT  3   // NULL / empty input handed to json_parse_raw
 
-static JSON_THREAD_LOCAL char g_json_err_buf[JSON_ERROR_BUF_SIZE];
-static JSON_THREAD_LOCAL int  g_json_err_set;
-static JSON_THREAD_LOCAL int  g_json_err_kind;
-static JSON_THREAD_LOCAL int  g_json_err_line;
-static JSON_THREAD_LOCAL int  g_json_err_col;
+/* The last error, the calling thread's. A cooperative build
+ * (AETHER_NO_THREADING) has no thread-locals, and ESP-IDF would put a
+ * thread-local on every FreeRTOS task's stack: there it is a block of the
+ * calling task's execution context instead (aether_context_local, docs/
+ * design/task-execution-contexts.md), made at the first parse, and one
+ * shared block only when there was no memory for it. */
+typedef struct {
+    char buf[JSON_ERROR_BUF_SIZE];
+    int  set;
+    int  kind;
+    int  line;
+    int  col;
+} JsonErr;
+
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local */
+static const char g_json_err_key = 0;
+static JsonErr g_json_err_no_memory;
+static JsonErr* json_err(void) {
+    JsonErr* e = (JsonErr*)aether_context_local(&g_json_err_key, sizeof(JsonErr), NULL);
+    return e ? e : &g_json_err_no_memory;
+}
+#else
+static JSON_THREAD_LOCAL JsonErr g_json_err;
+#define json_err() (&g_json_err)
+#endif
 
 static void err_clear(void) {
-    g_json_err_buf[0] = '\0';
-    g_json_err_set = 0;
-    g_json_err_kind = AETHER_JSON_KIND_OK;
-    g_json_err_line = 0;
-    g_json_err_col = 0;
+    JsonErr* e = json_err();
+    e->buf[0] = '\0';
+    e->set = 0;
+    e->kind = AETHER_JSON_KIND_OK;
+    e->line = 0;
+    e->col = 0;
 }
 
 const char* json_last_error(void) {
-    return g_json_err_set ? g_json_err_buf : "";
+    JsonErr* e = json_err();
+    return e->set ? e->buf : "";
 }
 
 // Issue #392 — programmatic kind / position accessors. Callers that
@@ -121,9 +144,9 @@ const char* json_last_error(void) {
 // `parse_strict` wrapper in module.ae which combines these with
 // json_last_error(). Kind constants live in module.ae as exported
 // `const KIND_*` (values match the AETHER_JSON_KIND_* macros above).
-int json_last_error_kind(void) { return g_json_err_set ? g_json_err_kind : AETHER_JSON_KIND_OK; }
-int json_last_error_line(void) { return g_json_err_set ? g_json_err_line : 0; }
-int json_last_error_col(void)  { return g_json_err_set ? g_json_err_col  : 0; }
+int json_last_error_kind(void) { JsonErr* e = json_err(); return e->set ? e->kind : AETHER_JSON_KIND_OK; }
+int json_last_error_line(void) { JsonErr* e = json_err(); return e->set ? e->line : 0; }
+int json_last_error_col(void)  { JsonErr* e = json_err(); return e->set ? e->col  : 0; }
 
 // Every parser error goes through this. First-error-wins so the innermost
 // diagnostic is preserved; outer callers that detect a NULL return don't
@@ -135,7 +158,8 @@ int json_last_error_col(void)  { return g_json_err_set ? g_json_err_col  : 0; }
 // (~50 across this file) unchanged while still surfacing OOM
 // distinctly to callers who switch on the kind tuple.
 static void err_set(int line, int col, const char* fmt, ...) {
-    if (g_json_err_set) return;
+    JsonErr* e = json_err();
+    if (e->set) return;
     char msg[JSON_ERR_REASON_BUF];
     va_list ap;
     va_start(ap, fmt);
@@ -143,24 +167,25 @@ static void err_set(int line, int col, const char* fmt, ...) {
     va_end(ap);
     // msg is capped at JSON_ERR_REASON_BUF-1, leaving room for " at N:N"
     // (max ~30 chars for 32-bit line/col) inside the outer buffer.
-    snprintf(g_json_err_buf, sizeof(g_json_err_buf),
+    snprintf(e->buf, sizeof(e->buf),
              "%s at %d:%d", msg, line, col);
-    g_json_err_set = 1;
-    g_json_err_line = line;
-    g_json_err_col = col;
-    g_json_err_kind = (strstr(msg, "out of memory") != NULL)
+    e->set = 1;
+    e->line = line;
+    e->col = col;
+    e->kind = (strstr(msg, "out of memory") != NULL)
         ? AETHER_JSON_KIND_OUT_OF_MEMORY
         : AETHER_JSON_KIND_PARSE_ERROR;
 }
 
 // Used once from json_parse_raw when the caller hands us a NULL pointer.
 static void err_set_no_pos(const char* reason) {
-    if (g_json_err_set) return;
-    snprintf(g_json_err_buf, sizeof(g_json_err_buf), "%s", reason);
-    g_json_err_set = 1;
-    g_json_err_line = 0;
-    g_json_err_col = 0;
-    g_json_err_kind = AETHER_JSON_KIND_INVALID_INPUT;
+    JsonErr* e = json_err();
+    if (e->set) return;
+    snprintf(e->buf, sizeof(e->buf), "%s", reason);
+    e->set = 1;
+    e->line = 0;
+    e->col = 0;
+    e->kind = AETHER_JSON_KIND_INVALID_INPUT;
 }
 
 // ---------------------------------------------------------------------------

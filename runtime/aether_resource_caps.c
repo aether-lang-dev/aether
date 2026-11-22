@@ -160,7 +160,13 @@ static inline int caps_capped(void) {
  * afterwards is frees of more than was ever counted, and is forgotten, as
  * the one counter always held them at zero. */
 static void caps_fold_slots(void) {
-    while (atomic_flag_test_and_set_explicit(&g_fold_lock, memory_order_acquire)) AETHER_CPU_PAUSE();
+    while (atomic_flag_test_and_set_explicit(&g_fold_lock, memory_order_acquire)) {
+#if defined(AETHER_NO_THREADING)
+        aether_context_relax();
+#else
+        AETHER_CPU_PAUSE();
+#endif
+    }
     int64_t moved = 0;
     for (int i = 0; i < CAPS_USE_SLOTS; i++)
         moved += atomic_exchange_explicit(&g_use_slots[i].bytes, 0, memory_order_relaxed);
@@ -381,7 +387,9 @@ static size_t g_slot_used = 0;
  * rather than spin hot (#3410). */
 static inline void acct_yield(void) {
 #if defined(AETHER_NO_THREADING)
-    AETHER_CPU_PAUSE();
+    /* Tasks of a cooperative build with task contexts (aether_exec.c) take
+     * the lock too: the port's relax lets a holder of lower priority run. */
+    aether_context_relax();
 #elif defined(_WIN32)
     SwitchToThread();
 #else
@@ -897,6 +905,19 @@ static void own_free(AetherExecAccount* a) {
     acct_unlock();
     free(gone);
 }
+
+#if defined(AETHER_NO_THREADING)
+/* aether_resource_caps.h. A cooperative build links one runtime copy, whose
+ * accounts these are. */
+void aether_accounts_frames_ended(struct AetherFrames* F) {
+    if (!F->account) return;
+    AetherExecAccount* gone = NULL;
+    acct_lock();
+    (void)account_switch(F, NULL, &gone);
+    acct_unlock();
+    free(gone);
+}
+#endif
 
 /* aether_exec_use: an account these accounts did not make (one another copy
  * of the runtime made, where the copies did not find each other) is refused,

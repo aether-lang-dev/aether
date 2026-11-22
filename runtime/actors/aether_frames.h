@@ -38,12 +38,19 @@ typedef struct {
 typedef struct AetherCancelCell {
     _Atomic uint64_t pending;
     struct AetherCancelCell* next;
+    /* A cooperative build's task contexts (aether_exec.c): a context that is
+     * detached gives its cell back, free, with the serial it reached, and the
+     * next context attached takes it and starts counting above that, so a
+     * token of the old context names no execution of the new one. */
+    _Atomic int unowned;
+    uint64_t serial_floor;
 } AetherCancelCell;
 
 #define AETHER_OUTCOME_TEXT_MAX 1024
 
 struct AetherUnwindEntry;   /* aether_unwind.c's */
 struct AetherCallerState;   /* aether_host.c's */
+struct AetherCtxLocal;      /* aether_unwind.c's */
 
 /* An ACTIVE account a thread is timing (aether_resource_caps.c, #3409): when
  * this thread began timing it. The first AETHER_ACCT_TIMED_INLINE are kept
@@ -65,7 +72,7 @@ typedef struct {
  * timing list past its inline entries, the caller info, the callback
  * reason) are made on first use and given back by aether_frames_release
  * when the thread ends or the task's context is detached. */
-typedef struct {
+typedef struct AetherFrames {
     AetherJmpFrame   frames[AETHER_PANIC_MAX_DEPTH];
     int              depth;    /* live frames; the innermost is frames[depth-1] */
     AetherExecRecord exec[AETHER_PANIC_MAX_DEPTH];
@@ -108,6 +115,8 @@ typedef struct {
     int              teardown_count;
     int              teardown_capacity;
     int              teardown_running;
+    /* Context-local blocks (aether_context_local), newest first. */
+    struct AetherCtxLocal* locals;
 } AetherFrames;
 
 /* The heap parts of `F` given back (the thread ended, or its task's
@@ -117,6 +126,27 @@ void aether_frames_release(AetherFrames* F);
 /* The calling thread's heap parts are given back when it ends: called by a
  * file that gives its block a heap part, the first time it does. */
 void aether_frames_mark_thread(void);
+
+#if defined(AETHER_NO_THREADING)
+/* Task contexts (aether_unwind.c, aether_exec.c; libaether.h has the host
+ * API and docs/design/task-execution-contexts.md the contract). */
+struct AetherExecContext;
+struct AetherExecContext* aether_context_builtin(void);
+AetherFrames* aether_context_frames(struct AetherExecContext* ctx);
+size_t aether_context_size(void);
+/* 1 when the calling task may run actors: no port is installed, or it holds
+ * the built-in context. */
+int aether_context_owns_actors(void);
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn))
+#endif
+void aether_context_wrong_task(const char* what);
+/* Wait a little for a lock another task holds: the port's relax, or a pause. */
+void aether_context_relax(void);
+/* The actors' own entry points stop a task that does not own them. */
+#define AETHER_ACTORS_TASK_CHECK(what) \
+    do { if (__builtin_expect(!aether_context_owns_actors(), 0)) aether_context_wrong_task(what); } while (0)
+#endif
 
 /* This thread's block. The block is a `static` thread-local of
  * aether_unwind.c, the one file that owns it (with the try frames' push and

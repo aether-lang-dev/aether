@@ -244,6 +244,84 @@ AETHER_API int      aether_exec_use(AetherExecAccount* account, AetherExecAccoun
 AETHER_API uint64_t aether_exec_account_used(const AetherExecAccount* account);
 AETHER_API int      aether_exec_account_tripped(const AetherExecAccount* account);
 
+/* Task execution contexts: more than one task of a cooperative runtime
+ * (built with AETHER_NO_THREADING, as on an ESP32 under ESP-IDF) entering
+ * Aether, each with execution state of its own. The contract is
+ * docs/design/task-execution-contexts.md.
+ *
+ * A threaded runtime keeps each thread's execution state in a thread-local
+ * block: its try and execution frames, the account in use, its deadline,
+ * cancel cell, last outcome, caller info and the rest. A cooperative
+ * runtime has no thread-locals (ESP-IDF puts a program's thread-locals on
+ * every FreeRTOS task's stack, system tasks included), so it keeps one such
+ * block, the built-in context, which every task shared. With a port
+ * installed, each task that enters Aether has a context of its own, which
+ * the runtime makes and frees; a task that never enters Aether pays one
+ * pointer slot of the port's.
+ *
+ * The port says where a task's context is kept. `current` returns the
+ * calling task's (NULL: none) and is called each time the runtime reaches
+ * its execution state, so it should be a load (FreeRTOS:
+ * pvTaskGetThreadLocalStoragePointer). `set_current` makes `ctx` the
+ * calling task's (NULL: none) and returns 0, or -1 when it cannot; when a
+ * task ends with a context still set, the port calls
+ * aether_context_task_ended(ctx) from wherever the task is cleaned up
+ * (FreeRTOS: the deletion callback of
+ * vTaskSetThreadLocalStoragePointerAndDelCallback). `relax`, which may be
+ * NULL, gives the processor to other tasks while a runtime lock is held
+ * elsewhere (FreeRTOS: vTaskDelay(1)): without it a waiting task of higher
+ * priority spins forever on one core against a holder of lower priority.
+ * The runtime keeps the pointer: the port must outlive every task that
+ * enters Aether. runtime/aether_context_freertos.c is the ESP-IDF port
+ * (aether_freertos_contexts_install in aether_context_freertos.h).
+ *
+ * aether_context_port_install installs it, once, on the task that owns the
+ * actors: that task keeps the built-in context, and actors (spawn, send,
+ * ask, the scheduler's loop) run only there; any other task that reaches
+ * them stops the program with a message saying so. Install it before any
+ * other task enters Aether. 0, or -1: already installed, a port without
+ * `current` or `set_current`, or a threaded runtime (whose threads have
+ * their own state already).
+ *
+ * aether_context_attach gives the calling task a fresh context: 0, or -1
+ * when it has one already, no port is installed, or there is no memory.
+ * aether_context_detach frees it: 0, or -1 when the task has none, holds
+ * the built-in one, or is inside a call into Aether. The account the task
+ * has in use is let go (as aether_exec_use(NULL, NULL) does), and its
+ * caller info, cancel cell and buffers given back; its last outcome goes
+ * with it. On a threaded runtime both return 0 and do nothing.
+ *
+ * Contract: one task per context, and a context never moves to another
+ * task; a task must not be deleted while it is inside a call into Aether;
+ * nothing here, and nothing of Aether's, may be called from an interrupt.
+ * Once a port is installed, a task that reaches the runtime's execution
+ * state without a context stops the program rather than share another
+ * task's. Shared by design: the heap and the process memory cap, the
+ * execution accounts themselves (each in use on one task at a time, behind
+ * the accounts' lock), cancel tokens (any task may cancel another's call),
+ * the callback registry, and the actors, which belong to the installing
+ * task. Aether code cannot name, select or switch a context: these are host
+ * C calls only. */
+#ifndef AETHER_EXEC_CONTEXT_DEFINED
+#define AETHER_EXEC_CONTEXT_DEFINED
+typedef struct AetherExecContext AetherExecContext;
+typedef struct {
+    AetherExecContext* (*current)(void);
+    int (*set_current)(AetherExecContext* ctx);
+    void (*relax)(void);
+} AetherContextPort;
+#endif
+AETHER_API int  aether_context_port_install(const AetherContextPort* port);
+AETHER_API int  aether_context_attach(void);
+AETHER_API int  aether_context_detach(void);
+AETHER_API void aether_context_task_ended(AetherExecContext* ctx);
+#if defined(ESP_PLATFORM)
+/* The ESP-IDF port (runtime/aether_context_freertos.c), installed on the
+ * calling task: aether_context_port_install with a FreeRTOS thread-local
+ * pointer slot. */
+AETHER_API int  aether_freertos_contexts_install(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
