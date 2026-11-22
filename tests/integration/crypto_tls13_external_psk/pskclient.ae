@@ -1,0 +1,93 @@
+// The pure TLS client's external PSK (tls13_client.connect_psk and
+// connect_socket_psk) against 127.0.0.1 PSK_PORT. PSK_MODE "host" (the
+// default) lets connect_psk dial; "socket" connects with std.tcp and hands
+// the socket over. The key is PSK_KEY_HEX (default the byte 0x11 32 times),
+// the identity PSK_IDENTITY_HEX (default "plug-01"). REQUEST is sent after
+// the handshake (default "hello"; "GET" for "GET / HTTP/1.0", "STATUS" for
+// the esp32 firmware's "GET /status"), and one reply is read. Prints:
+//   CONNECTED group=<n>  /  ERR: <why>
+//   SENT / SENDERR: <why>
+//   RECV <the reply's first line> / RECV-EOF / RECVERR: <why>
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+import std.cryptography.tls13_client
+
+extern string_char_at(str: string, index: int) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    return h - 55
+}
+
+fn from_hex(s: string) -> ptr {
+    n = string.length(s) / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(s, 2 * i)) * 16 + hexval(string_char_at(s, 2 * i + 1)))
+        i = i + 1
+    }
+    return b
+}
+
+fn env_or(name: string, dflt: string) -> string {
+    v = os.getenv(name)
+    if v == "" { return dflt }
+    return v
+}
+
+main() {
+    port, _pe = string.to_int(os.getenv("PSK_PORT"))
+    key = from_hex(env_or("PSK_KEY_HEX", "1111111111111111111111111111111111111111111111111111111111111111"))
+    id = from_hex(env_or("PSK_IDENTITY_HEX", "706c75672d3031"))
+    klen = bytes.length(key)
+    ilen = bytes.length(id)
+    conn = null
+    err = ""
+    if os.getenv("PSK_MODE") == "socket" {
+        sock, derr = tcp.connect("127.0.0.1", port)
+        if derr != "" {
+            println("ERR: dial: ${derr}")
+            exit(1)
+        }
+        conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..ilen], bytes.view(key)[0..klen])
+    } else {
+        conn, err = tls13_client.connect_psk("127.0.0.1", port, bytes.view(id)[0..ilen], bytes.view(key)[0..klen])
+    }
+    // The call copied the key; this copy is the caller's to wipe.
+    bytes.wipe_free(key)
+    bytes.wipe_free(id)
+    if err != "" {
+        println("ERR: ${err}")
+        exit(1)
+    }
+    println("CONNECTED group=${tls13_client.conn_group(conn)}")
+    req = env_or("REQUEST", "hello")
+    if req == "GET" { req = "GET / HTTP/1.0\r\n\r\n" }
+    if req == "STATUS" { req = "GET /status HTTP/1.1\r\nHost: device\r\nConnection: close\r\n\r\n" }
+    serr = tls13_client.conn_send(conn, string.bytes(req))
+    if serr != "" {
+        println("SENDERR: ${serr}")
+    } else {
+        println("SENT")
+        data, n, rerr = tls13_client.conn_recv(conn)
+        if rerr != "" {
+            println("RECVERR: ${rerr}")
+        } else if data == null {
+            println("RECV-EOF")
+        } else {
+            text = bytes.to_string(data, n)
+            nl = string.index_of(text, "\r")
+            if nl > 0 { text = string.substring(text, 0, nl) }
+            println("RECV ${text}")
+            bytes.wipe_free(data)
+        }
+    }
+    tls13_client.close_conn(conn)
+}
+
+extern exit(code: int)

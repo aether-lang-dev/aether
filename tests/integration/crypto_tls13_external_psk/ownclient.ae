@@ -1,0 +1,73 @@
+// Who closes the socket handed to tls13_client.connect_socket_psk: the
+// call, on every path. Each case connects to the sink at 127.0.0.1
+// SINK_PORT, hands the socket over with something the call must refuse,
+// prints "CASE <n> <why>", and then waits OWN_GAP_MS (default 1000) before
+// the next, so the sink can see each socket close while this process is
+// still alive: a socket the call failed to close would stay open until the
+// process exits. Case 6's sink answers with bytes that are not TLS. The
+// argument checks come first, then a refused handshake.
+//   1 an empty identity     2 a 65-byte identity     3 a 31-byte key
+//   4 a 33-byte key         5 a key slice with no bound
+//   6 a peer that does not speak TLS
+// A null socket is refused too (there is nothing to close): CASE 0.
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+import std.cryptography.tls13_client
+
+extern exit(code: int)
+extern usleep(us: int) -> int
+
+fn gap() {
+    ms, _e = string.to_int(os.getenv("OWN_GAP_MS"))
+    if ms <= 0 { ms = 1000 }
+    usleep(ms * 1000)
+}
+
+main() {
+    port, _pe = string.to_int(os.getenv("SINK_PORT"))
+    id = bytes.new(65)
+    key = bytes.new(33)
+    i = 0
+    while i < 65 {
+        bytes.set(id, i, 0x41 + (i % 26))
+        i = i + 1
+    }
+    i = 0
+    while i < 33 {
+        bytes.set(key, i, 0x11)
+        i = i + 1
+    }
+    c0, e0 = tls13_client.connect_socket_psk(null, bytes.view(id)[0..7], bytes.view(key)[0..32])
+    println("CASE 0 ${c0 == null} ${e0}")
+    n = 1
+    while n <= 6 {
+        sock, derr = tcp.connect("127.0.0.1", port)
+        if derr != "" {
+            println("ERR: dial: ${derr}")
+            exit(1)
+        }
+        conn = null
+        err = ""
+        if n == 1 { conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..0], bytes.view(key)[0..32]) }
+        if n == 2 { conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..65], bytes.view(key)[0..32]) }
+        if n == 3 { conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..7], bytes.view(key)[0..31]) }
+        if n == 4 { conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..7], bytes.view(key)[0..33]) }
+        if n == 5 { conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..7], bytes.data(key) as byte[]) }
+        if n == 6 { conn, err = tls13_client.connect_socket_psk(sock, bytes.view(id)[0..7], bytes.view(key)[0..32]) }
+        if conn != null {
+            println("CASE ${n} CONNECTED (wrong)")
+            tls13_client.close_conn(conn)
+        } else {
+            println("CASE ${n} ${err}")
+        }
+        gap()
+        n = n + 1
+    }
+    bytes.wipe_free(id)
+    bytes.wipe_free(key)
+    println("DONE")
+    gap()
+}

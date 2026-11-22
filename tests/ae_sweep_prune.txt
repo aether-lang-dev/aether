@@ -344,6 +344,9 @@ tests/integration/sandbox_nested_libraries/
 # #3336, #3352: resumepeer.ae is the scripted PSK/0-RTT server resumeclient.ae
 # connects to; the driver runs them together and against openssl s_server.
 tests/integration/crypto_tls13_resume/
+# The external-PSK client: pskpeer.ae is the scripted server pskclient.ae and
+# ownclient.ae connect to; the driver runs them, openssl s_server and Python.
+tests/integration/crypto_tls13_external_psk/
 # #2956: frames.ae is a library and app.ae its importer; the driver builds both
 # and its C host loads the library.
 tests/integration/emit_lib_execution_frame/

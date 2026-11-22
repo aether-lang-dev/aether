@@ -16,6 +16,8 @@
 //     (negotiated from the ServerHello)
 //   - server CertificateVerify: ECDSA-P256, ECDSA-P384, or RSA-PSS-rsae-SHA256
 //   - full chain validation (see SERVER AUTHENTICATION below)
+//   - an external PSK (connect_psk, connect_socket_psk): a SHA-256 key given
+//     to both ends out of band, psk_dhe_ke, no certificate (see below)
 //   - session resumption (PSK) + 0-RTT early data; TLS alerts; OCSP-staple
 //     revocation check; mTLS via connect_mtls (presents an ECDSA-P256 client
 //     cert + CertificateVerify) or an empty-cert decline on connect()
@@ -81,6 +83,9 @@
 //
 //   connect(host, port, x25519_priv32) -> (ClientConn, string)
 //       perform the handshake; returns a live connection or an error.
+//   connect_psk(host, port, identity, key) / connect_socket_psk(sock, identity, key)
+//       an external-PSK handshake (RFC 8446 2.2): no certificates, the key
+//       is the authentication.
 //   connect_socket(sock, host, cafile) / connect_socket_mtls(..., cert, len, key)
 //       the same over a socket the caller connected (a protocol that
 //       starts in the clear: Postgres' SSLRequest, MySQL's handshake);
@@ -145,7 +150,7 @@ exports(
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
     connect, connect_mtls, connect_pq, connect_socket, connect_socket_mtls,
-    connect_socket_insecure_skip_verify, connect_socket_mtls_insecure_skip_verify, conn_group, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
+    connect_socket_insecure_skip_verify, connect_socket_mtls_insecure_skip_verify, conn_group, connect_psk, connect_socket_psk, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
     conn_key_update, conn_early_accepted,
     conn_get_ticket, free_ticket, SessionTicket,
     ticket_len, ticket_nonce_len, ticket_lifetime, ticket_max_early_data, ticket_cipher_suite,
@@ -2558,7 +2563,7 @@ connect_resume_0rtt(host: string, port: int, x25519_priv: ptr, ticket: ptr, earl
 }
 
 // Core resume, optionally with 0-RTT early data (early_data == null / len 0 for
-// a plain resume).
+// a plain resume): the ticket's PSK, identity and age, then psk_handshake.
 //
 // The PSK's checks (RFC 8446 4.2.11, #3318): the server must take the one
 // identity offered, with a suite of the ticket's hash. 0-RTT data goes under
@@ -2578,27 +2583,12 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     if early_data != null && early_len > 0 { want_0rtt = 1 }
     // Early data is protected with the ticket's own suite (4.2.10, #3339);
     // a ticket that does not say which sends none.
-    ed_aead, ed_key_len, ed_algo, _ed_hl, ed_err = suite_params(st.cipher_suite)
+    _ed_aead, _ed_key_len, ed_algo, _ed_hl, ed_err = suite_params(st.cipher_suite)
     if string.equals(ed_err, "") != 1 || ed_algo != algo { want_0rtt = 0 }
 
     // PSK = HKDF-Expand-Label(res_master, "resumption", ticket_nonce, Hash.len)
     psk = tls13_ks.psk_from_resumption(algo, st.res_master, hl, bytes.view(st.nonce)[0..st.nonce_len])
 
-    sock, dial_err = tcp.connect(host, port)
-    if string.equals(dial_err, "") != 1 { tls13_ks.free_secret(psk); return null, dial_err }
-    pub = x25519.base_point(x25519_priv)
-    rnd = rand_into(32)
-    sid = rand_into(32)
-    if rnd == null || sid == null {
-        if rnd != null { bytes.wipe_free(rnd) }
-        if sid != null { bytes.wipe_free(sid) }
-        bytes.wipe_free(pub); tls13_ks.free_secret(psk); tcp.close(sock)
-        return null, "no randomness available for the handshake"
-    }
-
-    // The PSK ClientHello (+ early_data when sending 0-RTT), its binder
-    // computed over the truncated ClientHello and patched in.
-    pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
     // obfuscated_ticket_age is the ticket's age in ms plus its ticket_age_add,
     // modulo 2^32 (RFC 8446 4.2.11.1). A server that takes 0-RTT data checks
     // it against its own clock and refuses the data when they differ by more
@@ -2610,12 +2600,161 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         if aged < 0 { aged = 0 }
         obf_age = ((aged + ((st.age_add as long) & 0xFFFFFFFF)) & 0xFFFFFFFF) as int
     }
-    tls13_hs.client_hello_psk(rnd, bytes.view(sid)[0..32], pub, host, bytes.view(st.ticket)[0..st.ticket_len], obf_age, hl, want_0rtt, &pch)
+    return psk_handshake(host, port, null, x25519_priv, psk, algo, hl, bytes.view(st.ticket)[0..st.ticket_len], obf_age, 0, want_0rtt, early_data, st.cipher_suite)
+}
+
+// ---- external PSK (RFC 8446 2.2, 4.2.11; a key provisioned out of band) ----
+
+// The bounds of this first cut: a SHA-256 PSK of exactly 32 bytes and an
+// identity of 1 to 64 bytes. RFC 8446 allows identities up to 2^16-1 bytes
+// and keys of any length; these bounds are the ask's and keep a ClientHello
+// with the PSK well inside one record. A wider identity or key is refused
+// here rather than half supported.
+const EXTERNAL_PSK_KEY_LEN = 32
+const EXTERNAL_PSK_MAX_IDENTITY = 64
+
+// A TLS 1.3 handshake authenticated by an EXTERNAL pre-shared key (RFC 8446
+// 2.2): a key and its identity that the two ends were given out of band, not
+// a resumption ticket. connect_psk dials host:port itself; connect_socket_psk
+// runs over a socket the caller connected. Each returns the module's usual
+// (ClientConn, "") or (null, why); conn_send, conn_recv, conn_key_update and
+// close_conn work on the connection as on any other.
+//
+// What it does and refuses:
+//   - psk_dhe_ke only (4.2.9): the server must answer with a key_share, so
+//     every session has a fresh ECDHE secret (x25519, or secp256r1 after a
+//     HelloRetryRequest) besides the PSK; a psk_ke answer is refused
+//     (missing_extension).
+//   - the binder is keyed with the "ext binder" label (7.1), never "res
+//     binder", over the ClientHello truncated before the binders, and is
+//     computed again after a HelloRetryRequest over message_hash(ClientHello1),
+//     the HelloRetryRequest and the second ClientHello (4.2.11.2, 4.4.1).
+//   - the server must select identity 0, the only one offered
+//     (illegal_parameter), and one of the two SHA-256 suites, the only ones
+//     offered (TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256): the
+//     PSK is SHA-256, and a suite of another hash is illegal_parameter.
+//   - no fallback: a server that does not take the PSK (no pre_shared_key in
+//     its ServerHello, a Certificate flight instead) is refused, as is one
+//     that sends a Certificate after taking it, and TLS 1.2. There is no
+//     certificate check on this path at all; the key is the authentication.
+//   - a wrong key cannot complete: a server checks the binder and refuses
+//     (it says decrypt_error or illegal_parameter), and a server that did
+//     not check it derives other handshake keys, so its flight does not
+//     open (bad_record_mac) and its Finished would not verify (the Finished
+//     comparison is constant-time, bytes_equal). Each is an error string
+//     other than EOF's and a timeout's.
+//   - no 0-RTT and no early data; no SNI from connect_socket_psk (it knows
+//     no host name); connect_psk sends `host` as SNI when it is not "".
+//
+// Keys: `identity` and `key` are borrowed for the call and never kept: the
+// key is copied into a buffer of the handshake's own, which is wiped (as is
+// every secret derived from it: early, binder, handshake and Finished keys,
+// the ECDHE secret and private scalars) on success and on every failure
+// path. The caller still owns its own copy and wipes it when done. Both may
+// hold any bytes, NUL included. The ephemeral key shares, client random and
+// session id come from the system CSPRNG; when it fails the call fails
+// closed ("no randomness available for the handshake") without sending
+// anything. The connection keeps the application traffic secrets and the
+// resumption master secret, as any other does, and close_conn wipes them.
+//
+// The caller binds an identity and key to the peer it means: the client
+// learns nothing else about who answered.
+connect_psk(host: string, port: int, identity: byte[], key: byte[]) -> (ptr, string) {
+    return external_psk(host, port, null, identity, key)
+}
+
+// connect_psk over `sock`, an already-connected std.tcp socket. The socket
+// is the connection's from the call on: the returned connection closes it
+// at close_conn, and every failure, a refused argument included, closes it
+// before returning, so the caller never closes it after this call. A null
+// socket is refused and there is nothing to close.
+connect_socket_psk(sock: @keep ptr, identity: byte[], key: byte[]) -> (ptr, string) {
+    if sock == null { return null, "connect_socket_psk: the socket is null" }
+    return external_psk("", 0, sock, identity, key)
+}
+
+// "" when `identity` and `key` are within this cut's bounds, else why not.
+fn external_psk_refusal(identity: byte[], key: byte[]) -> string {
+    if identity.len < 1 || identity.len > EXTERNAL_PSK_MAX_IDENTITY {
+        return "external PSK: the identity must be 1 to ${EXTERNAL_PSK_MAX_IDENTITY} bytes, not ${identity.len}"
+    }
+    if key.len != EXTERNAL_PSK_KEY_LEN {
+        return "external PSK: the key must be ${EXTERNAL_PSK_KEY_LEN} bytes (SHA-256), not ${key.len}"
+    }
+    return ""
+}
+
+fn external_psk(host: string, port: int, sock: @keep ptr, identity: byte[], key: byte[]) -> (ptr, string) {
+    why = external_psk_refusal(identity, key)
+    if why != "" {
+        if sock != null { tcp.close(sock) }
+        return null, why
+    }
+    priv = rand_into(32)
+    if priv == null {
+        if sock != null { tcp.close(sock) }
+        return null, "no randomness available for the handshake"
+    }
+    // The handshake's own copy of the key, which psk_handshake wipes.
+    psk = bytes.new(EXTERNAL_PSK_KEY_LEN)
+    bytes.copy_from_slice(psk, 0, key[0..EXTERNAL_PSK_KEY_LEN])
+    conn, err = psk_handshake(host, port, sock, priv, psk, "sha256", 32, identity, 0, 1, 0, null, 0)
+    bytes.wipe_free(priv)
+    return conn, err
+}
+
+// The PSK handshake both kinds of PSK run (RFC 8446 2.2): one identity
+// offered with psk_dhe_ke, the binder over the truncated ClientHello, the
+// abbreviated flight (EncryptedExtensions, Finished), then the client
+// Finished.
+//   adopt_sock  a connected socket to run over, or null to dial host:port;
+//               closed on every failure, the connection's on success
+//   psk         the PSK, `hl` bytes of hash `algo`: CONSUMED (wiped and
+//               freed) on every path
+//   identity    the PskIdentity, borrowed; obf_age its obfuscated_ticket_age
+//               (0 for an external PSK, 4.2.11)
+//   external    1 for an out-of-band PSK: the "ext binder" label, the
+//               SHA-256 suites alone; 0 for a resumption ticket's
+//   want_early  1 to send early_data (resumption only) under the suite
+//               ed_suite, the ticket's
+fn psk_handshake(host: string, port: int, adopt_sock: @keep ptr, x25519_priv: ptr, psk: ptr, algo: string, hl: int, identity: byte[], obf_age: int, external: int, want_early: int, early_data: byte[], ed_suite: int) -> (ptr, string) {
+    if early_data.len < 0 { panic("tls13_client.psk_handshake: the `early_data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if identity.len < 0 { panic("tls13_client.psk_handshake: the `identity` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    ed_aead, ed_key_len, _ed_algo, _ed_hl, _ed_err = suite_params(ed_suite)
+    want_0rtt = want_early
+    if external == 1 { want_0rtt = 0 }
+    // Errors name the handshake they end: "${what}: ..." or "external PSK: ...".
+    what = "resume"
+    if external == 1 { what = "external PSK" }
+    rejected = "server rejected the PSK (no resumption)"
+    if external == 1 { rejected = "server did not take the external PSK (no pre_shared_key in its ServerHello)" }
+
+    sock = adopt_sock
+    if sock == null {
+        dsock, dial_err = tcp.connect(host, port)
+        if string.equals(dial_err, "") != 1 { tls13_ks.free_secret(psk); return null, dial_err }
+        sock = dsock
+    }
+    pub = x25519.base_point(x25519_priv)
+    rnd = rand_into(32)
+    sid = rand_into(32)
+    if rnd == null || sid == null {
+        if rnd != null { bytes.wipe_free(rnd) }
+        if sid != null { bytes.wipe_free(sid) }
+        bytes.wipe_free(pub); tls13_ks.free_secret(psk); tcp.close(sock)
+        return null, "no randomness available for the handshake"
+    }
+
+    // The PSK ClientHello (+ early_data when sending 0-RTT), its binder
+    // computed over the truncated ClientHello and patched in. An external
+    // PSK offers the SHA-256 suites alone.
+    pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+    tls13_hs.client_hello_psk(rnd, bytes.view(sid)[0..32], pub, host, identity, obf_age, hl, want_0rtt, external, &pch)
     ch = pch.buf
     ch_len = pch.buf_len
     early = tls13_ks.early_secret_psk(algo, bytes.view(psk)[0..hl])
     tr = transcript_new()
-    patch_binder(ch, pch.binder_off, pch.truncated_len, early, algo, hl, tr)
+    patch_binder(ch, pch.binder_off, pch.truncated_len, early, algo, hl, tr, external)
     transcript_add(tr, bytes.view(ch)[0..ch_len])
     serr = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
     if string.equals(serr, "") != 1 {
@@ -2649,7 +2788,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         if ed_sent == 0 {
             tls13_record.free_ctx(ed_ctx)
             tls13_ks.free_secret(early); tls13_ks.free_secret(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
-            return null, "resume: the early data could not be sent"
+            return null, "${what}: the early data could not be sent"
         }
     }
 
@@ -2693,11 +2832,17 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                 reading = 0
             } else if parsed.is_hello_retry == 1 {
                 _ha, _hk, halgo, _hh, _he = suite_params(parsed.cipher_suite)
-                if halgo != algo {
+                if external == 1 && parsed.cipher_suite == tls13_hs.TLS_AES_256_GCM_SHA384 {
+                    // Not offered: the external PSK's ClientHello names the
+                    // SHA-256 suites alone (4.1.4).
+                    err = "hello retry request: cipher suite ${parsed.cipher_suite} was not offered"
+                    alert = ALERT_ILLEGAL_PARAMETER
+                    reading = 0
+                } else if halgo != algo {
                     // The second ClientHello may offer no PSK of another
                     // hash (4.2.11), and without the PSK there is nothing
                     // to resume.
-                    err = "resume: the HelloRetryRequest chose a suite of another hash than the ticket's"
+                    err = "${what}: the HelloRetryRequest chose a suite of another hash than the ticket's"
                     alert = ALERT_HANDSHAKE_FAILURE
                     reading = 0
                 } else {
@@ -2724,7 +2869,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                         bytes.wipe_free(ch)
                         ch = pch2.buf
                         ch_len = pch2.buf_len
-                        patch_binder(ch, pch2.binder_off, pch2.truncated_len, early, algo, hl, tr)
+                        patch_binder(ch, pch2.binder_off, pch2.truncated_len, early, algo, hl, tr, external)
                         transcript_add(tr, bytes.view(ch)[0..ch_len])
                         if ccs_sent == 0 {
                             send_dummy_ccs(sock)
@@ -2755,9 +2900,17 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     // The PSK checks, then the key share: psk_dhe_ke over the group this
     // ClientHello has a share for.
     if err == "" && parsed.psk_accepted != 1 {
-        err = "server rejected the PSK (no resumption)"
+        err = rejected
+        // An external PSK is the only authentication on offer: a server
+        // that did not take it cannot be authenticated, and there is no
+        // certificate fallback (handshake_failure).
+        if external == 1 { alert = ALERT_HANDSHAKE_FAILURE }
     }
     rec_aead, rec_key_len, hash_algo, hash_len, _suite_err = suite_params(parsed.cipher_suite)
+    if err == "" && external == 1 && parsed.cipher_suite == tls13_hs.TLS_AES_256_GCM_SHA384 {
+        err = "server hello: cipher suite ${parsed.cipher_suite} was not offered"
+        alert = ALERT_ILLEGAL_PARAMETER
+    }
     if err == "" && parsed.selected_identity != 0 {
         err = "server hello: selected_identity ${parsed.selected_identity}, but the client offered one PSK"
         alert = ALERT_ILLEGAL_PARAMETER
@@ -2847,11 +3000,11 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     zero_rtt_accepted = 0
     if want_0rtt == 1 && string.equals(ferr, "") == 1 {
         zero_rtt_accepted = flight_has_early_data_ext(fl, fllen)
-        if zero_rtt_accepted == 1 && parsed.cipher_suite != st.cipher_suite {
+        if zero_rtt_accepted == 1 && parsed.cipher_suite != ed_suite {
             // The server that took the early data reads the client under
             // the early traffic keys until EndOfEarlyData (4.5), so the
             // alert goes under them.
-            ferr = "encrypted extensions: early data accepted under cipher suite ${parsed.cipher_suite}, not the ticket's ${st.cipher_suite}"
+            ferr = "encrypted extensions: early data accepted under cipher suite ${parsed.cipher_suite}, not the ticket's ${ed_suite}"
             send_alert_hs(sock, ed_ctx, ALERT_LEVEL_FATAL, ALERT_ILLEGAL_PARAMETER)
         }
     }
@@ -2864,7 +3017,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         // Verify server Finished (no cert auth on resume — the PSK binds identity).
         expected = finished_verify_data_algo(hs_server_secret(keys), bytes.view(th_before_finished)[0..hash_len], hash_algo, hash_len)
         if bytes_equal(expected, bytes.view(server_verify_data)[0..hash_len]) != 1 {
-            result_err = "resume: server Finished MAC verification failed"
+            result_err = "${what}: server Finished MAC verification failed"
             rf_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
             send_alert_hs(sock, rf_ctx, ALERT_LEVEL_FATAL, ALERT_DECRYPT_ERROR)
             tls13_record.free_ctx(rf_ctx)
@@ -2903,7 +3056,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                 rc.early_accepted = zero_rtt_accepted
             } else {
                 tls13_ks.free_secret(c_ap); tls13_ks.free_secret(s_ap); tls13_ks.free_secret(res_master2)
-                result_err = "resume: the client's flight could not be sent"
+                result_err = "${what}: the client's flight could not be sent"
             }
             bytes.wipe_free(cvd); bytes.wipe_free(cfin)
             tls13_record.free_ctx(cli_hs_ctx)
@@ -2933,9 +3086,16 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
 // HMAC(finished key of the binder_key from `early`, Transcript-Hash(what
 // `prefix` holds, then ch's first `truncated_len` bytes)) (RFC 8446
 // 4.2.11.2). `prefix` is empty for a first ClientHello, and holds
-// message_hash and the HelloRetryRequest for a second (#3325).
-fn patch_binder(ch: ptr, binder_off: int, truncated_len: int, early: ptr, algo: string, hl: int, prefix: ptr) {
-    bkey = tls13_ks.binder_key(algo, early)
+// message_hash and the HelloRetryRequest for a second (#3325). `external`
+// 1 keys it with the external PSK's binder key, else the resumption one's.
+fn patch_binder(ch: ptr, binder_off: int, truncated_len: int, early: ptr, algo: string, hl: int, prefix: ptr, external: int) {
+    // "ext binder" for an external PSK, "res binder" for a ticket's (7.1).
+    bkey = null
+    if external == 1 {
+        bkey = tls13_ks.external_binder_key(algo, early)
+    } else {
+        bkey = tls13_ks.binder_key(algo, early)
+    }
     bfk = finished_key_algo(bkey, algo, hl)
     pt = prefix as *Transcript
     t = transcript_new()
