@@ -80,6 +80,7 @@
     <li><a href="schema.html">schema</a></li>
     <li><a href="sed.html">sed</a></li>
     <li><a href="set.html">set</a></li>
+    <li><a href="sharedmap.html">sharedmap</a></li>
     <li><a href="signal.html">signal</a></li>
     <li><a href="snapshot.html">snapshot</a></li>
     <li><a href="sort.html">sort</a></li>
@@ -439,6 +440,11 @@
       <h3>set</h3>
       <p>std.set - unordered set of unique strings Backed by the same hash table as std.map, so lookups are O(1) on average and items are copied on insert (the caller's string lifetime does not matter).</p>
       <span class="count">14 exports</span>
+    </a>
+    <a href="sharedmap.html" class="module-card">
+      <h3>sharedmap</h3>
+      <p>std.sharedmap — the shared map, from Aether: a token-guarded map of strings a host fills with a hosted language's inputs and reads its outputs back from (a guest bridge's aether_map_get / aether_map_put, a sandboxed child through a shared memory block).</p>
+      <span class="count">12 exports</span>
     </a>
     <a href="signal.html" class="module-card">
       <h3>signal</h3>
@@ -2620,6 +2626,18 @@
       <li class="function-item" data-name="items_free"><a href="set.html#items_free"><span class="fn-name">items_free</span><span class="fn-module">set</span></a></li>
       <li class="function-item" data-name="items_size"><a href="set.html#items_size"><span class="fn-name">items_size</span><span class="fn-module">set</span></a></li>
       <li class="function-item" data-name="items_get"><a href="set.html#items_get"><span class="fn-name">items_get</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="new"><a href="sharedmap.html#new"><span class="fn-name">new</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="token"><a href="sharedmap.html#token"><span class="fn-name">token</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="put"><a href="sharedmap.html#put"><span class="fn-name">put</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="get"><a href="sharedmap.html#get"><span class="fn-name">get</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="has"><a href="sharedmap.html#has"><span class="fn-name">has</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="count"><a href="sharedmap.html#count"><span class="fn-name">count</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="key_at"><a href="sharedmap.html#key_at"><span class="fn-name">key_at</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="value_at"><a href="sharedmap.html#value_at"><span class="fn-name">value_at</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="freeze"><a href="sharedmap.html#freeze"><span class="fn-name">freeze</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="free"><a href="sharedmap.html#free"><span class="fn-name">free</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="guest_put"><a href="sharedmap.html#guest_put"><span class="fn-name">guest_put</span><span class="fn-module">sharedmap</span></a></li>
+      <li class="function-item" data-name="MAX_ENTRIES"><a href="sharedmap.html#MAX_ENTRIES"><span class="fn-name">MAX_ENTRIES</span><span class="fn-module">sharedmap</span></a></li>
       <li class="function-item" data-name="SIGHUP"><a href="signal.html#SIGHUP"><span class="fn-name">SIGHUP</span><span class="fn-module">signal</span></a></li>
       <li class="function-item" data-name="SIGINT"><a href="signal.html#SIGINT"><span class="fn-name">SIGINT</span><span class="fn-module">signal</span></a></li>
       <li class="function-item" data-name="SIGQUIT"><a href="signal.html#SIGQUIT"><span class="fn-name">SIGQUIT</span><span class="fn-module">signal</span></a></li>

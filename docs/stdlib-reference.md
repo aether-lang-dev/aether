@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (92 modules)
+## Module index (93 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -77,6 +77,7 @@ header comment is the authoritative description.
 | `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.sed` | FreeBSD's sed as a library: compile a script once, run it over strings, streams or granted files. | 23 | [guide](../std/sed/README.md) · [source](../std/sed/module.ae) |
 | `std.set` | Unordered set of unique strings. | 14 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
+| `std.sharedmap` | Token-guarded map of strings, by length, that a host shares with a guest bridge or a sandboxed child. | 12 | [guide](../std/sharedmap/README.md) · [source](../std/sharedmap/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
 | `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 5 | [guide](../std/snapshot/README.md) · [source](../std/snapshot/module.ae) |
 | `std.sort` | In-place sort and binary search over packed numeric arrays and string arrays, with optional comparators. | 12 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |

@@ -57,11 +57,13 @@ println(output)
 ```aether
 import contrib.host.aether
 import std.sandbox
+import std.sharedmap
 
-// Create shared map with inputs
-map, token = shared_map_new()
-shared_map_put(map, "sku", "WIDGET-1")
-shared_map_put(map, "quantity", "5")
+// Create shared map with inputs (keys and values by their length)
+map = sharedmap.new()
+_p1 = sharedmap.put(map, "sku", "WIDGET-1")
+_p2 = sharedmap.put(map, "quantity", "5")
+token = sharedmap.token(map)
 
 // Run script: it reads inputs via aether_map_get("sku")
 // and writes outputs via aether_map_put("result", "...")
@@ -69,9 +71,9 @@ worker = sandbox.new("worker") { grant_env("AETHER_MAP_SHM") }
 aether.run_script_sandboxed_with_map(worker, "rules/pricing.ae", token)
 
 // Read outputs back
-result = shared_map_get(map, "result")
+result, _found = sharedmap.get(map, "result")
 println("Price: ${result}")
-shared_map_free(map)
+sharedmap.free(map)
 ```
 
 ## Environment variables
@@ -80,7 +82,7 @@ shared_map_free(map)
 |---|---|
 | `AETHER_AE_PATH` | Path to `ae` compiler (default: `ae` on PATH) |
 | `AETHER_SANDBOX_SHM` | Set on child: POSIX shm name for grants |
-| `AETHER_MAP_SHM` | Set on child: shared memory name for map I/O |
+| `AETHER_MAP_SHM` | Set on child: shared memory name for map I/O (layout 2, length-prefixed: `runtime/aether_shared_map.h`) |
 
 The grant list is serialized to POSIX shared memory by
 `aether_spawn_sandboxed()` (in `runtime/aether_spawn_sandboxed.c`)

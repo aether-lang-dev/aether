@@ -33,6 +33,14 @@
 // of the arguments (the arg_* helpers read it without leaving handles
 // behind); they return a handle, 0 for undefined, or quickjs.throw_error(...).
 //
+// Strings cross by their length, both ways: every string parameter below is
+// taken whole (a NUL in a script, a name, a message or JSON is a character,
+// not the end), and every string returned keeps every byte. The one refusal
+// is a filename holding a NUL (the engine takes it as a C string). What comes
+// out is valid UTF-8: a lone surrogate is U+FFFD (to_json keeps it, escaped);
+// bytes going in that are not UTF-8 become U+FFFD. Strings passed in stay the
+// caller's; strings returned are the caller's, new each call.
+//
 // The engine is quickjs-ng's amalgamation, pinned in amalgamation.lock and
 // fetched by scripts/fetch-quickjs-amalgamation.sh (release archives ship
 // it). README.md has the details.
@@ -45,8 +53,10 @@ import std.string
 exports(
     runtime, dispose, last_error, handles, memory_used,
     now_ns, set_deadline_ns, clear_deadline, deadline_ns, set_cancel_cell, set_stop_cell,
+    set_poll_budget, clear_poll_budget, poll_budget,
     interrupted, clear_interrupted,
-    INTERRUPTED_NONE, INTERRUPTED_DEADLINE, INTERRUPTED_CANCEL, INTERRUPTED_STOP,
+    INTERRUPTED_NONE, INTERRUPTED_DEADLINE, INTERRUPTED_CANCEL, INTERRUPTED_STOP, INTERRUPTED_BUDGET,
+    last_exception,
     eval, eval_async, eval_module, call, run_jobs,
     function, throw_error, rethrow, set_global, get_global,
     release, dup, global, new_undefined, new_null, new_bool, new_int, new_float, new_string, new_object, new_array,
@@ -65,16 +75,20 @@ extern qjs_set_deadline_ns(q: ptr, ns: long)
 extern qjs_deadline_ns(q: ptr) -> long
 extern qjs_set_cancel_cell(q: ptr, cell: ptr)
 extern qjs_set_stop_cell(q: ptr, cell: ptr)
+extern qjs_set_poll_budget(q: ptr, polls: long)
+extern qjs_poll_budget(q: ptr) -> long
+extern qjs_last_exception(q: ptr) -> int
 extern qjs_interrupted(q: ptr) -> int
 extern qjs_clear_interrupted(q: ptr)
-extern qjs_error(q: ptr) -> string
+extern qjs_error_data(q: ptr) -> ptr
+extern qjs_error_len(q: ptr) -> int
 extern qjs_handles(q: ptr) -> int
 extern qjs_memory_used(q: ptr) -> long
-extern qjs_eval(q: ptr, code: string, filename: string, flags: int) -> int
+extern qjs_eval(q: ptr, code: @aether string, filename: @aether string, flags: int) -> int
 extern qjs_call(q: ptr, f: int, this_h: int, args: int) -> int
 extern qjs_run_jobs(q: ptr) -> int
-extern qjs_function(q: ptr, name: string, arity: int, cb: @retain fn(@keep ptr, int, int) -> int) -> int
-extern qjs_throw(q: ptr, kind: string, msg: string) -> int
+extern qjs_function(q: ptr, name: @aether string, arity: int, cb: @retain fn(@keep ptr, int, int) -> int) -> int
+extern qjs_throw(q: ptr, kind: @aether string, msg: @aether string) -> int
 extern qjs_rethrow(q: ptr) -> int
 extern qjs_release(q: ptr, h: int)
 extern qjs_dup(q: ptr, h: int) -> int
@@ -84,11 +98,11 @@ extern qjs_null(q: ptr) -> int
 extern qjs_bool(q: ptr, b: int) -> int
 extern qjs_int(q: ptr, n: int) -> int
 extern qjs_float(q: ptr, d: float) -> int
-extern qjs_string(q: ptr, s: string) -> int
+extern qjs_string(q: ptr, s: @aether string) -> int
 extern qjs_object(q: ptr) -> int
 extern qjs_array(q: ptr) -> int
-extern qjs_parse_json(q: ptr, text: string) -> int
-extern qjs_to_json(q: ptr, h: int) -> string
+extern qjs_parse_json(q: ptr, text: @aether string) -> int
+extern qjs_to_json(q: ptr, h: int) -> int
 extern qjs_to_string(q: ptr, h: int) -> int
 extern qjs_scratch(q: ptr) -> ptr
 extern string_new_with_length(data: ptr, length: size_t) -> string @heap
@@ -96,8 +110,8 @@ extern qjs_to_int(q: ptr, h: int) -> int
 extern qjs_to_float(q: ptr, h: int) -> float
 extern qjs_to_bool(q: ptr, h: int) -> int
 extern qjs_type(q: ptr, h: int) -> string
-extern qjs_get(q: ptr, obj: int, name: string) -> int
-extern qjs_set(q: ptr, obj: int, name: string, v: int) -> int
+extern qjs_get(q: ptr, obj: int, name: @aether string) -> int
+extern qjs_set(q: ptr, obj: int, name: @aether string, v: int) -> int
 extern qjs_get_index(q: ptr, obj: int, i: int) -> int
 extern qjs_set_index(q: ptr, obj: int, i: int, v: int) -> int
 extern qjs_length(q: ptr, obj: int) -> int
@@ -126,9 +140,11 @@ dispose(q: ptr) { qjs_free(q) }
 // meets one is stopped with "InternalError: interrupted", which a script
 // cannot catch, whatever entered it: an eval, a call, run_jobs, or a
 // conversion that runs a getter, valueOf or toString (to_string, to_int,
-// get, ...). The runtime stays usable. QuickJS checks every few thousand
-// operations, so a busy loop stops within microseconds of a cell being set;
-// a single long native call (a huge regexp, say) is not interrupted midway.
+// get, ...). The runtime stays usable. QuickJS checks every 10,000 counted
+// steps (set_poll_budget says which), so a busy loop stops within
+// microseconds of a cell being set; a regexp checks on its own counter, so a
+// runaway one is stopped too. One long native call that does not iterate in
+// the engine (a huge String.prototype.repeat, say) is not interrupted midway.
 //
 // Threads: the cells may be set from any thread (Esc, SIGINT, a watchdog);
 // they are read with an acquire load. Everything else here, the deadline
@@ -139,6 +155,7 @@ const INTERRUPTED_NONE = 0
 const INTERRUPTED_DEADLINE = 1
 const INTERRUPTED_CANCEL = 2
 const INTERRUPTED_STOP = 3
+const INTERRUPTED_BUDGET = 4
 
 // Monotonic nanoseconds, the clock set_deadline_ns is on: the same clock as
 // std.os's now_monotonic_ns (CLOCK_MONOTONIC; QueryPerformanceCounter on
@@ -170,18 +187,62 @@ set_cancel_cell(q: ptr, cell: ptr) { qjs_set_cancel_cell(q, cell) }
 // cell is.
 set_stop_cell(q: ptr, cell: ptr) { qjs_set_stop_cell(q, cell) }
 
+// A budget of work rather than time: stop JavaScript after `polls` more of
+// the engine's interrupt polls, in this entry and every later one, until the
+// host sets it again or calls clear_poll_budget. quickjs-ng polls once every
+// 10,000 counted steps, where a step is a JavaScript function call, a jump
+// the interpreter takes or tests (each loop iteration, each `if`), an element
+// step of an iterating built-in (Array.prototype.find, map, sort, ...) or a
+// step of a proxy chain; a regexp polls once every 10,000 of its own
+// backtracking steps. So a budget of n stops JavaScript at its nth poll from
+// now, after between (n - 1) * 10000 and n * 10000 counted steps (exactly
+// (n - 1) * 10000 in a fresh runtime, which polls at its first step), the
+// same on a fast machine and a slow one. Straight-line code with no call or
+// jump is not counted, and is finite. Stopped as for the deadline
+// ("InternalError: interrupted"), reported as INTERRUPTED_BUDGET. 0 means
+// spent (the next poll stops); a negative value is no budget.
+set_poll_budget(q: ptr, polls: long) { qjs_set_poll_budget(q, polls) }
+
+// No poll budget.
+clear_poll_budget(q: ptr) { qjs_set_poll_budget(q, -1 as long) }
+
+// The polls left of the budget: 0 when it is spent, -1 when there is none.
+poll_budget(q: ptr) -> long { return qjs_poll_budget(q) }
+
 // Why JavaScript was first stopped since the runtime was made or
 // clear_interrupted: INTERRUPTED_NONE (0), INTERRUPTED_DEADLINE (1),
-// INTERRUPTED_CANCEL (2) or INTERRUPTED_STOP (3). When several hold at once
-// a cancel is reported over a deadline, and both over a stop. It stays put
-// while the host reads errors and values afterwards.
+// INTERRUPTED_CANCEL (2), INTERRUPTED_STOP (3) or INTERRUPTED_BUDGET (4).
+// When several hold at once a cancel is reported over a deadline, a deadline
+// over a spent budget, and all three over a stop. It stays put while the
+// host reads errors and values afterwards.
 interrupted(q: ptr) -> int { return qjs_interrupted(q) }
 
 // Forget the reason, before reusing the runtime for the next piece of work.
 clear_interrupted(q: ptr) { qjs_clear_interrupted(q) }
 
-// The text of the last exception, with its stack.
-last_error(q: ptr) -> string { return string.copy(qjs_error(q)) }
+// The text of the last failure on this runtime: String(the exception), then,
+// for an Error with a stack, a newline and its stack; or the host's own
+// refusal ("TypeError: not a function"). Every byte is kept (a NUL in a
+// message included), and it is valid UTF-8 (a lone surrogate is U+FFFD). It is
+// for showing a person: a message may itself hold a newline, so the text
+// cannot be split back into message and stack reliably; last_exception gives
+// the value to read them from.
+last_error(q: ptr) -> string { return err_(q) }
+
+// The value the last failure threw (an eval, eval_async, eval_module, call,
+// run_jobs, parse_json, or a conversion that ran JavaScript), as a NEW handle:
+// the caller releases it (or returns it from a host function, which hands it
+// to the engine; dispose frees it otherwise). Read the parts from it:
+// get(q, e, "message"), get(q, e, "name"), get(q, e, "stack") for an Error;
+// a thrown 42 is 42. A later failure does not change a handle already taken,
+// only what the next call returns. 0 when the last failure had no value
+// behind it: the host's own refusal ("TypeError: not a function", a filename
+// holding a NUL) or a heap too full to make the error. last_error is the same
+// failure as text. Runs no JavaScript.
+last_exception(q: ptr) -> int { return qjs_last_exception(q) }
+
+// The last failure's text, by its length (qjs_error_data holds NULs too).
+err_(q: ptr) -> string { return string_new_with_length(qjs_error_data(q), qjs_error_len(q)) }
 
 // Handles held now (0 when everything taken was released).
 handles(q: ptr) -> int { return qjs_handles(q) }
@@ -191,10 +252,12 @@ memory_used(q: ptr) -> long { return qjs_memory_used(q) }
 
 // ---- running code ----
 
-// Run a script; (its value, "") or (0, the exception's text).
+// Run a script, all of `code`'s bytes; (its value, "") or (0, the exception's
+// text). A filename holding a NUL is refused: (0, "TypeError: eval: the
+// filename holds a NUL").
 eval(q: ptr, code: string, filename: string) -> (int, string) {
     h = qjs_eval(q, code, filename, 0)
-    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    if h < 0 { return 0, err_(q) }
     return h, ""
 }
 
@@ -215,7 +278,7 @@ eval(q: ptr, code: string, filename: string) -> (int, string) {
 //   }
 eval_async(q: ptr, code: string, filename: string) -> (int, string) {
     h = qjs_eval(q, code, filename, 4)
-    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    if h < 0 { return 0, err_(q) }
     return h, ""
 }
 
@@ -223,14 +286,14 @@ eval_async(q: ptr, code: string, filename: string) -> (int, string) {
 // (a module has no completion value: eval_async keeps a script's).
 eval_module(q: ptr, code: string, filename: string) -> (int, string) {
     h = qjs_eval(q, code, filename, 1)
-    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    if h < 0 { return 0, err_(q) }
     return h, ""
 }
 
 // Call f with this_h (0: undefined) and the elements of array args (0: none).
 call(q: ptr, f: int, this_h: int, args: int) -> (int, string) {
     h = qjs_call(q, f, this_h, args)
-    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    if h < 0 { return 0, err_(q) }
     return h, ""
 }
 
@@ -239,7 +302,7 @@ call(q: ptr, f: int, this_h: int, args: int) -> (int, string) {
 // that may settle a promise (a host callback, a resolve).
 run_jobs(q: ptr) -> (int, string) {
     n = qjs_run_jobs(q)
-    if n < 0 { return -1, string.copy(qjs_error(q)) }
+    if n < 0 { return -1, err_(q) }
     return n, ""
 }
 
@@ -253,7 +316,8 @@ run_jobs(q: ptr) -> (int, string) {
 function(q: ptr, name: string, arity: int, cb: @keep fn(@keep ptr, int, int) -> int) -> int { return qjs_function(q, name, arity, cb) }
 
 // Throw from a host function: `return quickjs.throw_error(q, "TypeError", "...")`.
-// kind: "TypeError", "RangeError", "SyntaxError", "ReferenceError" or "Error".
+// kind: "TypeError", "RangeError", "SyntaxError", "ReferenceError" or "Error"
+// (anything else is an Error). The message is taken whole, a NUL included.
 throw_error(q: ptr, kind: string, msg: string) -> int { return qjs_throw(q, kind, msg) }
 
 // Throw again, from a host function, the exception a nested call or eval
@@ -265,19 +329,19 @@ throw_error(q: ptr, kind: string, msg: string) -> int { return qjs_throw(q, kind
 // throwing) cannot be caught by the script: quickjs-ng makes them so.
 rethrow(q: ptr) -> int { return qjs_rethrow(q) }
 
-// globalThis[name] = v; v stays held by its handle.
+// globalThis[name] = v (the name by its length); v stays held by its handle.
 set_global(q: ptr, name: string, v: int) {
     g = qjs_global(q)
     _r = qjs_set(q, g, name, v)
     qjs_release(q, g)
 }
 
-// globalThis[name]: (handle, "") or (0, error).
+// globalThis[name] (the name by its length): (handle, "") or (0, error).
 get_global(q: ptr, name: string) -> (int, string) {
     g = qjs_global(q)
     h = qjs_get(q, g, name)
     qjs_release(q, g)
-    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    if h < 0 { return 0, err_(q) }
     return h, ""
 }
 
@@ -291,26 +355,36 @@ new_null(q: ptr) -> int { return qjs_null(q) }
 new_bool(q: ptr, b: int) -> int { return qjs_bool(q, b) }
 new_int(q: ptr, n: int) -> int { return qjs_int(q, n) }
 new_float(q: ptr, d: float) -> int { return qjs_float(q, d) }
+// A JavaScript string of all of s's bytes (UTF-8; a byte that is not is U+FFFD).
 new_string(q: ptr, s: string) -> int { return qjs_string(q, s) }
 new_object(q: ptr) -> int { return qjs_object(q) }
 new_array(q: ptr) -> int { return qjs_array(q) }
 
-// JSON.parse: (handle, "") or (0, error).
+// JSON.parse of all of text's bytes (a NUL in it is a SyntaxError): (handle,
+// "") or (0, error).
 parse_json(q: ptr, text: string) -> (int, string) {
     h = qjs_parse_json(q, text)
-    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    if h < 0 { return 0, err_(q) }
     return h, ""
 }
 
-// JSON.stringify(h) ("" if it has no JSON form).
-to_json(q: ptr, h: int) -> string { return string.copy(qjs_to_json(q, h)) }
+// JSON.stringify(h) ("" if it has no JSON form, or stringifying threw:
+// last_error says which). Every byte is kept; JSON escapes a NUL and a lone
+// surrogate (\u0000, \ud800), so this is the lossless way out for a string
+// holding one.
+to_json(q: ptr, h: int) -> string {
+    n = qjs_to_json(q, h)
+    if n < 0 { return "" }
+    return string_new_with_length(qjs_scratch(q), n)
+}
 
 // String(h): (the string, "") or ("", the exception's text) when the
 // conversion threw (a Symbol, a throwing toString) or was interrupted, so an
-// empty string is told apart from a failure. NUL bytes in the string are kept.
+// empty string is told apart from a failure. NUL bytes in the string are kept;
+// a lone surrogate is U+FFFD, so the result is valid UTF-8.
 to_string(q: ptr, h: int) -> (string, string) {
     n = qjs_to_string(q, h)
-    if n < 0 { return "", string.copy(qjs_error(q)) }
+    if n < 0 { return "", err_(q) }
     return string_new_with_length(qjs_scratch(q), n), ""
 }
 
@@ -324,27 +398,28 @@ type_of(q: ptr, h: int) -> string { return string.copy(qjs_type(q, h)) }
 
 // ---- properties ----
 
-// obj[name]: (handle, "") or (0, error) (a getter can throw).
+// obj[name], the name by its length (a NUL in it is part of the key):
+// (handle, "") or (0, error) (a getter can throw).
 get(q: ptr, obj: int, name: string) -> (int, string) {
     h = qjs_get(q, obj, name)
-    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    if h < 0 { return 0, err_(q) }
     return h, ""
 }
 
 // obj[name] = v (v stays held by its handle): "" or the error.
 set(q: ptr, obj: int, name: string, v: int) -> string {
-    if qjs_set(q, obj, name, v) < 0 { return string.copy(qjs_error(q)) }
+    if qjs_set(q, obj, name, v) < 0 { return err_(q) }
     return ""
 }
 
 get_index(q: ptr, obj: int, i: int) -> (int, string) {
     h = qjs_get_index(q, obj, i)
-    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    if h < 0 { return 0, err_(q) }
     return h, ""
 }
 
 set_index(q: ptr, obj: int, i: int, v: int) -> string {
-    if qjs_set_index(q, obj, i, v) < 0 { return string.copy(qjs_error(q)) }
+    if qjs_set_index(q, obj, i, v) < 0 { return err_(q) }
     return ""
 }
 
@@ -448,6 +523,6 @@ promise_state(q: ptr, h: int) -> int { return qjs_promise_state(q, h) }
 // is not a promise or is still pending. Release the handle.
 promise_result(q: ptr, h: int) -> (int, string) {
     r = qjs_promise_result(q, h)
-    if r < 0 { return 0, string.copy(qjs_error(q)) }
+    if r < 0 { return 0, err_(q) }
     return r, ""
 }

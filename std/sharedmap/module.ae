@@ -1,0 +1,103 @@
+// std.sharedmap — the shared map, from Aether: a token-guarded map of strings
+// a host fills with a hosted language's inputs and reads its outputs back
+// from (a guest bridge's aether_map_get / aether_map_put, a sandboxed child
+// through a shared memory block). runtime/aether_shared_map.h is the C side
+// the bridges use.
+// Import with: import std.sharedmap
+//
+//   import std.sharedmap
+//
+//   main() {
+//       m = sharedmap.new()
+//       _p = sharedmap.put(m, "user", "Alice")
+//       sharedmap.freeze(m)                       // inputs: a guest cannot overwrite them
+//       // ... hand sharedmap.token(m) to a guest, run it ...
+//       v, found = sharedmap.get(m, "reply")
+//       sharedmap.free(m)
+//   }
+//
+// Keys and values are strings by their length: a NUL inside one is stored,
+// read back and carried through the shared memory block whole. Ownership: a
+// map is the caller's, freed with sharedmap.free (which also kills its
+// token); strings passed in stay the caller's (the map copies them); strings
+// returned are new and the caller's. The map holds at most 256 keys: a put
+// of a new key past that is refused (-1), never dropped silently.
+
+import std.string
+
+exports(
+    new, token, put, get, has, count, key_at, value_at, freeze, free,
+    guest_put, MAX_ENTRIES
+)
+
+extern aether_shared_map_new(out_token: ptr) -> ptr
+extern aether_shared_map_token(map: ptr) -> long
+extern aether_shared_map_put(map: ptr, key: string, key_len: size_t, value: string, value_len: size_t) -> int
+extern aether_shared_map_find(map: ptr, key: string, key_len: size_t) -> int
+extern aether_shared_map_count(map: ptr) -> int
+extern aether_shared_map_key_at(map: ptr, i: int, len: ptr) -> ptr
+extern aether_shared_map_value_at(map: ptr, i: int, len: ptr) -> ptr
+extern aether_shared_map_key_len_at(map: ptr, i: int) -> long
+extern aether_shared_map_value_len_at(map: ptr, i: int) -> long
+extern aether_shared_map_freeze_inputs(map: ptr)
+extern aether_shared_map_put_by_token(token: long, key: string, key_len: size_t, value: string, value_len: size_t) -> int
+extern aether_shared_map_free(map: ptr)
+
+// The most keys one map holds.
+const MAX_ENTRIES = 256
+
+// A new, empty map, the caller's to free; null without memory.
+new() -> ptr { return aether_shared_map_new(null) }
+
+// The token a hosted language reaches the map through (for a bridge's
+// *_with_map runner). It dies when the map is freed.
+token(m: ptr) -> long { return aether_shared_map_token(m) }
+
+// m[key] = value, both by their length: 0, or -1 when refused (the map full
+// with a new key, no memory), the map unchanged.
+put(m: ptr, key: string, value: string) -> int {
+    return aether_shared_map_put(m, key, string.length(key), value, string.length(value))
+}
+
+// m[key]: (the value, 1), or ("", 0) when the key is absent.
+get(m: ptr, key: string) -> (string, int) {
+    i = aether_shared_map_find(m, key, string.length(key))
+    if i < 0 { return "", 0 }
+    return string_new_with_length(aether_shared_map_value_at(m, i, null), aether_shared_map_value_len_at(m, i)), 1
+}
+
+// 1 when key is in the map, else 0.
+has(m: ptr, key: string) -> int {
+    if aether_shared_map_find(m, key, string.length(key)) < 0 { return 0 }
+    return 1
+}
+
+// Keys in the map; key_at and value_at read entry i (0 .. count - 1), in the
+// order keys were first put; "" past the end.
+count(m: ptr) -> int { return aether_shared_map_count(m) }
+
+key_at(m: ptr, i: int) -> string {
+    n = aether_shared_map_key_len_at(m, i)
+    if n < 0 { return "" }
+    return string_new_with_length(aether_shared_map_key_at(m, i, null), n)
+}
+
+value_at(m: ptr, i: int) -> string {
+    n = aether_shared_map_value_len_at(m, i)
+    if n < 0 { return "" }
+    return string_new_with_length(aether_shared_map_value_at(m, i, null), n)
+}
+
+// Make every key put so far an input: a guest reads it and cannot overwrite
+// it (guest_put refuses), and a child's shared memory block cannot either.
+freeze(m: ptr) { aether_shared_map_freeze_inputs(m) }
+
+// A put with a guest's rules, through the token, as a host serving a guest
+// in another process applies one: 0, or -1 (a dead token, a frozen input,
+// the map full).
+guest_put(token: long, key: string, value: string) -> int {
+    return aether_shared_map_put_by_token(token, key, string.length(key), value, string.length(value))
+}
+
+// Frees the map and everything in it; its token is dead from now on.
+free(m: ptr) { aether_shared_map_free(m) }

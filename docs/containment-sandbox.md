@@ -2132,10 +2132,11 @@ worker = sandbox.new("worker") {
     grant_fs_read("/etc/*")
 }
 
-// Create map with inputs
-map = shared_map_new(&token)
-shared_map_put(map, "user", "alice")
-shared_map_put(map, "threshold", "42")
+// Create map with inputs (std.sharedmap)
+map = sharedmap.new()
+_p1 = sharedmap.put(map, "user", "alice")
+_p2 = sharedmap.put(map, "threshold", "42")
+token = sharedmap.token(map)
 
 // Run JavaScript, it reads inputs, writes outputs
 js.run_sandboxed_with_map(worker, <<JS
@@ -2147,21 +2148,27 @@ JS
 , token)
 
 // Read outputs
-println(shared_map_get(map, "result"))  // "processed alice"
-println(shared_map_get(map, "count"))   // "1000"
-shared_map_free(map)
+result, _f1 = sharedmap.get(map, "result")
+count, _f2 = sharedmap.get(map, "count")
+println(result)  // "processed alice"
+println(count)   // "1000"
+sharedmap.free(map)
 ```
 
 ### Type convention
 
-All values are strings. Numbers, booleans, and other types are
-encoded as strings by the sender and parsed by the receiver:
+All values are strings, carried by their length: a NUL inside a key
+or a value is a byte like any other, in the map and in the shared
+memory block a sandboxed child reads (layout 2, length-prefixed, with a
+magic and a version; `runtime/aether_shared_map.h`). Numbers, booleans,
+and other types are encoded as strings by the sender and parsed by the
+receiver:
 
 ```aether,fragment
-shared_map_put(map, "threshold", "42")      // int
-shared_map_put(map, "rate", "3.14")         // float
-shared_map_put(map, "enabled", "true")      // bool
-shared_map_put(map, "tags", "a,b,c")        // list (caller's convention)
+_a = sharedmap.put(map, "threshold", "42")      // int
+_b = sharedmap.put(map, "rate", "3.14")         // float
+_c = sharedmap.put(map, "enabled", "true")      // bool
+_d = sharedmap.put(map, "tags", "a,b,c")        // list (caller's convention)
 ```
 
 ```lua

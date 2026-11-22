@@ -1,0 +1,73 @@
+// std.sharedmap: keys and values by their length (a NUL is stored whole),
+// inputs frozen against a guest's put, a full map refusing rather than
+// dropping, and iteration. Every map made is freed.
+
+import std.sharedmap
+import std.spec
+import std.string
+
+extern exit(code: int)
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.sharedmap: strings by their length") {
+        spec.it("stores and reads back a key and a value holding a NUL, whole") callback {
+            m = sharedmap.new()
+            spec.assert_eq(sharedmap.put(m, "k\0x", "a\0b"), 0, "stored")
+            v, found = sharedmap.get(m, "k\0x")
+            spec.assert_eq(found, 1, "found by the whole key")
+            spec.assert_eq(string.length(v), 3, "a, NUL, b")
+            spec.assert_str_eq(v, "a\0b", "the same bytes")
+            _c, cut = sharedmap.get(m, "k")
+            spec.assert_eq(cut, 0, "the key cut at its NUL is another, absent, key")
+            spec.assert_eq(sharedmap.put(m, "k", "short"), 0, "which can be put")
+            spec.assert_eq(sharedmap.count(m), 2, "beside it")
+            spec.assert_str_eq(sharedmap.key_at(m, 0), "k\0x", "key_at, whole")
+            spec.assert_str_eq(sharedmap.value_at(m, 0), "a\0b", "value_at, whole")
+            spec.assert_str_eq(sharedmap.key_at(m, 2), "", "past the end")
+            sharedmap.free(m)
+        }
+        spec.it("an empty key and an empty value are a key and a value") callback {
+            m = sharedmap.new()
+            spec.assert_eq(sharedmap.put(m, "", ""), 0, "stored")
+            v, found = sharedmap.get(m, "")
+            spec.assert_eq(found, 1, "found")
+            spec.assert_str_eq(v, "", "empty")
+            spec.assert_eq(sharedmap.has(m, "absent"), 0, "absent is absent")
+            sharedmap.free(m)
+        }
+    }
+
+    spec.describe(fw, "std.sharedmap: a guest's rules") {
+        spec.it("a frozen input refuses a guest's put; a new key is taken") callback {
+            m = sharedmap.new()
+            _p = sharedmap.put(m, "in\0put", "host")
+            sharedmap.freeze(m)
+            t = sharedmap.token(m)
+            spec.assert_eq(sharedmap.guest_put(t, "in\0put", "guest"), 0 - 1, "an input is read-only to a guest")
+            spec.assert_eq(sharedmap.guest_put(t, "in", "guest"), 0, "the cut name is not that input: a new key")
+            v, _f = sharedmap.get(m, "in\0put")
+            spec.assert_str_eq(v, "host", "the input is as the host put it")
+            spec.assert_eq(sharedmap.put(m, "in\0put", "host2"), 0, "the host itself may change it")
+            sharedmap.free(m)
+            spec.assert_eq(sharedmap.guest_put(t, "late", "x"), 0 - 1, "a freed map's token is dead")
+        }
+        spec.it("a full map refuses a new key, loudly, and still updates an old one") callback {
+            m = sharedmap.new()
+            i = 0
+            ok = 0
+            while i < sharedmap.MAX_ENTRIES {
+                if sharedmap.put(m, "k${i}", "v") == 0 { ok = ok + 1 }
+                i = i + 1
+            }
+            spec.assert_eq(ok, sharedmap.MAX_ENTRIES, "256 keys")
+            spec.assert_eq(sharedmap.put(m, "one more", "v"), 0 - 1, "the 257th is refused")
+            spec.assert_eq(sharedmap.has(m, "one more"), 0, "and not stored")
+            spec.assert_eq(sharedmap.put(m, "k0", "new"), 0, "an existing key still updates")
+            sharedmap.free(m)
+        }
+    }
+
+    exit(spec.run_summary(fw))
+}

@@ -92,16 +92,19 @@ extern stunt_raise_error(vm: ptr, msg: string) -> int
 // --- The shared map (runtime/aether_shared_map.h) -------------------------
 extern stunt_map_new() -> ptr
 extern stunt_map_token(map: ptr) -> long
-extern stunt_map_put(map: ptr, key: string, value: string)
-extern stunt_map_get(map: ptr, key: string) -> string
+// Keys and values by their length (a NUL is kept); put: 0, or -1 refused
+// (the map full). get: the value, a new string, or "" when absent
+// (stunt_map_guest_has tells those apart).
+extern stunt_map_put(map: ptr, key: @aether string, value: @aether string) -> int
+extern stunt_map_get(map: ptr, key: @aether string) -> string @heap
 extern stunt_map_free(map: ptr)
 // Freeze the keys put so far: a guest reads them and cannot overwrite them.
 extern stunt_map_freeze(map: ptr)
 // A guest's get and put, with a guest's rules (a frozen input refuses a put:
 // -1). For a host serving a guest in a child process.
-extern stunt_map_guest_put(map_token: long, key: string, value: string) -> int
-extern stunt_map_guest_get(map_token: long, key: string) -> string
-extern stunt_map_guest_has(map_token: long, key: string) -> int
+extern stunt_map_guest_put(map_token: long, key: @aether string, value: @aether string) -> int
+extern stunt_map_guest_get(map_token: long, key: @aether string) -> string @heap
+extern stunt_map_guest_has(map_token: long, key: @aether string) -> int
 
 // --- The catalogue --------------------------------------------------------
 extern stunt_catalogue_size() -> int

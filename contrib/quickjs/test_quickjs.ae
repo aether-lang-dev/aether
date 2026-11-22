@@ -131,6 +131,28 @@ interrupted_find_leaves_array_whole(method: string, n: int) -> int {
     return bad
 }
 
+// The iteration a `for (;;) i++` loop reached when a budget of `polls`
+// stopped it, in a runtime of its own (so the engine's poll counter starts at
+// the same place every time); -1 if it was not the budget that stopped it.
+steps_under_budget(polls: int) -> int {
+    r = quickjs.runtime(8192, 0)
+    if r == null { return -1 }
+    guard(r)
+    quickjs.set_poll_budget(r, polls as long)
+    _h, _err = quickjs.eval(r, "var i = 0; for (;;) i++", "count.js")
+    got = -1
+    if quickjs.interrupted(r) == quickjs.INTERRUPTED_BUDGET {
+        quickjs.clear_poll_budget(r)
+        v, e = quickjs.get_global(r, "i")
+        if e == "" {
+            got = quickjs.to_int(r, v)
+            quickjs.release(r, v)
+        }
+    }
+    quickjs.dispose(r)
+    return got
+}
+
 main() {
     fw = spec.init()
     q = quickjs.runtime(16384, 0)
@@ -759,6 +781,260 @@ main() {
             spec.assert_eq(quickjs.new_uint8array(q, null, 3), -1, "null data with a count is refused")
             spec.assert_eq(quickjs.new_uint8array(q, null, -1), -1, "so is a negative count")
             _g = eval_string(q, "delete globalThis.fromHost; delete globalThis.det; delete globalThis.sum_bytes; delete globalThis.peek_bytes")
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: strings go in by their length") {
+        spec.it("new_string keeps a NUL") callback {
+            h = quickjs.new_string(q, "a\0b")
+            s, err = quickjs.to_string(q, h)
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(string.length(s), 3, "a, NUL, b")
+            spec.assert_str_eq(s, "a\0b", "the same bytes back")
+            quickjs.set_global(q, "nul_s", h)
+            quickjs.release(q, h)
+            spec.assert_str_eq(eval_string(q, "nul_s.length + ':' + nul_s.charCodeAt(1)"), "3:0", "JavaScript sees three characters, the middle one NUL")
+            _d = eval_string(q, "delete globalThis.nul_s")
+        }
+        spec.it("eval runs a script whose text holds a NUL, all of it") callback {
+            spec.assert_str_eq(eval_string(q, "'a\0b'.length"), "3", "a raw NUL inside a string literal")
+            h, err = quickjs.eval(q, "var RAN = 1;\0 var NOT_RAN = 2;", "y.js")
+            spec.assert_eq(h, 0, "a raw NUL outside a literal is not the end of the script")
+            spec.assert_contains(err, "SyntaxError", "it is a syntax error, as JavaScript says")
+            spec.assert_str_eq(eval_string(q, "typeof RAN"), "undefined", "and nothing before it ran")
+            p, perr = quickjs.eval_async(q, "await 0; 'x\0y'.length", "a.js")
+            spec.assert_str_eq(perr, "", "eval_async takes it too")
+            _n, _je = quickjs.run_jobs(q)
+            r, _re = quickjs.promise_result(q, p)
+            v, _ve = quickjs.get(q, r, "value")
+            spec.assert_eq(quickjs.to_int(q, v), 3, "and runs all of it")
+            quickjs.release(q, v)
+            quickjs.release(q, r)
+            quickjs.release(q, p)
+            m, merr = quickjs.eval_module(q, "globalThis.mod_n = 'p\0q\0r'.length;", "m.js")
+            spec.assert_str_eq(merr, "", "eval_module takes it too")
+            quickjs.release(q, m)
+            _mj, _mje = quickjs.run_jobs(q)
+            spec.assert_str_eq(eval_string(q, "mod_n"), "5", "and runs all of it")
+            _d = eval_string(q, "delete globalThis.mod_n")
+        }
+        spec.it("a filename holding a NUL is refused, not cut") callback {
+            h, err = quickjs.eval(q, "1", "a\0b.js")
+            spec.assert_eq(h, 0, "no value")
+            spec.assert_contains(err, "TypeError: eval: the filename holds a NUL", "refused, saying why")
+        }
+        spec.it("throw_error keeps a NUL in the message, for every kind") callback {
+            f = quickjs.function(q, "thrower", 1, | q: ptr, this_h: int, args: int | {
+                    kind = quickjs.arg_string(q, args, 0)
+                    return quickjs.throw_error(q, kind, "x\0y")
+                })
+            quickjs.set_global(q, "thrower", f)
+            quickjs.release(q, f)
+            code = "['TypeError','RangeError','SyntaxError','ReferenceError','Error'].map(function (k) { try { thrower(k) } catch (e) { return e.name + ':' + e.message.length + ':' + e.message.charCodeAt(1) } }).join(' ')"
+            spec.assert_str_eq(eval_string(q, code), "TypeError:3:0 RangeError:3:0 SyntaxError:3:0 ReferenceError:3:0 Error:3:0", "each kind, its message whole")
+            _d = eval_string(q, "delete globalThis.thrower")
+        }
+        spec.it("parse_json reads the whole text, so a NUL is a parse error") callback {
+            h, err = quickjs.parse_json(q, "1\0garbage")
+            spec.assert_eq(h, 0, "1 then a NUL is not JSON")
+            spec.assert_contains(err, "SyntaxError", "a parse error")
+            h2, err2 = quickjs.parse_json(q, "\"a\\u0000b\"")
+            spec.assert_str_eq(err2, "", "an escaped NUL is JSON")
+            s, _se = quickjs.to_string(q, h2)
+            spec.assert_str_eq(s, "a\0b", "and reads back whole")
+            quickjs.release(q, h2)
+        }
+        spec.it("property names go in by their length: get, set, set_global, get_global") callback {
+            o = quickjs.new_object(q)
+            v = quickjs.new_int(q, 7)
+            spec.assert_str_eq(quickjs.set(q, o, "k\0x", v), "", "set")
+            quickjs.release(q, v)
+            quickjs.set_global(q, "nul_o", o)
+            spec.assert_str_eq(eval_string(q, "Object.keys(nul_o).map(function (k) { return k.length }).join(',') + ':' + ('k' in nul_o)"), "3:false", "one key of three characters, and no key k")
+            g, gerr = quickjs.get(q, o, "k\0x")
+            spec.assert_str_eq(gerr, "", "get")
+            spec.assert_eq(quickjs.to_int(q, g), 7, "reads it")
+            quickjs.release(q, g)
+            k, _ke = quickjs.get(q, o, "k")
+            spec.assert_str_eq(quickjs.type_of(q, k), "undefined", "the cut name is another, absent, property")
+            quickjs.release(q, k)
+            quickjs.release(q, o)
+            n = quickjs.new_int(q, 9)
+            quickjs.set_global(q, "g\0h", n)
+            quickjs.release(q, n)
+            gg, _gge = quickjs.get_global(q, "g\0h")
+            spec.assert_eq(quickjs.to_int(q, gg), 9, "a global by a name with a NUL")
+            quickjs.release(q, gg)
+            spec.assert_str_eq(eval_string(q, "typeof globalThis.g"), "undefined", "not the cut name")
+            _d = eval_string(q, "delete globalThis.nul_o; delete globalThis['g\\0h']")
+        }
+        spec.it("a host function's name keeps a NUL") callback {
+            f = quickjs.function(q, "f\0g", 0, | q: ptr, this_h: int, args: int | { return 0 })
+            quickjs.set_global(q, "named", f)
+            quickjs.release(q, f)
+            spec.assert_str_eq(eval_string(q, "named.name.length"), "3", "the name, whole")
+            _d = eval_string(q, "delete globalThis.named")
+        }
+        spec.it("an error's text keeps a NUL: the eval's error and last_error") callback {
+            h, err = quickjs.eval(q, "throw new Error('x\\0y')", "x.js")
+            spec.assert_eq(h, 0, "no value")
+            spec.assert_true(string.starts_with(err, "Error: x\0y\n"), "the error half of the tuple, whole")
+            spec.assert_true(string.starts_with(quickjs.last_error(q), "Error: x\0y\n"), "last_error, whole")
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: UTF-8 at the boundary") {
+        spec.it("a character outside the BMP crosses both ways as four bytes, one code point") callback {
+            spec.assert_str_eq(eval_string(q, "'\\u{1F600}'"), "\xf0\x9f\x98\x80", "out: UTF-8, four bytes")
+            h = quickjs.new_string(q, "\xf0\x9f\x98\x80")
+            quickjs.set_global(q, "emoji", h)
+            quickjs.release(q, h)
+            spec.assert_str_eq(eval_string(q, "emoji.length + ':' + emoji.codePointAt(0).toString(16)"), "2:1f600", "in: one code point, a surrogate pair")
+            _d = eval_string(q, "delete globalThis.emoji")
+        }
+        spec.it("a lone surrogate reaches the host as U+FFFD; JSON carries it losslessly") callback {
+            spec.assert_str_eq(eval_string(q, "'a\\uD800b'"), "a\xef\xbf\xbdb", "to_string: U+FFFD, valid UTF-8")
+            spec.assert_str_eq(eval_string(q, "'\\uDC00'"), "\xef\xbf\xbd", "a lone low surrogate too")
+            spec.assert_str_eq(eval_string(q, "'\\uD83D\\uDE00'"), "\xf0\x9f\x98\x80", "a pair is one character, not two replacements")
+            h, err = quickjs.eval(q, "throw new Error('\\uD800')", "s.js")
+            spec.assert_eq(h, 0, "no value")
+            spec.assert_true(string.starts_with(err, "Error: \xef\xbf\xbd"), "an error's text too")
+            j, _je = quickjs.eval(q, "'\\uD800'", "j.js")
+            spec.assert_str_eq(quickjs.to_json(q, j), "\"\\ud800\"", "to_json escapes it, so JSON round-trips it")
+            quickjs.release(q, j)
+        }
+        spec.it("bytes that are not UTF-8 go in as U+FFFD, one per bad byte") callback {
+            h = quickjs.new_string(q, "a\xffb")
+            quickjs.set_global(q, "bad8", h)
+            quickjs.release(q, h)
+            spec.assert_str_eq(eval_string(q, "bad8.length + ':' + bad8.charCodeAt(1).toString(16)"), "3:fffd", "U+FFFD for the byte")
+            _d = eval_string(q, "delete globalThis.bad8")
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: a poll budget") {
+        spec.it("stops a runaway script, says INTERRUPTED_BUDGET, and stays spent") callback {
+            r = quickjs.runtime(8192, 0)
+            guard(r)
+            spec.assert_eq(quickjs.poll_budget(r) as int, -1, "a fresh runtime has no budget")
+            quickjs.set_poll_budget(r, 5 as long)
+            spec.assert_eq(quickjs.poll_budget(r) as int, 5, "it reads back")
+            _h, err = quickjs.eval(r, "for (;;) {}", "spin.js")
+            spec.assert_contains(err, "InternalError: interrupted", "stopped")
+            spec.assert_eq(quickjs.interrupted(r), quickjs.INTERRUPTED_BUDGET, "by the budget")
+            spec.assert_eq(quickjs.poll_budget(r) as int, 0, "which is spent")
+            quickjs.clear_interrupted(r)
+            _h2, err2 = quickjs.eval(r, "for (;;) {}", "spin2.js")
+            spec.assert_contains(err2, "interrupted", "a later entry is stopped too: the budget is not reset per entry")
+            spec.assert_eq(quickjs.interrupted(r), quickjs.INTERRUPTED_BUDGET, "by the budget again")
+            quickjs.clear_poll_budget(r)
+            quickjs.clear_interrupted(r)
+            spec.assert_eq(quickjs.poll_budget(r) as int, -1, "cleared")
+            v, err3 = quickjs.eval(r, "var s = 0; for (var i = 0; i < 100000; i++) s += i; s", "ok.js")
+            spec.assert_str_eq(err3, "", "with no budget a loop of 100000 runs")
+            quickjs.release(r, v)
+            quickjs.dispose(r)
+        }
+        spec.it("counts work, not time: the same budget stops a fresh runtime at the same step") callback {
+            a = steps_under_budget(11)
+            b = steps_under_budget(11)
+            c = steps_under_budget(21)
+            spec.assert_true(a > 0, "the loop ran: ${a}")
+            spec.assert_eq(a, b, "two runs of the same budget stop at the same iteration")
+            // `for (;;) i++` takes one counted step (its back jump) per
+            // iteration, and a fresh runtime polls at its first step: a budget
+            // of n is (n - 1) * 10000 iterations exactly, as the module says.
+            spec.assert_eq(a, 100000, "a budget of 11 polls: 10 * 10000 steps")
+            spec.assert_eq(c, 200000, "a budget of 21 polls: 20 * 10000 steps")
+        }
+        spec.it("stops a runaway regexp too: the regexp engine polls on its own counter") callback {
+            r = quickjs.runtime(8192, 0)
+            guard(r)
+            quickjs.set_poll_budget(r, 3 as long)
+            _h, err = quickjs.eval(r, "/(a+)+b/.test('a'.repeat(40))", "re.js")
+            spec.assert_contains(err, "InternalError: interrupted", "stopped inside the match")
+            spec.assert_eq(quickjs.interrupted(r), quickjs.INTERRUPTED_BUDGET, "by the budget")
+            quickjs.dispose(r)
+        }
+        spec.it("spends across entries, and a deadline is reported over it") callback {
+            r = quickjs.runtime(8192, 0)
+            guard(r)
+            quickjs.set_poll_budget(r, 1000 as long)
+            v, _e = quickjs.eval(r, "var s = 0; for (var i = 0; i < 200000; i++) s += i; s", "w.js")
+            quickjs.release(r, v)
+            left = quickjs.poll_budget(r)
+            spec.assert_true(left < 1000 as long && left > 900 as long, "an entry spends polls: ${left} left")
+            v2, _e2 = quickjs.eval(r, "for (var i = 0; i < 200000; i++) s += i; s", "w2.js")
+            quickjs.release(r, v2)
+            spec.assert_true(quickjs.poll_budget(r) < left, "the next entry spends from what is left")
+            quickjs.set_poll_budget(r, 1 as long)
+            quickjs.set_deadline_ns(r, 1 as long)
+            _h, err = quickjs.eval(r, "for (;;) {}", "both.js")
+            spec.assert_contains(err, "interrupted", "stopped")
+            spec.assert_eq(quickjs.interrupted(r), quickjs.INTERRUPTED_DEADLINE, "a passed deadline is reported over a spent budget")
+            quickjs.dispose(r)
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: the exception as a handle") {
+        spec.it("last_exception is the thrown value: message, name and stack apart") callback {
+            _v, err = quickjs.eval(q, "throw new Error('a\\n    at b')", "x.js")
+            spec.assert_true(string.starts_with(err, "Error: a\n    at b\n"), "last_error keeps the convenience text")
+            e = quickjs.last_exception(q)
+            spec.assert_true(e > 0, "a handle")
+            spec.assert_str_eq(quickjs.type_of(q, e), "error", "the Error itself")
+            m, _me = quickjs.get(q, e, "message")
+            ms, _mse = quickjs.to_string(q, m)
+            spec.assert_str_eq(ms, "a\n    at b", "its message whole, newline and all")
+            quickjs.release(q, m)
+            n, _ne = quickjs.get(q, e, "name")
+            ns, _nse = quickjs.to_string(q, n)
+            spec.assert_str_eq(ns, "Error", "its name")
+            quickjs.release(q, n)
+            st, _ste = quickjs.get(q, e, "stack")
+            sts, _stse = quickjs.to_string(q, st)
+            spec.assert_contains(sts, "x.js", "its stack, apart")
+            spec.assert_true(string.contains(sts, "    at b") == 0, "which does not hold the message's text")
+            quickjs.release(q, st)
+            quickjs.release(q, e)
+        }
+        spec.it("a thrown value that is not an Error is itself") callback {
+            _v, _err = quickjs.eval(q, "throw 42", "n.js")
+            e = quickjs.last_exception(q)
+            spec.assert_str_eq(quickjs.type_of(q, e), "number", "a number")
+            spec.assert_eq(quickjs.to_int(q, e), 42, "42")
+            quickjs.release(q, e)
+            _v2, _err2 = quickjs.eval(q, "throw new TypeError('x\\0y')", "t.js")
+            e2 = quickjs.last_exception(q)
+            m, _me = quickjs.get(q, e2, "message")
+            ms, _mse = quickjs.to_string(q, m)
+            spec.assert_str_eq(ms, "x\0y", "a message with a NUL, whole")
+            quickjs.release(q, m)
+            quickjs.release(q, e2)
+        }
+        spec.it("a failure with no value behind it has none: 0") callback {
+            o = quickjs.new_object(q)
+            _r, err = quickjs.call(q, o, 0, 0)
+            spec.assert_contains(err, "TypeError: not a function", "a host refusal")
+            spec.assert_eq(quickjs.last_exception(q), 0, "no value")
+            quickjs.release(q, o)
+        }
+        spec.it("the handle is the caller's: a later failure does not change it") callback {
+            _v1, _e1 = quickjs.eval(q, "throw new RangeError('first')", "1.js")
+            h1 = quickjs.last_exception(q)
+            _v2, _e2 = quickjs.eval(q, "throw new SyntaxError('second')", "2.js")
+            h2 = quickjs.last_exception(q)
+            spec.assert_true(h1 != h2, "two handles")
+            m1, _m1e = quickjs.get(q, h1, "message")
+            s1, _s1e = quickjs.to_string(q, m1)
+            spec.assert_str_eq(s1, "first", "the first still reads its own exception")
+            quickjs.release(q, m1)
+            m2, _m2e = quickjs.get(q, h2, "message")
+            s2, _s2e = quickjs.to_string(q, m2)
+            spec.assert_str_eq(s2, "second", "the second its")
+            quickjs.release(q, m2)
+            quickjs.release(q, h1)
+            quickjs.release(q, h2)
         }
     }
 
