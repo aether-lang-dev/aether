@@ -762,6 +762,21 @@ function's defers) is gone, and with it a free that ran before a user `defer`
 reading the local. Structs, tuples and optionals return the same way; the
 struct return-escape set went with it.
 
+**A return leaves its statement's temporaries too (#3811).** Every return
+with a value computes it into the result first, then gives back every
+temporary its statement made (a module `var`'s read, a call's slice read in
+place, a string an argument's view may point into, a composite argument)
+and runs the defers of every scope it leaves, then returns. A temporary is
+put on the defer stack while the value is emitted, so the drain after the
+value sees each one, whatever made it. A result that is a temporary's own
+value took a reference of its own when it was computed (`return gs` copies
+what the read holds, R3), so the temporary gives back only its own; a slice
+result that views a temporary string is the one exception R3 already names
+(#3570): the string is given back only when the view holds what it views.
+The return used to choose a bare `return v;` when it guessed the value would
+make no temporary, and a value the guess missed (a module slice `var`'s
+read) left its release after the `return`, where it never ran.
+
 **One retain and one drop per type (#2921).** Every owning type has two
 generated functions, used by every place: `_ae_retain_<T>(T*)` takes a
 reference to each part of a bit copy, `_ae_drop_<T>(T*)` releases each part

@@ -666,28 +666,6 @@ static int string_arg_held(CodeGenerator* gen, ASTNode* arg) {
     return string_reads_place(gen, arg);
 }
 
-/* May emitting `e` hold a temporary to the end of its statement, released
- * by the statement's block on its exit (push_scoped_temp_free)? A call
- * returning a view holds an argument it may point into (arg_drain_open), and
- * a string read from a place a call can store into is held for its
- * statement when evaluated ahead (order_hoist_operand, the field handovers).
- * A `return` releases what its value holds before it leaves, which it can
- * only do through its own exit drain; one emitted as a bare `return v;`
- * leaves that release after itself, where it never runs. An over-estimate
- * costs that return one temporary, so every call returning a view and every
- * read of such a place counts, whatever its arguments are. */
-int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e) {
-    if (!e || e->type == AST_CLOSURE) return 0;
-    if (e->type == AST_FUNCTION_CALL && call_returns_view(e) && e->child_count > 0) return 1;
-    /* #3568: a fresh slice read in place, held to the statement's end. */
-    if (e->type == AST_FUNCTION_CALL && annotation_has_marker(e->annotation, "slice_stmt_temp"))
-        return 1;
-    if (string_reads_place(gen, e)) return 1;
-    for (int i = 0; i < e->child_count; i++)
-        if (value_holds_statement_temps(gen, e->children[i])) return 1;
-    return 0;
-}
-
 /* Room for one more hoisted argument: the slots double onto the heap once
  * the wrap's own are full. */
 static void arg_drain_room(ArgDrainWrap* w) {

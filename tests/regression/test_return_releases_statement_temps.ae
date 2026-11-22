@@ -1,0 +1,166 @@
+// Regression (#3811): a `return` computes its value into the result, then
+// gives back every temporary its statement made, then returns, as every
+// other exit of the scope does (R3, leave).
+//
+// A return chose its C shape before emitting its value, by guessing from
+// the value whether it would hold a temporary for its statement. A read of
+// a module-level slice `var` was not in the guess: it takes a reference to
+// the var's buffer into a temporary, and the temporary's release was
+// emitted after a bare `return`, where it never ran. Each call kept one
+// reference, so a buffer the var later let go of was never freed, and
+// inside a `try` the temporary's journal entry stayed behind, naming a
+// slot of a frame that had returned.
+//
+// - the issue's shape (`return gs.len`), with the var given a new buffer
+//   each turn, and the same for a module string `var`, a fresh slice read
+//   in place and a call's view of a fresh string: where the heap count is
+//   exact (mem.heap_in_use_exact), rounds of them leave the heap where
+//   they found it;
+// - a return of the var itself hands the caller a reference of its own,
+//   which outlives the var's next store;
+// - inside a `try`, each such call leaves the journal
+//   (aether_unwind_journal_size) as it found it, and so does a panic after
+//   it.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern aether_unwind_journal_size() -> int
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3811: ${what}")
+        exit(1)
+    }
+}
+
+var gs: int[] = []
+var gname: string = ""
+
+fresh(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = i
+    }
+    return xs
+}
+
+read_slice_var() -> int {
+    return gs.len
+}
+
+read_string_var() -> int {
+    return string.length(gname)
+}
+
+read_fresh_in_place() -> int {
+    return fresh(5)[4]
+}
+
+read_view_of_fresh() -> int {
+    return string.bytes("x${gs.len}").len
+}
+
+reads() -> int {
+    return read_slice_var() + read_string_var() + read_fresh_in_place() + read_view_of_fresh()
+}
+
+// The result is the temporary's own value: the return takes a reference
+// of its own to what it hands over (R3) before the temporary gives its
+// back, so the caller's copy outlives the var's next store.
+whole_slice_var() -> int[] {
+    return gs
+}
+
+whole_string_var() -> string {
+    return gname
+}
+
+aliases() -> int {
+    w = whole_slice_var()
+    s = whole_string_var()
+    n = w.len
+    gs = fresh(2)
+    gname = "other"
+    churn()
+    check(w.len == n && w[n - 1] == n - 1, "a returned var's buffer outlived the var's store")
+    check(string.length(s) > 0, "a returned string var outlived the var's store")
+    return w[0]
+}
+
+churn() -> int {
+    t = 0
+    for r in 0..64 {
+        b = make([]int, 8)
+        for i in 0..8 {
+            b[i] = -7
+        }
+        t = t + b[0]
+    }
+    return t
+}
+
+// Inside a `try`, the journal right after one call: a later call may reuse
+// the returned frame's stack and forget an entry left there by its address,
+// so each is measured alone.
+journal_after(which: int) -> int {
+    before = aether_unwind_journal_size()
+    r = 0
+    if which == 0 {
+        r = read_slice_var()
+    } else if which == 1 {
+        r = read_string_var()
+    } else if which == 2 {
+        r = read_fresh_in_place()
+    } else {
+        r = read_view_of_fresh()
+    }
+    left = aether_unwind_journal_size() - before
+    check(r >= 0, "the value")
+    return left
+}
+
+one_round() -> int {
+    t = 0
+    for r in 0..16 {
+        gs = fresh(8 + r)
+        gname = "name ${r}"
+        t = t + reads() + aliases()
+    }
+    return t
+}
+
+main() {
+    gs = fresh(8)
+    gname = "start"
+    check(reads() == 8 + 5 + 4 + 2, "the values: ${reads()}")
+    try {
+        for which in 0..4 {
+            left = journal_after(which)
+            check(left == 0, "return shape ${which} left ${left} journal entries behind")
+        }
+        check(reads() == 19, "the values in a try")
+    } catch e {
+        check(false, "the reads panicked: ${e}")
+    }
+    before = aether_unwind_journal_size()
+    caught = 0
+    try {
+        r = reads()
+        panic("after ${r}")
+    } catch e {
+        caught = 1
+    }
+    check(caught == 1, "the panic was caught")
+    check(aether_unwind_journal_size() == before, "the journal after the panic")
+    one_round()
+    if mem.heap_in_use_exact() {
+        one_round()
+        grown = mem.steady_growth(|| {
+                one_round()
+            }, 5)
+        check(grown == 0, "a round grew the heap by ${grown} bytes in every window")
+    }
+    println("OK")
+}

@@ -270,7 +270,8 @@ TEST(codegen_builder_int_return_of_builder_casts_pointer) {
         "  return w }\n"
         "main() { println(\"${rec(2) {}}\") }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "return (int)(intptr_t)(_builder);") != NULL);
+    /* #3811: held in the result, which the exit returns. */
+    ASSERT_TRUE(strstr(buf, "int _builder_ret = (int)(intptr_t)(_builder);") != NULL);
     ASSERT_TRUE(strstr(buf, "return _builder;") == NULL);
     free(buf);
 }
@@ -292,7 +293,8 @@ TEST(codegen_ptr_return_of_int_casts_to_pointer) {
         "handle(n: int) -> ptr { return n }\n"
         "main() { }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "return (void*)(intptr_t)(n);") != NULL);
+    /* #3811: held in the result, which the exit returns. */
+    ASSERT_TRUE(strstr(buf, "void* _builder_ret = (void*)(intptr_t)(n);") != NULL);
     free(buf);
 }
 

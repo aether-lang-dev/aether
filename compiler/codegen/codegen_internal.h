@@ -51,7 +51,6 @@ int codegen_output_rewritable(CodeGenerator* gen);
 int codegen_local_unread(CodeGenerator* gen, const char* name);
 /* Does `node` read `name` (an identifier, a call, a dotted call's receiver)? */
 int codegen_tree_reads_name(const ASTNode* node, const char* name);
-int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e);
 void seq_open(CodeGenerator* gen, TempSeq* s);
 void seq_open_ordered(CodeGenerator* gen, TempSeq* s, int typed);
 const char* seq_let(CodeGenerator* gen, TempSeq* s, const char* ctype, const char* prefix);

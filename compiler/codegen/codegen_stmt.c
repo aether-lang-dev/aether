@@ -3627,19 +3627,6 @@ static int call_is_extern(CodeGenerator* gen, ASTNode* call) {
            find_extern_declaration_in_scope(gen, fn) != NULL;
 }
 
-/* May evaluating `e` hold an owning value in a statement temporary (a
- * call, an array or a tuple literal inside it, not `e` itself at `top`),
- * whose block-exit drop a return must run after taking `e`? */
-static int value_holds_temps(CodeGenerator* gen, ASTNode* e, int top) {
-    if (!e || e->type == AST_CLOSURE) return 0;
-    if (!top && (e->type == AST_ARRAY_LITERAL || e->type == AST_FUNCTION_CALL ||
-                 e->type == AST_TUPLE_LITERAL) && own_type_owns(gen, e->node_type))
-        return 1;
-    for (int i = 0; i < e->child_count; i++)
-        if (value_holds_temps(gen, e->children[i], 0)) return 1;
-    return 0;
-}
-
 /* The array value `e` wrapped in the optional `t` of its array type: the
  * optional is a temporary its array is filled into (emit_array_fill), as C
  * initializes no array from an array value. */
@@ -9668,21 +9655,6 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
         print_line(gen, "(void)%s;", new_local);
 }
 
-/* Does a `return`'s value hold a temporary for its statement
- * (value_holds_statement_temps), which its exit drain must release? A value
- * that is a slice may be a view of that very temporary: the drain then
- * releases a temporary string only when every slice result holds what it
- * views (return_slices_guard, #3570), where a slice result used to keep the
- * temporary for good, so `return string.bytes(t), 7` leaked `t`. */
-static int return_holds_statement_temps(CodeGenerator* gen, ASTNode* stmt) {
-    if (!hoist_ready(gen)) return 0;
-    for (int i = 0; i < stmt->child_count; i++) {
-        ASTNode* v = stmt->children[i];
-        if (v && v->type != AST_PRINT_STATEMENT && value_holds_statement_temps(gen, v)) return 1;
-    }
-    return 0;
-}
-
 /* #3570: the C condition that every slice result of the multi-value return
  * `stmt`, written into `ret`'s positions, holds what it views or views
  * nothing (aether_slice_holds_or_empty), or NULL when none is a slice. */
@@ -13329,12 +13301,23 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 }
                 break;
             }
-            // Emit ALL defers before return (unwind entire function)
-            /* And when the value holds a temporary for its statement
-             * (return_holds_statement_temps). */
-            if (gen->defer_count > 0 ||
-                (stmt->child_count == 1 && value_holds_temps(gen, stmt->children[0], 1)) ||
-                return_holds_statement_temps(gen, stmt)) {
+            /* #3811, R3 (leave): a return computes its value into the
+             * result, then gives back every temporary its statement made
+             * and runs every defer of the scopes it leaves, then returns.
+             * A temporary the value makes (a module `var`'s read, a call's
+             * slice read in place, an argument a view may point into, a
+             * composite argument, a string read ahead of a call) is put on
+             * the defer stack while the value is emitted, so the drain
+             * emitted after the value sees each one, whatever made it. The
+             * return used to choose its shape before emitting the value,
+             * from a guess at whether the value would make one; a value the
+             * guess missed (a module slice `var`'s read) was returned bare,
+             * and its release came after the `return`, where it never ran.
+             * A value with no temporary and no defer to run costs nothing:
+             * the result is a local the C compiler returns in place. */
+            int returns_value = stmt->child_count > 0 && stmt->children[0] &&
+                                stmt->children[0]->type != AST_PRINT_STATEMENT;
+            if (gen->defer_count > 0 || returns_value) {
                 // Multi-value return + defer: build a _builder_ret typed
                 // as the function's tuple return so the existing defer-
                 // unwind machinery still applies. Without this branch,
@@ -13424,6 +13407,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "}");
                     break;
                 }
+                /* A void value (`return f()` of a void `f`) has no result to
+                 * hold: it runs as a statement, then the drain. */
+                Type* void_fn = gen->current_func_return_type;
+                if (returns_value && stmt->children[0]->node_type &&
+                    stmt->children[0]->node_type->kind == TYPE_VOID &&
+                    (!void_fn || void_fn->kind == TYPE_VOID || void_fn->kind == TYPE_UNKNOWN)) {
+                    print_indent(gen);
+                    generate_expression(gen, stmt->children[0]);
+                    fprintf(gen->output, ";\n");
+                    emit_all_defers(gen);
+                    emit_try_pops_for_nonlocal_exit(gen);
+                    print_line(gen, "return;");
+                    break;
+                }
                 // For return with value, save to temp first
                 if (stmt->child_count > 0 && stmt->children[0] &&
                     stmt->children[0]->type != AST_PRINT_STATEMENT) {
@@ -13496,111 +13493,28 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "return _builder_ret;");
                     gen->indent_level--;
                     print_line(gen, "}");
-                } else if (stmt->child_count > 0 && stmt->children[0] &&
-                           stmt->children[0]->type == AST_PRINT_STATEMENT) {
-                    emit_all_defers(gen);
-                    generate_statement(gen, stmt->children[0]);
-                    /* Issue #501: drain try frames. */
-                    emit_try_pops_for_nonlocal_exit(gen);
-                    print_line(gen, "return;");
                 } else {
+                    /* A print the return carries is its value: it runs
+                     * first, then the drain, which gives back what it made. */
+                    if (stmt->child_count > 0 && stmt->children[0] &&
+                        stmt->children[0]->type == AST_PRINT_STATEMENT)
+                        generate_statement(gen, stmt->children[0]);
                     emit_all_defers(gen);
                     /* Issue #501: drain try frames. */
                     emit_try_pops_for_nonlocal_exit(gen);
                     print_line(gen, "return;");
                 }
             } else {
-                // No defers - original behavior
+                /* No value and no defer: nothing to give back. A print
+                 * the return carries runs first, and the drain after it
+                 * gives back what it made. */
                 if (stmt->child_count > 0 && stmt->children[0] &&
-                    stmt->children[0]->type == AST_PRINT_STATEMENT) {
+                    stmt->children[0]->type == AST_PRINT_STATEMENT)
                     generate_statement(gen, stmt->children[0]);
-                    /* Issue #501: drain try frames. */
-                    emit_try_pops_for_nonlocal_exit(gen);
-                    print_line(gen, "return;");
-                } else if (stmt->child_count > 1) {
-                    // Multi-value return: return a, b → return (_tuple_X_Y){a, b}
-                    /* Issue #501: drain try frames. Inside a `try` the
-                     * tuple is built first, into `_ae_tr`, and the frames
-                     * popped after, so a panic while building it is the
-                     * try's to catch. */
-                    int in_try = gen->try_frame_depth > 0;
-                    print_indent(gen);
-                    // Use the function's known return type if it's a tuple
-                    // (avoids UNKNOWN types from unresolved identifiers)
-                    Type* tuple = NULL;
-                    int owned = 0;
-                    if (gen->current_func_return_type &&
-                        gen->current_func_return_type->kind == TYPE_TUPLE) {
-                        tuple = gen->current_func_return_type;
-                    } else {
-                        // Fallback: build from expression types
-                        tuple = create_type(TYPE_TUPLE);
-                        tuple->tuple_count = stmt->child_count;
-                        tuple->tuple_types = malloc(stmt->child_count * sizeof(Type*));
-                        for (int j = 0; j < stmt->child_count; j++) {
-                            tuple->tuple_types[j] = stmt->children[j]->node_type
-                                ? clone_type(stmt->children[j]->node_type)
-                                : create_type(TYPE_INT);
-                        }
-                        owned = 1;
-                    }
-                    ensure_tuple_typedef(gen, tuple);
-                    const char* tname = get_c_type(tuple);
-                    /* #2478: the positions are evaluated left to right. */
-                    order_prelude_begin(gen, stmt->children, stmt->child_count, NULL);
-                    int arrays = tuple_return_has_array(gen, stmt);
-                    if (arrays || in_try) fprintf(gen->output, "{ %s _ae_tr = (%s){", tname, tname);
-                    else fprintf(gen->output, "return (%s){", tname);
-                    for (int j = 0; j < stmt->child_count; j++) {
-                        if (j > 0) fprintf(gen->output, ", ");
-                        emit_tuple_return_position(gen, stmt->children[j], j);
-                    }
-                    fprintf(gen->output, "};\n");
-                    if (arrays || in_try) {
-                        if (arrays) emit_tuple_array_fills(gen, stmt, "_ae_tr");
-                        emit_try_pops_for_nonlocal_exit(gen);
-                        print_line(gen, "return _ae_tr; }");
-                    }
-                    if (owned) free_type(tuple);
-                } else if (gen->try_frame_depth > 0 && stmt->child_count > 0) {
-                    /* Inside a `try`: the value is computed inside its frames
-                     * and they are popped after, as the defer-aware path
-                     * does. Popped first, a panic while computing it (an
-                     * index out of range, a call that panics) escaped the
-                     * `try` written around it and ended the process. */
-                    print_line(gen, "{");
-                    gen->indent_level++;
-                    Type* fn_ret = gen->current_func_return_type;
-                    Type* ret_type = (fn_ret && fn_ret->kind != TYPE_VOID &&
-                                      fn_ret->kind != TYPE_UNKNOWN)
-                                     ? fn_ret : stmt->children[0]->node_type;
-                    const char* ret_c_type =
-                        (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
-                        ? c_result_type(ret_type) : "int";
-                    print_indent(gen);
-                    fprintf(gen->output, "%s _builder_ret = ", ret_c_type);
-                    emit_return_value(gen, stmt);
-                    fprintf(gen->output, ";\n");
-                    emit_try_pops_for_nonlocal_exit(gen);
-                    print_line(gen, "return _builder_ret;");
-                    gen->indent_level--;
-                    print_line(gen, "}");
-                } else {
-                    /* Issue #501: drain try frames before the
-                     * print_indent for the `return <expr>;` line. */
-                    emit_try_pops_for_nonlocal_exit(gen);
-                    print_indent(gen);
-                    fprintf(gen->output, "return");
-                    if (stmt->child_count > 0) {
-                        fprintf(gen->output, " ");
-                        /* R3 on the no-defer single-value path,
-                         * as on the defer-aware path.
-                         * #340: emit_return_value also coerces a
-                         * bare value / `none` into a `T?` return. */
-                        emit_return_value(gen, stmt);
-                    }
-                    fprintf(gen->output, ";\n");
-                }
+                emit_all_defers(gen);
+                /* Issue #501: drain try frames. */
+                emit_try_pops_for_nonlocal_exit(gen);
+                print_line(gen, "return;");
             }
             break;
         }
