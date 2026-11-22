@@ -2405,7 +2405,13 @@ $(BUILD_DIR)/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(
 # Format: one path per non-comment, non-empty line. Paths are
 # relative to share/aether/ in the install layout (and to the repo
 # root in the source tree). Lines starting with `#` are comments.
-$(BUILD_DIR)/MANIFEST: Makefile | $(BUILD_DIR)
+#
+# The list depends on the flags as well as on this file: EXTRA_CFLAGS with
+# AETHER_NO_THREADING (make ci-coop's stdlib builds) swaps the multicore
+# scheduler for the cooperative one. Made from the Makefile alone, a ci-coop
+# stopped before its last step left the cooperative scheduler listed, and the
+# next ordinary `make stdlib` kept it: the flags stamp moves with them.
+$(BUILD_DIR)/MANIFEST: Makefile $(BUILD_FLAGS_STAMP) | $(BUILD_DIR)
 	@echo "Generating MANIFEST..."
 	@( \
 	  echo "# Aether MANIFEST — link-suitable C source files for"; \
