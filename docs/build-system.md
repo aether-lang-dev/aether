@@ -1057,6 +1057,15 @@ runtime `--target=wasm` compiles beside the program is the cooperative one
 `share/aether/runtime/coop_runtime_sources.txt`), the list ci-wasm and the
 ESP32 build read too (#3383).
 
+A cooperative runtime has no thread-locals, so by default every task that
+enters it shares one block of execution state. An ESP-IDF host that runs
+Aether on more than one FreeRTOS task installs the FreeRTOS task-context
+port (`aether_freertos_contexts_install`, `runtime/aether_context_freertos.c`)
+and attaches a context to each such task; actors stay on the installing
+task. The contract and the supported pattern for a native network task
+beside an Aether task are in
+[design/task-execution-contexts.md](design/task-execution-contexts.md).
+
 `wasm32-freestanding` is deliberately **not** offered: it ships no libc, so the
 generated C's `#include <stdio.h>` cannot resolve and `--emit=obj` fails
 outright. Its only working mode would be `--emit=csrc`, which emits the same
