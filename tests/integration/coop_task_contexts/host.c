@@ -354,6 +354,7 @@ extern const char* http_response_header_raw(void* r, const char* name);
 extern void     http_response_free(void* r);
 extern int      http_client_pool_idle_count_raw(void);
 extern void*    list_new(void);
+extern void     list_free(void* list);
 extern void     aether_sandbox_push(void* grants);
 extern void     aether_sandbox_pop(void);
 extern int      aether_sandbox_depth(void);
@@ -398,13 +399,15 @@ static void* clock_reader(void* arg) {
 static void* sandbox_holder(void* arg) {
     (void)arg;
     ATTACH();
-    aether_sandbox_push(list_new());   /* an empty grant list: nothing allowed */
+    void* nothing = list_new();         /* an empty grant list: nothing allowed */
+    aether_sandbox_push(nothing);
     if (aether_sandbox_depth() != 1) net_bad("the holder's level is not in force");
     if (aether_sandbox_check_slow("env", "HOME") != 0) net_bad("the holder's level refused nothing");
     atomic_store(&g_held, 1);
     while (!atomic_load(&g_looked)) sleep_ms(1);
     if (aether_sandbox_depth() != 1) net_bad("the holder's level went");
     aether_sandbox_pop();
+    list_free(nothing);
     DETACH();
     return NULL;
 }
