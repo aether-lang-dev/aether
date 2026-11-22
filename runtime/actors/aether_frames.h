@@ -143,6 +143,23 @@ __attribute__((noreturn))
 void aether_context_wrong_task(const char* what);
 /* Wait a little for a lock another task holds: the port's relax, or a pause. */
 void aether_context_relax(void);
+/* A lock for state the tasks of a cooperative build share on purpose (the
+ * HTTP client's connection pool, std.net's address-family memo), where the
+ * thread shim's mutex is a no-op: an atomic flag; a waiter pauses a little,
+ * then relaxes through the port so a holder of lower priority runs, as the
+ * execution accounts' lock does. Hold it for short, non-blocking work. */
+#include <stdatomic.h>
+#include "../utils/aether_compiler.h"
+static inline void aether_context_lock(atomic_flag* f) {
+    unsigned spins = 0;
+    while (atomic_flag_test_and_set_explicit(f, memory_order_acquire)) {
+        if (++spins < 64) AETHER_CPU_PAUSE();
+        else aether_context_relax();
+    }
+}
+static inline void aether_context_unlock(atomic_flag* f) {
+    atomic_flag_clear_explicit(f, memory_order_release);
+}
 /* The actors' own entry points stop a task that does not own them. */
 #define AETHER_ACTORS_TASK_CHECK(what) \
     do { if (__builtin_expect(!aether_context_owns_actors(), 0)) aether_context_wrong_task(what); } while (0)

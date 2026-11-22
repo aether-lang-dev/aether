@@ -1,6 +1,7 @@
 #include "aether_zstd.h"
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/actors/aether_panic.h"   /* AETHER_CONTEXT_CAPS_BUFFER */
 
 #include <stdlib.h>
 #include <string.h>
@@ -24,9 +25,18 @@ static inline const unsigned char* zstd_unwrap_bytes(const char* data, int lengt
 
 /* One-shot output slot, thread-local like std.zlib's. Streaming output lives
  * on the handle; see the header. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(tls_comp)
+#define tls_comp_buf (tls_comp_here()->buf)
+#define tls_comp_cap (tls_comp_here()->cap)
+#define tls_comp_len (tls_comp_here()->len)
+#else
 static _Thread_local unsigned char* tls_comp_buf = NULL;
 static _Thread_local size_t         tls_comp_cap = 0;
 static _Thread_local int            tls_comp_len = 0;
+#endif
 
 static void free_comp_tls(void) {
     if (tls_comp_buf) {

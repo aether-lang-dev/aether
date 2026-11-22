@@ -105,10 +105,17 @@ of their own and do not consult the deadline; `write_some` never waits.
 
 - **`AETHER_NO_THREADING`** (the cooperative scheduler: wasm, `ci-coop`,
   ESP-IDF): the deadline works as everywhere, since it is only the owner's
-  own waits being bounded. A cancel can only come from somewhere that runs
-  while the owner is blocked, and on one thread nothing does, except a POSIX
-  signal handler (`tcp.cancel` is async-signal-safe there). A handle tripped
-  before the call still refuses it at once.
+  own waits being bounded. A cancel has to come from something that runs
+  while the owner is blocked: on a single-task program only a POSIX signal
+  handler does (`tcp.cancel` is async-signal-safe there); with task
+  contexts (`docs/design/task-execution-contexts.md`) another task can, and
+  a native one that never enters Aether may, since a cancel touches only
+  the handle and its descriptor, never execution state. Nothing here is
+  per thread or global: the deadline, the stop and the handle belong to the
+  socket and the handle. `tests/integration/coop_task_contexts` (`tcpstop`)
+  has a native thread cancel an attached task's blocked read, and a
+  deadline end the next, on the cooperative runtime with a context port.
+  A handle tripped before the call still refuses it at once.
 - **`AETHER_NO_NETWORKING`** (wasm32-wasi, Emscripten, and the ESP-IDF
   component build as `tests/esp32/project` sets it today): std.tcp is the
   stub, so `connect_until`, `set_deadline` and `cancel_new` refuse with

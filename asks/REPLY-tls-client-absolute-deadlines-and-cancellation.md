@@ -1,7 +1,9 @@
 # Reply: absolute deadlines and cancellation for TLS clients
 
-Answers `tls-client-absolute-deadlines-and-cancellation.md`. Shipped on
-branch `batch/tls-psk-deadlines` (not yet merged or released). The design,
+Answers `tls-client-absolute-deadlines-and-cancellation.md`. Shipped in
+one PR with the external-PSK client and task execution contexts (branch
+`batch/nov22-esp32-psk-deadlines-task-contexts`, not yet merged or
+released). The design,
 per platform, is `docs/design/tcp-tls-deadlines-and-cancellation.md`.
 
 ## The API
@@ -64,8 +66,10 @@ explicitly; there is no process-wide setting.
   `close_conn` wipes its secrets and closes it at once.
 - **Platforms.** Linux, macOS and iOS, FreeBSD/NetBSD/OpenBSD and Windows are
   implemented, not stubbed (table in the design doc). Builds without threads
-  (`AETHER_NO_THREADING`) keep the deadline; a cancel there can only come
-  before the call or from a signal handler. Builds without networking (the
+  (`AETHER_NO_THREADING`) keep the deadline; a cancel there comes before the
+  call, from a signal handler, or, with task contexts (the PR also answers
+  `esp-idf-cooperative-task-local-execution-state.md`), from another task,
+  a native one included. Builds without networking (the
   ESP-IDF component build today, wasm) refuse with "networking disabled at
   build time". Not bounded: name resolution (checked before and after, not
   interrupted), so the controller's numeric device address is the wholly

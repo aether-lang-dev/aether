@@ -32,6 +32,23 @@
  *   host unattached a thread that enters without attaching (must abort)
  *   host actors     the installing thread asks an actor; then an attached
  *                   thread that does not own the actors tries (must abort)
+ *
+ * Built with -DNET_MODES, against the runtime built with networking and a
+ * filesystem (and the sandbox), the per-thread state of std and the runtime
+ * a cooperative build used to keep in thread-locals, or in plain globals all
+ * tasks shared:
+ *
+ *   host clock      one task pins std.net's millisecond clock and holds it
+ *                   pinned; the other must read a running clock
+ *   host sandbox    one task has a sandbox level in force that grants
+ *                   nothing; the other must see none and be refused nothing
+ *   host pool       two tasks make keep-alive requests at once through the
+ *                   HTTP client's one connection pool, to a local server
+ *                   that echoes each request's path; each response must be
+ *                   the task's own, with its joined duplicate headers
+ *   host tcpstop    a task blocked reading a silent peer under std.tcp's
+ *                   deadline and cancel handle: a native task that never
+ *                   enters Aether cancels it, then a deadline ends the next
  */
 #include <pthread.h>
 #include <sched.h>
@@ -322,12 +339,297 @@ static void* enters_unattached(void* arg) {
 }
 #endif
 
+#if defined(NET_MODES) && !defined(NO_CONTEXT_API)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+extern void     http_clock_pin(void);
+extern void     http_clock_unpin(void);
+extern uint64_t http_clock_ms(void);
+extern void*    http_get_raw(const char* url);
+extern int      http_response_status(void* r);
+extern int      http_response_body_length(void* r);
+extern const char* http_response_header_raw(void* r, const char* name);
+extern void     http_response_free(void* r);
+extern int      http_client_pool_idle_count_raw(void);
+extern void*    list_new(void);
+extern void     aether_sandbox_push(void* grants);
+extern void     aether_sandbox_pop(void);
+extern int      aether_sandbox_depth(void);
+extern int      aether_sandbox_check_slow(const char* category, const char* resource);
+
+/* Two tasks, one holding something of its own while the other looks. */
+static _Atomic int g_held = 0, g_looked = 0;
+static int g_net_bad = 0;
+static char g_net_first[256];
+static void net_bad(const char* what) {
+    if (!g_net_first[0]) snprintf(g_net_first, sizeof g_net_first, "%s", what);
+    g_net_bad++;
+}
+
+static void* clock_holder(void* arg) {
+    (void)arg;
+    ATTACH();
+    http_clock_pin();
+    uint64_t pinned = http_clock_ms();
+    atomic_store(&g_held, 1);
+    while (!atomic_load(&g_looked)) sleep_ms(1);
+    /* Its own pin held while the other read the clock. */
+    if (http_clock_ms() != pinned) net_bad("the holder's pin moved");
+    http_clock_unpin();
+    DETACH();
+    return NULL;
+}
+
+static void* clock_reader(void* arg) {
+    (void)arg;
+    ATTACH();
+    while (!atomic_load(&g_held)) sleep_ms(1);
+    uint64_t a = http_clock_ms();
+    sleep_ms(40);
+    uint64_t b = http_clock_ms();
+    if (b < a + 20) net_bad("the reader read the other task's pinned clock");
+    atomic_store(&g_looked, 1);
+    DETACH();
+    return NULL;
+}
+
+static void* sandbox_holder(void* arg) {
+    (void)arg;
+    ATTACH();
+    aether_sandbox_push(list_new());   /* an empty grant list: nothing allowed */
+    if (aether_sandbox_depth() != 1) net_bad("the holder's level is not in force");
+    if (aether_sandbox_check_slow("env", "HOME") != 0) net_bad("the holder's level refused nothing");
+    atomic_store(&g_held, 1);
+    while (!atomic_load(&g_looked)) sleep_ms(1);
+    if (aether_sandbox_depth() != 1) net_bad("the holder's level went");
+    aether_sandbox_pop();
+    DETACH();
+    return NULL;
+}
+
+static void* sandbox_other(void* arg) {
+    (void)arg;
+    ATTACH();
+    while (!atomic_load(&g_held)) sleep_ms(1);
+    if (aether_sandbox_depth() != 0) net_bad("the other task saw the holder's sandbox level");
+    if (aether_sandbox_check_slow("env", "HOME") != 1) net_bad("the other task was refused by the holder's level");
+    atomic_store(&g_looked, 1);
+    DETACH();
+    return NULL;
+}
+
+static int run_pair(void* (*holder)(void*), void* (*other)(void*), const char* what) {
+    pthread_t a, b;
+    pthread_create(&a, NULL, holder, NULL);
+    pthread_create(&b, NULL, other, NULL);
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    printf("%s: %d wrong\n", what, g_net_bad);
+    if (g_net_first[0]) fprintf(stderr, "first: %s\n", g_net_first);
+    return g_net_bad ? 1 : 0;
+}
+
+/* The local server: keep-alive, each response echoing the request's path. */
+static int g_port;
+
+static void* serve_conn(void* arg) {
+    int fd = (int)(intptr_t)arg;
+    char req[2048];
+    size_t have = 0;
+    for (;;) {
+        char* end;
+        while (!(end = (have ? strstr(req, "\r\n\r\n") : NULL))) {
+            if (have >= sizeof req - 1) { close(fd); return NULL; }
+            ssize_t n = recv(fd, req + have, sizeof req - 1 - have, 0);
+            if (n <= 0) { close(fd); return NULL; }
+            have += (size_t)n;
+            req[have] = '\0';
+        }
+        char path[256] = "?";
+        sscanf(req, "GET %255s", path);
+        char out[512];
+        int n = snprintf(out, sizeof out,
+                         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Pair: a\r\nX-Pair: b\r\n"
+                         "X-Path: %s\r\n\r\nok", path);
+        if (send(fd, out, (size_t)n, 0) != n) { close(fd); return NULL; }
+        size_t used = (size_t)(end + 4 - req);
+        memmove(req, req + used, have - used);
+        have -= used;
+        req[have] = '\0';
+    }
+}
+
+static void* serve(void* arg) {
+    int lfd = (int)(intptr_t)arg;
+    for (;;) {
+        int fd = accept(lfd, NULL, NULL);
+        if (fd < 0) continue;
+        pthread_t t;
+        pthread_create(&t, NULL, serve_conn, (void*)(intptr_t)fd);
+        pthread_detach(t);
+    }
+    return NULL;
+}
+
+static int start_server(void) {
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof a;
+    if (lfd < 0 || bind(lfd, (struct sockaddr*)&a, sizeof a) != 0 || listen(lfd, 64) != 0 ||
+        getsockname(lfd, (struct sockaddr*)&a, &len) != 0)
+        return -1;
+    g_port = ntohs(a.sin_port);
+    pthread_t t;
+    pthread_create(&t, NULL, serve, (void*)(intptr_t)lfd);
+    pthread_detach(t);
+    return 0;
+}
+
+#define POOL_ROUNDS 300
+static _Atomic int g_pool_bad = 0;
+
+static void* pool_task(void* arg) {
+    const char* who = (const char*)arg;
+    ATTACH();
+    for (int i = 0; i < POOL_ROUNDS; i++) {
+        char url[128], path[64];
+        snprintf(path, sizeof path, "/%s/%d", who, i);
+        snprintf(url, sizeof url, "http://127.0.0.1:%d%s", g_port, path);
+        void* r = http_get_raw(url);
+        if (!r || http_response_status(r) != 200 || http_response_body_length(r) != 2 ||
+            strcmp(http_response_header_raw(r, "X-Path"), path) != 0 ||
+            strcmp(http_response_header_raw(r, "X-Pair"), "a, b") != 0) {
+            if (atomic_fetch_add(&g_pool_bad, 1) == 0)
+                fprintf(stderr, "first: %s round %d: status %d, X-Path \"%s\"\n", who, i,
+                        r ? http_response_status(r) : -1, r ? http_response_header_raw(r, "X-Path") : "");
+        }
+        if (r) http_response_free(r);
+    }
+    DETACH();
+    return NULL;
+}
+
+/* std.tcp's deadline and cancel (aether_net.h). */
+typedef struct { void* _0; const char* _1; } HostOpenResult;
+extern HostOpenResult tcp_connect_until_raw(const char* host, int port, long long due_ms, void* cancel);
+extern HostOpenResult tcp_cancel_new_raw(void);
+extern int      tcp_cancel_raw(void* cancel);
+extern void     tcp_cancel_free_raw(void* cancel);
+extern int      tcp_receive_into_raw(void* sock, void* buf, int cap);
+extern int      tcp_stop_raw(void* sock);
+extern int      tcp_close(void* sock);
+extern int64_t  os_now_monotonic_ms_raw(void);   /* the clock due_ms is on */
+#define HOST_TCP_RECV_DEADLINE  (-3)
+#define HOST_TCP_RECV_CANCELLED (-4)
+
+static int g_silent_port;
+static void* silent_serve(void* arg) {
+    int lfd = (int)(intptr_t)arg;
+    for (;;) {
+        int fd = accept(lfd, NULL, NULL);   /* held open, never written to */
+        (void)fd;
+    }
+    return NULL;
+}
+
+static void* g_tcp_cancel;
+static _Atomic int g_tcp_reading = 0;
+
+static void* native_canceller(void* arg) {
+    (void)arg;
+    /* Never attaches: a cancel touches only the handle. */
+    while (!atomic_load(&g_tcp_reading)) sleep_ms(1);
+    sleep_ms(100);
+    (void)tcp_cancel_raw(g_tcp_cancel);
+    return NULL;
+}
+
+static long long now_ms(void) { return (long long)os_now_monotonic_ms_raw(); }
+
+static void* tcp_reader(void* arg) {
+    (void)arg;
+    char buf[16];
+    ATTACH();
+    HostOpenResult r = tcp_connect_until_raw("127.0.0.1", g_silent_port, now_ms() + 20000, g_tcp_cancel);
+    if (!r._0) { net_bad("connect_until under a cancel handle failed"); DETACH(); return NULL; }
+    atomic_store(&g_tcp_reading, 1);
+    long long t0 = now_ms();
+    int n = tcp_receive_into_raw(r._0, buf, sizeof buf);
+    if (n != HOST_TCP_RECV_CANCELLED || tcp_stop_raw(r._0) != 2) net_bad("the native task's cancel did not stop the read");
+    if (now_ms() - t0 > 10000) net_bad("the cancel came late");
+    tcp_close(r._0);
+    r = tcp_connect_until_raw("127.0.0.1", g_silent_port, now_ms() + 300, NULL);
+    if (!r._0) { net_bad("connect_until under a deadline failed"); DETACH(); return NULL; }
+    t0 = now_ms();
+    n = tcp_receive_into_raw(r._0, buf, sizeof buf);
+    long long took = now_ms() - t0;
+    if (n != HOST_TCP_RECV_DEADLINE || tcp_stop_raw(r._0) != 1) net_bad("the deadline did not stop the read");
+    if (took > 5000) net_bad("the deadline came late");
+    tcp_close(r._0);
+    DETACH();
+    return NULL;
+}
+
+static int tcpstop(void) {
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof a;
+    if (lfd < 0 || bind(lfd, (struct sockaddr*)&a, sizeof a) != 0 || listen(lfd, 8) != 0 ||
+        getsockname(lfd, (struct sockaddr*)&a, &len) != 0) {
+        fprintf(stderr, "no local listener\n");
+        return 2;
+    }
+    g_silent_port = ntohs(a.sin_port);
+    pthread_t l, c, t;
+    pthread_create(&l, NULL, silent_serve, (void*)(intptr_t)lfd);
+    pthread_detach(l);
+    HostOpenResult h = tcp_cancel_new_raw();
+    if (!h._0) { fprintf(stderr, "no cancel handle: %s\n", h._1); return 2; }
+    g_tcp_cancel = h._0;
+    pthread_create(&c, NULL, native_canceller, NULL);
+    pthread_create(&t, NULL, tcp_reader, NULL);
+    pthread_join(t, NULL);
+    pthread_join(c, NULL);
+    tcp_cancel_free_raw(g_tcp_cancel);
+    printf("tcpstop: %d wrong\n", g_net_bad);
+    if (g_net_first[0]) fprintf(stderr, "first: %s\n", g_net_first);
+    return g_net_bad ? 1 : 0;
+}
+
+static int pool(void) {
+    if (start_server() != 0) { fprintf(stderr, "no local server\n"); return 2; }
+    pthread_t a, b;
+    pthread_create(&a, NULL, pool_task, (void*)"A");
+    pthread_create(&b, NULL, pool_task, (void*)"B");
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    int idle = http_client_pool_idle_count_raw();
+    printf("pool: %d requests from two tasks, %d wrong, %s idle\n", 2 * POOL_ROUNDS,
+           atomic_load(&g_pool_bad), idle >= 1 && idle <= 8 ? "some" : "a wrong count of");
+    return atomic_load(&g_pool_bad) ? 1 : 0;
+}
+#endif
+
 int main(int argc, char** argv) {
     const char* m = argc > 1 ? argv[1] : "all";
     setvbuf(stdout, NULL, _IONBF, 0);
     install_port();
     if (strcmp(m, "deadline") == 0) { mode_all = 0; mode_deadline = 1; }
     else if (strcmp(m, "caller") == 0) { mode_all = 0; mode_caller = 1; }
+#if defined(NET_MODES) && !defined(NO_CONTEXT_API)
+    else if (strcmp(m, "clock") == 0) return run_pair(clock_holder, clock_reader, "clock");
+    else if (strcmp(m, "sandbox") == 0) return run_pair(sandbox_holder, sandbox_other, "sandbox");
+    else if (strcmp(m, "pool") == 0) return pool();
+    else if (strcmp(m, "tcpstop") == 0) return tcpstop();
+#endif
 #ifndef NO_CONTEXT_API
     else if (strcmp(m, "churn") == 0) return churn();
     else if (strcmp(m, "actors") == 0) {

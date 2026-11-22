@@ -1,4 +1,7 @@
 #include "aether_os.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 #include "../mem/aether_grow.h"
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_sandbox.h"
@@ -466,7 +469,16 @@ static const char* aether_exec_failure(int e) {
  * thread's next call. strerror_r, not strerror: the runtime runs actor,
  * worker and HTTP threads, and strerror's buffer is shared. */
 static const char* aether_os_strerror_msg(const char* what, int err) {
+#if defined(AETHER_NO_THREADING)
+    /* A cooperative build: a block of the calling task's execution context
+     * (aether_context_local), not a thread-local on every task's stack. */
+    static const char msg_key = 0;
+    char (*msg_block)[256] = (char (*)[256])aether_context_local(&msg_key, 256, NULL);
+    if (!msg_block) return what;
+#define msg (*msg_block)
+#else
     static __thread char msg[256];
+#endif
     char buf[128];
     const char* reason = buf;
     buf[0] = '\0';
@@ -478,6 +490,7 @@ static const char* aether_os_strerror_msg(const char* what, int err) {
     snprintf(msg, sizeof msg, "%s: %s", what, reason);
     return msg;
 }
+#undef msg
 
 /* Reap a child whose exec failed. */
 static void aether_reap_failed(pid_t pid) {
@@ -4349,7 +4362,20 @@ static wchar_t* build_environ_block(void* env_list) {
 
 /* Why the last win_prepare_launch on this thread failed, for the error
  * slot callers return. Static strings only. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_context_local), not a thread-local; with no memory for it, one
+ * shared slot (it holds static strings only). */
+static const char g_win_launch_err_key = 0;
+static const char* g_win_launch_err_no_memory;
+static const char** win_launch_err_here(void) {
+    const char** e = (const char**)aether_context_local(&g_win_launch_err_key, sizeof(const char*), NULL);
+    return e ? e : &g_win_launch_err_no_memory;
+}
+#define g_win_launch_err (*win_launch_err_here())
+#else
 static _Thread_local const char* g_win_launch_err = NULL;
+#endif
 
 static const char* win_launch_error(void) {
     return g_win_launch_err ? g_win_launch_err : "spawn failed";

@@ -1,4 +1,7 @@
 #include "aether_cryptography.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_once.h"
@@ -152,9 +155,18 @@ char* cryptography_md5_hex_raw(const char* data, int length) {
 /* Binary (raw-bytes) digest TLS split-accessor (#637). Same shape as
  * the base64-decode TLS slot above. Independent buffer — concurrent
  * b64 + digest work on the same thread don't clobber each other. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(g_dig)
+#define g_dig_buf (g_dig_here()->buf)
+#define g_dig_cap (g_dig_here()->cap)
+#define g_dig_len (g_dig_here()->len)
+#else
 static __thread unsigned char* g_dig_buf = NULL;
 static __thread size_t         g_dig_cap = 0;
 static __thread int            g_dig_len = 0;
+#endif
 
 static void release_dig_locked(void) {
     if (g_dig_buf) aether_caps_free(g_dig_buf, g_dig_cap);
@@ -667,9 +679,18 @@ unsigned char* cryptography_base64_decode_buf(const char* in, size_t in_len,
 /* Independent TLS slot — concurrent random_bytes + digest work on the
  * same thread don't clobber each other. Per-thread so cross-thread
  * draws also don't interfere. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(g_rng)
+#define g_rng_buf (g_rng_here()->buf)
+#define g_rng_cap (g_rng_here()->cap)
+#define g_rng_len (g_rng_here()->len)
+#else
 static __thread unsigned char* g_rng_buf = NULL;
 static __thread size_t         g_rng_cap = 0;
 static __thread int            g_rng_len = 0;
+#endif
 
 static void release_rng_locked(void) {
     if (g_rng_buf) aether_caps_free(g_rng_buf, g_rng_cap);

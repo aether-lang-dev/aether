@@ -1,6 +1,7 @@
 #include "aether_brotli.h"
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/actors/aether_panic.h"   /* AETHER_CONTEXT_CAPS_BUFFER */
 
 #include <stdlib.h>
 #include <string.h>
@@ -25,9 +26,18 @@ static inline const unsigned char* brotli_unwrap_bytes(const char* data, int len
 
 /* One-shot output slot, thread-local like std.zlib's. The STREAMING output
  * lives on the handle instead; see the header. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(tls_comp)
+#define tls_comp_buf (tls_comp_here()->buf)
+#define tls_comp_cap (tls_comp_here()->cap)
+#define tls_comp_len (tls_comp_here()->len)
+#else
 static _Thread_local unsigned char* tls_comp_buf = NULL;
 static _Thread_local size_t         tls_comp_cap = 0;
 static _Thread_local int            tls_comp_len = 0;
+#endif
 
 static void free_comp_tls(void) {
     if (tls_comp_buf) {
@@ -217,9 +227,18 @@ int brotli_decoder_patched(void) {
 }
 
 /* One-shot decompression output slot, thread-local */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a block of the calling task's execution context
+ * (aether_panic.h), not a thread-local on every task's stack. */
+AETHER_CONTEXT_CAPS_BUFFER(tls_decomp)
+#define tls_decomp_buf (tls_decomp_here()->buf)
+#define tls_decomp_cap (tls_decomp_here()->cap)
+#define tls_decomp_len (tls_decomp_here()->len)
+#else
 static _Thread_local unsigned char* tls_decomp_buf = NULL;
 static _Thread_local size_t         tls_decomp_cap = 0;
 static _Thread_local int            tls_decomp_len = 0;
+#endif
 
 static void free_decomp_tls(void) {
     if (tls_decomp_buf) {

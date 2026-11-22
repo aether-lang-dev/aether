@@ -24,6 +24,9 @@
 #include <string.h>
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local */
+#endif
 
 /* Mirror the file-static helpers in aether_string.c so we accept both
  * AetherString* and plain const char* at the FFI boundary, identically
@@ -47,7 +50,23 @@ static inline size_t str_len_local(const void* s) {
 #else
 #  define TLS __thread
 #endif
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build has no thread-locals of Aether's own (ESP-IDF would put
+ * one on every FreeRTOS task's stack): the slot is a block of the calling
+ * task's execution context (aether_context_local, docs/design/
+ * task-execution-contexts.md), and one shared only when there was no memory
+ * for it, as std.json's is. */
+typedef struct { char buf[256]; } RegexErr;
+static const char g_last_error_key = 0;
+static RegexErr g_last_error_no_memory;
+static RegexErr* regex_err_here(void) {
+    RegexErr* e = (RegexErr*)aether_context_local(&g_last_error_key, sizeof(RegexErr), NULL);
+    return e ? e : &g_last_error_no_memory;
+}
+#define g_last_error (regex_err_here()->buf)
+#else
 static TLS char g_last_error[256] = "";
+#endif
 
 static void set_last_error(const char* msg) {
     snprintf(g_last_error, sizeof(g_last_error), "%s", msg ? msg : "");

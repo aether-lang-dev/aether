@@ -3998,6 +3998,13 @@ ci-coop: clean compiler ae
 		cat /tmp/ae_coop_out.txt | head -10; \
 		fail=$$((fail + 1)); \
 	fi; \
+	printf "  %-50s " "no thread-locals in the cooperative stdlib"; \
+	sh tests/integration/coop_task_contexts/check_no_tls.sh $(BUILD_DIR)/libaether.a >/tmp/ae_coop_out.txt 2>&1; \
+	case $$? in \
+		0) echo "PASS"; pass=$$((pass + 1)) ;; \
+		2) echo "SKIP (no readelf)" ;; \
+		*) echo "FAIL"; head -10 /tmp/ae_coop_out.txt; fail=$$((fail + 1)) ;; \
+	esac; \
 	echo ""; \
 	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi

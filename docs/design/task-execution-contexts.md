@@ -113,6 +113,10 @@ generated C preprocesses to the same text but for one added prototype.
 | caller info (identity, attributes, deadline) | `.caller` | per context: one task's identity is never another's |
 | refusing callback's reason, fn-pointer ownership mark, teardown queue, allocation test hook | `.callback_reason`, `.fnptr_owned`, `.teardown_*`, `.alloc_fail_after` | per context |
 | generated builder blocks' stack; std.json's last error; the panic's captured trace | context-local blocks (`aether_context_local`) | per context on a cooperative build; thread-locals on a threaded one |
+| std's per-call results and caches: std.net's joined header, pinned clock, server certificate-refusal text and request-body read; std.fs's stat, statvfs, mount, block-device, read-failure, positional and binary read caches; std.os's and std.ipc's error texts; the proxy's cookie buffer and trace-id state; std.cryptography's digest and random buffers; std.regex's and std.yaml's errors and yaml's emit buffer; the zlib, brotli, zstd and lzf buffers | context-local blocks | per context on a cooperative build, a buffer freed with the context; thread-locals on a threaded one |
+| the sandbox's levels, refusal flag and staged write; the audit reader's cursor | context-local blocks | per context: one task's level never decides another's call |
+| the HTTP client's idle connections; std.net's address-family memo | `aether_http.c`, `aether_net.c` | shared by design (any task may reuse a connection another put back), behind the context lock (`aether_context_lock`: an atomic flag, a waiter relaxing through the port) |
+| the actor-step flags (`g_aether_in_actor_step`, the current actor's id) | `aether_panic.c` | plain globals: only the actors' task runs steps |
 | execution accounts, their table of blocks, the live list | `aether_resource_caps.c` | shared by design, behind the accounts' lock (an atomic flag; a waiter relaxes through the port) |
 | process memory cap and the bytes counted | `g_mem`, `g_use_slots` | shared by design, atomics (one slot without threads) |
 | `aether_caps_slow`, `aether_caps_armed`, the cancel cell list | atomics | shared by design: fast-path flags and the cells tokens point at |
@@ -170,11 +174,29 @@ ESP32-S3 and the ESP32-C3 (`sh tests/esp32/test_esp32_contexts.sh`).
 
 - **Per-task actors.** Above: a scheduler per context is a redesign, not
   part of this.
-- **std.net's thread-locals.** `std/net/aether_http.c` (`tls_joined`, 8 KiB,
-  and `aether_http_pinned_ms`) and `std/net/aether_http_server.c` (`why`,
-  `g_rbr_*`) use raw `_Thread_local`/`__thread`, which on ESP-IDF puts them
-  on every task's stack, and the HTTP client's connection pool takes a
-  mutex that is a no-op without threads. They should become context-local
-  blocks (`aether_context_local`) under `AETHER_NO_THREADING`, as std.json's
-  error did; that is the next step for the HTTPS case. std/fs's
-  thread-locals are not reached on a build without a filesystem.
+- **std.net on ESP-IDF.** std.net does not build for ESP-IDF with
+  networking on (no `poll.h`; lwIP's `tcp_close` clashes with std.tcp's; no
+  `socketpair`), so an ESP-IDF component builds it with
+  `AETHER_NO_NETWORKING`, as stubs. Its state above is per context on every
+  cooperative build that has networking (the host test builds one); the
+  ESP lane checks only that its images hold no thread-local section of
+  Aether's.
+
+## Keeping it so
+
+No file of `std/` or `runtime/` that a cooperative build compiles may keep a
+thread-local (`_Thread_local`, `__thread`, or `AETHER_TLS`, which is empty
+there and so one global for every task) for state that belongs to a call.
+Use a context-local block under `AETHER_NO_THREADING` and keep the
+thread-local otherwise: a small struct and `aether_context_local` as
+std.json's error does, `AETHER_CONTEXT_CAPS_BUFFER` (aether_panic.h) for a
+split accessor's result buffer, or a lock (`aether_context_lock`) for state
+shared on purpose. `coop_task_contexts` reads every object of the
+cooperative list (built with and without networking, and the sandbox) for
+thread-local symbols, and `make ci-coop` reads the whole cooperative
+`libaether.a` (`tests/integration/coop_task_contexts/check_no_tls.sh`); both
+fail on one. The actor-step flags and the actors' own state (`current_core_id`,
+the reply slot and step actor, supervision's links and captures, the send
+buffer) stay `AETHER_TLS`, one global on a cooperative build, because only
+the actors' task touches them; `runtime/memory/aether_arena_optimized.c`'s
+arena pointer is the same but nothing calls that allocator.

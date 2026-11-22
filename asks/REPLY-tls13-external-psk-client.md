@@ -1,8 +1,9 @@
 # Reply: TLS 1.3 external-PSK client
 
-Answers `tls13-external-psk-client.md`. Shipped on branch
-`batch/tls-psk-deadlines` (not yet merged or released; the release that
-carries it is the one to pin).
+Answers `tls13-external-psk-client.md`. Shipped in one PR with the TLS
+deadlines and task execution contexts (branch
+`batch/nov22-esp32-psk-deadlines-task-contexts`, not yet merged or released;
+the release that carries it is the one to pin).
 
 ## The API
 

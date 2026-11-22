@@ -40,6 +40,9 @@
  * stray print or a library reading stdin cannot touch the channel. */
 
 #include "../../runtime/config/aether_optimization_config.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 
 #include <errno.h>
 #include <stdio.h>
@@ -205,7 +208,16 @@ _tuple_int_int_string ipc_stdio_channel_raw(void) {
 /* "<what>: <strerror(err)>" in a per-thread buffer, valid until this
  * thread's next failing call. */
 static const char* ipc_errno_msg(const char* what, int err) {
+#if defined(AETHER_NO_THREADING)
+    /* A cooperative build: a block of the calling task's execution context
+     * (aether_context_local), not a thread-local on every task's stack. */
+    static const char msg_key = 0;
+    char (*msg_block)[256] = (char (*)[256])aether_context_local(&msg_key, 256, NULL);
+    if (!msg_block) return what;
+#define msg (*msg_block)
+#else
     static __thread char msg[256];
+#endif
     char buf[128];
     const char* reason = buf;
     buf[0] = '\0';
@@ -217,6 +229,7 @@ static const char* ipc_errno_msg(const char* what, int err) {
     snprintf(msg, sizeof msg, "%s: %s", what, reason);
     return msg;
 }
+#undef msg
 
 int ipc_parent_channel_raw(void) {
     const char* s = getenv("AETHER_IPC_FD");
@@ -402,10 +415,20 @@ static void ipc_close_all(const int* fds, size_t n) {
 /* "<what>: <text>" in a per-thread buffer of its own, valid until this
  * thread's next call. */
 static const char* ipc_msg(const char* what, const char* text) {
+#if defined(AETHER_NO_THREADING)
+    /* A cooperative build: a block of the calling task's execution context
+     * (aether_context_local), not a thread-local on every task's stack. */
+    static const char msg_key = 0;
+    char (*msg_block)[256] = (char (*)[256])aether_context_local(&msg_key, 256, NULL);
+    if (!msg_block) return what;
+#define msg (*msg_block)
+#else
     static __thread char msg[256];
+#endif
     snprintf(msg, sizeof msg, "%s: %s", what, text);
     return msg;
 }
+#undef msg
 
 /* One recvmsg for recv and recv_fd: up to `max` bytes in *out (malloc'd, the
  * caller's) and the descriptor that came with them in *out_fd, -1 when none.

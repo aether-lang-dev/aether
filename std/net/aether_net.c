@@ -479,7 +479,15 @@ static int net_family_memo_next = 0;
 /* CRITICAL_SECTION, which the thread shim maps pthread_mutex_t to on Windows,
  * has no static initialiser, so the lock is created once through an atomic
  * gate there (the same shape as the HTTP pool's in aether_http.c). */
-#if defined(_WIN32)
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build's mutex is a no-op, and with task contexts several
+ * tasks dial at once: the memo stays shared (what one task learned about a
+ * host serves the next dial to it), under the context lock (aether_frames.h). */
+#include "../../runtime/actors/aether_frames.h"
+static atomic_flag net_family_memo_flag = ATOMIC_FLAG_INIT;
+#define net_family_memo_enter() aether_context_lock(&net_family_memo_flag)
+#define net_family_memo_leave() aether_context_unlock(&net_family_memo_flag)
+#elif defined(_WIN32)
 #include <stdatomic.h>
 static pthread_mutex_t net_family_memo_mutex;
 static atomic_int      net_family_memo_state = 0;   /* 0 unset, 1 setting, 2 ready */
@@ -497,11 +505,15 @@ static pthread_mutex_t* net_family_memo_lock(void) {
 static pthread_mutex_t net_family_memo_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t* net_family_memo_lock(void) { return &net_family_memo_mutex; }
 #endif
+#if !defined(AETHER_NO_THREADING)
+#define net_family_memo_enter() pthread_mutex_lock(net_family_memo_lock())
+#define net_family_memo_leave() pthread_mutex_unlock(net_family_memo_lock())
+#endif
 
 static int net_family_lookup(const char* host, int port) {
     int family = 0;
     if (!host || strlen(host) >= sizeof net_family_memo[0].host) return 0;
-    pthread_mutex_lock(net_family_memo_lock());
+    net_family_memo_enter();
     for (int i = 0; i < NET_FAMILY_MEMO_SLOTS; i++) {
         if (net_family_memo[i].family && net_family_memo[i].port == port &&
             strcmp(net_family_memo[i].host, host) == 0) {
@@ -509,13 +521,13 @@ static int net_family_lookup(const char* host, int port) {
             break;
         }
     }
-    pthread_mutex_unlock(net_family_memo_lock());
+    net_family_memo_leave();
     return family;
 }
 
 void aether_net_note_family(const char* host, int port, int family) {
     if (!host || strlen(host) >= sizeof net_family_memo[0].host) return;
-    pthread_mutex_lock(net_family_memo_lock());
+    net_family_memo_enter();
     int slot = -1;
     for (int i = 0; i < NET_FAMILY_MEMO_SLOTS; i++) {
         if (net_family_memo[i].family && net_family_memo[i].port == port &&
@@ -531,7 +543,7 @@ void aether_net_note_family(const char* host, int port, int family) {
         net_family_memo[slot].port = port;
     }
     net_family_memo[slot].family = family;
-    pthread_mutex_unlock(net_family_memo_lock());
+    net_family_memo_leave();
 }
 
 int aether_net_order(const char* host, int port, AetherAddrList* addrs) {

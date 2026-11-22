@@ -27,6 +27,35 @@
  * header is a separate variable per translation unit, and the thread that pins
  * it is not in the file that reads it. A thread that never pins reads the real
  * clock, which is every thread but a driver. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build has no thread-locals (AETHER_TLS_SHARED is empty there,
+ * which made this one value for every task of a runtime with task contexts):
+ * the pin is a block of the calling task's execution context instead
+ * (aether_context_local, docs/design/task-execution-contexts.md). With no
+ * memory for the block, the task does not pin and reads the real clock. */
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local */
+static const char aether_http_pinned_key = 0;
+static uint64_t* http_pinned_here(void) {
+    return (uint64_t*)aether_context_local(&aether_http_pinned_key, sizeof(uint64_t), NULL);
+}
+
+void http_clock_pin(void) {
+    uint64_t* pin = http_pinned_here();
+    if (!pin) return;
+    uint64_t ms = aether_now_ns() / 1000000ULL;
+    *pin = ms ? ms : 1;
+}
+
+void http_clock_unpin(void) {
+    uint64_t* pin = http_pinned_here();
+    if (pin) *pin = 0;
+}
+
+uint64_t http_clock_ms(void) {
+    uint64_t* pin = http_pinned_here();
+    return pin && *pin ? *pin : (aether_now_ns() / 1000000ULL);
+}
+#else
 AETHER_TLS_SHARED uint64_t aether_http_pinned_ms = 0;
 
 void http_clock_pin(void) {
@@ -42,6 +71,7 @@ uint64_t http_clock_ms(void) {
     return aether_http_pinned_ms ? aether_http_pinned_ms
                                  : (aether_now_ns() / 1000000ULL);
 }
+#endif
 
 /* A header name has to be a token, and a value has to be free of the bytes
  * that end a line.
@@ -760,7 +790,19 @@ typedef struct HttpIdleConn {
 /* CRITICAL_SECTION, which the thread shim maps pthread_mutex_t to on Windows,
  * has no static initialiser, so the lock is created once through an atomic
  * gate there. Same shape as runtime/sandbox/aether_audit.c. */
-#if defined(_WIN32)
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build's mutex is a no-op, and with task contexts several
+ * tasks reach this pool at once. It stays one pool, shared on purpose (a
+ * connection one task put back is the next request's to reuse, whichever
+ * task makes it; a pool per task would hold idle sockets per task), so it
+ * takes a real lock: the context lock, whose waiter relaxes through the
+ * port (aether_frames.h). Held only for list work and the closes of
+ * expired entries, as the mutex is. */
+#include "../../runtime/actors/aether_frames.h"   /* aether_context_lock */
+static atomic_flag http_pool_flag = ATOMIC_FLAG_INIT;
+#define http_pool_enter() aether_context_lock(&http_pool_flag)
+#define http_pool_leave() aether_context_unlock(&http_pool_flag)
+#elif defined(_WIN32)
 static pthread_mutex_t http_pool_mutex;
 static atomic_int      http_pool_mutex_state = 0;   /* 0 unset, 1 setting, 2 ready */
 static pthread_mutex_t* http_pool_lock(void) {
@@ -776,6 +818,10 @@ static pthread_mutex_t* http_pool_lock(void) {
 #else
 static pthread_mutex_t http_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t* http_pool_lock(void) { return &http_pool_mutex; }
+#endif
+#if !defined(AETHER_NO_THREADING)
+#define http_pool_enter() pthread_mutex_lock(http_pool_lock())
+#define http_pool_leave() pthread_mutex_unlock(http_pool_lock())
 #endif
 
 static HttpIdleConn*   http_pool_head = NULL;
@@ -876,7 +922,7 @@ static void http_pool_expire_locked(int64_t now) {
 static int http_pool_take(const char* key, Transport* out) {
     if (!http_pool_enabled) return 0;
     int found = 0;
-    pthread_mutex_lock(http_pool_lock());
+    http_pool_enter();
     http_pool_expire_locked(http_now_ms());
     HttpIdleConn** link = &http_pool_head;
     while (*link) {
@@ -891,7 +937,7 @@ static int http_pool_take(const char* key, Transport* out) {
         }
         link = &c->next;
     }
-    pthread_mutex_unlock(http_pool_lock());
+    http_pool_leave();
     return found;
 }
 
@@ -908,7 +954,7 @@ static void http_pool_put(const char* key, Transport* t) {
         return;
     }
     int64_t now = http_now_ms();
-    pthread_mutex_lock(http_pool_lock());
+    http_pool_enter();
     http_pool_expire_locked(now);
     /* Only whether the per-key cap is REACHED matters, not the exact count, so
      * stop at the cap instead of walking to the end -- and skip the walk
@@ -931,7 +977,7 @@ static void http_pool_put(const char* key, Transport* t) {
         }
     }
     if (http_pool_count >= http_pool_max_idle || per_key >= http_pool_max_per_key) {
-        pthread_mutex_unlock(http_pool_lock());
+        http_pool_leave();
         free(c);
         transport_close(t);
         return;
@@ -954,7 +1000,7 @@ static void http_pool_put(const char* key, Transport* t) {
      * only deadline there is. Lowering it here is what re-arms the sweep. */
     if (c->idle_since_ms + http_pool_idle_ms < http_pool_next_expiry_ms)
         http_pool_next_expiry_ms = c->idle_since_ms + http_pool_idle_ms;
-    pthread_mutex_unlock(http_pool_lock());
+    http_pool_leave();
     /* The pool entry owns everything the Transport did now, so the
      * caller's copy must stop pointing at any of it: a later
      * transport_close on the caller's struct would otherwise close the
@@ -972,12 +1018,12 @@ static void http_pool_put(const char* key, Transport* t) {
 
 /* Close and drop every idle connection. */
 void http_client_pool_clear_raw(void) {
-    pthread_mutex_lock(http_pool_lock());
+    http_pool_enter();
     HttpIdleConn* c = http_pool_head;
     http_pool_head = NULL;
     http_pool_count = 0;
     http_pool_next_expiry_ms = INT64_MAX;   /* nothing left to expire */
-    pthread_mutex_unlock(http_pool_lock());
+    http_pool_leave();
     while (c) {
         HttpIdleConn* next = c->next;
         transport_close(&c->t);
@@ -1011,10 +1057,10 @@ void http_client_pool_clear_raw(void) {
 /* The pool's current caps, for reporting and for tests that need to know
  * whether mounting a proxy resized it. */
 void http_client_pool_caps_raw(int* max_idle, int* max_per_host) {
-    pthread_mutex_lock(http_pool_lock());
+    http_pool_enter();
     if (max_idle)     *max_idle = http_pool_max_idle;
     if (max_per_host) *max_per_host = http_pool_max_per_key;
-    pthread_mutex_unlock(http_pool_lock());
+    http_pool_leave();
 }
 
 void http_client_pool_size_for_proxy(void) {
@@ -1029,7 +1075,7 @@ void http_client_pool_size_for_proxy(void) {
     if (want < 64)   want = 64;
     if (want > 1024) want = 1024;
 
-    pthread_mutex_lock(http_pool_lock());
+    http_pool_enter();
     if (http_pool_enabled) {
         if (http_pool_max_idle < want)    http_pool_max_idle = want;
         /* One backend may legitimately take the whole pool: a proxy with a
@@ -1037,14 +1083,14 @@ void http_client_pool_size_for_proxy(void) {
          * total would reintroduce exactly the churn this removes. */
         if (http_pool_max_per_key < want) http_pool_max_per_key = want;
     }
-    pthread_mutex_unlock(http_pool_lock());
+    http_pool_leave();
 }
 
 /* Reconfigure the pool. `max_idle` 0 turns reuse off (and clears what is
  * held); negative values leave that setting untouched. */
 const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
                                            int64_t idle_ns) {
-    pthread_mutex_lock(http_pool_lock());
+    http_pool_enter();
     if (max_idle >= 0) {
         http_pool_max_idle = max_idle;
         http_pool_enabled = max_idle > 0;
@@ -1059,7 +1105,7 @@ const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
          * operation to sweep and recompute it. */
         http_pool_next_expiry_ms = INT64_MIN;
     }
-    pthread_mutex_unlock(http_pool_lock());
+    http_pool_leave();
     if (!http_pool_enabled) http_client_pool_clear_raw();
     return "";
 }
@@ -1077,9 +1123,9 @@ long long http_client_rx_buffer_allocs_raw(void) {
 }
 
 int http_client_pool_idle_count_raw(void) {
-    pthread_mutex_lock(http_pool_lock());
+    http_pool_enter();
     int n = http_pool_count;
-    pthread_mutex_unlock(http_pool_lock());
+    http_pool_leave();
     return n;
 }
 
@@ -5446,6 +5492,9 @@ typedef struct HttpHeaderCache {
     struct HttpHeaderCache* next;
 } HttpHeaderCache;
 
+/* The longest joined value a lookup returns; the rest is dropped. */
+#define HTTP_JOINED_HEADER_MAX 8192
+
 const char* http_response_header_raw(HttpResponse* response, const char* name) {
     if (!response || !name || !*name) return "";
     if (!response->headers) return "";
@@ -5460,7 +5509,19 @@ const char* http_response_header_raw(HttpResponse* response, const char* name) {
      *
      * Joining duplicate-named headers into ", "-separated value is
      * done in a thread-local accumulator below. */
-    static _Thread_local char tls_joined[8192];
+#if defined(AETHER_NO_THREADING)
+    /* A cooperative build: a raw thread-local would sit on every FreeRTOS
+     * task's stack under ESP-IDF, so the accumulator is a block of the
+     * calling task's execution context (aether_context_local), made at its
+     * first header lookup. */
+    static const char tls_joined_key = 0;
+    char* tls_joined = (char*)aether_context_local(&tls_joined_key, HTTP_JOINED_HEADER_MAX, NULL);
+    if (!tls_joined) aether_panic("http: no memory for this task's joined header value");
+#define tls_joined_size ((size_t)HTTP_JOINED_HEADER_MAX)
+#else
+    static _Thread_local char tls_joined[HTTP_JOINED_HEADER_MAX];
+#define tls_joined_size sizeof(tls_joined)
+#endif
     tls_joined[0] = '\0';
     size_t joined_len = 0;
 
@@ -5496,11 +5557,11 @@ const char* http_response_header_raw(HttpResponse* response, const char* name) {
                     size_t vlen = (size_t)((p + line_len) - val);
                     while (vlen > 0 && (*val == ' ' || *val == '\t')) { val++; vlen--; }
                     /* Append to the joined accumulator. */
-                    if (joined_len > 0 && joined_len + 2 < sizeof(tls_joined)) {
+                    if (joined_len > 0 && joined_len + 2 < tls_joined_size) {
                         memcpy(tls_joined + joined_len, ", ", 2);
                         joined_len += 2;
                     }
-                    if (joined_len + vlen < sizeof(tls_joined)) {
+                    if (joined_len + vlen < tls_joined_size) {
                         memcpy(tls_joined + joined_len, val, vlen);
                         joined_len += vlen;
                         tls_joined[joined_len] = '\0';
@@ -5515,6 +5576,7 @@ const char* http_response_header_raw(HttpResponse* response, const char* name) {
 
     return tls_joined;
 }
+#undef tls_joined_size
 
 const char* http_response_effective_url_raw(HttpResponse* response) {
     if (!response || !response->effective_url) return "";

@@ -6,6 +6,9 @@
 #include "aether_http_pool.h"
 #include "aether_http_park.h"
 #include "aether_http_evloop.h"
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_panic.h"   /* aether_context_local: a cooperative build's per-task state */
+#endif
 #include "aether_http_internal.h"
 #include "../../runtime/utils/aether_cpu_available.h"
 #if !defined(_WIN32)
@@ -3132,6 +3135,9 @@ void* http_server_tls_ctx_ref(HttpServer* server) {
 #endif
 }
 
+/* The longest reason http_server_set_tls_raw returns for a file it cannot read. */
+#define HTTP_TLS_WHY_MAX 600
+
 const char* http_server_set_tls_raw(HttpServer* server,
                                     const char* cert_path,
                                     const char* key_path) {
@@ -3141,10 +3147,18 @@ const char* http_server_set_tls_raw(HttpServer* server,
 
     /* Read here, for both backends, so they say the same about a file they
      * cannot read; the pure server once read both at every connection. */
-    static _Thread_local char why[600];
-    char* cert = tls_read_pem_file(cert_path, "certificate", why, sizeof why);
+#if defined(AETHER_NO_THREADING)
+    /* A cooperative build: a block of the calling task's execution context
+     * (aether_context_local), not a thread-local on every task's stack. */
+    static const char why_key = 0;
+    char* why = (char*)aether_context_local(&why_key, HTTP_TLS_WHY_MAX, NULL);
+    if (!why) return "no memory for the reason a certificate or key was refused";
+#else
+    static _Thread_local char why[HTTP_TLS_WHY_MAX];
+#endif
+    char* cert = tls_read_pem_file(cert_path, "certificate", why, HTTP_TLS_WHY_MAX);
     if (!cert) return why;
-    char* key = tls_read_pem_file(key_path, "private key", why, sizeof why);
+    char* key = tls_read_pem_file(key_path, "private key", why, HTTP_TLS_WHY_MAX);
     if (!key) {
         tls_text_wipe_free(cert);
         return why;
@@ -10499,9 +10513,30 @@ int http_request_body_complete(HttpRequest* req) {
  *     fbs-core port measured (N concurrent M-byte uploads no longer hold
  *     N×M live). The canonical loop is offset-forward, which satisfies
  *     the sequential constraint naturally. */
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build: a raw thread-local would sit on every FreeRTOS task's
+ * stack under ESP-IDF, so the three are a block of the calling task's
+ * execution context (aether_context_local, docs/design/
+ * task-execution-contexts.md), whose buffer is given back with the context. */
+typedef struct { unsigned char* buf; size_t cap; int len; } HttpRbr;
+static const char g_rbr_key = 0;
+static void http_rbr_release(void* p) {
+    HttpRbr* r = (HttpRbr*)p;
+    if (r->buf) aether_caps_free(r->buf, r->cap);
+}
+static HttpRbr* http_rbr_here(void) {
+    HttpRbr* r = (HttpRbr*)aether_context_local(&g_rbr_key, sizeof(HttpRbr), http_rbr_release);
+    if (!r) aether_panic("http: no memory for this task's request body read");
+    return r;
+}
+#define g_rbr_buf (http_rbr_here()->buf)
+#define g_rbr_cap (http_rbr_here()->cap)
+#define g_rbr_len (http_rbr_here()->len)
+#else
 static __thread unsigned char* g_rbr_buf = NULL;
 static __thread size_t         g_rbr_cap = 0;
 static __thread int            g_rbr_len = 0;
+#endif
 
 static void release_rbr_locked(void) {
     /* Cap-aware (#343): every g_rbr_buf allocation records its exact

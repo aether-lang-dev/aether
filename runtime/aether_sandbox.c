@@ -85,7 +85,27 @@ typedef struct AetherSandboxRendezvous {
 } AetherSandboxRendezvous;
 
 static atomic_int g_threads;
+#if defined(AETHER_NO_THREADING)
+/* A cooperative build has no thread-locals: AETHER_TLS_SHARED is empty there,
+ * which made this file's per-thread state one block for every task of a
+ * runtime with task contexts, so one task's levels were checked against
+ * another's calls. Each is a block of the calling task's execution context
+ * instead (aether_context_local, docs/design/task-execution-contexts.md).
+ * With no memory for one the program stops: the sandbox does not decide a
+ * call against state that is not the caller's. */
+static void* sandbox_task_block(const void* key, size_t size) {
+    void* b = aether_context_local(key, size, NULL);
+    if (!b) {
+        fprintf(stderr, "aether: no memory for this task's sandbox state\n");
+        abort();
+    }
+    return b;
+}
+static const char t_total_key = 0;
+#define t_total (*(int*)sandbox_task_block(&t_total_key, sizeof(int)))
+#else
 static AETHER_TLS_SHARED int t_total;
+#endif
 
 /* A step of this copy looks at the levels' count from now on (the step bit
  * of its one word, aether_step_barrier.h): levels may be in force where its
@@ -298,7 +318,12 @@ typedef struct {
     int pending_site;
 } SandboxThread;
 
+#if defined(AETHER_NO_THREADING)
+static const char t_sbx_key = 0;
+#define t_sbx (*(SandboxThread*)sandbox_task_block(&t_sbx_key, sizeof(SandboxThread)))
+#else
 static AETHER_TLS_SHARED SandboxThread t_sbx;
+#endif
 
 static void push_level(SandboxThread* t, void* grants, const void* image, int site, int skip_to) {
     const AetherSandboxRendezvous* r = rv();
@@ -548,7 +573,12 @@ char* aether_sandbox_grant_pattern(const char* category, const char* pattern) {
 
 /* Whether this thread's last checked call was refused by the sandbox,
  * for std to tell a refusal from the system's own EACCES. */
+#if defined(AETHER_NO_THREADING)
+static const char t_fs_refused_key = 0;
+#define t_fs_refused (*(int*)sandbox_task_block(&t_fs_refused_key, sizeof(int)))
+#else
 static AETHER_TLS_SHARED int t_fs_refused;
+#endif
 
 int aether_sandbox_refused(void) {
     return t_fs_refused;
@@ -2329,8 +2359,15 @@ int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char
  * one open: the LD_PRELOAD library asks aether_sandbox_staged_for and checks
  * the file instead of the temporary's own name (libaether_sandbox_preload.c,
  * staged_write_target). Borrowed: the caller keeps both alive while set. */
+#if defined(AETHER_NO_THREADING)
+typedef struct { const char* tmp; const char* path; } SandboxStage;
+static const char t_stage_key = 0;
+#define t_stage_tmp  (((SandboxStage*)sandbox_task_block(&t_stage_key, sizeof(SandboxStage)))->tmp)
+#define t_stage_path (((SandboxStage*)sandbox_task_block(&t_stage_key, sizeof(SandboxStage)))->path)
+#else
 static AETHER_TLS_SHARED const char* t_stage_tmp;
 static AETHER_TLS_SHARED const char* t_stage_path;
+#endif
 
 void aether_sandbox_stage(const char* tmp, const char* path) {
     t_stage_tmp = tmp && path ? tmp : NULL;
