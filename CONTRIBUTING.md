@@ -412,7 +412,10 @@ script that never runs under MSYS2, marks that line `kill-ok: <why>`.
 Every test the sweep runs has a time limit: 120 s for a `.ae` test
 (`AE_TEST_TIMEOUT`) and 600 s for its build (`AE_TEST_BUILD_TIMEOUT`), 420 s
 for a shell driver (`AE_SH_TEST_TIMEOUT`), and each `make ci` stage its own
-(tests/scripts/run_stage.sh). A test past its limit is ended with everything
+(tests/scripts/run_stage.sh). A shell driver whose own work is long by nature
+raises its limit with a `# sweep-timeout: SECONDS` line in its first 40 lines
+(never lowering it below the default; see cross_ios, which builds the runtime
+three times), sized for the slowest runner and not the typical one. A test past its limit is ended with everything
 it started and fails as `[TIMEOUT]`. The runners take the limit from
 `tests/lib/sweep_timeout.sh`: `timeout(1)` (or `gtimeout`) on Linux and macOS,
 and on Windows a job object around the test, which a native watchdog
