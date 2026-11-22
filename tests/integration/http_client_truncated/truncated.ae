@@ -42,6 +42,7 @@ main() {
         exit(1)
     }
     body = string.concat(client.response_body(resp), "")
+    client.response_free(resp)
     if string.equals(body, "0123456789") == 0 {
         println("FAIL: close-framed body was '${body}'")
         exit(1)

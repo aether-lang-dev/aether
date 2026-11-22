@@ -137,6 +137,7 @@ main() {
         gi = gi + 1
     }
 
+    json.free(root)
     println("wycheproof rsaes_pkcs1_2048: ${passed} valid ok, ${rejected_invalid} invalid rejected, ${failed} failed")
     if failed > 0 { exit(1) }
     println("ALL PASS")
