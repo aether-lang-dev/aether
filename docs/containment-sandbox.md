@@ -951,8 +951,13 @@ socket: it spawns with `spawn_socket`, mounts the functions the script may
 call, answers each call (a file as an open descriptor), and bounds every
 exchange with a deadline, then a `CANCEL`, then a kill. `std.guest.child`
 is an Aether worker's side, and enters `sandbox.enforce` with no grants
-before the script's first step. Its README (`std/guest/README.md`) has the
-protocol.
+before the script's first step. A script may also leave functions behind
+for the host to call later (`READY`, then `INVOKE` and `RETURN` or
+`RAISE`, strictly alternating, each exchange under the same deadline);
+an invoked function reaches only what the host mounted, so being callable
+gives the child no new capability. Its README (`std/guest/README.md`) has
+the protocol, and `docs/design/guest-host-calls-guest.md` the design of
+the host-calls-guest direction.
 
 ### Starting a foreign interpreter: `grant_runtime`
 

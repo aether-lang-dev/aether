@@ -1,0 +1,355 @@
+// The host calls the guest, end to end: std.guest driving
+// tests/integration/std_guest/stub_guest.ae (std.guest.child) in a real
+// child, over a real socket, with real deadlines, through the verbs of
+// docs/design/guest-host-calls-guest.md: READY, INVOKE, RETURN, RAISE and
+// END. On Linux the child is spawned with sandbox.spawn_socket (Landlock,
+// seccomp, the preload); elsewhere it runs uncontained, asked for by name,
+// still locked down by the guest's own sandbox.enforce.
+//
+//   invoke_host <stub_guest> <scratch dir>   (test_std_guest_invoke.sh builds both)
+//
+// The verb is a general call, and these specs use it as one: the JSON
+// value grid passed directly as arguments and values, both ways, and the
+// safety rows. One spec is the notify-then-fetch pattern: the guest starts
+// a lookup through a host function that answers with a transaction id at
+// once, and serves; later the host invokes it with that id, and the guest
+// fetches the details through another host function, which the host may
+// refuse. It shows an export calling mounted host functions and keeping
+// state between invocations.
+
+import std.spec
+import std.fs
+import std.guest
+import std.list
+import std.os
+import std.sandbox
+import std.string
+
+fn begin(prog: string, name: string, log: string) -> guest.Guest {
+    perms = sandbox.new("std-guest-invoke") {
+    }
+    if os.platform() == "linux" {
+        g, err = guest.launch(perms, prog, null, name, log)
+        sandbox.free(perms)
+        if err != "" { println("spawn: ${err}") }
+        return g
+    }
+    g, err = guest.launch_uncontained(perms, prog, null, name, log)
+    sandbox.free(perms)
+    if err != "" { println("spawn: ${err}") }
+    return g
+}
+
+fn log_text(log: string) -> string {
+    text, err = fs.read(log)
+    if err != "" { return "" }
+    return text
+}
+
+// The one value in a one-element JSON array, as text: "[v]" -> "v".
+fn only_arg(args: string) -> string {
+    n = string.length(args)
+    if n < 2 { return "null" }
+    return string.substring(args, 1, n - 1)
+}
+
+// A script with exports, run to READY; its CALLs are failed.
+fn serving(stub: string, name: string, log: string, source: string) -> guest.Guest {
+    g = begin(stub, name, log)
+    guest.mount(&g, "echo_host", 1, 1)
+    guest.mount(&g, "ask", 0, 0)
+    e = guest.run_script(&g, source) callback | h: *guest.Guest, ev: guest.Event | {
+    }
+    if e.kind != "READY" { println("${name}: expected READY, got ${e.kind} ${e.text}") }
+    return g
+}
+
+// The JSON values of the boundary grid, the other way: each is sent as
+// the one argument of an INVOKE and must come back as it went.
+fn grid() -> ptr {
+    big = ""
+    while string.length(big) < 60000 { big = "${big}abcdefghijklmnopqrstuvwxyz0123456789" }
+    values = list.new()
+    list.add(values, "\"\"")
+    list.add(values, "\"plain\"")
+    list.add(values, "\"h\xc3\xa9llo, \xe6\x97\xa5\xe6\x9c\xac\"")
+    list.add(values, "\"\xf0\x9f\x98\x80 non-BMP, raw\"")
+    list.add(values, "\"\\ud83d\\ude00 non-BMP, escaped\"")
+    list.add(values, guest.json_string("a\x00b"))
+    list.add(values, guest.json_string("quote \" backslash \\ newline \n tab \t"))
+    list.add(values, "0")
+    list.add(values, "-1")
+    list.add(values, "9223372036854775807")
+    list.add(values, "-9223372036854775808")
+    list.add(values, "1.5")
+    list.add(values, "-2.5e-300")
+    list.add(values, "true")
+    list.add(values, "false")
+    list.add(values, "null")
+    list.add(values, "[]")
+    list.add(values, "{}")
+    list.add(values, "[1,\"a\",[null,{\"k\":false}]]")
+    list.add(values, "{\"k\":{\"n\":[1,2.25,-3]},\"s\":\"v\"}")
+    list.add(values, "\"${big}\"")
+    return values
+}
+
+main() {
+    if os.args_count() < 3 {
+        println("usage: invoke_host <stub_guest> <scratch dir>")
+        exit(2)
+    }
+    stub = os.args_get(1)
+    dir = os.args_get(2)
+    log = "${dir}/audit.log"
+    fs.write(log, "")
+    fw = spec.init()
+    spec.describe(fw, "std.guest: the host calls the guest") {
+        spec.it("notify then fetch: the guest is told a transaction id and fetches the details through a host function") callback {
+            g = begin(stub, "txn", log)
+            guest.mount(&g, "begin_lookup", 1, 1)
+            guest.mount(&g, "txn_details", 1, 1)
+            // The host's own state: which lookups it started, and their details.
+            started = list.new()
+            lookups = "call! begin_lookup [\"alice\"]\nkeep $last\ncall! begin_lookup [\"bob\"]\nkeep $last\nsay started $kept"
+            on_txn = "def on_txn\nrequire-kept\ncall! txn_details $args\nkeep $last\nreturn $kept\nend"
+            unchecked = "def on_txn_unchecked\ncall! txn_details $args\nreturn $last\nend"
+            script = "${lookups}\n${on_txn}\n${unchecked}"
+            e = guest.run_script(&g, script) callback | h: *guest.Guest, ev: guest.Event | {
+                if ev.kind == "CALL" && ev.name == "begin_lookup" {
+                    id = "${123456 + list.size(started)}"
+                    list.add(started, id)
+                    guest.answer(h, guest.json_string(id))
+                }
+            }
+            spec.assert_str_eq("${e.kind} ${e.text}", "READY [\"on_txn\",\"on_txn_unchecked\"]", "the guest serves its two exports")
+            fetched = list.new()
+            details = | h: *guest.Guest, ev: guest.Event | {
+                if ev.kind == "CALL" && ev.name == "txn_details" {
+                    id = only_arg(ev.text)
+                    list.add(fetched, id)
+                    if id == "\"123456\"" {
+                        guest.audit(h, "FETCH txn 123456")
+                        guest.answer(h, "{\"txn\":\"123456\",\"who\":\"alice\",\"amount\":12}")
+                    } else if id == "\"123457\"" {
+                        guest.audit(h, "FETCH txn 123457")
+                        guest.answer(h, "{\"txn\":\"123457\",\"who\":\"bob\",\"amount\":7}")
+                    } else {
+                        guest.audit(h, "FETCH refused for ${guest.printable(id)}")
+                        guest.fail(h, "unknown txn ${id}")
+                    }
+                }
+            }
+            v, err = guest.call_export(&g, "on_txn", "[\"123456\"]", details)
+            spec.assert_str_eq("${v}|${err}", "[\"123456\",\"123457\",{\"txn\":\"123456\",\"who\":\"alice\",\"amount\":12}]|", "the first notification: fetched, kept")
+            v, err = guest.call_export(&g, "on_txn", "[\"123457\"]", details)
+            spec.assert_str_eq("${v}|${err}", "[\"123456\",\"123457\",{\"txn\":\"123456\",\"who\":\"alice\",\"amount\":12},{\"txn\":\"123457\",\"who\":\"bob\",\"amount\":7}]|", "a second, in a row: the guest's state carried")
+            spec.assert_eq(list.size(fetched), 2, "two fetches")
+            v, err = guest.call_export(&g, "on_txn", "[\"777\"]", details)
+            spec.assert_str_eq("[${v}] ${err}", "[] unknown txn [\"777\"]", "a txn the guest never started: it raises")
+            spec.assert_eq(list.size(fetched), 2, "and fetched nothing")
+            v, err = guest.call_export(&g, "on_txn_unchecked", "[\"424242\"]", details)
+            spec.assert_str_eq("[${v}] ${err}", "[] txn_details: unknown txn \"424242\"", "an id the host refuses inside the export: the guest raises")
+            spec.assert_true(guest.is_serving(&g), "still serving")
+            spec.assert_str_eq(guest.end(&g), "", "END")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "DONE 0")
+            text = log_text(log)
+            spec.assert_contains(text, "txn READY exports [\"on_txn\",\"on_txn_unchecked\"]\n", "READY audited")
+            spec.assert_contains(text, "txn INVOKE on_txn\ntxn FETCH txn 123456\n", "the notification, then the fetch")
+            spec.assert_contains(text, "txn FETCH refused for \"424242\"\n", "a refused fetch")
+            spec.assert_contains(text, "txn END\n", "END audited")
+            list.free(started)
+            list.free(fetched)
+        }
+        spec.it("a script that exports nothing ends with DONE, as before") callback {
+            g = begin(stub, "plain", log)
+            e = guest.run_script(&g, "say hi") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "DONE")
+            spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "finished", "nothing to invoke")
+        }
+        spec.it("guest-export-called: every JSON value crosses both ways, as INVOKE's argument and RETURN's value, and through a CALL inside the export") callback {
+            g = serving(stub, "types", log, "def echo\nreturn $args\nend\ndef relay\ncall! echo_host $args\nreturn $last\nend")
+            values = grid()
+            n = list.size(values)
+            seen = list.new()
+            i = 0
+            while i < n {
+                val, _ = list.get_string(values, i)
+                v, err = guest.call_export(&g, "echo", "[${val}]") callback | h: *guest.Guest, ev: guest.Event | {
+                }
+                spec.assert_str_eq("${v}|${err}", "[${val}]|", "echo ${i}")
+                v, err = guest.call_export(&g, "relay", "[${val}]") callback | h: *guest.Guest, ev: guest.Event | {
+                    if ev.kind == "CALL" {
+                        list.add(seen, ev.text)
+                        guest.answer(h, only_arg(ev.text))
+                    }
+                }
+                spec.assert_str_eq("${v}|${err}", "${val}|", "relay ${i}")
+                got, _ = list.get_string(seen, i)
+                spec.assert_str_eq(got, "[${val}]", "the guest's CALL ${i}, as the host sent it")
+                i = i + 1
+            }
+            guest.end(&g)
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "DONE")
+            list.free(values)
+            list.free(seen)
+        }
+        spec.it("refuses an INVOKE larger than the frame limit before sending it: the guest serves on") callback {
+            g = serving(stub, "big-arg", log, "def echo\nreturn $args\nend")
+            big = ""
+            while string.length(big) < 100000 { big = "${big}0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+            v, err = guest.call_export(&g, "echo", "[\"${big}\"]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_err_contains(err, "over the frame limit of 65536 bytes", "refused, with why")
+            spec.assert_true(guest.is_serving(&g), "still serving")
+            v, err = guest.call_export(&g, "echo", "[1]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${v}|${err}", "[1]|", "and the next call works")
+            guest.close(&g)
+        }
+        spec.it("guest-export-raises: RAISE, and the guest serves on") callback {
+            g = serving(stub, "raises", log, "def bad\nraise boom\nend\ndef echo\nreturn $args\nend")
+            v, err = guest.call_export(&g, "bad", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("[${v}] ${err}", "[] boom", "RAISE")
+            v, err = guest.call_export(&g, "echo", "[1]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${v}|${err}", "[1]|", "the next invocation works")
+            guest.close(&g)
+        }
+        spec.it("guest-export-slow: the deadline cancels an export that loops, which ends the guest") callback {
+            g = serving(stub, "slow", log, "def slow\nspin\nend")
+            g.deadline_ms = 300
+            v, err = guest.call_export(&g, "slow", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("[${v}] ${err}", "[] ERROR cancelled by host: deadline of 300 ms passed", "cancelled")
+            spec.assert_eq(g.over, 1, "the guest has ended")
+            spec.assert_contains(log_text(log), "slow TIMEOUT no frame within 300 ms; CANCEL sent", "audited")
+        }
+        spec.it("guest-export-silent: an export that hears no cancel is killed after the grace") callback {
+            g = serving(stub, "silent", log, "def silent\ndeaf\nend")
+            g.deadline_ms = 200
+            g.grace_ms = 200
+            pid = g.pid
+            v, err = guest.call_export(&g, "silent", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("[${v}] ${err}", "[] KILLED no answer to CANCEL within 200 ms", "killed")
+            spec.assert_eq(os.kill(pid, 0), -1, "the process is gone")
+        }
+        spec.it("guest-export-oversize: a RETURN over max_frame is refused, and the guest killed") callback {
+            g = serving(stub, "oversize", log, "def big\nbig 70000\nend")
+            v, err = guest.call_export(&g, "big", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("[${v}] ${err}", "[] KILLED frame refused: ipc.read_frame: frame longer than max", "refused")
+        }
+        spec.it("a worker that knows its value is too large for a frame raises instead, and serves on, at the host's limit") callback {
+            g = serving(stub, "polite", log, "def big\nreturn-big 70000\nend\ndef mid\nreturn-big 5000\nend\ndef echo\nreturn $args\nend")
+            v, err = guest.call_export(&g, "big", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("[${v}] ${err}", "[] the value is 70002 bytes, over the frame limit of 65536 bytes", "RAISE, not a kill")
+            v, err = guest.call_export(&g, "mid", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_eq(string.length(v), 5002, "5000 bytes fit the default limit")
+            guest.close(&g)
+            // The host reads at most 4096 a frame: the worker learns it
+            // (MAXFRAME, before the script) and holds to it.
+            s = begin(stub, "polite-4k", log)
+            s.max_frame = 4096
+            e = guest.run_script(&s, "def mid\nreturn-big 5000\nend\ndef echo\nreturn $args\nend") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq(e.kind, "READY", "serving")
+            v, err = guest.call_export(&s, "mid", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("[${v}] ${err}", "[] the value is 5002 bytes, over the frame limit of 4096 bytes", "the host's own limit")
+            v, err = guest.call_export(&s, "echo", "[2]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${v}|${err}", "[2]|", "and it serves on")
+            guest.end(&s)
+            e = guest.next(&s)
+            spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "DONE")
+        }
+        spec.it("guest-reenters-while-called: a host handler cannot invoke the guest that is calling it") callback {
+            g = serving(stub, "reenter", log, "def calls\ncall! ask []\nreturn $last\nend")
+            refused = list.new()
+            v, err = guest.call_export(&g, "calls", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+                if ev.kind == "CALL" {
+                    list.add(refused, guest.invoke(h, "calls", "[]"))
+                    list.add(refused, guest.end(h))
+                    guest.answer(h, "\"answered\"")
+                }
+            }
+            spec.assert_str_eq("${v}|${err}", "\"answered\"|", "the call answered, the export returned")
+            r0, _ = list.get_string(refused, 0)
+            r1, _ = list.get_string(refused, 1)
+            spec.assert_contains(r0, "waiting on a host call inside an invocation", "invoke refused")
+            spec.assert_contains(r1, "waiting on a host call inside an invocation", "end refused")
+            guest.end(&g)
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "nothing else was sent: it ends cleanly")
+            list.free(refused)
+        }
+        spec.it("guest-export-flood and guest-export-malformed: READY lists the host refuses") callback {
+            f = begin(stub, "flood", log)
+            e = guest.run_script(&f, "flood 300") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${e.kind} ${e.text}", "KILLED protocol: READY exports more than 256 functions", "300 exports")
+            ok = begin(stub, "flood-ok", log)
+            e = guest.run_script(&ok, "flood 256") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq(e.kind, "READY", "256 are allowed")
+            guest.close(&ok)
+            m = begin(stub, "malformed", log)
+            e = guest.run_script(&m, "ready [\"two words\"]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${e.kind} ${e.text}", "KILLED protocol: READY a name holds letters, digits, '_' and '.', not 'two words'", "a name with a space")
+            spec.assert_contains(log_text(log), "malformed KILLED protocol: READY", "audited")
+        }
+        spec.it("guest-after-end: invoke after END and DONE is refused") callback {
+            g = serving(stub, "after-end", log, "def f\nreturn 1\nend")
+            guest.end(&g)
+            spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "it is ending", "after END")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.code}", "DONE 0", "DONE")
+            spec.assert_err_contains(guest.invoke(&g, "f", "[]"), "the guest has finished", "after DONE")
+        }
+        spec.it("an idle guest has no deadline, and next on it returns IDLE") callback {
+            g = serving(stub, "idle", log, "def f\nreturn 1\nend")
+            g.deadline_ms = 100
+            e = guest.next(&g)
+            spec.assert_str_eq(e.kind, "IDLE", "IDLE")
+            sleep(400)
+            e = guest.next(&g)
+            spec.assert_str_eq(e.kind, "IDLE", "still IDLE, well past the deadline")
+            v, err = guest.call_export(&g, "f", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${v}|${err}", "1|", "and it answers")
+            guest.close(&g)
+        }
+        spec.it("a frame from an idle guest is unsolicited: the host hangs up (a RETURN before it is read is the residue of open question iii)") callback {
+            g = serving(stub, "sneaky", log, "def f\nframe RETURN 2\nreturn 1\nend")
+            v, err = guest.call_export(&g, "f", "[]") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${v}|${err}", "2|", "the first RETURN is taken as the answer: without ids it cannot be told apart")
+            sleep(200)
+            spec.assert_str_eq(guest.invoke(&g, "f", "[]"), "invoke: protocol: 'RETURN' from the guest while it was idle", "the second is caught")
+            spec.assert_eq(g.over, 1, "hung up")
+            spec.assert_contains(log_text(log), "sneaky KILLED protocol: 'RETURN' from the guest while it was idle", "audited")
+        }
+        spec.it("a guest cannot send INVOKE") callback {
+            g = begin(stub, "invokes", log)
+            e = guest.run_script(&g, "frame INVOKE f []") callback | h: *guest.Guest, ev: guest.Event | {
+            }
+            spec.assert_str_eq("${e.kind} ${e.text}", "KILLED protocol: unexpected 'INVOKE'", "refused")
+        }
+        spec.it("a cancel while the guest serves ends it") callback {
+            g = serving(stub, "idle-cancel", log, "def f\nreturn 1\nend")
+            guest.cancel(&g, "shutting down")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.text}", "ERROR cancelled by host: shutting down", "ERROR")
+        }
+    }
+    return spec.run_summary(fw)
+}

@@ -31,12 +31,26 @@
     <li><a href="#next">next</a></li>
     <li><a href="#close">close</a></li>
     <li><a href="#audit">audit</a></li>
+    <li><a href="#invoke">invoke</a></li>
+    <li><a href="#end">end</a></li>
+    <li><a href="#result">result</a></li>
+    <li><a href="#is_exported">is_exported</a></li>
+    <li><a href="#is_serving">is_serving</a></li>
+    <li><a href="#run_script">run_script</a></li>
+    <li><a href="#call_export">call_export</a></li>
     <li><a href="#json_string">json_string</a></li>
     <li><a href="#printable">printable</a></li>
     <li><a href="#level_name">level_name</a></li>
     <li><a href="#MAX_FRAME">MAX_FRAME</a></li>
     <li><a href="#DEADLINE_MS">DEADLINE_MS</a></li>
     <li><a href="#GRACE_MS">GRACE_MS</a></li>
+    <li><a href="#MAX_EXPORTS">MAX_EXPORTS</a></li>
+    <li><a href="#MAX_EXPORT_NAME">MAX_EXPORT_NAME</a></li>
+    <li><a href="#SCRIPT">SCRIPT</a></li>
+    <li><a href="#SERVING">SERVING</a></li>
+    <li><a href="#INVOKING">INVOKING</a></li>
+    <li><a href="#ENDING">ENDING</a></li>
+    <li><a href="#CANCELLED">CANCELLED</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -150,7 +164,7 @@
     <div class="function" id="Event" data-name="Event">
       <h3 class="function-name">Event <span class="kind">struct</span></h3>
       <pre class="usage"><code>struct Event</code></pre>
-      <p class="doc">One thing the guest did. kind is SAY     text LOG     code = the level 0..5, name = TRACE .. FATAL, text = the message, tags = a JSON object; nothing to answer CALL    name, text = the arguments as a JSON array; answer it with answer, fail, grant_file or deny before the next call to next DONE    code, the script's exit code ERROR   text, the guest's message (&quot;cancelled by host: ...&quot; after a deadline or a cancel) KILLED  text, why the host hung up and killed it</p>
+      <p class="doc">One thing the guest did. kind is SAY     text LOG     code = the level 0..5, name = TRACE .. FATAL, text = the message, tags = a JSON object; nothing to answer CALL    name, text = the arguments as a JSON array; answer it with answer, fail, grant_file or deny before the next call to next DONE    code, the script's exit code ERROR   text, the guest's message (&quot;cancelled by host: ...&quot; after a deadline or a cancel) KILLED  text, why the host hung up and killed it READY   text = the exported names as a JSON array (also g.exported): the script has ended and the guest serves; invoke, or end RETURN  text = the JSON value the invoked function returned RAISE   text = the error the invoked function raised; the guest still serves IDLE    next was called while the guest serves: nothing was read</p>
     </div>
     <div class="function" id="launch" data-name="launch">
       <h3 class="function-name">launch <span class="kind">fn</span></h3>
@@ -186,7 +200,7 @@
       <h3 class="function-name">start <span class="kind">fn</span></h3>
       <pre class="usage"><code>start(g, source) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">g: *Guest, source: string</span></p>
-      <p class="doc">Sends the script; the guest locks itself down and runs it.</p>
+      <p class="doc">Sends the script; the guest locks itself down and runs it. A max_frame set below MAX_FRAME goes first, as MAXFRAME, so the worker holds what it sends to the limit this host will read: a RETURN it cannot send whole it can RAISE instead (std.guest.child, returned). At the default nothing extra is sent. A max_frame lowered after start the worker does not hear of: its frames over it are refused here, and the guest killed.</p>
     </div>
     <div class="function" id="answer" data-name="answer">
       <h3 class="function-name">answer <span class="kind">fn</span></h3>
@@ -216,7 +230,7 @@
       <h3 class="function-name">cancel <span class="kind">fn</span></h3>
       <pre class="usage"><code>cancel(g, reason) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">g: *Guest, reason: string</span></p>
-      <p class="doc">Asks the guest to stop its script now. next() then returns its ERROR.</p>
+      <p class="doc">Asks the guest to stop now: its script, its invocation, or (serving) itself. next() then returns its ERROR. A cancel ends the guest (cancelling, below).</p>
     </div>
     <div class="function" id="next" data-name="next">
       <h3 class="function-name">next <span class="kind">fn</span></h3>
@@ -234,6 +248,48 @@
       <h3 class="function-name">audit <span class="kind">fn</span></h3>
       <pre class="usage"><code>audit(&amp;g, &quot;SPAWN refused)</code></pre>
       <p class="signature"><span class="sig-params">&amp;g, &quot;SPAWN refused: ${err}&quot;</span></p>
+    </div>
+    <div class="function" id="invoke" data-name="invoke">
+      <h3 class="function-name">invoke <span class="kind">fn</span></h3>
+      <pre class="usage"><code>invoke(g, name, args) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, name: string, args: string</span></p>
+      <p class="doc">Calls the guest's exported function `name` with `args`, a JSON array. Only while the guest serves: after READY, and after the RETURN or RAISE that ended the last invocation. The host then reads the invocation's events with next as it reads a script's: SAY, LOG, CALL (answer each), and at the end RETURN or RAISE, each exchange bounded by deadline_ms. A deadline that passes cancels the guest, which ends it. &quot;&quot; when sent, or why nothing was: the guest is not serving (its script, an invocation or a host call it waits on is still running, or it is ending), it does not export `name`, `args` is not an array, or the INVOKE frame would be longer than MAX_FRAME, the most a worker reads. A frame the idle guest sent unasked is a protocol error: the host hangs up and says so.</p>
+    </div>
+    <div class="function" id="end" data-name="end">
+      <h3 class="function-name">end <span class="kind">fn</span></h3>
+      <pre class="usage"><code>end(g) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest</span></p>
+      <p class="doc">Ends a serving guest politely: END, which it answers with DONE 0 (next returns it, and reaps the guest). &quot;&quot; or why nothing was sent.</p>
+    </div>
+    <div class="function" id="result" data-name="result">
+      <h3 class="function-name">result <span class="kind">fn</span></h3>
+      <pre class="usage"><code>result(e) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">e: Event</span></p>
+      <p class="doc">An invocation's outcome from the event that ended it: (the JSON value, &quot;&quot;) for RETURN; (&quot;&quot;, the error) for RAISE, and for the ERROR, KILLED or DONE that ended the guest instead.</p>
+    </div>
+    <div class="function" id="is_exported" data-name="is_exported">
+      <h3 class="function-name">is_exported <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_exported(g, name) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, name: string</span></p>
+      <p class="doc">Whether the guest's READY exported `name` (compared exactly).</p>
+    </div>
+    <div class="function" id="is_serving" data-name="is_serving">
+      <h3 class="function-name">is_serving <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_serving(g) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest</span></p>
+      <p class="doc">Whether the guest is idle and serving: invoke and end may be called.</p>
+    </div>
+    <div class="function" id="run_script" data-name="run_script">
+      <h3 class="function-name">run_script <span class="kind">fn</span></h3>
+      <pre class="usage"><code>run_script(g, source, on_event) <span class="arrow">-&gt;</span> Event</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, source: string, on_event: fn</span></p>
+      <p class="doc">Starts `source` and runs it to its end, handing every SAY, LOG and CALL to `on_event`, a function of (*Guest, Event), which answers each CALL (answer, fail, grant_file or deny). A CALL it leaves unanswered is failed for it. Returns the event that ended the script: READY (the guest serves; call_export, then end), DONE, ERROR or KILLED.</p>
+    </div>
+    <div class="function" id="call_export" data-name="call_export">
+      <h3 class="function-name">call_export <span class="kind">fn</span></h3>
+      <pre class="usage"><code>call_export(g, name, args, on_event) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, name: string, args: string, on_event: fn</span></p>
+      <p class="doc">invoke, then the invocation's events up to its end, handed to `on_event` as run_script hands a script's: (the JSON value, &quot;&quot;) for a RETURN; (&quot;&quot;, the error) for a RAISE, a refused invoke, or the end of the guest (a deadline, a kill). The guest still serves after a RAISE.</p>
     </div>
     <div class="function" id="json_string" data-name="json_string">
       <h3 class="function-name">json_string <span class="kind">fn</span></h3>
@@ -266,6 +322,36 @@
     <div class="function" id="GRACE_MS" data-name="GRACE_MS">
       <h3 class="function-name">GRACE_MS <span class="kind">const</span></h3>
       <pre class="usage"><code>GRACE_MS = 1000</code></pre>
+    </div>
+    <div class="function" id="MAX_EXPORTS" data-name="MAX_EXPORTS">
+      <h3 class="function-name">MAX_EXPORTS <span class="kind">const</span></h3>
+      <pre class="usage"><code>MAX_EXPORTS = 256</code></pre>
+      <p class="doc">The most functions a guest may export, and the longest name of one, in bytes. A READY over either is a protocol error: the guest is hung up on.</p>
+    </div>
+    <div class="function" id="MAX_EXPORT_NAME" data-name="MAX_EXPORT_NAME">
+      <h3 class="function-name">MAX_EXPORT_NAME <span class="kind">const</span></h3>
+      <pre class="usage"><code>MAX_EXPORT_NAME = 128</code></pre>
+    </div>
+    <div class="function" id="SCRIPT" data-name="SCRIPT">
+      <h3 class="function-name">SCRIPT <span class="kind">const</span></h3>
+      <pre class="usage"><code>SCRIPT = 0</code></pre>
+      <p class="doc">Where a guest's conversation is (Guest.phase): SCRIPT     its script runs (from launch to READY or DONE) SERVING    its script has ended with READY: idle, waiting for INVOKE or END INVOKING   an invocation runs (from INVOKE to RETURN or RAISE) ENDING     END has been sent: only DONE (or ERROR) may come CANCELLED  CANCEL has been sent: the guest is ending (see cancelling)</p>
+    </div>
+    <div class="function" id="SERVING" data-name="SERVING">
+      <h3 class="function-name">SERVING <span class="kind">const</span></h3>
+      <pre class="usage"><code>SERVING = 1</code></pre>
+    </div>
+    <div class="function" id="INVOKING" data-name="INVOKING">
+      <h3 class="function-name">INVOKING <span class="kind">const</span></h3>
+      <pre class="usage"><code>INVOKING = 2</code></pre>
+    </div>
+    <div class="function" id="ENDING" data-name="ENDING">
+      <h3 class="function-name">ENDING <span class="kind">const</span></h3>
+      <pre class="usage"><code>ENDING = 3</code></pre>
+    </div>
+    <div class="function" id="CANCELLED" data-name="CANCELLED">
+      <h3 class="function-name">CANCELLED <span class="kind">const</span></h3>
+      <pre class="usage"><code>CANCELLED = 4</code></pre>
     </div>
   </div>
 </main>
