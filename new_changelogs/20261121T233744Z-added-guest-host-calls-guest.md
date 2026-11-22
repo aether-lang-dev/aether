@@ -19,8 +19,9 @@
   killed; a host whose `max_frame` is below 64 KiB tells the worker before
   the script (`MAXFRAME`, the only new host-to-worker frame besides
   `INVOKE` and `END`, not sent at the default). The worker's side is
-  `child.ready`, `child.serve`, `child.returned` and `child.raised`. A
-  worker that exports nothing behaves exactly as before on the wire;
+  `child.ready`, `child.serve`, `child.returned` and `child.raised`, and
+  `child.serve_exports(h, dispatch)`, the whole serving loop in one call.
+  A worker that exports nothing behaves exactly as before on the wire;
   `guest.Guest` gains `phase`, `exported` and `pending`. The ways of
   calling across that divide (a direct call with its arguments, notify
   then fetch as a suggested pattern, and the zero-change pull pattern),

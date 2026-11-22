@@ -62,7 +62,7 @@
 
 exports(Host, Reply, Invocation, open, attach, free, read_script, run, poll, call_host, say, log, audit,
     report_refusals, done, error, mount_count, mount_at, is_mounted,
-    ready, serve, returned, raised, is_exported,
+    ready, serve, serve_exports, returned, raised, is_exported,
     json_string, split_verb, MAX_FRAME, MAX_FILE)
 
 import std.audit as sandbox_audit
@@ -496,6 +496,52 @@ raised(h: *Host, why: string) {
     text = why
     if string.length(text) + 6 > h.max_frame { text = string.substring(text, 0, h.max_frame - 6) }
     tell(h, "RAISE ${text}")
+}
+
+// The serving loop every worker needs, once: after ready, serve until the
+// host ENDs (done(h, 0)) or cancels (error(h, "cancelled by host: ...")),
+// and for each INVOKE call `dispatch`, a function of (*Host, Invocation)
+// that runs the export in the engine and returns a Reply: VALUE with the
+// JSON value, or FAIL with the error. serve_exports answers it: returned,
+// or raised for a FAIL and for a value too large for the host's frame. A
+// cancel heard inside the invocation (poll, or a call_host answered with
+// CANCEL, which set h.cancel) ends the worker with error, whatever the
+// Reply: a cancel ends the worker, not only the invocation (open question
+// (i) in docs/design/guest-host-calls-guest.md). `dispatch` sends no
+// answer itself.
+//
+//   child.ready(h, "[\"on_tick\"]")
+//   child.serve_exports(h) callback | h: *child.Host, inv: child.Invocation | {
+//       // run inv.name with inv.args (also h.invoked) in the engine
+//       return child.Reply { kind: "VALUE", text: "1" }
+//   }
+//
+// A worker that named its own loop serve_exports should call this one,
+// qualified, and delete its own: an unqualified serve_exports(...) inside
+// a child.run(h) callback block resolves to this export.
+serve_exports(h: *Host, dispatch: fn) {
+    while true {
+        inv = serve(h)
+        if inv.kind == "END" {
+            done(h, 0)
+            return
+        }
+        if inv.kind == "CANCEL" {
+            error(h, "cancelled by host: ${inv.args}")
+            return
+        }
+        Reply r = call(dispatch, h, inv)
+        if h.cancel != "" {
+            error(h, "cancelled by host: ${h.cancel}")
+            return
+        }
+        if r.kind == "VALUE" {
+            rerr = returned(h, r.text)
+            if rerr != "" { raised(h, rerr) }
+        } else {
+            raised(h, if r.text == "" { "guest function failed" } else { r.text })
+        }
+    }
 }
 
 // FILE: the descriptor rides on the next byte; read it, close it, and give

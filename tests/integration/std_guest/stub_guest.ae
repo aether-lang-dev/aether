@@ -24,7 +24,7 @@
 //                     (in order) instead of DONE, and serves
 //   return JSON       in an export: RETURN JSON (falling off the end
 //                     returns null); one too large for the host's frame
-//                     limit RAISEs why instead, as child.returned says
+//                     limit RAISEs why instead (child.serve_exports)
 //   return-big N      in an export: return a string of N bytes, so
 //   raise TEXT        in an export: RAISE TEXT
 //   keep JSON         remembers JSON, across invocations
@@ -59,6 +59,10 @@ struct Stub {
     args: string
     // `ready` or `flood`: the READY to send instead of the defs' names.
     ready_raw: string
+    // How the current invocation ended, for child.serve_exports to send:
+    // VALUE or FAIL, and the JSON value or the error.
+    answer: string
+    answer_text: string
 }
 
 // How a run of lines ended.
@@ -93,17 +97,17 @@ main() {
 run_script(h: *child.Host) {
     st = Stub {
         names: list.new(), bodies: list.new(), kept: list.new(),
-        last: "null", args: "[]", ready_raw: ""
+        last: "null", args: "[]", ready_raw: "", answer: "", answer_text: ""
     }
     top = split_defs(h.source, &st)
     status = run_lines(h, &st, top, false)
     if status == FELL_OFF {
         if st.ready_raw != "" {
             child.ready(h, st.ready_raw)
-            serve_exports(h, &st)
+            serve(h, &st)
         } else if list.size(st.names) > 0 {
             child.ready(h, names_json(&st))
-            serve_exports(h, &st)
+            serve(h, &st)
         } else {
             child.done(h, 0)
         }
@@ -170,35 +174,39 @@ fn kept_json(st: *Stub) -> string {
     return "${out}]"
 }
 
-// Serves the exports until the host ends or cancels.
-fn serve_exports(h: *child.Host, st: *Stub) {
-    while true {
-        inv = child.serve(h)
-        if inv.kind == "END" {
-            child.done(h, 0)
-            return
-        }
-        if inv.kind == "CANCEL" {
-            child.error(h, "cancelled by host: ${inv.args}")
-            return
-        }
-        body = ""
-        n = list.size(st.names)
-        i = 0
-        while i < n {
-            name, _ = list.get_string(st.names, i)
-            if name == inv.name {
-                b, _ = list.get_string(st.bodies, i)
-                body = b
-            }
-            i = i + 1
-        }
-        st.args = inv.args
-        status = run_lines(h, st, body, true)
-        st.args = "[]"
-        if status == FINISHED { return }
-        if status == FELL_OFF { child.returned(h, "null") }
+// Serves the exports until the host ends or cancels: std.guest.child's
+// own loop, with one invocation run here.
+fn serve(h: *child.Host, st: *Stub) {
+    child.serve_exports(h) callback | sh: *child.Host, inv: child.Invocation | {
+        return invoke_export(sh, st, inv)
     }
+}
+
+fn invoke_export(h: *child.Host, st: *Stub, inv: child.Invocation) -> child.Reply {
+    body = ""
+    n = list.size(st.names)
+    i = 0
+    while i < n {
+        name, _ = list.get_string(st.names, i)
+        if name == inv.name {
+            b, _ = list.get_string(st.bodies, i)
+            body = b
+        }
+        i = i + 1
+    }
+    st.args = inv.args
+    st.answer = "VALUE"
+    st.answer_text = "null"
+    run_lines(h, st, body, true)
+    st.args = "[]"
+    return child.Reply { kind: st.answer, text: st.answer_text }
+}
+
+// In an export: how it ended, for serve_exports to answer.
+fn answer(st: *Stub, kind: string, text: string) -> int {
+    st.answer = kind
+    st.answer_text = text
+    return ANSWERED
 }
 
 fn expand(text: string, st: *Stub) -> string {
@@ -215,7 +223,8 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
     i = 0
     while i < count {
         if child.poll(h) != "" {
-            child.error(h, "cancelled by host: ${h.cancel}")
+            // In an export, serve_exports answers the cancel.
+            if !in_export { child.error(h, "cancelled by host: ${h.cancel}") }
             return FINISHED
         }
         line = expand(string.copy(string.array_get(lines, i)), st)
@@ -225,20 +234,18 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
         } else if cmd == "call" || cmd == "call!" {
             name, args = child.split_verb(rest)
             if !child.is_mounted(h, name) {
+                if in_export { return answer(st, "FAIL", "${name} is not mounted") }
                 child.error(h, "${name} is not mounted")
                 return FINISHED
             }
             r = child.call_host(h, name, args)
             if r.kind == "CANCEL" {
-                child.error(h, "cancelled by host: ${r.text}")
+                if !in_export { child.error(h, "cancelled by host: ${r.text}") }
                 return FINISHED
             }
             if r.kind == "FAIL" {
                 if cmd == "call!" {
-                    if in_export {
-                        child.raised(h, "${name}: ${r.text}")
-                        return ANSWERED
-                    }
+                    if in_export { return answer(st, "FAIL", "${name}: ${r.text}") }
                     child.error(h, "${name}: ${r.text}")
                     return FINISHED
                 }
@@ -257,13 +264,14 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
             out = ""
             while string.length(out) < size { out = "${out}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }
             if in_export {
-                if ipc.write_frame(h.ch, "RETURN \"${out}\"") != "" { exit(1) }
-                return ANSWERED
+                // A worker that ignores the frame limit: the host kills it.
+                ipc.write_frame(h.ch, "RETURN \"${out}\"")
+                exit(1)
             }
             child.say(h, out)
         } else if cmd == "spin" {
             while child.poll(h) == "" {}
-            child.error(h, "cancelled by host: ${h.cancel}")
+            if !in_export { child.error(h, "cancelled by host: ${h.cancel}") }
             return FINISHED
         } else if cmd == "deaf" {
             while true {
@@ -278,7 +286,7 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
                 k = k + 1
             }
             child.say(h, out)
-        } else if cmd == "exit" {
+        } else if cmd == "exit" && !in_export {
             code, _ = string.to_int(rest)
             child.done(h, code)
             return FINISHED
@@ -290,12 +298,9 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
                 while string.length(value) < size { value = "${value}yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" }
                 value = "\"${string.substring(value, 0, size)}\""
             }
-            rerr = child.returned(h, value)
-            if rerr != "" { child.raised(h, rerr) }
-            return ANSWERED
+            return answer(st, "VALUE", value)
         } else if cmd == "raise" && in_export {
-            child.raised(h, rest)
-            return ANSWERED
+            return answer(st, "FAIL", rest)
         } else if cmd == "keep" {
             list.add(st.kept, rest)
         } else if cmd == "require-kept" && in_export {
@@ -308,8 +313,7 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
                 k = k + 1
             }
             if !found {
-                child.raised(h, "unknown txn ${st.args}")
-                return ANSWERED
+                return answer(st, "FAIL", "unknown txn ${st.args}")
             }
         } else if cmd == "ready" {
             st.ready_raw = rest
@@ -325,6 +329,7 @@ fn run_lines(h: *child.Host, st: *Stub, source: string, in_export: bool) -> int 
         } else if cmd == "frame" {
             if ipc.write_frame(h.ch, rest) != "" { exit(1) }
         } else if cmd != "" {
+            if in_export { return answer(st, "FAIL", "stub: unknown command '${cmd}'") }
             child.error(h, "stub: unknown command '${cmd}'")
             return FINISHED
         }

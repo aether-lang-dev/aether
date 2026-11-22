@@ -331,6 +331,7 @@ Worker, `std.guest.child`, on the existing `Host`:
 | | |
 |---|---|
 | `ready(h, names_json)` | instead of `done`: announce the exports and serve |
+| `serve_exports(h, dispatch)` | the serving loop, once: `dispatch(h, inv)` runs one invocation and returns a `Reply` (`VALUE` or `FAIL`); END, CANCEL, a cancel inside the invocation and a value too large for a frame are answered for it |
 | `serve(h)` | wait, with no deadline, for an `Invocation`: `INVOKE` (`name`, `args`, also `h.invoked`), `END` or `CANCEL` |
 | `returned(h, json)`, `raised(h, why)` | answer the invocation; the guest serves on |
 | `is_exported(h, name)` | what `ready` announced |
@@ -533,6 +534,11 @@ main() {
 fn say(a: int, b: int, c: int) { println("${a + b + c}") }
 ```
 
-The same call outside the block builds. The prototype's Python worker
-names its serving function `serve_exports` because of it, as the test
-worker here does.
+The same call outside the block builds. The prototype's workers named
+their serving function `serve_exports` because of it, and now that
+`std.guest.child` exports a `serve_exports` of its own the trap is live
+again for them: a worker's `serve_exports(vm, h)` (a `ptr` and the `Host`)
+inside the `child.run` block compiles and calls the module's with the wrong
+arguments (it panics at the first `call` of the "dispatch"); one taking
+only `h` fails to compile with an arity error. Workers call
+`child.serve_exports` and keep no function of that name.

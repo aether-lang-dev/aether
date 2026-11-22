@@ -9,6 +9,7 @@ import std.spec
 import std.fs
 import std.io
 import std.ipc
+import std.list
 import std.mem
 import std.os
 import std.string
@@ -202,6 +203,71 @@ main() {
                     child.free(b)
                     i = i + 1
                 }
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
+            spec.it("serve_exports: answers each INVOKE from the dispatch, raises a FAIL or a value too large, and ends on END") callback {
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                h.max_frame = 100
+                child.ready(h, "[\"echo\",\"bad\",\"huge\"]")
+                heard(host)
+                ipc.write_frame(host, "INVOKE echo [1,\"a\"]")
+                ipc.write_frame(host, "INVOKE bad []")
+                ipc.write_frame(host, "INVOKE huge []")
+                ipc.write_frame(host, "INVOKE nope []")
+                ipc.write_frame(host, "INVOKE echo [2]")
+                ipc.write_frame(host, "END")
+                seen = list.new()
+                child.serve_exports(h) callback | sh: *child.Host, inv: child.Invocation | {
+                    list.add(seen, "${inv.name} ${sh.invoked}")
+                    if inv.name == "bad" { return child.Reply { kind: "FAIL", text: "no" } }
+                    if inv.name == "huge" {
+                        big = ""
+                        while string.length(big) < 200 { big = "${big}0123456789" }
+                        return child.Reply { kind: "VALUE", text: "\"${big}\"" }
+                    }
+                    return child.Reply { kind: "VALUE", text: inv.args }
+                }
+                want = ["RETURN [1,\"a\"]", "RAISE no", "RAISE the value is 202 bytes, over the frame limit of 100 bytes",
+                    "RAISE no exported function 'nope'", "RETURN [2]", "DONE 0"]
+                i = 0
+                while i < 6 {
+                    spec.assert_str_eq(heard(host), want[i], want[i])
+                    i = i + 1
+                }
+                spec.assert_eq(list.size(seen), 4, "the dispatch ran for each exported INVOKE")
+                s0, _ = list.get_string(seen, 0)
+                spec.assert_str_eq(s0, "echo [1,\"a\"]", "with h.invoked set")
+                list.free(seen)
+                child.free(h)
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
+            spec.it("serve_exports: a cancel heard inside an invocation, or while idle, ends the worker with ERROR") callback {
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                child.ready(h, "[\"wait\"]")
+                heard(host)
+                ipc.write_frame(host, "INVOKE wait []")
+                ipc.write_frame(host, "CANCEL stop")
+                child.serve_exports(h) callback | sh: *child.Host, inv: child.Invocation | {
+                    r = child.call_host(sh, "F", "[]")
+                    return child.Reply { kind: "VALUE", text: "1" }
+                }
+                spec.assert_str_eq(heard(host), "CALL F []", "the export called the host")
+                spec.assert_str_eq(heard(host), "ERROR cancelled by host: stop", "then ERROR, no RETURN")
+                spec.assert_eq(waiting(host), 0, "and nothing else")
+                child.free(h)
+                k = child.attach(ch, "spec")
+                child.ready(k, "[\"f\"]")
+                heard(host)
+                ipc.write_frame(host, "CANCEL idle")
+                child.serve_exports(k) callback | sh: *child.Host, inv: child.Invocation | {
+                    return child.Reply { kind: "VALUE", text: "1" }
+                }
+                spec.assert_str_eq(heard(host), "ERROR cancelled by host: idle", "a cancel while idle")
+                child.free(k)
                 io.fd_close(host)
                 io.fd_close(ch)
             }

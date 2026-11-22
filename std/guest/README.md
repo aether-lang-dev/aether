@@ -266,7 +266,8 @@ runs `h.source`. Everything else is a call the engine makes:
 | looks for a cancel | `poll(h)`, without waiting: `""`, or the reason, also in `h.cancel` |
 | sets up | `h.source`, `mount_count(h)`, `mount_at(h, i)` (name and arity), `is_mounted(h, name)`, `h.probe`, `h.log_level` |
 | ends a script that left functions behind | `ready(h, names_json)` instead of `done`, then serves |
-| serves | `serve(h)` waits, with no deadline, and returns an `Invocation`: `INVOKE` (`name`, `args` a JSON array, also `h.invoked`), `END` (answer `done(h, 0)`) or `CANCEL` (`args` the reason: answer `error`) |
+| serves, the whole loop | `serve_exports(h, dispatch)`: `dispatch(h, inv)` runs one invocation and returns a `Reply` (`VALUE` with the JSON value, `FAIL` with the error); END, CANCEL, a cancel inside the invocation and a value too large are handled for it |
+| serves, one step | `serve(h)` waits, with no deadline, and returns an `Invocation`: `INVOKE` (`name`, `args` a JSON array, also `h.invoked`), `END` (answer `done(h, 0)`) or `CANCEL` (`args` the reason: answer `error`) |
 | answers an invocation | `returned(h, json)` or `raised(h, why)`; the guest serves on after either. `returned` gives back `""`, or, for a value whose frame is longer than the host reads (`h.max_frame`: 64 KiB, or the host's `MAXFRAME`), why it sent nothing, so the worker can `raised` that instead of being killed; `raised` cuts a message to fit |
 | is done with the Host | `free(h)`: the Host, its mounts and its strings; the channel stays open |
 
@@ -285,26 +286,31 @@ the script did next. With `PROBE`, `run` also tries `fs.read("/etc/passwd")`
 and `tcp.connect("1.1.1.1", 443)` from inside the lockdown and reports both;
 an engine can add probes of its own in its block when `h.probe` is 1.
 
-A worker serves after its script like this; inside an invocation it calls
-the host and polls exactly as inside a script:
+A worker serves after its script with one call, `serve_exports`: it waits
+for each `INVOKE`, hands it to the worker's function that runs the export,
+answers with what that returns (a `Reply`: `VALUE` and the JSON value, or
+`FAIL` and the error), and finishes on `END` (`DONE 0`) or a cancel
+(`ERROR`). Inside an invocation the engine calls the host and polls exactly
+as inside a script; a cancel it hears there ends the worker.
 
 ```aether,fragment
 child.ready(h, "[\"on_tick\",\"compare\"]")
-while true {
-    inv = child.serve(h)
-    if inv.kind == "END" {
-        child.done(h, 0)
-        break
-    }
-    if inv.kind == "CANCEL" {
-        child.error(h, "cancelled by host: ${inv.args}")
-        break
-    }
-    // INVOKE: run inv.name with inv.args in the engine, which may call
-    // the host (child.call_host) and poll on the way. Here, an echo.
-    child.returned(h, inv.args)
+child.serve_exports(h) callback | sh: *child.Host, inv: child.Invocation | {
+    // Run inv.name with inv.args (also sh.invoked) in the engine, which may
+    // call the host (child.call_host) and poll on the way. Here, an echo.
+    return child.Reply { kind: "VALUE", text: inv.args }
 }
 ```
+
+The loop written out is `serve(h)` until `END` or `CANCEL`, and
+`returned(h, json)` or `raised(h, why)` for each `INVOKE`.
+
+**Call it `child.serve_exports`, qualified, and have no function of your
+own by that name.** Inside a `child.run(h) callback { }` block an
+unqualified call of a local function named like one of `std.guest.child`'s
+exports resolves to the export (a compiler bug, recorded in the design
+note): a worker's own `serve_exports(vm, h)` there compiles and calls this
+one with the wrong arguments.
 
 `serve` answers an `INVOKE` of a name `ready` did not announce with
 `RAISE` itself. A function that raises leaves the guest serving; a cancel,
