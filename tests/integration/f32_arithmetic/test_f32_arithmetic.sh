@@ -66,8 +66,9 @@ for want in 'float h = ' 'float g = ' 'float d = ' 'float n = ' 'double m = ' 'f
         fail=1
     fi
 done
-# the literals carry C's f suffix, in a return and a comparison too
-for want in '0.5f' '1.5f' '2.0f' 'return (v \* 0.5f)' 'return (v \* (-(0.5f)))' 'return (v < 0.5f)'; do
+# the literals carry C's f suffix, in a return and a comparison too (a
+# return's value is computed into its result first, #3811)
+for want in '0.5f' '1.5f' '2.0f' '_builder_ret = (v \* 0.5f)' '_builder_ret = (v \* (-(0.5f)))' '_builder_ret = (v < 0.5f)'; do
     if ! grep -q "$want" "$tmp/out.c"; then
         echo "  [FAIL] f32_arithmetic: literal beside an f32 not emitted as $want"
         fail=1
