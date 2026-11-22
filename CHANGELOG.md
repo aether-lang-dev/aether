@@ -14,6 +14,166 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.935.0]
+
+### Added
+
+- **contrib.quickjs: a budget of work, and the exception as a handle.**
+  `quickjs.set_poll_budget(q, polls)` stops JavaScript after so many of the
+  engine's interrupt polls rather than so much time (quickjs-ng polls once
+  every 10,000 calls, jumps and built-in iteration steps, and a regexp on its
+  own counter), the same on any machine: `INTERRUPTED_BUDGET` (4) says so,
+  `poll_budget` reads what is left and `clear_poll_budget` removes it. A
+  budget of n stops a fresh runtime after exactly (n - 1) * 10000 steps.
+  `quickjs.last_exception(q)` is the value the last failure threw, as a new
+  handle the caller releases, so `message`, `name` and `stack` are read apart
+  instead of cut out of `last_error`'s text (a message can hold a newline);
+  0 when the failure had no value. The README's claim that a long regexp is
+  not interrupted was wrong: the regexp engine polls too, and a runaway one
+  is stopped.
+
+- **`std.guest`: the host calls the guest.** A contained guest's script
+  can now leave functions behind for the host to call later: it ends with
+  `READY` and their names instead of `DONE`, and serves. The host calls
+  one by name with `guest.invoke` (`INVOKE`, answered with `RETURN` or
+  `RAISE`, which `guest.result` turns into `(value, err)`) and finishes
+  with `guest.end` (`END`, answered with `DONE 0`); `guest.run_script` and
+  `guest.call_export` run a script or an invocation to its end while a
+  handler answers the guest's own calls. Host and guest strictly
+  alternate: `invoke` is refused unless the guest is idle, `next` on an
+  idle guest returns `IDLE` without running the deadline down, and the
+  deadline, `max_frame` and the kill hold inside an invocation as in a
+  script. The `READY` list is bounded (1 to 256 distinct names of letters,
+  digits, `_` and `.`, at most 128 bytes each), and a frame from an idle
+  guest, or one answering what was not asked, hangs up. `invoke` refuses
+  an `INVOKE` frame longer than the 64 KiB a worker reads, saying why and
+  sending nothing, where it used to send it and lose the worker.
+  `child.returned` refuses a `RETURN` longer than the host reads, saying
+  why, so the worker can `RAISE` that and serve on instead of being
+  killed; a host whose `max_frame` is below 64 KiB tells the worker before
+  the script (`MAXFRAME`, the only new host-to-worker frame besides
+  `INVOKE` and `END`, not sent at the default). The worker's side is
+  `child.ready`, `child.serve`, `child.returned` and `child.raised`, and
+  `child.serve_exports(h, dispatch)`, the whole serving loop in one call.
+  A worker that exports nothing behaves exactly as before on the wire;
+  `guest.Guest` gains `phase`, `exported` and `pending`. The ways of
+  calling across that divide (a direct call with its arguments, notify
+  then fetch as a suggested pattern, and the zero-change pull pattern),
+  side by side, and the questions still open are in
+  `docs/design/guest-host-calls-guest.md`.
+
+- **A test that a worker's own `serve_exports(vm, h)` in a `child.run(h)`
+  callback is still its own.** The combined tree has both the receiver rule
+  (the program's name comes first) and `std.guest.child.serve_exports`; the
+  test in `tests/integration/dsl_receiver_program_shadows/guest_child.ae` runs
+  the real module over a socket pair and holds that the program's function is
+  the one called.
+
+### Fixed
+
+- **contrib.quickjs carries strings whole, both ways.** Strings went in as C
+  strings, so a NUL cut them: `new_string(q, "a\0b")` made `"a"`, a script
+  ran up to its first NUL and said nothing, `parse_json("1\0garbage")` was
+  `1`, a property name was a shorter, different name, and an error was
+  recorded as C text, so `throw new Error('x\0y')` read back as `Error: x`.
+  Now `new_string`, `eval`, `eval_async`, `eval_module`, `parse_json`,
+  `throw_error`'s message, `function`'s name and the names of `get`, `set`,
+  `get_global` and `set_global` take every byte (`@aether string`), and
+  `to_json`, `last_error` and every error text keep every byte. A filename
+  holding a NUL is refused (`TypeError: eval: the filename holds a NUL`),
+  never cut. What the module hands out is valid UTF-8: a lone surrogate,
+  which the engine writes as WTF-8, is U+FFFD, and `to_json` is the
+  lossless route for one (README, "Strings, NUL and UTF-8").
+
+- **In a trailing block, a name the program binds comes before the block
+  receiver's function of that name.** The receiver fallback (#333) was asked
+  ahead of everything outside the block, so in `child.run(h) callback {
+  say(1, 2, 3) }` a program's three-argument `say` was checked against the
+  module's `say` ("expects 2 argument(s), got 3"), a program's function of
+  the module's own arity built and silently called the module's, and a local
+  or parameter read in the block (`println(label)`) was the module's function
+  of that name. The program's own locals, parameters, closures bound to
+  locals and top-level functions, types, constants and `var`s now shadow the
+  receiver, in the checker, inference, the settle of what a function returns
+  and codegen alike, as `docs/closures-and-builder-dsl.md` says; where the
+  program binds nothing of the name the receiver's function is still what it
+  means, and builtins and names an import bound still lose to it. A
+  non-callable local named like the receiver's function is refused naming
+  that function. `contrib/parsers/xml_expat`'s spec defined a `fail` that
+  exits, which its `it` blocks had reached as std.spec's: it now has none.
+
+- **A parameter that a closure in a trailing block captures is the
+  parameter, not the block receiver's function of the same name.**
+  aether-ui's `reorderable(cb: fn)`, whose block passed a closure calling
+  `cb` to a DSL that also had a `cb` setter, read the setter where it meant
+  its parameter, and the C compiler stopped at an int-to-pointer conversion;
+  sae's gate check kept every such name apart because of it. The same root
+  as the fix above (the receiver was asked before the program's own
+  bindings); this adds its regression test, with the parameter both
+  captured by a closure and passed on as a value.
+
+- **`AETHER_LIB_DIR` finds a binary library by its file name, as `--lib`
+  does.** The `ae` driver's binary-import prepass probes the search chain for
+  `lib<name>.so` (`.dylib`, `.dll`), and the variable joined that chain only
+  later, when the cache key was computed: a library built from a source of
+  another name (RexxAE's `librexxae`, from `src/engine.ae`) was "unresolved
+  import" under `AETHER_LIB_DIR` and found under `--lib`. In a project with
+  `[dependencies]` the variable was ignored altogether, since the
+  dependencies' directories in the chain counted as a typed `--lib`. It is now
+  read once per command, before anything else joins the chain
+  (`tc_lib_dirs_seed_from_env`), and every probe reads the same chain.
+
+- **A local named like a struct, enum, message or actor no longer hides
+  the type from the generated C.** `Other = n` and then `o = Other { q: "x" }`
+  type-checked and stopped in the C compiler ("must use 'struct' tag to refer
+  to type 'Other'"): C put the variable in scope over the typedef, so every
+  later spelling of the type, a compound literal or a local of an enum type a
+  call returns, named the variable. Such a local (a parameter or pattern
+  variable too) now has a C name of its own from its binding on, as a local
+  shadowing a function has (#2683); a use of the type before the binding
+  keeps it. The checker and inference also took the local for the type a
+  struct literal names and a field read reads, so `o.q` "had no type": the
+  type a value has is now found past a local of its name.
+
+- **The shared map carries keys and values by their length, and its shared
+  memory block is length-prefixed.** `aether_shared_map_*` stored C strings,
+  so a NUL cut a key or a value, and the cross-process block used the NUL as
+  its separator. Every key and value now carries its length
+  (`aether_shared_map_put(map, key, key_len, value, value_len) -> int`, `get`
+  with a `*value_len` out, `*_at` likewise; put returns -1 instead of
+  dropping a new key in a full map), and the block is layout 2: a magic
+  (`AESM`), a zero word that stops a layout-1 reader at an empty map, a
+  version, then length-prefixed entries; a block in any other layout is
+  refused whole when read back, and a child's block can no longer overwrite
+  a frozen input. Aether code gets `std.sharedmap` (`new`, `put`, `get ->
+  (string, int)`, `freeze`, `guest_put`, `free`, ...). Two older bugs went
+  with it: `to_shm` wrote past its 64 KiB stack buffer for a large map (now
+  refused with `E2BIG`), and on macOS its shm name was longer than the 31
+  characters macOS allows, so a map never reached a child there.
+
+- **The HTTP client no longer spends time quadratic in the chunk count on a chunked response.** After every receive it asked whether the chunked body was complete by walking the whole body from its first chunk, so a server sending many tiny chunks (one-byte chunks, 600 KB of them) cost the client's CPU in proportion to the square of the chunk count: `http_client_max_response` took 52 s and timed out on a 4-core Linux host, and a hostile server could hold a client busy the same way. The walk now resumes from the end of the last complete chunk, so each byte is walked once. The same response now takes under a second.
+
+- **`ae_toolchain_zig` no longer fails about one run in three on macOS.** Its
+  steps 4 and 5 copied a different fake zig over the one `--check` had
+  already run; macOS kills a Mach-O rewritten in place (its code-signature
+  cache is for the old bytes), so `--check` said "`zig version` failed"
+  instead of "reports 0.0.1". The test removes the file first, so each copy
+  is a new one. The same failure is in `origin/main`.
+
+- **Ten more Wycheproof drivers free their vector file, and the pure-server
+  key test's server frees itself before it refuses.** The ASan and LSan sweep
+  (`SAN_LEAKS=fail`, as CI's leak gates run it) failed `wycheproof_ed448_cmac`
+  and `wycheproof_rsa_decrypt`: `wp_aes_cmac`, `wp_ecdh_secp256k1`,
+  `wp_ecdsa_p256`, `wp_ecdsa_p256_der`, `wp_ecdsa_p384`,
+  `wp_ecdsa_secp256k1`, `wp_ecdsa_secp256k1_der`, `wp_rsa_oaep`, `wp_x25519`
+  and `wp_x448` parsed their file with `json.parse` and never `json.free`d
+  it (an arena of up to half a megabyte each), the same leak as the ten drivers
+  already fixed. `https_pure_server_keys/server.ae` left its `http.server_create`
+  allocation to the OS on each of its three refusal exits; under LeakSanitizer
+  the leak report ends the process before libc flushes stdout, so the `FAIL:
+  server_set_tls: ...` line the test reads was lost and "an RSA-1024 key"
+  read "(no output; the server exited)". No behaviour of any test changes.
+
 ## [0.934.0]
 
 ### Added
