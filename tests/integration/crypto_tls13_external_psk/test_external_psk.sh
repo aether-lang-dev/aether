@@ -152,6 +152,55 @@ else
     echo "    skip: socket ownership: no python3 for the sink"
 fi
 
+echo "  deadlines and cancellation (tcp.connect_until, tcp.set_deadline, conn_set_deadline)"
+"$AE" build "$SCRIPT_DIR/tlsdeadline.ae" -o "$TMP/tlsdeadline" >"$TMP/b_tlsdeadline.log" 2>&1 \
+    || { sed -n '1,12p' "$TMP/b_tlsdeadline.log"; fail "tlsdeadline did not build"; }
+# stop_case <CASE> <PEER_CASE> <want error> <earliest ms> <latest ms> <after>
+# `after` is a pattern for what follows the result: the next conn_recv's
+# answer and how soon close_conn returned, or "" for a handshake case.
+stop_case() {
+    rm -f "$TMP/port" "$TMP/peer.out"
+    HOLD_MS=15000 PEER_CASE="$2" PEER_PORT_OUT="$TMP/port" "$TMP/pskpeer" >"$TMP/peer.out" 2>&1 &
+    ppid=$!
+    PIDS="$PIDS $ppid"
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
+    [ -s "$TMP/port" ] || fail "$1: the peer never listened"
+    got=$(CASE="$1" PSK_PORT="$(cat "$TMP/port")" "$TMP/tlsdeadline" 2>&1 | tr '\n' '|')
+    stop_server "$ppid"
+    ms=$(printf '%s' "$got" | sed -n 's/.*RESULT [^|]* ms=\([0-9]*\).*/\1/p')
+    ok=1
+    case "$got" in *"RESULT $1 err=[$3] "*) ;; *) ok=0 ;; esac
+    # shellcheck disable=SC2254
+    case "$got" in *$6*) ;; *) ok=0 ;; esac
+    [ -n "$ms" ] && [ "$ms" -ge "$4" ] && [ "$ms" -le "$5" ] || ok=0
+    if [ "$ok" = 1 ]; then
+        note ok "$1: [$3] after $ms ms (bound $4..$5)"
+    else
+        note no "$1" "client said [$got]; want [$3] in $4..$5 ms"
+    fi
+}
+AFTER="AFTER recv=?recv: the connection failed earlier?|CLOSED in "
+stop_case hs-deadline stall=1 "deadline exceeded" 700 2200 ""
+stop_case hs-cancel stall=1 "cancelled" 400 1900 ""
+stop_case hs-adopted stall=1 "deadline exceeded" 700 2200 ""
+stop_case after-deadline stall_after=1 "deadline exceeded" 1000 2500 "$AFTER"
+stop_case after-cancel stall_after=1 "cancelled" 400 1900 "$AFTER"
+stop_case trickle trickle=1 "deadline exceeded" 1000 2500 "$AFTER"
+# Sent 1 MiB at a time: the stop can come one piece's sealing late.
+stop_case write-deadline noread=1 "deadline exceeded" 1000 4000 "$AFTER"
+stop_case write-cancel noread=1 "cancelled" 400 3400 "$AFTER"
+stop_case ordinary "" "" 0 2000 "RECV hi"
+stop_case wrong-key "" "server refused the handshake with alert decrypt_error (51)" 0 2000 ""
+dial=$(CASE=dial-deadline STALL_ADDR="${STALL_ADDR:-192.0.2.1}" "$TMP/tlsdeadline" 2>&1 | tr '\n' '|')
+case "$dial" in
+    *"err=[deadline exceeded]"*)
+        ms=$(printf '%s' "$dial" | sed -n 's/.*ms=\([0-9]*\).*/\1/p')
+        if [ "$ms" -ge 700 ] && [ "$ms" -le 2200 ]; then note ok "dial-deadline: a stalled dial ends at the deadline ($ms ms)"
+        else note no "dial-deadline" "after $ms ms"; fi ;;
+    *) echo "    skip: dial-deadline: ${STALL_ADDR:-192.0.2.1} does not stall a connect here [$dial]" ;;
+esac
+
 # ---- openssl s_server ----
 if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -- '-psk_identity' \
     && openssl s_server -help 2>&1 | grep -q -- '-tls1_3'; then

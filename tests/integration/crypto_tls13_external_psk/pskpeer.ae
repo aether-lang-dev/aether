@@ -18,6 +18,11 @@
 //   badfinished=1    a server Finished with one bit flipped
 //   tls12=1          a TLS 1.2 ServerHello (no supported_versions)
 //   stall=1          after the ClientHello, send nothing and wait to be closed
+//   stall_after=1    complete the handshake, then neither send nor read
+//                    (HOLD_MS, default 20000); noread=1 is the same, for a
+//                    client that writes
+//   trickle=1        answer the client's data with a 200-byte record sent a
+//                    byte every 100 ms
 // Writes its port to PEER_PORT_OUT, serves one connection, and prints a line
 // per step: "CH id=<ok|bad> binder=<ext|res|bad> suites=<hex list>", then
 // what the client sent: "ALERT <n>", "FINISHED <ok|bad>", "DATA <text>",
@@ -40,11 +45,20 @@ import std.cryptography.tls13_record
 import std.cryptography.tls13_client
 
 extern exit(code: int)
+extern fflush(stream: ptr) -> int
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at(str: string, index: int) -> int
 
 const HRR_RANDOM = "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c"
+
+// Exit with what was printed flushed first: the peer leaves on many paths
+// without freeing what it holds, and under LeakSanitizer an exit that
+// reports a leak ends the process before stdio is flushed.
+fn quit(code: int) {
+    fflush(null)
+    exit(code)
+}
 
 // ---- knobs, hex, buffers, records (as peer.ae) ----
 
@@ -264,7 +278,7 @@ fn next_hello(r: *Reader) -> ptr {
     if rec == null { return null }
     if (bytes.get(rec, 0) & 0xFF) == 0x15 {
         println("ALERT ${bytes.get(rec, 6) & 0xFF}")
-        exit(0)
+        quit(0)
     }
     n = bytes.length(rec) - 5
     m = bytes.new(n)
@@ -280,12 +294,12 @@ fn client_record(r: *Reader, ctx: ptr) -> (int, ptr) {
         rec = next_record(r)
         if rec == null {
             println("CLOSED")
-            exit(0)
+            quit(0)
         }
         ct = bytes.get(rec, 0) & 0xFF
         if ct == 0x15 {
             println("ALERT ${bytes.get(rec, 6) & 0xFF}")
-            exit(0)
+            quit(0)
         }
         if ct == 0x17 {
             o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
@@ -293,11 +307,11 @@ fn client_record(r: *Reader, ctx: ptr) -> (int, ptr) {
             bytes.free(rec)
             if oe != "" {
                 println("UNREADABLE: ${oe}")
-                exit(0)
+                quit(0)
             }
             if o.content_type == 21 {
                 println("ALERT ${bytes.get(o.plaintext, 1) & 0xFF}")
-                exit(0)
+                quit(0)
             }
             return o.content_type, o.plaintext
         }
@@ -416,7 +430,7 @@ main() {
     srv, lerr = tcp.listen_on("127.0.0.1", 0)
     if lerr != "" {
         println("FAIL: ${lerr}")
-        exit(1)
+        quit(1)
     }
     _pw = fs.write(os.getenv("PEER_PORT_OUT"), "${tcp.server_port(srv)}")
     sock, aerr = tcp.accept(srv)
@@ -424,7 +438,7 @@ main() {
     tcp.server_close(srv)
     if aerr != "" {
         println("FAIL: ${aerr}")
-        exit(1)
+        quit(1)
     }
     r = Reader { sock: sock, buf: bytes.new(4096), len: 0, off: 0 }
 
@@ -436,7 +450,7 @@ main() {
     ch = next_hello(&r)
     if ch == null {
         println("CLOSED before a ClientHello")
-        exit(0)
+        quit(0)
     }
     empty = bytes.new(0)
     idk = identity_kind(ch, id)
@@ -454,13 +468,13 @@ main() {
             rest = next_record(&r)
         }
         println("CLOSED")
-        exit(0)
+        quit(0)
     }
     if (idk != "ok" || bk != "ext") && knob("ignore_binder") == "" {
         // A server checking the binder refuses here (RFC 8446 4.2.11).
         send_alert_plain(sock, 51)
         println("REFUSED")
-        exit(0)
+        quit(0)
     }
 
     tr = tls13_client.transcript_new()
@@ -517,7 +531,7 @@ main() {
         ch = next_hello(&r)
         if ch == null {
             println("CLOSED")
-            exit(0)
+            quit(0)
         }
         b2 = binder_kind(ch, prefix, early)
         println("CH2 id=${identity_kind(ch, id)} binder=${b2}")
@@ -525,7 +539,7 @@ main() {
         if b2 != "ext" && knob("ignore_binder") == "" {
             send_alert_plain(sock, 51)
             println("REFUSED")
-            exit(0)
+            quit(0)
         }
         tls13_client.transcript_add(tr, bytes.view(ch)[0..bytes.length(ch)])
     }
@@ -536,7 +550,7 @@ main() {
     so, sl = find_share(ch, group)
     if so < 0 {
         println("FAIL: no key share for group ${group}")
-        exit(1)
+        quit(1)
     }
     cpub = bytes.new(sl)
     bytes.copy_from_bytes(cpub, 0, ch, so, sl)
@@ -614,7 +628,7 @@ main() {
     if ready {
         _ct, _cp = client_record(&r, null)
         println("UNEXPECTED")
-        exit(0)
+        quit(0)
     }
 
     // The handshake keys: the PSK's early secret, then the ECDHE.
@@ -697,6 +711,16 @@ main() {
     bytes.wipe_free(want)
     bytes.free(p2)
 
+    if knob("stall_after") != "" || knob("noread") != "" {
+        // Established, then nothing: no reply, and nothing read, until
+        // HOLD_MS (default 20000) has passed or the driver ends this.
+        hold, _he = string.to_int(os.getenv("HOLD_MS"))
+        if hold <= 0 { hold = 20000 }
+        println("HOLDING")
+        sleep(hold)
+        quit(0)
+    }
+
     // The client's data under its application keys, then ours.
     actx = ctx_of(algo, hl, aead, klen, c_ap)
     sctx = ctx_of(algo, hl, aead, klen, s_ap)
@@ -706,7 +730,30 @@ main() {
     if t3 == 23 { println("DATA ${string.trim(text_of(p3))}") } else { println("RECORD ${t3}") }
     bytes.free(p3)
     hi = from_hex("6869")
-    send_sealed(sock, sctx, 23, hi)
+    if knob("trickle") != "" {
+        // The reply record a byte every 100 ms: each read gets something
+        // well inside any per-read timeout, and the record takes 20 s.
+        big = bytes.new(200)
+        k = 0
+        while k < 200 {
+            bytes.set(big, k, 0x61)
+            k = k + 1
+        }
+        rec = tls13_record.seal_record(sctx, 23, bytes.view(big)[0..200])
+        bytes.free(big)
+        q = 0
+        going = 1
+        while q < bytes.length(rec) && going == 1 {
+            _tn, te = tcp.write_all(sock, bytes.view(rec)[q..q + 1])
+            if te != "" { going = 0 }
+            q = q + 1
+            sleep(100)
+        }
+        println("TRICKLED ${q}")
+        bytes.free(rec)
+    } else {
+        send_sealed(sock, sctx, 23, hi)
+    }
     bytes.free(hi)
     nr = next_record(&r)
     if nr != null { bytes.free(nr) }
@@ -717,5 +764,5 @@ main() {
     tls13_record.free_ctx(sctx)
     bytes.free(r.buf)
     bytes.free(id)
-    exit(0)
+    quit(0)
 }
