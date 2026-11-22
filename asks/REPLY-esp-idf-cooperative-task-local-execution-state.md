@@ -49,8 +49,9 @@ now in `runtime/coop_runtime_sources.txt`, empty off ESP-IDF): FreeRTOS
 thread-local pointer slot 1 (`AETHER_FREERTOS_TLS_SLOT`) with its deletion
 callback, and `vTaskDelay(1)` to relax. It needs
 `CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=2` and
-`CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS=y` (the default), and refuses to
-compile without them.
+`CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS=y` (the default) to install;
+without them it still builds (a single-task project changes nothing) and
+`aether_freertos_contexts_install()` returns -1, saying what to set.
 
 The contract (`docs/design/task-execution-contexts.md` in full):
 

@@ -10,7 +10,8 @@
  * lock, a waiting task sleeps a tick rather than spin, so a holder of lower
  * priority runs. The project needs CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_
  * POINTERS of at least 2 (its default is 1) and
- * CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS (its default is y).
+ * CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS (its default is y) to install the
+ * port; without them it builds, and the install returns -1 saying so.
  *
  * The host calls aether_freertos_contexts_install() once, on the task that
  * owns the actors (app_main's, usually), before it starts any other task
@@ -30,12 +31,27 @@
 #if AETHER_FREERTOS_TLS_SLOT < 1
 #error "AETHER_FREERTOS_TLS_SLOT: ESP-IDF keeps thread-local pointer slot 0 for pthreads"
 #endif
-#if CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS <= AETHER_FREERTOS_TLS_SLOT
-#error "Aether's task contexts use a FreeRTOS thread-local pointer slot: set CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS to at least AETHER_FREERTOS_TLS_SLOT + 1 (2 by default)"
-#endif
-#if !CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS
-#error "Aether's task contexts need CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS, to end the context of a task deleted with one"
-#endif
+
+/* A project that does not configure the slot still builds: this file is in
+ * every cooperative build's source list, and a single-task program (the
+ * default sdkconfig, ESP-IDF's examples, the esp32 lane's projects) never
+ * installs a port. Only the install refuses, and says what to set. It was a
+ * #error, which stopped every ESP-IDF build of the runtime that had not
+ * raised the slot count, contexts or not. */
+#if CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS <= AETHER_FREERTOS_TLS_SLOT || \
+    !CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS
+#include <stdio.h>
+
+int aether_freertos_contexts_install(void) {
+    fprintf(stderr,
+            "aether: task contexts need FreeRTOS thread-local pointer slot %d and its deletion "
+            "callback: set CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS to at least %d and "
+            "CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS=y\n",
+            AETHER_FREERTOS_TLS_SLOT, AETHER_FREERTOS_TLS_SLOT + 1);
+    return -1;
+}
+
+#else
 
 static AetherExecContext* freertos_current(void) {
     return (AetherExecContext*)pvTaskGetThreadLocalStoragePointer(NULL, AETHER_FREERTOS_TLS_SLOT);
@@ -67,6 +83,7 @@ static const AetherContextPort k_freertos_port = {
 int aether_freertos_contexts_install(void) {
     return aether_context_port_install(&k_freertos_port);
 }
+#endif /* the slot and its deletion callback configured */
 
 #else
 /* ISO C wants a translation unit to declare something. */

@@ -318,7 +318,9 @@ AETHER_API void aether_context_task_ended(AetherExecContext* ctx);
 #if defined(ESP_PLATFORM)
 /* The ESP-IDF port (runtime/aether_context_freertos.c), installed on the
  * calling task: aether_context_port_install with a FreeRTOS thread-local
- * pointer slot. */
+ * pointer slot. -1, with a message, when the project has not configured
+ * the slot (CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS of at least 2 and
+ * CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS). */
 AETHER_API int  aether_freertos_contexts_install(void);
 #endif
 

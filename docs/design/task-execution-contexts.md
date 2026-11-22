@@ -80,8 +80,9 @@ thread-local pointer slot `AETHER_FREERTOS_TLS_SLOT` (1; ESP-IDF reserves
 0 for pthreads) with `vTaskSetThreadLocalStoragePointerAndDelCallback`, and
 relaxes with `vTaskDelay(1)`. The project needs
 `CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=2` (or more) and
-`CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS=y` (the default); the file refuses
-to compile without them.
+`CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS=y` (the default); without them the
+file still builds, so a single-task project needs no change, and
+`aether_freertos_contexts_install()` returns -1 and says what to set.
 
 **Cost.** With no port installed the accessor is one load and a predicted
 branch, the built-in block as before. With a port, one call to `current`
