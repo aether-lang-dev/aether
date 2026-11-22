@@ -16,6 +16,9 @@
 #   fallback.ae    where the program binds nothing, the receiver's (the
 #                  innermost first), through an import alias too
 #   alias.ae       the program's function beside a receiver imported `as`
+#   serve.ae       the program's function of the receiver's arity with other
+#                  argument types (std.guest.child's serve_exports shape):
+#                  built, and panicked in the module's function
 #   local_call.ae  a non-callable local hides the receiver's function, as it
 #                  hides the program's own outside a block: refused by name
 
@@ -42,6 +45,7 @@ expect() {
 expect main.ae "main.tag 1 main.say 6 var local param p main.closure 2 main.tag 3 main.closure 4 main.say 12 main.opt o build b opt=<unset> user.tag 40 main.tag 9 dsl.tag 10"
 expect fallback.ae "dsl.tag 1 dsl.say 3 dsl.label inner.tag 2 inner.note 3 dsl.say 4 build b opt=o dsl.tag 4"
 expect alias.ae "main.tag 1 dsl.say 2"
+expect serve.ae "main.serve 5"
 
 out=$( cd "$SCRIPT_DIR" && AETHER_HOME="$ROOT" "$AE" build --lib lib local_call.ae -o /dev/null 2>&1 )
 if [ $? -eq 0 ]; then

@@ -1,7 +1,7 @@
 // Fixture for #333's shadowing rule: a module whose functions a trailing
 // block passed to it reaches by their bare names, and a program that
 // defines some of those names itself.
-exports(say, tag, label, run, build, opt)
+exports(say, tag, label, run, build, opt, serve)
 
 import std.map
 
@@ -36,4 +36,10 @@ builder build(name: string) {
 
 opt(_ctx: ptr, v: string) {
     map_put(_ctx, "opt", v)
+}
+
+// Shaped like std.guest.child's serve_exports(h, dispatch): two arguments,
+// the second a closure it calls.
+serve(h: ptr, dispatch: fn) {
+    call(dispatch, h)
 }
