@@ -164,6 +164,7 @@ main() {
         gi = gi + 1
     }
 
+    json.free(root)
     println("wycheproof chacha20poly1305: ${passed} valid ok, ${rejected_invalid} forgeries rejected, ${skipped_unsupported} skipped (iv!=96), ${failed} failed")
     if failed > 0 { exit(1) }
     println("ALL PASS")

@@ -47,6 +47,18 @@ fi
 . "$root/tests/lib/sweep_timeout.sh"
 sweep_timeout_bound TO "$root" "${AE_SH_TEST_TIMEOUT:-420}"
 
+# A test whose own work is long by nature (several full runtime builds for a
+# cross target) says so with a line `# sweep-timeout: SECONDS` in its first
+# 40 lines. That raises ITS limit above the default, never lowers it, so a
+# hang in any other test is still cut off at the default. The limit is for the
+# slowest runner, not the typical one: cross_ios takes 283 s on the macOS
+# x86_64 runner on a good day and 393 s on a bad one, against a 420 s default.
+test_timeout() {
+    t=$(head -n 40 "$1" | sed -n 's/^# sweep-timeout: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+    d="${AE_SH_TEST_TIMEOUT:-420}"
+    if [ -n "$t" ] && [ "$t" -gt "$d" ]; then echo "$t"; else echo "$d"; fi
+}
+
 # Each test's wall time, for the report at the end of the sweep (#2673).
 . "$root/tests/scripts/sweep_clock.sh"
 
@@ -73,7 +85,9 @@ for sh_test in $scripts; do
     # When the limit above ends this test, in seconds since the epoch: a test
     # that bounds steps of its own fits them under it, so its own report of a
     # stalled step is printed before the sweep kills it (cross_ios).
-    AE_SH_TEST_DEADLINE=$(($(date +%s) + ${AE_SH_TEST_TIMEOUT:-420}))
+    this_timeout=$(test_timeout "$sh_test")
+    sweep_timeout_bound TO "$root" "$this_timeout"
+    AE_SH_TEST_DEADLINE=$(($(date +%s) + this_timeout))
     export AE_SH_TEST_DEADLINE
     $TO bash "$sh_test" >"$tmpdir/run_$name.out" 2>"$tmpdir/run_$name.err"
     sh_rc=$?
@@ -103,7 +117,7 @@ for sh_test in $scripts; do
             touch "$tmpdir/PASS_$name"
         fi
     elif [ $sh_rc -eq 124 ]; then
-        echo "  [TIMEOUT] $name (shell test exceeded ${AE_SH_TEST_TIMEOUT:-420}s)"
+        echo "  [TIMEOUT] $name (shell test exceeded ${this_timeout}s)"
         print_tail "$name"
         printf timeout > "$tmpdir/phase_$name.txt"
         touch "$tmpdir/FAIL_$name"

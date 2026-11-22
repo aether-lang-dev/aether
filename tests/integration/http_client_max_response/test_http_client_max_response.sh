@@ -33,6 +33,10 @@ cleanup() {
     return 0
 }
 trap cleanup EXIT
+# The sweep ends a test past its limit with a signal, which skips the EXIT
+# trap: the server was left running, and the sweep waited on it. Exiting from
+# the signal's trap runs cleanup.
+trap 'exit 143' INT TERM HUP
 fail() { echo "  [FAIL] http_client_max_response: $1"; exit 1; }
 
 # The client's bound is the sweep's own: never timeout(1) here (see

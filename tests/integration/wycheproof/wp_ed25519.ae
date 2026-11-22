@@ -133,6 +133,7 @@ main() {
         gi = gi + 1
     }
 
+    json.free(root)
     println("wycheproof ed25519: ${passed} valid ok, ${rejected_invalid} forgeries rejected, ${failed} failed (stride ${stride})")
     if failed > 0 { exit(1) }
     println("ALL PASS")

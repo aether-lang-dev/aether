@@ -43,6 +43,7 @@ main() {
         exit(1)
     }
     body = string.concat(client.response_body(resp), "")
+    client.response_free(resp)
     if string.equals(body, "hello") == 0 {
         println("FAIL: body was '${body}', want just the declared 5 bytes")
         exit(1)

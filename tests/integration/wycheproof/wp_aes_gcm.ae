@@ -162,6 +162,7 @@ main() {
         gi = gi + 1
     }
 
+    json.free(root)
     println("wycheproof aes_gcm: ${passed} valid ok, ${rejected_invalid} forgeries rejected, ${skipped_unsupported} skipped (iv!=96/tag!=128), ${failed} failed")
     if failed > 0 { exit(1) }
     println("ALL PASS")

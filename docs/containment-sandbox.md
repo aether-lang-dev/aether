@@ -1996,8 +1996,8 @@ import tcl      // in place of the contrib.host import it had here
 |---|---|---|
 | Lua | `import lua` | 2026-11-04 |
 | Python | `import python` | 2026-11-05 |
-| Duktape (ES5), with `js` its alias | `import duktape`, `import js` | 2026-11-05 |
-| QuickJS (ES2023) | `import quickjs` | 2026-11-05 |
+| Duktape (ES5) | `import duktape` | 2026-11-05 |
+| QuickJS (ES2023), with the full `vm_*` API | `import quickjs` | 2026-11-05 |
 | Perl 5 | `import perl` | 2026-11-05 |
 | CRuby 3 | `import ruby` | 2026-11-05 |
 | Tcl 8.5+ | `import tcl` | 2026-11-05 |
@@ -2005,13 +2005,16 @@ import tcl      // in place of the contrib.host import it had here
 | Java (a child JVM) | `import java` | 2026-11-05 |
 | Factor | `import factor` | 2026-11-05 |
 | Racket CS, Rhombus | `import racket`, `import rhombus` | 2026-11-05 |
+| Rexx, on RexxAE (an engine written in Aether, from its own repository) | `import rexx` | never here: written there |
 
 There each language is held to stunt's catalogue by name, in process and
 in a `std.guest` contained child, and its README has the resulting
 containment table: which rows the in-process bridge holds (and which it
 cannot, such as CPython's copy of the environment or Lua's `os.execute`
 under the preload) and which the contained child holds. The engine behind
-the QuickJS bridge, `contrib.quickjs`, stays in this tree.
+the QuickJS bridge, `contrib.quickjs`, stays in this tree. That repository is
+tested on the current Aether release only, so a bridge there is known to work
+on that release and on no other.
 
 What stays in `contrib/host/` is:
 
@@ -2117,15 +2120,16 @@ the hosted code returns. A stale or guessed token returns nothing.
 
 Each host bridge provides two bindings to the hosted language,
 `aether_map_get(key)` and `aether_map_put(key, value)`: stunt's
-`map-*` checks here, and the Lua, JS, Perl, Ruby and Tcl bridges of
-aether-guest-languages under the same names.
+`map-*` checks here, and the Lua, Python, Duktape, QuickJS, Perl, Ruby and
+Tcl bridges of aether-guest-languages under the same names (the Rexx bridge
+spells them `AETHER_MAP_GET` and `AETHER_MAP_PUT`).
 
 ### Example
 
-With the JS bridge of aether-guest-languages (`import js` there):
+With the Duktape bridge of aether-guest-languages (`import duktape` there):
 
 ```aether,fragment
-import js
+import duktape
 
 worker = sandbox.new("worker") {
     grant_env("HOME")
@@ -2139,7 +2143,7 @@ _p2 = sharedmap.put(map, "threshold", "42")
 token = sharedmap.token(map)
 
 // Run JavaScript, it reads inputs, writes outputs
-js.run_sandboxed_with_map(worker, <<JS
+duktape.run_sandboxed_with_map(worker, <<JS
     var user = aether_map_get("user");
     var threshold = aether_map_get("threshold");
     aether_map_put("result", "processed " + user);
@@ -2318,9 +2322,6 @@ Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md):
 
 - Capturing stdout/stderr from hosted scripts, pipe rewire vs.
   shared-map key vs. pass-through, design undecided.
-- Native shared-map bindings for Perl and Ruby (in
-  aether-guest-languages), currently tied-hash via `eval`, which
-  swallows writes. Tcl and JS already have proper native C bindings.
 - `bytes` mode on the shared map, so callers don't have to
   base64 binary payloads across the boundary.
 
