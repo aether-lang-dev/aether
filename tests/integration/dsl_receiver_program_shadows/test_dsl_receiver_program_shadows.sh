@@ -48,7 +48,20 @@ expect main.ae "main.tag 1 main.say 6 var local param p main.closure 2 main.tag 
 expect fallback.ae "dsl.tag 1 dsl.say 3 dsl.label inner.tag 2 inner.note 3 dsl.say 4 build b opt=o dsl.tag 4"
 expect alias.ae "main.tag 1 dsl.say 2"
 expect serve.ae "main.serve 5"
-expect guest_child.ae "local serve_exports"
+# guest_child.ae runs std.guest.child over a socket pair, which Windows has no
+# implementation of (std_guest and std_guest_invoke skip there for the same
+# reason). The resolution it tests happens at compile time, so on Windows it
+# is built, not run: a program that resolved serve_exports to the module's
+# export would still build, so the build alone proves nothing there, and the
+# run on the other platforms is the proof. The platform from uname, never
+# from the environment's OS (check_platform_env.py).
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+        out=$( cd "$SCRIPT_DIR" && AETHER_HOME="$ROOT" "$AE" build --lib lib guest_child.ae -o /dev/null 2>&1 ) ||
+            { echo "  [FAIL] dsl_receiver_program_shadows: guest_child.ae did not build:"; echo "$out" | head -20 | sed 's/^/          /'; fails=$((fails + 1)); }
+        ;;
+    *) expect guest_child.ae "local serve_exports" ;;
+esac
 
 out=$( cd "$SCRIPT_DIR" && AETHER_HOME="$ROOT" "$AE" build --lib lib local_call.ae -o /dev/null 2>&1 )
 if [ $? -eq 0 ]; then
