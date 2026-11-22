@@ -1,0 +1,366 @@
+// std.tcp's per-connection deadline and cancel handle
+// (docs/design/tcp-tls-deadlines-and-cancellation.md), against peers on
+// threads of this process that use plain, unbounded std.tcp: one that
+// never answers, one that trickles a byte every 100 ms (inside any
+// per-call timeout, so only the total deadline can end the read), one that
+// never reads while the client writes, and an echo. Each case prints
+// "ok   <what>" or "FAIL <what>: <why>", then "SKIP <what>: <why>" where the
+// host cannot stage it; the last line is "PASS" or "FAILED <n>".
+//
+// Timing bounds are generous (a loaded four-core N100 runs this): a stop
+// must not come before its deadline, and must come within STOP_SLACK_MS
+// after it, or after the cancel.
+//
+// STALL_ADDR (default 192.0.2.1, TEST-NET-1, never routed) is the address a
+// connect stalls on; where it fails at once instead (no route), the connect
+// cases are skipped, saying so.
+
+import std.os
+import std.tcp
+import std.sync
+import std.bytes
+import std.string
+import std.worker
+
+const STOP_SLACK_MS = 1500
+
+fn now() -> long {
+    return os.now_monotonic_ms()
+}
+
+// ---- peers ----
+
+const PEER_SILENT = 1
+const PEER_TRICKLE = 2
+const PEER_NOREAD = 3
+const PEER_ECHO = 4
+
+// One accepted connection, served as `mode` says until the client closes
+// or `stop` is set; then closed (by this thread, its owner).
+fn serve_conn(sock: ptr, mode: int, stop: ptr) -> ptr {
+    buf = make([]byte, 4096)
+    one = make([]byte, 1)
+    one[0] = 0x41
+    going = 1
+    while going == 1 && sync.atomic_load(stop) == 0 {
+        if mode == PEER_TRICKLE {
+            sleep(100)
+            n, werr = tcp.write_slice(sock, one)
+            if werr != "" || n != 1 { going = 0 }
+        } else if mode == PEER_NOREAD {
+            sleep(20)
+        } else {
+            ready, perr = tcp.poll(sock, 20)
+            if perr != "" { going = 0 }
+            if ready {
+                got, rerr = tcp.read_into(sock, buf)
+                if rerr != "" && rerr != "timeout" { going = 0 }
+                if rerr == "" && mode == PEER_ECHO {
+                    _n, werr = tcp.write_all(sock, buf[0..got])
+                    if werr != "" { going = 0 }
+                }
+            }
+        }
+    }
+    tcp.close(sock)
+    return null
+}
+
+// Accept on `srv` until `stop` is set, each connection on a thread of its own.
+fn serve(srv: ptr, mode: int, stop: @keep ptr) -> ptr {
+    while sync.atomic_load(stop) == 0 {
+        if tcp.server_poll(srv, 20) == 1 {
+            sock, aerr = tcp.accept(srv)
+            if aerr == "" {
+                worker.run_detached(|| { return serve_conn(sock, mode, stop) })
+            }
+        }
+    }
+    tcp.server_close(srv)
+    return null
+}
+
+struct Peer {
+    port: int
+    stop: ptr
+}
+
+fn peer_start(mode: int) -> Peer {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL listen: ${lerr}")
+        exit(1)
+    }
+    stop = sync.atomic_new(0)
+    port = tcp.server_port(srv)
+    worker.run_detached(|| { return serve(srv, mode, stop) })
+    return Peer { port: port, stop: stop }
+}
+
+fn peer_stop(p: Peer) {
+    sync.atomic_store(p.stop, 1)
+}
+
+// ---- checks ----
+
+struct Tally {
+    fails: int
+}
+
+fn check(t: *Tally, what: string, ok: bool, why: string) {
+    if ok {
+        println("ok   ${what}")
+    } else {
+        println("FAIL ${what}: ${why}")
+        t.fails = t.fails + 1
+    }
+}
+
+// `err` is `want`, `el` ms after a start `stop_at` ms before the stop was due.
+fn stopped_in_time(t: *Tally, what: string, err: string, want: string, el: long, due_after: long) {
+    ok = err == want && el >= due_after && el <= due_after + STOP_SLACK_MS
+    check(t, what, ok, "error [${err}] after ${el} ms; want [${want}] at ${due_after} ms (+${STOP_SLACK_MS})")
+}
+
+// Trip `c` from another thread `after_ms` from now.
+fn trip_later(c: @keep ptr, after_ms: int) {
+    worker.run_detached(|| {
+            sleep(after_ms)
+            tcp.cancel(c)
+            return null
+        })
+}
+
+main() {
+    t = Tally { fails: 0 }
+    stall = os.getenv("STALL_ADDR")
+    if stall == "" { stall = "192.0.2.1" }
+
+    // -- connect --
+    t0 = now()
+    s0, e0 = tcp.connect_timeout(stall, 9, 300)
+    probe_el = now() - t0
+    if s0 != null { tcp.close(s0) }
+    if e0 != "connect timeout" {
+        println("SKIP connect stalled by a deadline: ${stall} does not stall a connect here (${e0} in ${probe_el} ms)")
+        println("SKIP connect stalled, cancelled from another thread: the same")
+    } else {
+        a = now()
+        s1, e1 = tcp.connect_until(stall, 9, a + 400, null)
+        if s1 != null { tcp.close(s1) }
+        stopped_in_time(&t, "connect stalled: the deadline ends it", e1, tcp.DEADLINE_EXCEEDED, now() - a, 400)
+        c1, _ce = tcp.cancel_new()
+        a = now()
+        trip_later(c1, 300)
+        s2, e2 = tcp.connect_until(stall, 9, 0, c1)
+        if s2 != null { tcp.close(s2) }
+        stopped_in_time(&t, "connect stalled, no deadline: a cancel from another thread ends it", e2, tcp.CANCELLED, now() - a, 300)
+        tcp.cancel_free(c1)
+    }
+    pe = peer_start(PEER_ECHO)
+    late = now() - 5
+    s3, e3 = tcp.connect_until("127.0.0.1", pe.port, late, null)
+    check(&t, "a deadline already passed refuses the dial", s3 == null && e3 == tcp.DEADLINE_EXCEEDED, "got [${e3}]")
+    if s3 != null { tcp.close(s3) }
+    c3, _c3e = tcp.cancel_new()
+    tcp.cancel(c3)
+    s4, e4 = tcp.connect_until("127.0.0.1", pe.port, 0, c3)
+    check(&t, "a cancel already tripped refuses the dial", s4 == null && e4 == tcp.CANCELLED && tcp.cancelled(c3), "got [${e4}]")
+    if s4 != null { tcp.close(s4) }
+    tcp.cancel_free(c3)
+
+    // -- ordinary traffic under a generous deadline --
+    c5, _c5e = tcp.cancel_new()
+    s5, e5 = tcp.connect_until("127.0.0.1", pe.port, now() + 20000, c5)
+    if e5 != "" {
+        check(&t, "echo under a deadline", false, e5)
+    } else {
+        big = make([]byte, 262144)
+        i = 0
+        while i < 262144 {
+            big[i] = (i * 7) & 0xFF
+            i = i + 1
+        }
+        _w, we = tcp.write_all(s5, big)
+        got = 0
+        same = true
+        rb = make([]byte, 65536)
+        while got < 262144 && same {
+            n, re = tcp.read_into(s5, rb)
+            if re != "" {
+                same = false
+                println("     read: ${re}")
+            } else {
+                j = 0
+                while j < n {
+                    if rb[j] != big[got + j] { same = false }
+                    j = j + 1
+                }
+                got = got + n
+            }
+        }
+        check(&t, "256 KiB echoed whole under a deadline and a cancel handle", we == "" && got == 262144 && same && tcp.stopped(s5) == "", "write [${we}], ${got} bytes back, same ${same}")
+        tcp.close(s5)
+    }
+    tcp.cancel_free(c5)
+
+    // -- a peer that never answers: read --
+    ps = peer_start(PEER_SILENT)
+    s6, e6 = tcp.connect("127.0.0.1", ps.port)
+    if e6 == "" {
+        a = now()
+        tcp.set_deadline(s6, a + 500, null)
+        _d, _n6, r6 = tcp.read_n(s6, 100)
+        stopped_in_time(&t, "read from a silent peer: the deadline ends it", r6, tcp.DEADLINE_EXCEEDED, now() - a, 500)
+        check(&t, "stopped() says why", tcp.stopped(s6) == tcp.DEADLINE_EXCEEDED, "[${tcp.stopped(s6)}]")
+        // Sticky: a send after the deadline ends at once, sending nothing.
+        a = now()
+        _wn, we6 = tcp.write(s6, "late")
+        check(&t, "a write after the deadline ends at once", we6 == tcp.DEADLINE_EXCEEDED && now() - a < 200, "[${we6}] in ${now() - a} ms")
+        // Bound again: the socket is whole, and the new deadline is the one.
+        tcp.set_deadline(s6, now() + 300, null)
+        check(&t, "set_deadline clears the stop", tcp.stopped(s6) == "", "[${tcp.stopped(s6)}]")
+        a = now()
+        rb6 = make([]byte, 16)
+        _n7, r7 = tcp.read_into(s6, rb6)
+        stopped_in_time(&t, "read_into under a new deadline", r7, tcp.DEADLINE_EXCEEDED, now() - a, 300)
+        // A cancel from another thread wakes a blocked read at once.
+        c6, _c6e = tcp.cancel_new()
+        tcp.set_deadline(s6, 0, c6)
+        a = now()
+        trip_later(c6, 300)
+        _d8, _n8, r8 = tcp.read_n(s6, 100)
+        stopped_in_time(&t, "read blocked with no deadline: a cancel from another thread ends it", r8, tcp.CANCELLED, now() - a, 300)
+        // The socket keeps its reference: freeing the handle first is safe.
+        tcp.cancel_free(c6)
+        _d9, _n9, r9 = tcp.read_n(s6, 100)
+        check(&t, "the cancel is sticky, the handle freed while bound", r9 == tcp.CANCELLED, "[${r9}]")
+        tcp.close(s6)
+    }
+
+    // -- a peer that trickles a byte every 100 ms --
+    pt = peer_start(PEER_TRICKLE)
+    s10, e10 = tcp.connect("127.0.0.1", pt.port)
+    if e10 == "" {
+        a = now()
+        tcp.set_deadline(s10, a + 1000, null)
+        total = 0
+        last = ""
+        while last == "" {
+            _d, n, re = tcp.read_n(s10, 64)
+            if re == "" { total = total + n }
+            last = re
+        }
+        el = now() - a
+        stopped_in_time(&t, "a peer trickling inside every per-read timeout: the total deadline ends it", last, tcp.DEADLINE_EXCEEDED, el, 1000)
+        check(&t, "  ...after reading what trickled in", total >= 4 && total <= 15, "${total} bytes")
+        tcp.close(s10)
+    }
+
+    // -- a peer that never reads: write --
+    pn = peer_start(PEER_NOREAD)
+    huge = make([]byte, 67108864)
+    s11, e11 = tcp.connect("127.0.0.1", pn.port)
+    if e11 == "" {
+        a = now()
+        tcp.set_deadline(s11, a + 600, null)
+        sent, we = tcp.write_all(s11, huge)
+        stopped_in_time(&t, "write_all to a peer that does not read: the deadline ends it", we, tcp.DEADLINE_EXCEEDED, now() - a, 600)
+        check(&t, "  ...short, with what went counted", sent > 0 && sent < 67108864, "${sent} bytes")
+        tcp.close(s11)
+    }
+    s12, e12 = tcp.connect("127.0.0.1", pn.port)
+    if e12 == "" {
+        c12, _c12e = tcp.cancel_new()
+        tcp.set_deadline(s12, 0, c12)
+        a = now()
+        trip_later(c12, 300)
+        _sent, we = tcp.write_all(s12, huge)
+        stopped_in_time(&t, "write_all blocked with no deadline: a cancel from another thread ends it", we, tcp.CANCELLED, now() - a, 300)
+        tcp.close(s12)
+        tcp.cancel_free(c12)
+    }
+
+    // -- expiry and cancel against close: no double close, no foreign close --
+    race_rounds = 200
+    rv = os.getenv("RACE_ROUNDS")
+    if rv != "" { race_rounds, _rerr = string.to_int(rv) }
+    broken = 0
+    if os.getenv("BROKEN_CANCELLER") == "1" { broken = 1 }
+    races_ok = 0
+    reused = 0
+    why = ""
+    r = 0
+    while r < race_rounds && why == "" {
+        c, ce = tcp.cancel_new()
+        if ce != "" { why = "cancel_new: ${ce}" }
+        done = sync.atomic_new(0)
+        jitter = (now() % 7) as int
+        sock, de = tcp.connect_until("127.0.0.1", pe.port, now() + 3 + jitter, c)
+        if de != "" { why = "dial: ${de}" }
+        old_fd = tcp.fd(sock)
+        worker.run_detached(|| {
+                sleep(((now() / 3) % 9) as int)
+                tcp.cancel(c)
+                // The shape this replaces, kept to show the check can fail: a
+                // canceller that closes the connection's descriptor by number
+                // once the owner may have closed it (BROKEN_CANCELLER=1, POSIX).
+                if broken == 1 { raw_close(old_fd) }
+                sync.atomic_store(done, 1)
+                return null
+            })
+        _d, _n, re = tcp.read_n(sock, 64)
+        if re != tcp.DEADLINE_EXCEEDED && re != tcp.CANCELLED { why = "round ${r}: read ended with [${re}]" }
+        // Even rounds drop the handle while the socket still holds it (the
+        // canceller done first: tripping a freed handle is the one misuse),
+        // odd rounds close first and race the canceller.
+        if (r % 2) == 0 {
+            while sync.atomic_load(done) == 0 { sleep(1) }
+            tcp.cancel_free(c)
+        }
+        tcp.close(sock)
+        // Decoys open at once, taking the numbers just freed.
+        d1, d1e = tcp.connect("127.0.0.1", pe.port)
+        d2, d2e = tcp.connect("127.0.0.1", pe.port)
+        if d1e != "" || d2e != "" { why = "decoy dial: ${d1e} ${d2e}" }
+        if tcp.fd(d1) == old_fd || tcp.fd(d2) == old_fd { reused = reused + 1 }
+        while sync.atomic_load(done) == 0 { sleep(1) }
+        // The canceller has finished: both decoys must still be what they were.
+        _w1, w1e = tcp.write(d1, "p1")
+        _w2, w2e = tcp.write(d2, "p2")
+        x1, _n1, x1e = tcp.read_n(d1, 8)
+        x2, _n2, x2e = tcp.read_n(d2, 8)
+        if w1e != "" || w2e != "" || x1e != "" || x2e != "" || x1 != "p1" || x2 != "p2" {
+            why = "round ${r}: a decoy was disturbed: [${w1e}] [${w2e}] [${x1e}] [${x2e}] [${x1}] [${x2}]"
+        } else {
+            races_ok = races_ok + 1
+        }
+        tcp.close(d1)
+        tcp.close(d2)
+        if (r % 2) == 1 { tcp.cancel_free(c) }
+        sync.atomic_free(done)
+        r = r + 1
+    }
+    check(&t, "expiry and cancel racing close, ${race_rounds} rounds: every decoy intact (${reused} took the closed number)", races_ok == race_rounds, why)
+
+    peer_stop(pe)
+    peer_stop(ps)
+    peer_stop(pt)
+    peer_stop(pn)
+    // Every peer thread sees its stop within one 100 ms step, and ends;
+    // then their cells can go.
+    sleep(500)
+    sync.atomic_free(pe.stop)
+    sync.atomic_free(ps.stop)
+    sync.atomic_free(pt.stop)
+    sync.atomic_free(pn.stop)
+    if t.fails == 0 {
+        println("PASS")
+    } else {
+        println("FAILED ${t.fails}")
+        exit(1)
+    }
+}
+
+extern exit(code: int)
+@extern("close") raw_close(fd: int) -> int

@@ -399,3 +399,6 @@ tests/integration/http_server_slow_clients/
 tests/integration/http_client_max_response/
 # probe.ae calls the host in shim.c (--extra); test_http_server_h2_drain_host.sh builds and runs them together.
 tests/integration/http_server_h2_drain_host/
+# deadline.ae runs from its driver, which also runs it with BROKEN_CANCELLER=1
+# to show the descriptor race check can fail.
+tests/integration/tcp_deadline_cancel/

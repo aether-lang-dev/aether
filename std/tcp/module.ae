@@ -16,7 +16,13 @@ exports(
     listen, listen_on, accept, fd, server_fd,
     server_port, server_poll, set_nodelay, set_read_buffer, available, poll, poll2,
     wait_writable, write_some,
-    close_drained
+    close_drained,
+    // Deadlines and cancellation (docs/design/tcp-tls-deadlines-and-cancellation.md)
+    tcp_connect_until_raw, tcp_set_deadline_raw, tcp_deadline_raw, tcp_stop_raw,
+    tcp_cancel_new_raw, tcp_cancel_raw, tcp_cancel_tripped_raw, tcp_cancel_free_raw,
+    connect_until, set_deadline, deadline, stopped,
+    cancel_new, cancel, cancelled, cancel_free,
+    DEADLINE_EXCEEDED, CANCELLED
 )
 
 // Raw externs - escape hatch
@@ -57,6 +63,20 @@ extern tcp_wait_writable_raw(sock: ptr, timeout_ms: int) -> int
 extern tcp_send_some_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_connect_unix_raw(path: string) -> (ptr, string)
 extern tcp_listen_unix_raw(path: string) -> (ptr, string)
+extern tcp_connect_until_raw(host: string, port: int, due_ms: long, cancel: ptr) -> (ptr, string)
+extern tcp_set_deadline_raw(sock: ptr, due_ms: long, cancel: ptr) -> int
+extern tcp_deadline_raw(sock: ptr) -> long
+extern tcp_stop_raw(sock: ptr) -> int
+extern tcp_cancel_new_raw() -> (ptr, string)
+extern tcp_cancel_raw(cancel: ptr) -> int
+extern tcp_cancel_tripped_raw(cancel: ptr) -> int
+extern tcp_cancel_free_raw(cancel: ptr)
+
+// The two errors a bound deadline or cancel ends an operation with (see
+// set_deadline), each distinct from "timeout" (the socket's own per-call
+// timeout), from a close and from every other failure. Compare with ==.
+const DEADLINE_EXCEEDED = "deadline exceeded"
+const CANCELLED = "cancelled"
 
 // Connect to host:port. Returns (socket, "") on success, (null, error)
 // on failure. Caller must tcp.close the returned socket.
@@ -150,9 +170,19 @@ listen_unix(path: string) -> {
 write(sock: ptr, data: string) -> {
     n = tcp_send_raw(sock, data)
     if n < 0 {
-        return 0, "send failed"
+        return 0, send_failure(sock)
     }
     return n, ""
+}
+
+// Why a send on `sock` failed: a bound deadline or cancel that stopped it,
+// else "send failed".
+fn send_failure(sock: ptr) -> string {
+    why = stopped(sock)
+    if why != "" {
+        return why
+    }
+    return "send failed"
 }
 
 // Length-aware socket write: sends the bytes of `data`, whose length
@@ -173,7 +203,7 @@ write_n(sock: ptr, data: byte[]) -> {
     }
     n = tcp_send_n_raw(sock, data, data.len)
     if n < 0 {
-        return 0, "send failed"
+        return 0, send_failure(sock)
     }
     return n, ""
 }
@@ -184,6 +214,10 @@ write_n(sock: ptr, data: byte[]) -> {
 read(sock: ptr, max_bytes: int) -> {
     data = tcp_receive_raw(sock, max_bytes)
     if data == null {
+        why = stopped(sock)
+        if why != "" {
+            return "", why
+        }
         return "", "connection closed or receive failed"
     }
     return data, ""
@@ -201,6 +235,10 @@ read(sock: ptr, max_bytes: int) -> {
 // failed"; that is the terminal state. A full-duplex relay must branch
 // on the "timeout" sentinel rather than collapsing all non-empty errors
 // into "closed."
+//
+// On a socket with a deadline or a cancel bound (set_deadline), the read
+// also ends with ("", 0, DEADLINE_EXCEEDED) or ("", 0, CANCELLED), the
+// socket still connected and still its owner's to close.
 read_n(sock: ptr, max_bytes: int) -> {
     return tcp_receive_n_raw(sock, max_bytes)
 }
@@ -222,7 +260,7 @@ write_slice(sock: ptr, s: byte[]) -> {
     need_bound("write_slice", s)
     n = tcp_send_bytes_raw(sock, s, s.len)
     if n < 0 {
-        return 0, "send failed"
+        return 0, send_failure(sock)
     }
     return n, ""
 }
@@ -238,7 +276,7 @@ write_all(sock: ptr, data: byte[]) -> {
     need_bound("write_all", data)
     n = tcp_send_all_raw(sock, data, data.len)
     if n < data.len {
-        return n, "send failed"
+        return n, send_failure(sock)
     }
     return n, ""
 }
@@ -259,6 +297,12 @@ read_into(sock: ptr, buf: byte[]) -> {
     n = tcp_receive_into_raw(sock, buf, buf.len)
     if n == -2 {
         return 0, "timeout"
+    }
+    if n == -3 {
+        return 0, DEADLINE_EXCEEDED
+    }
+    if n == -4 {
+        return 0, CANCELLED
     }
     if n < 0 {
         return 0, "connection closed or receive failed"
@@ -455,4 +499,114 @@ fd(sock: ptr) -> int {
 // tcp.server_close, never closed directly.
 server_fd(server: ptr) -> int {
     return tcp_server_fd_raw(server)
+}
+
+// ---- Deadlines and cancellation --------------------------------------------
+//
+// One absolute deadline and one cancel handle, bound to a connection, bound
+// every receive and send on it, however many calls they take and however
+// slowly the peer trickles: the deadline is a time, not a budget each call
+// starts again (docs/design/tcp-tls-deadlines-and-cancellation.md). Both are
+// per connection, passed explicitly; there is no process-wide setting.
+//
+//   c, err = tcp.cancel_new()                       // the host keeps c
+//   due = os.now_monotonic_ms() + 10000             // 10 s from now, for everything
+//   sock, err = tcp.connect_until("192.0.2.7", 443, due, c)
+//   ...                                             // reads and writes end by `due`
+//   tcp.cancel(c)                                   // any thread: wakes a blocked read at once
+//   tcp.close(sock)                                 // the owner closes, always
+//   tcp.cancel_free(c)
+//
+// What ends: read, read_n, read_into, write, write_n, write_slice and
+// write_all, each with DEADLINE_EXCEEDED or CANCELLED. poll, poll2,
+// wait_writable and server_poll take a timeout of their own and do not
+// consult the deadline; write_some never waits. A stop leaves the socket
+// connected and still its owner's to close: neither a deadline nor a cancel
+// closes or shuts down a descriptor, so a cancel racing a close can close
+// nothing, nor a descriptor number the system has since given to something
+// else. Both are sticky: once the deadline has passed, or the handle is
+// tripped, every bounded call on the socket ends at once, before sending
+// or reading a byte. The socket's own 30 s receive and send timeouts still
+// apply under them ("timeout"), as unbound.
+
+// connect, bounded by the absolute deadline `due_ms` (os.now_monotonic_ms's
+// clock; 0 for none) and ended early by the cancel handle `cancel` (null for
+// none), every address the host resolves to; the socket comes back with both
+// bound (set_deadline), so the same deadline covers what follows. Returns
+// (socket, "") or (null, error): DEADLINE_EXCEEDED, CANCELLED, or connect's
+// and connect_timeout's errors. Resolving the name is not interrupted (the
+// system resolver cannot be): the deadline and the cancel are checked before
+// and after it, so a numeric address is the wholly bounded dial.
+connect_until(host: string, port: int, due_ms: long, cancel: ptr) -> {
+    sock, err = tcp_connect_until_raw(host, port, due_ms, cancel)
+    if sock == null {
+        return null, err
+    }
+    return sock, ""
+}
+
+// Bind the absolute deadline `due_ms` (os.now_monotonic_ms's clock, 0 for
+// none) and the cancel handle `cancel` (null for none) to `sock`, replacing
+// what was bound and clearing stopped(sock). An adopted socket, one a caller
+// connected some other way, gets its bound this way before it is handed on
+// (tls13_client.connect_socket_psk honours it). The socket holds its own
+// reference to `cancel` until it is closed or rebound. Returns "" or why
+// not (a null handle, a negative `due_ms`). Call it from the thread that
+// owns the socket, not while another thread is in a read or write on it.
+set_deadline(sock: ptr, due_ms: long, cancel: ptr) -> string {
+    if tcp_set_deadline_raw(sock, due_ms, cancel) != 0 {
+        return "set_deadline: a null socket or a negative due_ms"
+    }
+    return ""
+}
+
+// The deadline bound to `sock`, 0 for none.
+deadline(sock: ptr) -> long {
+    return tcp_deadline_raw(sock)
+}
+
+// What ended the last call that a bound deadline or cancel stopped on
+// `sock`: DEADLINE_EXCEEDED, CANCELLED, or "" when none has.
+stopped(sock: ptr) -> string {
+    k = tcp_stop_raw(sock)
+    if k == 1 {
+        return DEADLINE_EXCEEDED
+    }
+    if k == 2 {
+        return CANCELLED
+    }
+    return ""
+}
+
+// A fresh cancel handle: (handle, "") or (null, why). The creator owns it
+// and frees it with cancel_free; sockets bound to it hold references of
+// their own, so freeing it while a connection is still open is safe. It
+// holds a descriptor or two of its own (an eventfd on Linux, a pipe on
+// macOS, iOS and the BSDs, a loopback socket pair on Windows).
+cancel_new() -> {
+    c, err = tcp_cancel_new_raw()
+    if c == null {
+        return null, err
+    }
+    return c, ""
+}
+
+// Trip `c`: every socket bound to it ends what it is waiting for at once,
+// and every bounded call on it after ends before starting, with CANCELLED.
+// From any thread or actor; any number of times. It writes to the handle's
+// own descriptor and never touches a socket's: the sockets' owners close
+// them. Not after cancel_free.
+cancel(c: ptr) {
+    tcp_cancel_raw(c)
+}
+
+// true once `c` has been tripped.
+cancelled(c: ptr) -> bool {
+    return tcp_cancel_tripped_raw(c) == 1
+}
+
+// Drop the creator's reference to `c` (null is ignored). Its descriptors
+// close when the last socket bound to it is closed too.
+cancel_free(c: ptr) {
+    tcp_cancel_free_raw(c)
 }
