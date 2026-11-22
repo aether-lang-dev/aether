@@ -28,8 +28,13 @@ if [ "$rc" != 0 ] || [ "$(tail -1 "$TMP/out")" != PASS ]; then
     echo "  [FAIL] $NAME"
     exit 1
 fi
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) ;;
+# Under ThreadSanitizer the broken canceller is a real race, there on
+# purpose, and TSan reports it (its close against the owner's connect): the
+# demonstration is left to the plain runs, which every other lane makes.
+broken_demo=1
+[ "${AETHER_SANITIZER:-}" = tsan ] && broken_demo=0
+case "$broken_demo:$(uname -s)" in
+    0:*|*:MINGW*|*:MSYS*|*:CYGWIN*) ;;
     *)
         BROKEN_CANCELLER=1 RACE_ROUNDS=400 "$TMP/deadline" >"$TMP/broken" 2>&1
         if grep -q '^FAIL expiry and cancel racing close.*a decoy was disturbed' "$TMP/broken"; then

@@ -36,8 +36,9 @@ const PEER_NOREAD = 3
 const PEER_ECHO = 4
 
 // One accepted connection, served as `mode` says until the client closes
-// or `stop` is set; then closed (by this thread, its owner).
-fn serve_conn(sock: ptr, mode: int, stop: ptr) -> ptr {
+// or `stop` is set; then closed (by this thread, its owner), and `live`,
+// counted up for it before it started, counted down.
+fn serve_conn(sock: ptr, mode: int, stop: ptr, live: ptr) -> ptr {
     buf = make([]byte, 4096)
     one = make([]byte, 1)
     one[0] = 0x41
@@ -63,26 +64,32 @@ fn serve_conn(sock: ptr, mode: int, stop: ptr) -> ptr {
         }
     }
     tcp.close(sock)
+    sync.atomic_sub(live, 1)
     return null
 }
 
 // Accept on `srv` until `stop` is set, each connection on a thread of its own.
-fn serve(srv: ptr, mode: int, stop: @keep ptr) -> ptr {
+// `live` counts this thread and every connection's, each counted up before it
+// starts and down as its last act, so peer_stop knows when the cells are free.
+fn serve(srv: ptr, mode: int, stop: @keep ptr, live: @keep ptr) -> ptr {
     while sync.atomic_load(stop) == 0 {
         if tcp.server_poll(srv, 20) == 1 {
             sock, aerr = tcp.accept(srv)
             if aerr == "" {
-                worker.run_detached(|| { return serve_conn(sock, mode, stop) })
+                sync.atomic_add(live, 1)
+                worker.run_detached(|| { return serve_conn(sock, mode, stop, live) })
             }
         }
     }
     tcp.server_close(srv)
+    sync.atomic_sub(live, 1)
     return null
 }
 
 struct Peer {
     port: int
     stop: ptr
+    live: ptr
 }
 
 fn peer_start(mode: int) -> Peer {
@@ -92,13 +99,20 @@ fn peer_start(mode: int) -> Peer {
         exit(1)
     }
     stop = sync.atomic_new(0)
+    live = sync.atomic_new(1)   // the accept thread, below
     port = tcp.server_port(srv)
-    worker.run_detached(|| { return serve(srv, mode, stop) })
-    return Peer { port: port, stop: stop }
+    worker.run_detached(|| { return serve(srv, mode, stop, live) })
+    return Peer { port: port, stop: stop, live: live }
 }
 
+// Stop the peer and wait for every one of its threads to end before its
+// cells go: a sleep long enough "usually" let ThreadSanitizer see a peer
+// thread's last read of `stop` race its free.
 fn peer_stop(p: Peer) {
     sync.atomic_store(p.stop, 1)
+    while sync.atomic_load(p.live) != 0 { sleep(5) }
+    sync.atomic_free(p.stop)
+    sync.atomic_free(p.live)
 }
 
 // ---- checks ----
@@ -123,10 +137,15 @@ fn stopped_in_time(t: *Tally, what: string, err: string, want: string, el: long,
 }
 
 // Trip `c` from another thread `after_ms` from now.
+// The canceller holds a reference of its own (cancel_retain, taken before it
+// starts), so its trip is ordered before whichever cancel_free drops the
+// last one and closes the handle's descriptors.
 fn trip_later(c: @keep ptr, after_ms: int) {
+    tcp.cancel_retain(c)
     worker.run_detached(|| {
             sleep(after_ms)
             tcp.cancel(c)
+            tcp.cancel_free(c)
             return null
         })
 }
@@ -299,9 +318,11 @@ main() {
         sock, de = tcp.connect_until("127.0.0.1", pe.port, now() + 3 + jitter, c)
         if de != "" { why = "dial: ${de}" }
         old_fd = tcp.fd(sock)
+        tcp.cancel_retain(c)   // the canceller's own reference
         worker.run_detached(|| {
                 sleep(((now() / 3) % 9) as int)
                 tcp.cancel(c)
+                tcp.cancel_free(c)
                 // The shape this replaces, kept to show the check can fail: a
                 // canceller that closes the connection's descriptor by number
                 // once the owner may have closed it (BROKEN_CANCELLER=1, POSIX).
@@ -311,9 +332,9 @@ main() {
             })
         _d, _n, re = tcp.read_n(sock, 64)
         if re != tcp.DEADLINE_EXCEEDED && re != tcp.CANCELLED { why = "round ${r}: read ended with [${re}]" }
-        // Even rounds drop the handle while the socket still holds it (the
-        // canceller done first: tripping a freed handle is the one misuse),
-        // odd rounds close first and race the canceller.
+        // Even rounds drop the creator's reference while the socket still
+        // holds one (the canceller done first), odd rounds close first and
+        // race the canceller; it holds its own reference either way.
         if (r % 2) == 0 {
             while sync.atomic_load(done) == 0 { sleep(1) }
             tcp.cancel_free(c)
@@ -347,13 +368,6 @@ main() {
     peer_stop(ps)
     peer_stop(pt)
     peer_stop(pn)
-    // Every peer thread sees its stop within one 100 ms step, and ends;
-    // then their cells can go.
-    sleep(500)
-    sync.atomic_free(pe.stop)
-    sync.atomic_free(ps.stop)
-    sync.atomic_free(pt.stop)
-    sync.atomic_free(pn.stop)
     if t.fails == 0 {
         println("PASS")
     } else {
