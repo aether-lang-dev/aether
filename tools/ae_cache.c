@@ -1371,7 +1371,8 @@ enum {
 
 #define CCVER_ATTEMPTS 3
 
-/* Run `"<resolved>" --version` until it answers: the first line of its stdout
+/* Run `<command> --version` until it answers (`command` a command prefix, a
+ * program and any arguments, quoted where they need it): the first line of its stdout
  * into `line` (CCVER_LINE), or, after CCVER_ATTEMPTS runs that printed no
  * line, how the last one ended. *rc is the last run's result and *runs how
  * many there were.
@@ -1384,13 +1385,13 @@ enum {
  * and the next unchanged build missed. Such a run is tried again; a compiler
  * that always exits without a line gives that outcome, with its exit status,
  * every time, so it still caches. */
-static int compiler_version_probe(const char* resolved, char* line, size_t line_size,
+static int compiler_version_probe(const char* command, char* line, size_t line_size,
                                   int* rc, int* runs) {
     int outcome = CCVER_NO_SPAWN;
     *rc = AE_SPAWN_FAILED;
     *runs = 0;
     line[0] = '\0';
-    char* cmd = str_join4("\"", 1, resolved, "\" --version", "");
+    char* cmd = str_join4(command, strlen(command), " --version", "", "");
     if (!cmd) return CCVER_NO_SPAWN;
     for (int attempt = 0; attempt < CCVER_ATTEMPTS; attempt++) {
         /* Spawned directly, as every compile step is (#3532): popen hands
@@ -1451,54 +1452,65 @@ static unsigned long long c_compiler_fingerprint(void) {
         if (word[0] == '-' || strchr(word, '=')) continue;
         char* resolved = resolve_program(word);
         if (!resolved) continue;
-        unsigned long long driver_hash = file_hash(resolved);
+        unsigned long long word_hash = file_hash(resolved);
         h = (h * 1099511628211ULL) ^ fnv64_str(resolved);
-        h = (h * 1099511628211ULL) ^ driver_hash;
-        /* The file found on PATH may be a trampoline whose bytes never
-         * change when the compiler behind it does: macOS's /usr/bin/gcc
-         * and /usr/bin/clang (xcrun shims, switched by xcode-select or an
-         * Xcode update), a ccache masquerade directory. What the program
-         * says it is comes from the compiler that will actually run, so
-         * its first line of `--version` is folded in too. A program that
-         * answers with no such line folds in that it did not, and its exit
-         * status: the outcome of the run is part of the key, so a run that
-         * failed this once cannot pass for one that never prints a line
-         * (#3707). */
-        char line[512];
-        int version_rc = 0, runs = 0;
-        int outcome = compiler_version_probe(resolved, line, sizeof(line), &version_rc, &runs);
-        if (outcome == CCVER_LINE) {
-            h = (h * 1099511628211ULL) ^ fnv64_str(line);
-        } else if (outcome == CCVER_NO_LINE) {
-            char what[64];
-            snprintf(what, sizeof(what), "\n--version: no line, exit %d\n", version_rc);
-            h = (h * 1099511628211ULL) ^ fnv64_str(what);
-        }
-        /* Each part of the compiler's identity, under -v (#3707). */
-        if (tc.verbose) {
-            line[strcspn(line, "\r\n")] = '\0';
-            static const char* const outcome_name[] = { "line", "no line", "signalled",
-                                                        "not started" };
-            fprintf(stderr, "[cache] ccid: %s file=%016llx version rc=%d runs=%d outcome=%s line=%s\n",
-                    resolved, driver_hash, version_rc, runs, outcome_name[outcome],
-                    outcome == CCVER_LINE ? line : "none");
-        }
-        /* Still unanswered after every retry, the compiler's identity is not
-         * known, and a key made without it would be another build's key:
-         * this build makes none, so it neither serves nor publishes. */
-        if (outcome == CCVER_SIGNALLED || outcome == CCVER_NO_SPAWN) {
-            if (tc.verbose)
-                fprintf(stderr, "[cache] ccid: '%s --version' did not run to an answer in %d "
-                                "tries; this build is not cached\n", resolved, runs);
-            free(resolved);
-            free(word);
-            free(owned);
-            fp = 0;
-            return fp;
-        }
+        h = (h * 1099511628211ULL) ^ word_hash;
+        if (tc.verbose) fprintf(stderr, "[cache] ccid: %s file=%016llx\n", resolved, word_hash);
         free(resolved);
     }
     free(word);
+    /* The file found on PATH may be a trampoline whose bytes never change
+     * when the compiler behind it does: macOS's /usr/bin/gcc and
+     * /usr/bin/clang (xcrun shims, switched by xcode-select or an Xcode
+     * update), a ccache masquerade directory. What the program says it is
+     * comes from the compiler that will actually run, so the first line of
+     * its `--version` is folded in too. A program that answers with no such
+     * line folds in that it did not, and its exit status: the outcome of the
+     * run is part of the key, so a run that failed this once cannot pass for
+     * one that never prints a line (#3707).
+     *
+     * #3814: asked of the command as given, the whole of $AE_CC / $CC with
+     * its arguments, and not of each program in it. `zig cc` is zig's clang,
+     * and only `zig cc --version` says which: `zig --version` is "unknown
+     * command", the same answer from every zig, so a zig upgrade was served
+     * the binaries the old one built (the staleness #2477 fixed). `ccache
+     * gcc --version` answers with gcc's line through ccache, as a compile
+     * through it runs. A compiler ae found itself is one program, quoted. */
+    char* asked = c_backend_env_override() ? str_join4(spec, strlen(spec), "", "", "")
+                                           : str_join4("\"", 1, spec, "\"", "");
+    if (!asked) { free(owned); return 0; }
+    char line[512];
+    int version_rc = 0, runs = 0;
+    int outcome = compiler_version_probe(asked, line, sizeof(line), &version_rc, &runs);
+    if (outcome == CCVER_LINE) {
+        h = (h * 1099511628211ULL) ^ fnv64_str(line);
+    } else if (outcome == CCVER_NO_LINE) {
+        char what[64];
+        snprintf(what, sizeof(what), "\n--version: no line, exit %d\n", version_rc);
+        h = (h * 1099511628211ULL) ^ fnv64_str(what);
+    }
+    /* Each part of the compiler's identity, under -v (#3707). */
+    if (tc.verbose) {
+        line[strcspn(line, "\r\n")] = '\0';
+        static const char* const outcome_name[] = { "line", "no line", "signalled",
+                                                    "not started" };
+        fprintf(stderr, "[cache] ccid: %s --version rc=%d runs=%d outcome=%s line=%s\n",
+                asked, version_rc, runs, outcome_name[outcome],
+                outcome == CCVER_LINE ? line : "none");
+    }
+    /* Still unanswered after every retry, the compiler's identity is not
+     * known, and a key made without it would be another build's key: this
+     * build makes none, so it neither serves nor publishes. */
+    if (outcome == CCVER_SIGNALLED || outcome == CCVER_NO_SPAWN) {
+        if (tc.verbose)
+            fprintf(stderr, "[cache] ccid: '%s --version' did not run to an answer in %d "
+                            "tries; this build is not cached\n", asked, runs);
+        free(asked);
+        free(owned);
+        fp = 0;
+        return fp;
+    }
+    free(asked);
     free(owned);
     fp = h ? h : 1ULL;
     return fp;

@@ -8,6 +8,8 @@
 # brackets did not compile. A probe whose control compile fails too now
 # tries the next form (-c into an object) instead of concluding "refused".
 #
+# Also (#3814): the cache key names zig's clang version.
+#
 # Needs zig: on PATH, or unpacked under build/scratch/.zig of this tree or of
 # the main checkout it is a worktree of. Skips without it.
 
@@ -88,6 +90,10 @@ else
 fi
 grep '^\[cmd\].*-Wformat' "$TMP/log" | tail -1 | grep -q -- '-fbracket-depth=' ||
     fail "the compile line with AE_CC=\"zig cc\" carries no -fbracket-depth"
+# #3814: the build cache knows the compiler by `zig cc --version`, zig's
+# clang, and not by `zig --version`, which every zig refuses alike.
+grep '^\[cache\] ccid: .* --version .*outcome=line line=.*clang version' "$TMP/log" > /dev/null ||
+    fail "the cache's compiler identity with AE_CC=\"zig cc\" does not name zig's clang version: $(grep '^\[cache\] ccid:' "$TMP/log" | tail -1 | cut -c1-160)"
 
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] $NAME: with AE_CC=\"zig cc\" the bracket probe tells, and a program nested 1018 brackets deep compiles with -fbracket-depth$linked"

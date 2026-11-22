@@ -203,6 +203,33 @@ echo "shim gcc 16.0.0" > "$TMP/ccD/version.txt"
 build_expect "rebuild after the compiler behind an unchanged shim changed" 5 CC="$CC_D"
 expect_miss "a compiler upgrade behind an unchanged driver file was served from the cache"
 
+# 3b. A compiler that answers --version only with its arguments (#3814):
+# `zig cc --version` is zig's clang, while `zig --version` is "unknown
+# command" from every zig, so the key asked of the program alone was the same
+# whatever the version. This wrapper answers `<it> -DAE_SUB --version` from
+# its file and refuses a bare `--version`, as zig does; $CC names it with
+# that argument, so only the command as given tells the versions apart.
+write_sub_wrapper() {
+    mkdir -p "$1"
+    if [ "$WIN" = 1 ]; then
+        printf '@if "%%~2"=="--version" (type "%%~dp0version.txt") else if "%%~1"=="--version" (exit /b 1) else ("%s" -DAE_CC_TAG=%s %%*)\r\n' \
+            "$(cygpath -w "$REAL_CC")" "$2" > "$1/gcc.cmd"
+    else
+        printf '#!/bin/sh\nif [ "$2" = "--version" ]; then cat "$(dirname "$0")/version.txt"; exit 0; fi\nif [ "$1" = "--version" ]; then echo "unknown command: --version" >&2; exit 1; fi\nexec "%s" -DAE_CC_TAG=%s "$@"\n' \
+            "$REAL_CC" "$2" > "$1/gcc"
+        chmod +x "$1/gcc"
+    fi
+}
+write_sub_wrapper "$TMP/ccE" 6
+echo "sub clang 20.1.0" > "$TMP/ccE/version.txt"
+CC_E="$(wrapper_file "$TMP/ccE") -DAE_SUB"
+build_expect "first build with a \$CC that answers --version with its argument" 6 CC="$CC_E"
+build_expect "unchanged rebuild with that \$CC" 6 CC="$CC_E"
+expect_hit "a \$CC with an argument"
+echo "sub clang 21.1.0" > "$TMP/ccE/version.txt"
+build_expect "rebuild after the version behind \$CC's argument changed" 6 CC="$CC_E"
+expect_miss "a compiler upgrade that only '\$CC --version' tells was served from the cache"
+
 # 4. Many --extra files: the key text used to be built with unchecked
 # snprintf appends into a 2 KiB stack buffer, and about 110 extra files
 # overran it. The key holds 17 bytes per file whatever its path, so the
