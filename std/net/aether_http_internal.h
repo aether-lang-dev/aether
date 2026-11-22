@@ -82,6 +82,13 @@ typedef struct {
     /* A chunked body's payload so far, its framing not counted: what a
      * response limit counts of it (http_exchange_recv, #3750). */
     size_t body_decoded;
+    /* Where the chunk walk may resume: the offset in the body of the last
+     * complete chunk's end, and the payload before it. Every recv re-asks
+     * whether the body is complete; walking from the start each time cost
+     * time quadratic in the chunk count, which a server sending one-byte
+     * chunks used to spend the client's CPU on. */
+    size_t chunk_resume_off;
+    size_t chunk_resume_decoded;
     /* The head held a NUL or a bare CR, now SP (http_head_section_repair,
      * #3572): its bytes are not the upstream's, and where a bare CR stood
      * can no longer be seen, so nothing relays them as they came. */

@@ -1253,9 +1253,13 @@ static int http_chunk_size_line(const char* line, size_t n, uint64_t* size) {
  * the bytes it then decodes cannot disagree: they did, when the framing check
  * read sizes with strtoll and the decoder with a loop of its own, and "0x5"
  * framed as five bytes decoded as the last chunk (#3520). */
-static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
-                             char* out, size_t* out_len) {
-    size_t off = 0, oi = 0;
+static int http_chunked_walk_from(const char* buf, size_t len, size_t* frame_len,
+                                  char* out, size_t* out_len,
+                                  size_t* resume_off, size_t* resume_decoded) {
+    /* With `resume_*`, the walk starts at the chunk boundary a previous call
+     * on a shorter prefix of the same body reached (and `out` is NULL). */
+    size_t off = resume_off ? *resume_off : 0;
+    size_t oi = resume_decoded ? *resume_decoded : 0;
     for (;;) {
         const char* lf = (const char*)memchr(buf + off, '\n', len - off);
         if (!lf) {
@@ -1282,6 +1286,8 @@ static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
         off += (size_t)size;
         if (buf[off] != '\r' || buf[off + 1] != '\n') return -1;
         off += 2;
+        if (resume_off) *resume_off = off;
+        if (resume_decoded) *resume_decoded = oi;
     }
     /* trailer-section = *( field-line CRLF ), then the CRLF that ends it. The
      * fields are not used, but where the section ends is framing, so each
@@ -1302,6 +1308,11 @@ static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
     *frame_len = off;
     if (out_len) *out_len = oi;
     return 1;
+}
+
+static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
+                             char* out, size_t* out_len) {
+    return http_chunked_walk_from(buf, len, frame_len, out, out_len, NULL, NULL);
 }
 
 /* Parse a chunk-size line, pumping until its LF is available. Sets *out to
@@ -3229,8 +3240,9 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
     if (!f->definite) return 0;
     if (f->chunked) {
         size_t frame = 0;
-        int rc = http_chunked_walk(buf + f->header_bytes, len - f->header_bytes, &frame,
-                                   NULL, &f->body_decoded);
+        int rc = http_chunked_walk_from(buf + f->header_bytes, len - f->header_bytes, &frame,
+                                        NULL, &f->body_decoded,
+                                        &f->chunk_resume_off, &f->chunk_resume_decoded);
         /* Framing that is not chunked framing has not said where the body
          * ends either: reading on would wait for an end that never comes. */
         if (rc < 0) f->invalid = 1;
