@@ -64,7 +64,9 @@ int main(void) {
 ## `--emit=obj`: one object file for an existing C build
 
 `--emit=csrc` hands you generated C that your build then has to know how to
-compile. `--emit=obj` does that step for you and stops at the object:
+compile. `--emit=obj` does that step for you and stops at the object, compiled
+with the flags the executable's compile step uses (the -O level, `-fwrapv`,
+the project's `[build] cflags`):
 
 ```sh
 ae build --emit=obj lib.ae -o lib.o

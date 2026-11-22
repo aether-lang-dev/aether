@@ -5403,6 +5403,35 @@ static void freebsd_casper_libs(char* out, size_t size) {
 }
 #endif
 
+/* #3812: the flags generated C is compiled with by compiler `cc`, malloc'd
+ * (NULL, unsaid, when memory runs out): the optimisation level and the
+ * language (-fwrapv), the GCC inlining budget, the hardening defines, the
+ * user's cflags after those so theirs win, and what follows them on every
+ * line (the AVX stack workaround on Windows, --trace, Clang's bracket
+ * depth). The executable's compile step and --emit=obj both take them from
+ * here; the object was compiled with none of them, so signed overflow was
+ * undefined in the object and defined in the executable.
+ *
+ * The POSIX line carries -pipe, and must carry -Wformat as opt_flags does:
+ * the -pipe path once hardcoded its own string and dropped it, so the C
+ * compiler's printf-family checks never ran on a normal build (#1252).
+ * Coverage, profile and size builds take opt_flags' string as it is. */
+static char* generated_c_compile_flags(const char* cc, bool optimize, const char* user_cflags) {
+#ifdef _WIN32
+    const char* base_opt = opt_flags(optimize);
+    const char* avx = win_avx_stack_flags(user_cflags);
+#else
+    const char* base_opt = (g_coverage || g_profile || g_size)
+                          ? opt_flags(optimize)
+                          : (optimize ? "-O2 -pipe -Wformat" AETHER_WRAP_CFLAGS
+                                      : "-O0 -g -pipe -Wformat" AETHER_WRAP_CFLAGS);
+    const char* avx = "";
+#endif
+    return ae_strdup_printf("%s%s%s%s%s%s%s%s", base_opt, gcc_inline_budget_flags(cc, optimize),
+                            harden_cflags(optimize), user_cflags[0] ? " " : "", user_cflags,
+                            avx, g_trace ? " -DAETHER_TRACE" : "", bracket_depth_flags(cc));
+}
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -5544,7 +5573,6 @@ void build_gcc_cmd(char* cmd, size_t size,
     /* The source fallback compiles the vendored libfyaml (above). */
     if (!tc.has_lib) yaml_libs = "";
     char* opt;   /* the flags, with user cflags of any length (#2534) */
-    const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* --emit=lib: a DLL. -shared, and --export-all-symbols (#993) because
      * GCC's auto-export switches off the moment any symbol carries an
      * explicit __declspec(dllexport) (an --extra shim, say), and the
@@ -5567,19 +5595,12 @@ void build_gcc_cmd(char* cmd, size_t size,
          * std.http.script_gateway could not reach a script's
          * aether_script_handle. Strong here too, for the same one-TU reason. */
         ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_WEAK_DEF= -DAETHER_NO_LIB_MAIN " : "";
-    /* The inlining budget ahead of the user's cflags, so theirs wins. */
-    if (user_cflags[0])
-        opt = ae_strdup_printf("-static %s%s%s%s%s %s%s%s%s", emit_lib_flags, opt_flags(optimize),
-                               gcc_inline_budget_flags(s_gcc_cmd, optimize),
-                               harden_cflags(optimize), harden_ldflags(), user_cflags,
-                               win_avx_stack_flags(user_cflags), trace_def,
-                               bracket_depth_flags(s_gcc_cmd));
-    else
-        opt = ae_strdup_printf("-static %s%s%s%s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
-                               gcc_inline_budget_flags(s_gcc_cmd, optimize),
-                               harden_cflags(optimize), harden_ldflags(),
-                               win_avx_stack_flags(""), trace_def,
-                               bracket_depth_flags(s_gcc_cmd));
+    /* The link side, then the compile flags --emit=obj compiles with too. */
+    char* compile_flags = generated_c_compile_flags(s_gcc_cmd, optimize, user_cflags);
+    opt = compile_flags ? ae_strdup_printf("-static %s%s %s", emit_lib_flags, harden_ldflags(),
+                                           compile_flags)
+                        : NULL;
+    free(compile_flags);
     if (!opt) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
         set_failing_cmd(cmd, size);
@@ -5751,22 +5772,6 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* emit_lib_flags = (g_emit_lib && !g_emit_exe) ? "-fPIC -shared -DAETHER_NO_LIB_MAIN " : "";
 #endif
-    // Coverage builds skip -pipe — gcov works fine with it, but it
-    // adds nothing when -O0 -g is already forced. Keeping the flag
-    // string short helps the cmd-buffer size budget.
-    //
-    // -Wformat must be present here too: the -pipe path is the mainline
-    // (non-static) build, and it previously hardcoded the opt string inline,
-    // dropping the -Wformat that opt_flags() carries. Without it the C
-    // compiler's printf-family format checks (mapped to the .ae source via
-    // #line) never run on a normal `ae build` — regressing #1252. Keep this in
-    // sync with opt_flags(); user cflags still append after, so -Wno-format
-    // remains an opt-out.
-    const char* base_opt = (g_coverage || g_profile || g_size)
-                          ? opt_flags(optimize)
-                          : (optimize ? "-O2 -pipe -Wformat" AETHER_WRAP_CFLAGS
-                                      : "-O0 -g -pipe -Wformat" AETHER_WRAP_CFLAGS);
-    const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* The link-side flags ride in the same blob: gcc accepts -Wl,... anywhere
      * on the line, and threading them through four separate link-command
      * format strings would be four places to forget. */
@@ -5798,17 +5803,12 @@ void build_gcc_cmd(char* cmd, size_t size,
 #endif
     const char* size_link = (g_size && !g_emit_obj && !g_emit_csrc)
                             ? size_link_flags : "";
-    /* The inlining budget ahead of the user's cflags, so theirs wins. */
-    if (user_cflags[0])
-        opt = ae_strdup_printf("%s%s%s%s%s%s%s %s%s%s", emit_lib_flags, base_opt,
-                               gcc_inline_budget_flags(cc, optimize),
-                               harden_cflags(optimize), harden_link, harden_pie, size_link,
-                               user_cflags, trace_def, bracket_depth_flags(cc));
-    else
-        opt = ae_strdup_printf("%s%s%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
-                               gcc_inline_budget_flags(cc, optimize),
-                               harden_cflags(optimize), harden_link, harden_pie, size_link,
-                               trace_def, bracket_depth_flags(cc));
+    /* The link side, then the compile flags --emit=obj compiles with too. */
+    char* compile_flags = generated_c_compile_flags(cc, optimize, user_cflags);
+    opt = compile_flags ? ae_strdup_printf("%s%s%s%s %s", emit_lib_flags, harden_link, harden_pie,
+                                           size_link, compile_flags)
+                        : NULL;
+    free(compile_flags);
     if (!opt) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
         set_failing_cmd(cmd, size);
@@ -6002,6 +6002,42 @@ void build_syntax_check_cmd(char* cmd, size_t size, const char* c_file, const ch
                      bracket_depth_flags(cc), AETHER_REQUIRED_DEFINES, get_cflags(),
                      tc.include_flags, ae_includes, c_file, extra ? extra : "");
     if (w >= (int)size) cmd_too_long(cmd, size, w);
+}
+
+/* #3812: the command that compiles `c_file` to the object `obj_file` for
+ * --emit=obj: the C compiler and the compile flags the executable's compile
+ * step uses (generated_c_compile_flags), the include paths, and none of the
+ * link arguments. The compiler is the one a native build drives: on Windows
+ * $AE_CC / $CC, then PATH, then the WinLibs download, checked as every
+ * other build checks it; on POSIX $AE_CC / $CC (a command prefix, the
+ * program and any flags, so not quoted whole, #2545), else gcc, else cc.
+ * 0, said, when no command can be made. */
+static int build_obj_compile_cmd(char* cmd, size_t size, const char* c_file,
+                                 const char* obj_file, bool optimize) {
+#ifdef _WIN32
+    if (!ensure_gcc_windows()) return 0;
+    const char* cc = s_gcc_cmd;
+#else
+    const char* cc = c_backend_env_override();
+    if (!cc) cc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
+#endif
+    const char* includes = get_aether_include_flags(c_file);   /* #1986 */
+    if (!includes) return 0;   /* out of memory, said */
+    char* flags = generated_c_compile_flags(cc, optimize, get_cflags());
+    if (!flags) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        return 0;
+    }
+    int w = snprintf(cmd, size, "%s -c %s %s %s \"%s\" -o \"%s\"", cc, flags,
+                     tc.include_flags ? tc.include_flags : "", includes, c_file, obj_file);
+    free(flags);
+    if (w >= (int)size) {
+        /* The include list has no length limit (#2536); a cut command would
+         * compile without the directories past the cut. */
+        cmd_too_long(cmd, size, w);
+        return 0;
+    }
+    return 1;
 }
 
 /* The runtime sources of a wasm build, as emcc arguments: each path
@@ -11264,34 +11300,13 @@ static int cmd_build(int argc, char** argv) {
                    "cross target.\n", target);
             return 0;
         }
-        /* The compiler as a command line names it. $AE_CC / $CC is a
-         * command prefix, the program and then any flags, so it is not
-         * quoted whole (#2545): `"gcc -m32"` named no program. */
-#ifdef _WIN32
-        /* The compiler every other native Windows build uses ($AE_CC /
-         * $CC, then PATH, then the WinLibs download), checked the same
-         * way. `command -v` is a POSIX shell builtin: through cmd.exe it
-         * printed "El sistema no puede encontrar la ruta especificada" and
-         * failed, so this path fell back to a bare `cc` that only an MSYS2
-         * shell has. */
-        if (!ensure_gcc_windows()) return 1;
-        const char* objcc = s_gcc_cmd;
-#else
-        const char* objcc = c_backend_env_override();
-        if (!objcc)
-            objcc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
-#endif
-        const char* obj_includes = get_aether_include_flags(c_file);   /* #1986 */
-        if (!obj_includes) return 1;   /* out of memory, said */
-        int ow = snprintf(cmd, sizeof(cmd), "%s -c %s %s \"%s\" -o \"%s\"",
-                          objcc, tc.include_flags ? tc.include_flags : "",
-                          obj_includes, c_file, obj_file);
-        if (ow >= (int)sizeof(cmd)) {
-            /* The include list has no length limit now (#2536); a cut
-             * command would compile without the directories past the cut. */
-            cmd_too_long(cmd, sizeof(cmd), ow);
-            return 1;
-        }
+        /* The compiler a native build drives, with the compile flags the
+         * executable's compile step uses (#3812). On Windows that is the
+         * compiler every other native build uses: `command -v` is a POSIX
+         * shell builtin, and through cmd.exe it printed "El sistema no puede
+         * encontrar la ruta especificada" and failed, so this path once fell
+         * back to a bare `cc` that only an MSYS2 shell has. */
+        if (!build_obj_compile_cmd(cmd, sizeof(cmd), c_file, obj_file, !quick)) return 1;
         if (tc.verbose) fprintf(stderr, "ae: %s\n", cmd);
         int orc = run_cmd(cmd);
         if (orc != 0) {

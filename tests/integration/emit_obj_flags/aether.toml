@@ -1,0 +1,2 @@
+[build]
+cflags = "-DAE_OBJ_TAG=7"

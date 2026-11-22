@@ -332,7 +332,7 @@ rotation, a quaternion product, a 3x3 solve), each emitted `static inline`, as
 real calls on 2,671 call sites (#3779).
 
 So `ae` gives GCC `--param inline-unit-growth=100` on the optimising builds of
-generated C: `ae build` (the executable and `--emit=lib`, `--profile`
+generated C: `ae build` (the executable, `--emit=lib` and `--emit=obj`, `--profile`
 included) and `ae examples`. It does not on `-O0` builds (`ae run`, `ae test`,
 `--quick`, `--coverage`), which inline
 nothing, nor with `--size`, which asks for bytes. It goes ahead of the
