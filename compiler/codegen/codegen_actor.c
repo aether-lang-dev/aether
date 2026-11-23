@@ -741,6 +741,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         // stored on MessageFieldDef at registration time, which preserves
                         // element type info that the bare type_kind drops.
                         const char* single_int_name = get_single_int_field(msg_def);
+                        /* #3827: this arm's views of its message's
+                         * string fields, filled below. */
+                        gen->msg_binding_body = arm_body;
+                        gen->msg_binding_count = 0;
+                        gen->msg_binding_names = (const char**)aether_xrealloc(
+                            NULL, sizeof(char*) * (size_t)(pattern->child_count + 1));
+                        gen->msg_binding_fields = (const char**)aether_xrealloc(
+                            NULL, sizeof(char*) * (size_t)(pattern->child_count + 1));
                         for (int k = 0; k < pattern->child_count; k++) {
                             ASTNode* field = pattern->children[k];
                             if (field->type == AST_PATTERN_FIELD) {
@@ -849,6 +857,21 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                     struct_param_written(arm_body, var_name))
                                     print_line(gen, "%s = aether_uniform_heap_str(%s, 0);",
                                                var_name, var_name);
+                                /* #3827: a string binding that views the
+                                 * message's field, by a name nothing else
+                                 * of the actor or the module answers to
+                                 * (a bare state name reads `self->`): a
+                                 * send that is its last use moves the
+                                 * message's reference on
+                                 * (binding_read_is_last_use decides). */
+                                else if (fsig && fsig->kind == TYPE_STRING && field_read &&
+                                         arm_body && arm_body->type == AST_BLOCK &&
+                                         !is_actor_state_var(gen, var_name) &&
+                                         !is_module_global_var(gen, var_name)) {
+                                    gen->msg_binding_names[gen->msg_binding_count] = var_name;
+                                    gen->msg_binding_fields[gen->msg_binding_count] = field->value;
+                                    gen->msg_binding_count++;
+                                }
                             }
                         }
 
@@ -896,6 +919,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             }
                         }
                         exit_scope(gen);
+                        free((void*)gen->msg_binding_names);
+                        free((void*)gen->msg_binding_fields);
+                        gen->msg_binding_names = NULL;
+                        gen->msg_binding_fields = NULL;
+                        gen->msg_binding_count = 0;
+                        gen->msg_binding_body = NULL;
 
                         gen->current_promoted_captures = prev_promoted;
                         gen->current_promoted_capture_count = prev_promoted_count;

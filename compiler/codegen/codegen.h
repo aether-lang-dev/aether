@@ -441,6 +441,15 @@ typedef struct {
     // entry, restored on exit. NULL outside a function-body context.
     ASTNode* current_function;
 
+    // #3827: while a receive arm's handler is emitted, the arm's body and
+    // its string bindings that are views of the message's own fields
+    // (`S(s) -> ...` binds `s` to `_pattern->s`): a send that is such a
+    // binding's last use takes the message's reference out of the place.
+    ASTNode* msg_binding_body;
+    const char** msg_binding_names;   // the binding's name in the arm
+    const char** msg_binding_fields;  // the message field it views
+    int msg_binding_count;
+
     // Issue #348 — when 1, codegen skips `requires`/`ensures` check
     // emission entirely (the per-call cost goes to zero, matching C's
     // -DNDEBUG for assert). Set from `--no-contracts` on the aetherc

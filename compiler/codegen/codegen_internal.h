@@ -295,6 +295,7 @@ void emit_string_element_free(CodeGenerator* gen, ASTNode* e);
 int string_take_kind(CodeGenerator* gen, ASTNode* e);
 int string_take_is_view(CodeGenerator* gen, ASTNode* e);
 int alias_source_must_copy(CodeGenerator* gen, const char* src_name);
+int binding_read_is_last_use(ASTNode* body, const char* name, ASTNode* read);
 void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* target);
 
 
@@ -410,6 +411,7 @@ const char* stmt_struct_temp_of(const ASTNode* expr);
 /* Drop `e as T` between string types before ownership is decided. */
 void erase_string_retype_casts(ASTNode* node);
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
+const char* message_binding_move_place(CodeGenerator* gen, ASTNode* init);
 ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on
  * the definition; the callers' ownership decisions and the bare-fn adapter

@@ -5929,6 +5929,26 @@ void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init)
             message_string_init_owned(gen, init));
 }
 
+/* #3827: when `init`, a send's string field, is a receive arm's binding of
+ * its message's string field at the binding's last use
+ * (binding_read_is_last_use), the message place it views,
+ * `_pattern-><field>`, which the send takes the reference out of; NULL
+ * otherwise, and the field is copied as before. Taken, the place is left
+ * empty, so the arm's release of the message releases nothing of it:
+ * `_aether_msg_str(place, 1)` hands the reference over when its count is 1,
+ * and else copies and releases the place's reference. The send reads the
+ * place, not the binding, so what moves is what the place held. */
+const char* message_binding_move_place(CodeGenerator* gen, ASTNode* init) {
+    if (!gen->msg_binding_body || !init || init->type != AST_IDENTIFIER || !init->value)
+        return NULL;
+    for (int i = 0; i < gen->msg_binding_count; i++) {
+        if (strcmp(gen->msg_binding_names[i], init->value) != 0) continue;
+        return binding_read_is_last_use(gen->msg_binding_body, init->value, init)
+               ? cg_internf("_pattern->%s", gen->msg_binding_fields[i]) : NULL;
+    }
+    return NULL;
+}
+
 /* The fields of message `lv`, built from the literal `message`, that its
  * sender still holds: every owning one but a string, which is a copy of its
  * own (#466). Each is published (#2919) before the message can reach the
@@ -14275,9 +14295,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * call (emitted at the receive-handler
                              * dispatch) string_releases the clone
                              * when the message is consumed. */
-                            int has_str = 0;
+                            int has_str = 0, moves = 0;
                             for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                                if (f->type_kind == TYPE_STRING) { has_str = 1; break; }
+                                if (f->type_kind != TYPE_STRING) continue;
+                                has_str = 1;
+                                if (!try_var &&
+                                    message_binding_move_place(gen, message_field_init_expr(message, f->name)))
+                                    moves = 1;
+                            }
+                            /* #3827: a field that moves a received string
+                             * on leaves the message it came in empty, so
+                             * nothing that can panic runs between the move
+                             * and the send: the target, the one operand
+                             * left, is evaluated first. */
+                            if (moves) {
+                                fprintf(gen->output, "void* _ae_to = ");
+                                emit_send_target(gen, target, "void*", "send");
+                                fprintf(gen->output, "; ");
                             }
                             if (has_str) {
                                 /* Prototypes (string_new_with_length,
@@ -14286,11 +14320,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                  * codegen prologue (codegen.c) — no
                                  * per-call-site re-declaration. */
                                 for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                                    if (f->type_kind == TYPE_STRING) {
-                                        emit_message_string_copy(gen,
-                                            cg_internf("_msg.%s", f->name),
-                                            message_field_init_expr(message, f->name));
-                                    }
+                                    if (f->type_kind != TYPE_STRING) continue;
+                                    ASTNode* init = message_field_init_expr(message, f->name);
+                                    const char* place = moves ? message_binding_move_place(gen, init) : NULL;
+                                    if (place)
+                                        fprintf(gen->output, "_msg.%s = _aether_msg_str(%s, 1); %s = NULL; ",
+                                                f->name, place, place);
+                                    else
+                                        emit_message_string_copy(gen, cg_internf("_msg.%s", f->name), init);
                                 }
                             }
                             emit_message_publishes(gen, message, "_msg", NULL);
@@ -14302,7 +14339,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             else
                                 fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
                                                                        : "aether_send_message(");
-                            emit_send_target(gen, target, "void*", "send");
+                            if (moves) fprintf(gen->output, "_ae_to");
+                            else emit_send_target(gen, target, "void*", "send");
                             fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
                         }
                     } else {

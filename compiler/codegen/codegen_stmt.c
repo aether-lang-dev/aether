@@ -331,6 +331,61 @@ int alias_source_must_copy(CodeGenerator* gen, const char* src_name) {
     return sole_read_repeats(gen->current_function, src_name);
 }
 
+/* Does `n` name `name` as anything but a plain read: a binding of it (a
+ * declaration or an assignment, a pattern's or a closure's parameter, a
+ * catch clause), a write (`+=`), or a read the identifier count does not
+ * see (a call of it, a dotted `name.x`)? */
+static int node_names_otherwise(const ASTNode* n, const char* name) {
+    if (!n->value) return 0;
+    size_t len = strlen(name);
+    if (strncmp(n->value, name, len) != 0) return 0;
+    switch (n->type) {
+        case AST_IDENTIFIER:
+            return n->value[len] == '.';
+        case AST_FUNCTION_CALL:
+            return n->value[len] == '\0' || n->value[len] == '.';
+        case AST_VARIABLE_DECLARATION: case AST_ASSIGNMENT: case AST_COMPOUND_ASSIGNMENT:
+        case AST_PATTERN_VARIABLE: case AST_CLOSURE_PARAM: case AST_CATCH_CLAUSE:
+        case AST_STATE_DECLARATION: case AST_CONST_DECLARATION:
+            return n->value[len] == '\0';
+        default:
+            return 0;
+    }
+}
+
+static int tree_names_otherwise(const ASTNode* n, const char* name) {
+    if (!n) return 0;
+    if (node_names_otherwise(n, name)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (tree_names_otherwise(n->children[i], name)) return 1;
+    return 0;
+}
+
+/* #3827, R5: is `read` the last use of `name` in `body`, exact by
+ * construction? The rule a local's last-use move keeps
+ * (alias_source_must_copy: named once, by a read no loop or closure runs
+ * again), made strict for a binding the body cannot rebind: `read` is that
+ * one identifier; nothing in `body` binds, writes or otherwise names `name`,
+ * so the read is the binding's own; and no `while`, `for`, closure or
+ * `defer` encloses it, so it runs at most once, where it stands. Anything
+ * else answers no, and the caller takes a reference instead (one count
+ * operation too many, never a leak or a double free). */
+int binding_read_is_last_use(ASTNode* body, const char* name, ASTNode* read) {
+    enum { CAP = 512 };
+    ASTNode* path[CAP];
+    if (!body || !name || !read || read->type != AST_IDENTIFIER || !read->value ||
+        strcmp(read->value, name) != 0) return 0;
+    if (count_var_identifier_uses(body, name) != 1 || tree_names_otherwise(body, name)) return 0;
+    int n = path_to_var_read(body, name, path, 0, CAP);
+    if (n <= 0 || path[n - 1] != read) return 0;
+    for (int i = 0; i < n - 1; i++) {
+        int t = path[i]->type;
+        if (t == AST_WHILE_LOOP || t == AST_FOR_LOOP || t == AST_CLOSURE ||
+            t == AST_DEFER_STATEMENT) return 0;
+    }
+    return 1;
+}
+
 /* #2461: taking a string into an owning slot (a local, a struct field, a
  * return value) from an expression that only VIEWS a buffer someone else
  * owns.

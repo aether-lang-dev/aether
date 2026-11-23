@@ -234,8 +234,14 @@ optional took its strings plain). A message does not share: a send
 deep-copies its strings (#466), so it needs no publish, except a temporary
 held by nothing else (an owned call or interpolation result whose count is
 1, not pinned), which the message takes as it is: a dying temporary moves
-(#3535, `_aether_msg_str`). A value read from a published place carries the
-bit with it.
+(#3535, `_aether_msg_str`). So does a received string a handler forwards on
+its last use (#3827): the arm's binding views the message's field, and a send
+whose field is that binding's one read in the arm, under no loop, closure or
+`defer`, with nothing in the arm binding the name
+(binding_read_is_last_use), takes the reference out of the place and leaves
+it empty, so the message's release after the arm releases nothing of it. Any
+other forward copies, one count operation too many at worst (R5). A value
+read from a published place carries the bit with it.
 
 **A module string `var` is locked (#3522).** Atomic counts make two
 threads' retains and releases of one string safe, not the place that holds
