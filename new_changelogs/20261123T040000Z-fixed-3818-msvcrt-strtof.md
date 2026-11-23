@@ -8,7 +8,9 @@
   out one ulp low ("1.00000005960464477540" gave 1.0, not 1 + 2^-23), text
   just under `FLT_MAX` plus half an ulp overflowed, and text just above
   2^-150 gave 0. msvcrt.dll's own `_strtod_l` misrounds doubles the same
-  way ("9007199254740993.0000000001" gave 2^53, not 2^53 + 2). On msvcrt
-  the runtime now parses both with mingw-w64's correctly rounded parsers,
-  under a comma-decimal locale too, and gets UCRT's bits. UCRT and MSVC
-  builds are unchanged.
+  way ("9007199254740993.0000000001" gave 2^53, not 2^53 + 2). Under
+  mingw-w64, msvcrt or UCRT, the runtime now parses both with mingw-w64's
+  correctly rounded parsers linked into the program,
+  under a comma-decimal locale too, and gets the bits of Windows' UCRT on
+  any ucrtbase.dll it runs on (Wine's rounds twice too). MSVC builds are
+  unchanged.

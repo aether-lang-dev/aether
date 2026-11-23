@@ -227,11 +227,14 @@ MINGW64's mingw-w64 15 links is its own, `(float)_strtod_l(...)`, which rounds t
 just above a float tie came out one ulp low, and the text just under `FLT_MAX` plus half an ulp
 overflowed. mingw-w64 12 (the msvcrt WinLibs GCC 14.2) has none, so a runtime built with it did not
 link (`undefined reference to __imp__strtof_l`). msvcrt.dll's own `_strtod_l` misrounds doubles
-next to a tie as well. On msvcrt under mingw-w64 (`__MINGW32__` without `_UCRT`),
-`aether_c_strtof` and `aether_c_strtod` now parse with mingw-w64's correctly rounded
-`__mingw_strtof` and `__mingw_strtod`; those parsers read the ambient radix and msvcrt has no
+next to a tie as well. Under mingw-w64 (`__MINGW32__`, msvcrt or UCRT), `aether_c_strtof` and
+`aether_c_strtod` now parse with mingw-w64's correctly rounded `__mingw_strtof` and
+`__mingw_strtod`, linked into the program; those parsers read the ambient radix and msvcrt has no
 per-thread locale, so under a radix other than `.` they parse a copy of the C-locale text with the
-`.` spelt as that radix. UCRT and MSVC keep `_strtof_l` and `_strtod_l`.
+`.` spelt as that radix. UCRT builds take the same path because the program runs on whatever
+ucrtbase.dll it finds: Windows' rounds correctly, Wine's narrows a double as mingw-w64 15's msvcrt
+one does (the halfway test failed under Wine with `zig cc`). MSVC keeps `_strtof_l` and
+`_strtod_l`.
 
 Windows locale-name detail for the §4.3 test's candidate list: `setlocale(LC_ALL, "de-DE")`
 succeeds on UCRT64 but fails on MINGW64 (msvcrt), which needs `"German_Germany.1252"`. Try
