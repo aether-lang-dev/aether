@@ -8557,8 +8557,23 @@ static void emit_lanes8_block(CodeGenerator* gen) {
     print_line(gen, "    return (AeF32x8){_ae_f32x4_select(m.lo, a.lo, b.lo), _ae_f32x4_select(m.hi, a.hi, b.hi)};");
     print_line(gen, "#endif");
     print_line(gen, "}");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_min(AeF32x8 a, AeF32x8 b) { return _ae_f32x8_select(_ae_f32x8_lt(a, b), a, b); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_max(AeF32x8 a, AeF32x8 b) { return _ae_f32x8_select(_ae_f32x8_gt(a, b), a, b); }");
+    /* #3815: one VMINPS / VMAXPS natively, with the operand order that is
+       `a < b ? a : b` (see _ae_f32x4_min); two of the four-lane form in
+       halves. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_min(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeF32x8)__builtin_ia32_minps256(a, b);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_min(a.lo, b.lo), _ae_f32x4_min(a.hi, b.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_max(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeF32x8)__builtin_ia32_maxps256(a, b);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_max(a.lo, b.lo), _ae_f32x4_max(a.hi, b.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_sqrt(AeF32x8 v) {");
     print_line(gen, "#if AETHER_LANES8_NATIVE && AETHER_LANE_ELEMENTWISE");
     print_line(gen, "    return __builtin_elementwise_sqrt(v);");
@@ -9647,8 +9662,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
        floats and as integers. */
     print_line(gen, "typedef union { AeF32x4 f; AeI32x4 i; } _AeF32x4Bits;");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_select(AeI32x4 m, AeF32x4 a, AeF32x4 b) { _AeF32x4Bits av, bv, rv; av.f = a; bv.f = b; rv.i = (m & av.i) | (~m & bv.i); return rv.f; }");
+    /* #3815: min and max are `a < b ? a : b` and `a > b ? a : b` per lane.
+       On x86 that is exactly what MINPS(a, b) and MAXPS(a, b) compute, NaN
+       and signed zeros included: either returns its second operand when a
+       lane of either is NaN or both are zero. GCC and Clang emit the compare
+       and the blend for the select, never the one instruction, which put
+       both on a running minimum's loop-carried chain. Elsewhere the select
+       stays: AArch64's fmin returns the NaN and fminnm the number, neither
+       of which is this rule. */
+    print_line(gen, "#if defined(__SSE__)");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_min(AeF32x4 a, AeF32x4 b) { return __builtin_ia32_minps(a, b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_max(AeF32x4 a, AeF32x4 b) { return __builtin_ia32_maxps(a, b); }");
+    print_line(gen, "#else");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_min(AeF32x4 a, AeF32x4 b) { return _ae_f32x4_select(a < b, a, b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_max(AeF32x4 a, AeF32x4 b) { return _ae_f32x4_select(a > b, a, b); }");
+    print_line(gen, "#endif");
     /* #2158: a lane square root and absolute value. Both are EXACT — IEEE
        square root is correctly rounded, and clearing the sign bit is not an
        approximation — so the lane form changes no result. It replaces four
