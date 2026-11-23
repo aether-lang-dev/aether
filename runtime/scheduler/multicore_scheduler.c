@@ -43,6 +43,7 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms);
 // Forward declaration: a pending send batch goes before a send around it
 // and before a wait (#3117), defined with the batch below.
 static inline void batch_flush_pending(void);
+static void batch_send_out(void);
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -4774,17 +4775,41 @@ static AETHER_TLS BatchSendBuffer* g_batch_buffer = NULL;
  * wait for quiescence, sends the batch first: the batch's messages are older,
  * and messages nobody has sent are not pending to the wait. */
 static inline void batch_flush_pending(void) {
-    if (unlikely(g_batch_buffer && g_batch_buffer->count > 0)) scheduler_send_batch_flush();
+    if (unlikely(g_batch_buffer && g_batch_buffer->count > 0)) batch_send_out();
+}
+
+/* A panic out of a batched loop (#3826): the drain of the panic's frame
+ * sends what the loop sent before it, in order, as the loop's end would
+ * have, and the drain takes the entry out of the journal, so the batch is
+ * closed. */
+static void batch_unwind_send(const void* buffer) {
+    (void)buffer;
+    batch_send_out();
 }
 
 /* Opening a batch never drops what one holds (#3117): only a flush empties
  * the buffer. An inner loop's start emptied it and lost the outer loop's
- * messages. */
+ * messages.
+ *
+ * The open batch is in the unwind journal (#3826): the loop's end
+ * (scheduler_send_batch_flush) sends it and forgets the entry, and a panic
+ * that leaves the loop for a `try` sends it from the drain. The loop jumped
+ * past its end, and its messages stayed in the buffer until this thread's
+ * next send or wait: never, on a thread with nothing more to send (a
+ * worker's). Outside every frame nothing is journaled (the panic ends the
+ * program), and a scheduler thread batches nothing. */
 void scheduler_send_batch_start(void) {
     if (!g_batch_buffer) {
         g_batch_buffer = calloc(1, sizeof(BatchSendBuffer));
         if (!g_batch_buffer) return;  // OOM: batching stays off, callers fall back
     }
+    if (current_core_id < 0) (void)aether_unwind_track(g_batch_buffer, batch_unwind_send);
+}
+
+/* The loop's end: its batch sent and closed. */
+void scheduler_send_batch_flush(void) {
+    batch_send_out();
+    if (g_batch_buffer) aether_unwind_forget(g_batch_buffer);
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
@@ -4818,7 +4843,7 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
 
     // If buffer is full, flush first
     if (g_batch_buffer->count >= BATCH_SEND_SIZE) {
-        scheduler_send_batch_flush();
+        batch_send_out();
     }
 
     int idx = g_batch_buffer->count++;
@@ -4832,7 +4857,7 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
     }
 }
 
-void scheduler_send_batch_flush(void) {
+static void batch_send_out(void) {
     if (!g_batch_buffer || g_batch_buffer->count == 0) return;
 
     int count = g_batch_buffer->count;

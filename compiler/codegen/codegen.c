@@ -459,7 +459,10 @@ int contains_send_expression(ASTNode* node) {
  * branch and an inner loop are fine: the counting and fork-join shape the
  * batch exists for. A `return`, or a labeled `break` or `continue` (which can
  * leave for an enclosing loop), would leave the batch unflushed, and a
- * closure made in the loop runs outside it, so each keeps the loop out too. */
+ * closure made in the loop runs outside it, so each keeps the loop out too.
+ * A panic in the loop (a `panic`, an index, a division, a send to null)
+ * needs no refusal: the open batch is in the unwind journal, and the unwind
+ * to the `try` sends it and closes it (scheduler_send_batch_start, #3826). */
 int loop_sends_without_waiting(ASTNode* node) {
     if (!node) return 1;
     switch (node->type) {
