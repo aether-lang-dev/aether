@@ -11,6 +11,7 @@
 // asked for.
 
 extern malloc(n: int) -> ptr
+extern free(p: ptr)
 extern exit(code: int)
 
 main() {
@@ -45,5 +46,8 @@ main() {
         println("FAIL: a small view's .len is ${small.len}")
         exit(1)
     }
+    // The 16 real bytes the views are over: given back, or LeakSanitizer
+    // reports them (the views own nothing).
+    free(p)
     println("PASS: .len past 2^31 panics: ${caught}")
 }
