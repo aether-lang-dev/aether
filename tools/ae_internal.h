@@ -267,6 +267,25 @@ void cache_probe_memo_put(const char* cc, const char* what, int answer);
 /* #3813: the key of the runtime compiled from source for compiler `cc` with
  * `cflags` from the sources `srcs`, cached as an archive; 0 for none. */
 unsigned long long cache_runtime_key(const char* cc, const char* cflags, const char* srcs);
+/* The identity of the build's C compiler, as the cache key folds it (the
+ * command, the programs it runs by content, the first line of its
+ * --version); 0 when it is not known. `ae cache ccid` prints it, and `make`
+ * records it beside libaether.a. */
+unsigned long long cache_c_compiler_id(void);
+/* #3813: libaether.crt beside tc.lib: the C runtime's name into `name`, the
+ * mingw-w64 major (-1 for none) and the identity of the compiler that built
+ * the archive (0 for none). 1 when the record names a runtime, else 0. */
+int cache_crt_record_read(char* name, size_t namesz, int* mingw, unsigned long long* built_by);
+/* What archive_crt_check decided for this compiler, record, header and
+ * cflags, remembered in the cache directory: 1 the runtime is compiled from
+ * source, 0 the archive is linked, -1 not known. */
+int  cache_crt_decision_get(void);
+void cache_crt_decision_put(int from_source);
+/* ae.c: whether this build compiles the runtime from source (no archive,
+ * --trace, or an archive on another C runtime), as the build decides it;
+ * and whether the archive was refused for its C runtime. */
+int ae_runtime_from_source(void);
+int ae_archive_crt_refused(void);
 /* #3600: "<path> <size> <mtime ns>" of the file `name` beside the program
  * `prog` (its first word, looked up on PATH): 1, or 0 when either is not
  * found. */

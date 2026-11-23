@@ -1,0 +1,38 @@
+// Regression (review of #3820): a closure that returns a string on one path
+// and null on another compiles and runs, as the same function does.
+//
+// The check that a closure's returns are one kind of value (a returned
+// closure or struct the checker left typed `int` would cross without its
+// retain) compared the C spelling of every pointer, so `null` (a `ptr`)
+// against the closure's `const char*` stopped the build. Only a number
+// where the closure returns something that owns is that case; a null
+// pointer owns nothing.
+
+extern exit(code: int)
+
+pick(x: int) -> string {
+    if x > 2 { return "big" }
+    return null
+}
+
+main() {
+    f = | x: int | {
+        if x > 2 { return "big" }
+        return null
+    }
+    a = call(f, 3)
+    b = call(f, 1)
+    if a != "big" {
+        println("FAIL: the closure's string return is '${a}'")
+        exit(1)
+    }
+    if b != null {
+        println("FAIL: the closure's null return is not null")
+        exit(1)
+    }
+    if pick(3) != "big" || pick(1) != null {
+        println("FAIL: the function form disagrees")
+        exit(1)
+    }
+    println("PASS: a closure returns a string or null")
+}

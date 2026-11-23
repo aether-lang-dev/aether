@@ -186,10 +186,14 @@ own thing and silent unless a symbol is actually missing.
 
 `lib/aether/libaether.crt` (in a release archive, `lib/libaether.crt`,
 beside `lib/libaether.a`) names the C runtime the archive was built
-against, one word on one line. A build tool that links the archive
-with a compiler of its own can compare it with what that compiler
-targets (`runtime/aether_crt_id.h` names it); `ae` does, and compiles
-the runtime from source when they differ. The MANIFEST's format does
+against, one word on the first line. Lines after it may follow:
+`mingw-w64 <major>` on Windows, and `cc <id>`, the identity of the
+compiler that built the archive (as `ae cache ccid` prints it). A build
+tool that links the archive with a compiler of its own can compare the
+first line with what that compiler targets (`runtime/aether_crt_id.h`
+names it); `ae` does, and compiles the runtime from source when they
+differ, and does not ask the compiler `cc <id>` names when the build
+gives no cflags. The MANIFEST's format does
 not change: the record is a file of its own.
 
 The MANIFEST never references trimmed paths, the regression test

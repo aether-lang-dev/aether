@@ -45,9 +45,10 @@
 #endif
 
 /* On Windows the import libraries come from mingw-w64, whose major versions
- * differ in what they import: an archive MSYS2's mingw-w64 15 builds imports
+ * differ in what they import: an archive MSYS2's mingw-w64 15 built imported
  * _strtof_l from msvcrt, which mingw-w64 12's libmsvcrt.a (WinLibs GCC 14.2)
- * does not provide, so the same C runtime by name still failed to link.
+ * does not provide, so the same C runtime by name still failed to link
+ * (the runtime no longer calls it on msvcrt, #3818).
  * Recorded beside the runtime's name, and compared with it. */
 #if defined(__MINGW64_VERSION_MAJOR)
 #  define AETHER_CRT_MINGW_MAJOR __MINGW64_VERSION_MAJOR

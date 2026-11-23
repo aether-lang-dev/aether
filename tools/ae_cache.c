@@ -103,20 +103,34 @@ const char* get_home_dir(void) {
  * already what the writer was about to put there. Under a parallel build every
  * loser of the race did that write. link(2) is the primitive that says "only
  * if absent" and is atomic; a filesystem without hard links (EPERM/EXDEV/
- * ENOSYS: FAT, some network mounts) falls back to the rename this always did. */
+ * ENOSYS: FAT, some network mounts) falls back to the rename this always did.
+ *
+ * Taken means taken by a file: a slot path that holds a directory (or
+ * anything else) is no published entry, and the writer was told it had
+ * published, its temp gone, and linked or ran that directory. It is a failed
+ * publish (-1), the temp left to the caller, as on any other failure. */
+static int slot_is_file(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG;
+}
+
 int cache_publish(const char* tmp_path, const char* final_path) {
 #ifdef _WIN32
     /* Without MOVEFILE_REPLACE_EXISTING this fails when the slot is taken. */
     if (MoveFileExA(tmp_path, final_path, 0)) return 0;
     DWORD e = GetLastError();
-    if (e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) {
+    if ((e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) && slot_is_file(final_path)) {
         DeleteFileA(tmp_path);
         return 0;
     }
     return -1;
 #else
     if (link(tmp_path, final_path) == 0) { unlink(tmp_path); return 0; }
-    if (errno == EEXIST) { unlink(tmp_path); return 0; }
+    if (errno == EEXIST) {
+        if (!slot_is_file(final_path)) return -1;
+        unlink(tmp_path);
+        return 0;
+    }
     if (errno == EPERM || errno == EXDEV || errno == ENOSYS) {
         return rename(tmp_path, final_path);
     }
@@ -1649,6 +1663,109 @@ unsigned long long cache_runtime_key(const char* cc, const char* cflags, const c
     return h ? h : 1ULL;
 }
 
+unsigned long long cache_c_compiler_id(void) { return c_compiler_fingerprint(); }
+
+/* #3813: the record `make` leaves beside libaether.a (libaether.crt): the C
+ * runtime's name alone on the first line, then, each on a line of its own
+ * and in any order, `mingw-w64 <major>` and `cc <id>`, the identity
+ * (cache_c_compiler_id, as `ae cache ccid` prints it) of the compiler that
+ * built the archive, written only when that compiler with no flags targets
+ * the recorded runtime. An older ae reads the first two lines and nothing
+ * else, as it always did. */
+int cache_crt_record_read(char* name, size_t namesz, int* mingw, unsigned long long* built_by) {
+    if (namesz) name[0] = '\0';
+    *mingw = -1;
+    *built_by = 0;
+    const char* sep = strrchr(tc.lib, '/');
+    const char* bsep = strrchr(tc.lib, '\\');
+    if (bsep && (!sep || bsep > sep)) sep = bsep;
+    size_t dl = sep ? (size_t)(sep - tc.lib) : 0;
+    char* rec = str_join4(tc.lib, dl, dl ? "/" : "", "libaether.crt", "");
+    FILE* f = rec ? fopen(rec, "r") : NULL;
+    free(rec);
+    if (!f) return 0;
+    char line[256];
+    int ok = 0;
+    if (fgets(line, sizeof(line), f)) {
+        size_t n = strcspn(line, "\r\n");
+        ok = n > 0 && n < namesz;
+        for (size_t i = 0; ok && i < n; i++)
+            ok = (line[i] >= 'a' && line[i] <= 'z') || (line[i] >= '0' && line[i] <= '9') ||
+                 line[i] == '_';
+        if (ok) snprintf(name, namesz, "%.*s", (int)n, line);
+    }
+    while (ok && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        unsigned major = 0;
+        unsigned long long id = 0;
+        char tail = 0;
+        if (sscanf(line, "mingw-w64 %u%c", &major, &tail) == 1 && major < 1000)
+            *mingw = (int)major;
+        else if (strlen(line) == 19 && sscanf(line, "cc %16llx%c", &id, &tail) == 1)
+            *built_by = id;
+    }
+    fclose(f);
+    return ok;
+}
+
+/* #3813: what archive_crt_check decided, remembered in the cache directory,
+ * so the cache key of the next build knows it without finding the compiler
+ * (on Windows a cmd.exe and a gcc start, about 40 ms) and asking it. It is
+ * kept by everything the decision is made from: the compiler's identity,
+ * the record beside the archive, runtime/aether_crt_id.h and the project's
+ * cflags. 0 when there is nowhere to keep it. */
+static int crt_decision_path(char* out, size_t outsz) {
+    unsigned long long ccid = c_compiler_fingerprint();
+    if (!ccid || !tc.src_root[0]) return 0;
+    const char* sep = strrchr(tc.lib, '/');
+    const char* bsep = strrchr(tc.lib, '\\');
+    if (bsep && (!sep || bsep > sep)) sep = bsep;
+    size_t dl = sep ? (size_t)(sep - tc.lib) : 0;
+    char* rec = str_join4(tc.lib, dl, dl ? "/" : "", "libaether.crt", "");
+    char* hdr = str_join4(tc.src_root, strlen(tc.src_root), "/runtime/aether_crt_id.h", "", "");
+    unsigned long long rh = rec ? file_hash(rec) : 0, hh = hdr ? file_hash(hdr) : 0;
+    free(rec);
+    free(hdr);
+    if (!rh) return 0;
+    unsigned long long h = fnv64_more(fnv64_str("crt-decision\n"), get_cflags());
+    h = (h * 1099511628211ULL) ^ rh;
+    h = (h * 1099511628211ULL) ^ hh;
+    h = (h * 1099511628211ULL) ^ ccid;
+    init_cache_dir();
+    snprintf(out, outsz, "%s/%016llx.probe", s_cache_dir, h);
+    return 1;
+}
+
+int cache_crt_decision_get(void) {
+    char path[1200];
+    if (!crt_decision_path(path, sizeof(path))) return -1;
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    int c = fgetc(f);
+    fclose(f);
+    return c == '1' ? 1 : c == '0' ? 0 : -1;
+}
+
+/* The build's decision replaces one remembered before, when they differ: a
+ * compiler that could not be asked once and answers now is keyed by its
+ * answer from the next build on. */
+void cache_crt_decision_put(int from_source) {
+    char path[1200], tmp[1300];
+    if (!crt_decision_path(path, sizeof(path))) return;
+    if (cache_crt_decision_get() == (from_source ? 1 : 0)) return;
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
+    FILE* f = fopen(tmp, "w");
+    if (!f) return;
+    int ok = fputc(from_source ? '1' : '0', f) != EOF;
+    if (fclose(f) != 0) ok = 0;
+#ifdef _WIN32
+    if (ok) ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    if (ok) ok = rename(tmp, path) == 0;
+#endif
+    if (!ok) remove(tmp);
+}
+
 /* "<path> <size> <mtime ns>" of the file `name` in the directory the program
  * `prog` (its first word) resolves to on PATH, into `out`; 0 when either is
  * not found. */
@@ -1780,7 +1897,10 @@ unsigned long long compute_cache_key(const char* ae_file,
     unsigned long long ccid = c_compiler_fingerprint();
     if (!ccid) key.oom = 1;
     key_append(&key, ":ccid=%016llx", ccid);
-    if (tc.has_lib) {
+    /* An archive refused for its C runtime is still the archive this key
+     * names: the decision may be made between a build's lookup key and its
+     * publish key (ae_runtime_from_source), and both are to be the same. */
+    if (tc.has_lib || ae_archive_crt_refused()) {
         unsigned long long lib_hash = file_hash(tc.lib);
         if (lib_hash) key_append(&key, ":lib=%016llx", lib_hash);
         /* #3813: the record of the archive's C runtime decides, with the
@@ -1814,7 +1934,30 @@ unsigned long long compute_cache_key(const char* ae_file,
      * about 120 files and 5 MB, measured at under 20 ms a build on Windows
      * (a cache hit went from 127 to 145 ms), against the stale result a
      * missed edit gives. */
-    if (tc.dev_mode && tc.src_root[0]) {
+    /* A runtime compiled from source is built from the .c files too, and the
+     * headers alone do not see an edit to one of them: the runtime archive
+     * got a new key (cache_runtime_key) and `ae run` served the program
+     * linked against the old one. So when this build compiles the runtime
+     * from source (ae_runtime_from_source: the decision the build makes,
+     * --trace, no archive, or another C runtime), that key is folded in
+     * instead, over the same trees and the .c files in them; a build that
+     * links the archive walks the headers only, as before. The compiler and
+     * the flags the runtime key would also fold are this key's own already
+     * (ccid, the salt, the -O level), so they are left out of it here,
+     * where the build's compile line is not known. */
+    if (tc.dev_mode && tc.src_root[0] && ae_runtime_from_source()) {
+        /* The source list is read only once the compile line is made, after
+         * this key, so the file it comes from (build/MANIFEST, which `make
+         * stdlib` writes) is folded instead: the walk sees every file the
+         * list can name, but not which of them it names (make ci-coop lists
+         * the cooperative scheduler in place of the multicore one). */
+        unsigned long long rt = cache_runtime_key("", "", "");
+        char* manifest = str_join4(tc.root, strlen(tc.root), "/build/MANIFEST", "", "");
+        unsigned long long mh = manifest ? file_hash(manifest) : 0;
+        free(manifest);
+        if (rt) key_append(&key, ":rt=%016llx:manifest=%016llx", rt, mh);
+        else complete = 0;
+    } else if (tc.dev_mode && tc.src_root[0]) {
         static const char* hdr_dirs[] = { "runtime", "std" };
         unsigned long long hdr_acc = 1469598103934665603ULL;
         int hdr_count = 0;

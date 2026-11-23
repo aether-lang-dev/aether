@@ -1,0 +1,28 @@
+// #3821: a call whose slice result is discarded, as a statement. Built by
+// test_discarded_slice_call.sh, which compiles its C under clang with
+// -Werror=unused-value.
+
+extern malloc(n: int) -> ptr
+
+var g_length: ptr = null
+
+length_cell() -> ptr { return g_length }
+
+length_scratch() -> float[] {
+    if g_length == null { g_length = malloc(64) }
+    return length_cell() as float[]
+}
+
+count() -> int {
+    return 3
+}
+
+reserve_scratch() {
+    length_scratch()
+    count()
+}
+
+main() {
+    reserve_scratch()
+    println("ok")
+}

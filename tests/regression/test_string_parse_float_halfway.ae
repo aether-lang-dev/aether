@@ -1,0 +1,172 @@
+// Regression (#3818): string.to_float and string.to_double read decimal text
+// as a correctly rounded strtof and strtod in the C locale do, whatever the
+// ambient locale and whatever C runtime the program is built against.
+//
+// On msvcrt (MSYS2's MINGW64, the msvcrt WinLibs) the runtime called
+// _strtof_l, which msvcrt.dll does not export. mingw-w64 12's import library
+// has none, so a runtime built with the msvcrt WinLibs did not link
+// ("undefined reference to __imp__strtof_l"); mingw-w64 15's has one that
+// narrows _strtod_l, which rounds twice. The inputs below lie next to a
+// float halfway point, where rounding to double first lands on the tie and
+// then goes to even: "1.00000005960464477540" is above 1 + 2^-24 and must
+// give 1 + 2^-23, not 1; the text just under FLT_MAX + ulp/2 must give
+// FLT_MAX, not an overflow; the text just above 2^-150 must give the least
+// subnormal, not 0. string.to_double is checked at its own ties: msvcrt.dll's
+// _strtod_l does not round them correctly. The expected bits are UCRT
+// strtof's and strtod's.
+//
+// The checks run in the C locale, then under a comma-decimal locale, where
+// the msvcrt path parses a copy of the text with the ambient radix; SKIP is
+// printed for that half when no such locale is installed. archive_crt builds
+// this program with the msvcrt WinLibs too, when one is installed.
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+// Sets the process-global locale (test-only; see runtime/aether_locale_num.h).
+extern aether_test_setlocale(name: string) -> int
+
+// The radix byte this thread would format with.
+extern aether_test_decimal_point() -> int
+
+select_comma_locale() -> string {
+    if aether_test_setlocale("de_DE.UTF-8") == 1 {
+        return "de_DE.UTF-8"
+    }
+    if aether_test_setlocale("de_DE.utf8") == 1 {
+        return "de_DE.utf8"
+    }
+    if aether_test_setlocale("fr_FR.UTF-8") == 1 {
+        return "fr_FR.UTF-8"
+    }
+    // Windows spellings: UCRT takes the BCP-47 form, msvcrt needs the long one.
+    if aether_test_setlocale("de-DE") == 1 {
+        return "de-DE"
+    }
+    if aether_test_setlocale("German_Germany.utf8") == 1 {
+        return "German_Germany.utf8"
+    }
+    if aether_test_setlocale("German_Germany.1252") == 1 {
+        return "German_Germany.1252"
+    }
+    return ""
+}
+
+// to_float's result, widened to double (exact), must have exactly the bits
+// `want`.
+flt(s: string, want: long, where: string) -> int {
+    v, err = string.to_float(s)
+    if err != "" || mem.bits_of_float(v) != want {
+        got = string.from_int_radix(mem.bits_of_float(v), 16)
+        println("  FAIL [${where}] to_float(\"${s}\"): bits ${got} err='${err}'")
+        return 1
+    }
+    return 0
+}
+
+// to_double's result must have exactly the bits `want`.
+dbl(s: string, want: long, where: string) -> int {
+    v, err = string.to_double(s)
+    if err != "" || mem.bits_of_float(v) != want {
+        got = string.from_int_radix(mem.bits_of_float(v), 16)
+        println("  FAIL [${where}] to_double(\"${s}\"): bits ${got} err='${err}'")
+        return 1
+    }
+    return 0
+}
+
+dbl_err(s: string, where: string) -> int {
+    v, err = string.to_double(s)
+    if err == "" {
+        println("  FAIL [${where}] to_double(\"${s}\") should error, got ${v}")
+        return 1
+    }
+    return 0
+}
+
+flt_err(s: string, where: string) -> int {
+    v, err = string.to_float(s)
+    if err == "" {
+        println("  FAIL [${where}] to_float(\"${s}\") should error, got ${v}")
+        return 1
+    }
+    return 0
+}
+
+checks(where: string) -> int {
+    fails = 0
+
+    // 1 + 2^-24 is the tie between 1 and 1 + 2^-23. Just below it: 1. Just
+    // above it: 1 + 2^-23, where a parse through double gives 1.
+    fails = fails + flt("1.00000005960464477539", 0x3ff0000000000000, where)
+    fails = fails + flt("1.00000005960464477540", 0x3ff0000020000000, where)
+    fails = fails + flt("1.000000059604644775390625", 0x3ff0000000000000, where)
+    fails = fails + flt("1.000000059604644775390626", 0x3ff0000020000000, where)
+
+    // Past 128 bytes, and the last digit decides: the tie exactly, then the
+    // tie and a 1 in the 145th decimal place.
+    fails = fails + flt("1.000000059604644775390625000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", 0x3ff0000000000000, where)
+    fails = fails + flt("1.0000000596046447753906250000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", 0x3ff0000020000000, where)
+
+    // FLT_MAX exactly; just under FLT_MAX + ulp/2 (FLT_MAX, where a parse
+    // through double overflows); the tie itself (rounds to even: overflow).
+    fails = fails + flt("3.40282346638528859811704183484516925440e+38", 0x47efffffe0000000, where)
+    fails = fails + flt("3.40282356779733661637539395458142568447e+38", 0x47efffffe0000000, where)
+    fails = fails + flt_err("3.40282356779733661637539395458142568448e+38", where)
+
+    // 2^-150 is the tie between 0 and the least subnormal 2^-149.
+    fails = fails + flt("7.0064923216240853546186479164495806564014e-46", 0x36a0000000000000, where)
+    fails = fails + flt("7.0064923216240853546186479164495806564013e-46", 0x0, where)
+
+    // The text the C locale reads: '.' only, its end where C puts it.
+    fails = fails + flt("0.1", 0x3fb99999a0000000, where)
+    fails = fails + flt(" \t2.5", 0x4004000000000000, where)
+    fails = fails + flt("-0.75e1", 0xc01e000000000000, where)
+    fails = fails + flt(".5", 0x3fe0000000000000, where)
+    fails = fails + flt("1.", 0x3ff0000000000000, where)
+    fails = fails + flt("3", 0x4008000000000000, where)
+    fails = fails + flt_err("1,5", where)
+    fails = fails + flt_err("1.5,", where)
+    fails = fails + flt_err("1.2.3", where)
+    fails = fails + flt_err("1.5x", where)
+    fails = fails + flt_err(",5", where)
+    fails = fails + flt_err(".", where)
+    fails = fails + flt_err("-", where)
+
+    // to_double the same way. msvcrt.dll's _strtod_l does not round these
+    // correctly: 2^53 + 1 is the tie between 2^53 and 2^53 + 2, 1 + 2^-53
+    // the tie between 1 and 1 + 2^-52, 2^-1075 the tie between 0 and the
+    // least subnormal; just above each, the upper one.
+    fails = fails + dbl("9007199254740993", 0x4340000000000000, where)
+    fails = fails + dbl("9007199254740993.0000000001", 0x4340000000000001, where)
+    fails = fails + dbl("1.00000000000000011102230246251565404236316680908203125", 0x3ff0000000000000, where)
+    fails = fails + dbl("1.000000000000000111022302462515654042363166809082031250001", 0x3ff0000000000001, where)
+    fails = fails + dbl("2.4703282292062328e-324", 0x1, where)
+    fails = fails + dbl("1.7976931348623157e308", 0x7fefffffffffffff, where)
+    fails = fails + dbl("0.1", 0x3fb999999999999a, where)
+    fails = fails + dbl(" -2.5", 0xc004000000000000, where)
+    fails = fails + dbl_err("1,5", where)
+    fails = fails + dbl_err("1.5,", where)
+    return fails
+}
+
+main() {
+    println("=== to_float / to_double: decimal text next to a tie, C and comma locales ===")
+    fails = checks("C")
+
+    loc = select_comma_locale()
+    if loc == "" {
+        println("  SKIP comma locale: none installed")
+    } else if aether_test_decimal_point() != 44 {
+        println("  SKIP comma locale: ${loc} does not format with ','")
+    } else {
+        fails = fails + checks(loc)
+    }
+
+    if fails > 0 {
+        println("FAIL: ${fails} checks failed")
+        exit(1)
+    }
+    println("All PASS")
+}

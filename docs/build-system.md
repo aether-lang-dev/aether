@@ -473,6 +473,7 @@ Both `ae run` and `ae build` cache compiled binaries in `~/.aether/cache/`. The 
 ae cache          # Show cache location, entry count, size and limit
 ae cache gc       # Evict least-recently-used builds down to the limit, now
 ae cache clear    # Delete all cached builds
+ae cache ccid     # Print the identity of the C compiler a build would use
 ```
 
 **The cache is bounded.** `AETHER_CACHE_MAX_MB` caps it (default 5120; `0`
@@ -807,8 +808,9 @@ an msvcrt archive linked by a UCRT compiler (`AE_CC="zig cc"`) failed on
 `try` (#3813), and two C runtimes in one program disagree on `FILE`, `errno`
 and the heap besides. On Windows the mingw-w64 major counts too: the same C
 runtime by name comes with other import libraries (an archive MSYS2's
-mingw-w64 15 built imports `_strtof_l`, which WinLibs GCC 14.2's mingw-w64 12
-does not provide). `make` writes the archive's runtime to `libaether.crt`
+mingw-w64 15 built imported `_strtof_l`, which WinLibs GCC 14.2's mingw-w64 12
+does not provide, until the runtime stopped calling it on msvcrt, #3818).
+`make` writes the archive's runtime to `libaether.crt`
 beside it, from `runtime/aether_crt_id.h`: the name on the first line (msvcrt
 or ucrt on Windows, glibc, musl, bionic or uclibc on Linux; nothing where a
 platform has one C runtime) and, on Windows, `mingw-w64 <major>` on the
@@ -822,6 +824,16 @@ and `ae build -v` says why:
 ```
 [toolchain] libaether.a is msvcrt mingw-w64 15; zig cc targets ucrt mingw-w64 13: the runtime is compiled from source
 ```
+
+The record also names the compiler that built the archive, `cc <id>`, its
+identity as the build cache has it (`ae cache ccid` prints it for the compiler
+a build would use), written only when that compiler given no flags targets the
+recorded runtime. A build by the same compiler with no cflags is not asked: the
+archive is its own, and `ae build -v` says `"gcc" built it: the archive is
+linked`. That saves one compiler start on every cold cache (8 commands to 7
+for `benchmarks/core/compile_heavy.ae`, about 25 ms on Windows). Any other
+compiler, and any cflags, are asked as before; the probe is compiled with the
+project's cflags, and so is its control.
 
 An archive with no record (one an older tree built) is linked as before. The
 runtime compiled from source is kept in the build cache as an archive, one per
@@ -844,9 +856,17 @@ cache does not make the fallback free: it is paid once for each compiler, set
 of flags and state of the sources. `ae run` (`-O0 -g`) and `ae build` (`-O2`)
 each build one, so do `--emit=lib`, `--trace` and every other set of `[build]
 cflags`; an edit to a runtime or std C source builds another (an edit to the
-program does not); and the cache's size cap can evict one, which the next
-build makes again. Editing and rebuilding a program is a hit after its first
-build.
+program does not), and in a source tree the program is built again too, as
+its own key folds the runtime's sources when the runtime is compiled from
+source; and the cache's size cap can evict one, which the next build makes
+again. Editing and rebuilding a program is a hit after its first build.
+
+The archive is made with the compiler's own archiver, and under `-flto` with
+its LTO-aware one (`gcc-ar`, `llvm-ar`; `zig ar` for `zig cc`): plain `ar`
+gives GCC's slim LTO objects no symbol index, and the link finds none of the
+runtime's symbols. No archive without a symbol index is published; when no
+archiver makes one, the build links the objects. An archive the cache does
+not take is linked from where it was made and removed when the build is done.
 
 The compilers this reaches on Windows are any not on the archive's C runtime
 and mingw-w64: `zig cc`; MSYS2's UCRT64 GCC, MSYS2's default environment,
