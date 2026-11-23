@@ -339,6 +339,8 @@ AETHER_WEAK int aether_pure_tls_client_send(void* conn, const void* buf, int len
     (void)conn; (void)buf; (void)len;
     return -1;
 }
+/* The bytes read, 0 at the server's close, HTTP_PT_RECV_TIMED_OUT (-2) for
+ * a read that waited out the socket's timeout, -1 for any other failure. */
 AETHER_WEAK int aether_pure_tls_client_recv(void* conn, void* buf, int len) {
     (void)conn; (void)buf; (void)len;
     return -1;
@@ -698,7 +700,13 @@ static int transport_send(Transport* t, const void* buf, int len) {
 
 static int transport_recv(Transport* t, void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
-    if (t->ssl) return SSL_read(t->ssl, buf, len);
+    if (t->ssl) {
+        /* SSL_get_error answers by this thread's error queue, which must be
+         * empty before the call it is asked about (http_io_failure_kind,
+         * #3846): an entry left by anything earlier reads as this read's. */
+        ERR_clear_error();
+        return SSL_read(t->ssl, buf, len);
+    }
 #endif
     if (t->pure_tls) return pt_client_recv(t->pure_tls, buf, len);
     return (int)recv(t->sockfd, buf, len, 0);
@@ -3992,10 +4000,40 @@ static int http_io_would_block(void) {
  * HTTP_IO_RESET when the peer reset or aborted the connection, and
  * HTTP_IO_OTHER for anything else. A timeout and a reset were one "recv
  * timeout or I/O error", which the proxy answers 504 for both. The kinds
- * are in aether_http_internal.h. */
-static int http_io_failure_kind(const Transport* t) {
+ * are in aether_http_internal.h.
+ *
+ * `n` is what the read returned. A TLS read is classified by the TLS
+ * layer's own answer, not by errno or WSAGetLastError: a TLS failure that
+ * made no failing system call (a protocol error, a bad record) leaves
+ * whatever an earlier call set there, and a stale EAGAIN read as a timeout
+ * answered 504 and kept an idempotent request from going again. OpenSSL's
+ * WANT_READ or WANT_WRITE is the timeout, its SSL_ERROR_SYSCALL a failed
+ * system call whose error is this call's, and anything else an I/O error;
+ * the pure-TLS client says a timeout by HTTP_PT_RECV_TIMED_OUT, and any
+ * other failure is an I/O error. */
+static int http_os_failure_kind(int blocking);
+int http_io_failure_kind(const Transport* t, int n) {
     /* -1 is a pure-TLS transport, which this client reads blocking. */
     int blocking = t->nonblocking != 1;
+#ifdef AETHER_HAS_OPENSSL
+    if (t->ssl) {
+        int e = SSL_get_error(t->ssl, n);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE)
+            return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
+        if (e == SSL_ERROR_SYSCALL && n < 0) return http_os_failure_kind(blocking);
+        return HTTP_IO_OTHER;
+    }
+#endif
+    if (t->pure_tls) {
+        if (n == HTTP_PT_RECV_TIMED_OUT)
+            return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
+        return HTTP_IO_OTHER;
+    }
+    return http_os_failure_kind(blocking);
+}
+
+/* The kind of the error a failed system call left (http_io_failure_kind). */
+static int http_os_failure_kind(int blocking) {
 #ifdef _WIN32
     int e = WSAGetLastError();
     if (e == WSAEWOULDBLOCK) return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
@@ -4072,7 +4110,7 @@ int http_exchange_recv(HttpExchange* x) {
         int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
         if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
         if (n < 0) {
-            int kind = http_io_failure_kind(x->t);
+            int kind = http_io_failure_kind(x->t, n);
             if (kind == HTTP_IO_WOULD_BLOCK) return AE_X_WANT_READ;
             x->recv_failure = kind;
             if (kind == HTTP_IO_TIMED_OUT) {
@@ -4479,7 +4517,7 @@ send_request:
         }
         /* Read from the error the failed read left, before anything else
          * can change it: a timeout and a reset are told apart (#3846). */
-        int skind = sn < 0 ? http_io_failure_kind(&t) : HTTP_IO_OTHER;
+        int skind = sn < 0 ? http_io_failure_kind(&t, sn) : HTTP_IO_OTHER;
         if (sn < 0) serr = 1;
         if (!hend) {
             free(hb);

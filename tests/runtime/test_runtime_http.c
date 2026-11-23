@@ -11,6 +11,12 @@
 #include <unistd.h>
 #endif
 #include <pthread.h>
+#include <errno.h>
+#ifdef AETHER_HAS_OPENSSL
+/* The TLS read classifier's cases (#3846). */
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
 #include "../../std/net/aether_http.h"
 #include "../../std/string/aether_string.h"
 /* The URL resolver and the proxy URL parser (#3552), on every platform. */
@@ -1184,4 +1190,84 @@ TEST_CATEGORY(http_connect_reply_refuses_malformed, TEST_CATEGORY_NETWORK) {
     ASSERT_TRUE(strstr(why, "longer than 4096") != NULL);
     T_CLOSE(fds[0]);
     T_CLOSE(fds[1]);
+}
+
+/* A failed TLS read is classified by the TLS layer's own answer, never by
+ * an errno or WSAGetLastError it did not set (#3846): a protocol error made
+ * with no failing system call left whatever was there, and a stale EAGAIN
+ * read as a timeout, which the proxy answered 504 and an idempotent request
+ * was not sent again for. Each case sets the stale value after the read and
+ * before the classifier, as anything in between can. */
+static void stale_would_block(void) {
+#ifdef _WIN32
+    WSASetLastError(WSAEWOULDBLOCK);
+#endif
+    errno = EAGAIN;
+}
+
+TEST_CATEGORY(http_tls_read_failure_kind_ignores_stale_errno, TEST_CATEGORY_NETWORK) {
+    /* The pure-TLS client: HTTP_PT_RECV_TIMED_OUT is its timeout, -1 any
+     * other failure. */
+    int conn = 0;
+    Transport t;
+    memset(&t, 0, sizeof t);
+    t.sockfd = -1;
+    t.nonblocking = -1;
+    t.pure_tls = &conn;
+    stale_would_block();
+    ASSERT_EQ(HTTP_IO_OTHER, http_io_failure_kind(&t, -1));
+    stale_would_block();
+    ASSERT_EQ(HTTP_IO_TIMED_OUT, http_io_failure_kind(&t, HTTP_PT_RECV_TIMED_OUT));
+
+#ifdef AETHER_HAS_OPENSSL
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    ASSERT_NOT_NULL(ctx);
+    char buf[64];
+    int fds[2];
+
+    /* A peer that answers the ClientHello with no TLS at all: a protocol
+     * error, SSL_ERROR_SSL. */
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    const char* junk = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+    send(fds[1], junk, (int)strlen(junk), 0);
+    SSL* ssl = SSL_new(ctx);
+    ASSERT_NOT_NULL(ssl);
+    SSL_set_fd(ssl, fds[0]);
+    SSL_set_connect_state(ssl);
+    memset(&t, 0, sizeof t);
+    t.sockfd = fds[0];
+    t.ssl = ssl;
+    ERR_clear_error();
+    int n = SSL_read(ssl, buf, (int)sizeof buf);
+    ASSERT_TRUE(n <= 0);
+    stale_would_block();
+    ASSERT_EQ(HTTP_IO_OTHER, http_io_failure_kind(&t, n));
+    SSL_free(ssl);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+
+    /* A peer that sends nothing for longer than the receive timeout: the
+     * timeout it is. */
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+#ifdef _WIN32
+    DWORD tv = 100;
+#else
+    struct timeval tv = { 0, 100000 };
+#endif
+    ASSERT_EQ(0, setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv));
+    ssl = SSL_new(ctx);
+    ASSERT_NOT_NULL(ssl);
+    SSL_set_fd(ssl, fds[0]);
+    SSL_set_connect_state(ssl);
+    t.sockfd = fds[0];
+    t.ssl = ssl;
+    ERR_clear_error();
+    n = SSL_read(ssl, buf, (int)sizeof buf);
+    ASSERT_TRUE(n <= 0);
+    ASSERT_EQ(HTTP_IO_TIMED_OUT, http_io_failure_kind(&t, n));
+    SSL_free(ssl);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+    SSL_CTX_free(ctx);
+#endif
 }

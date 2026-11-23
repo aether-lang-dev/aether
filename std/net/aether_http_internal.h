@@ -168,6 +168,16 @@ struct HttpUpstreamConnOpaque {
 #define HTTP_IO_WOULD_BLOCK 2
 #define HTTP_IO_RESET       3
 
+/* What the pure-TLS client's recv (aether_pure_tls_client_recv) returns for
+ * a read that waited out the socket's receive timeout; -1 is any other
+ * failure. */
+#define HTTP_PT_RECV_TIMED_OUT (-2)
+
+/* Why a read on `t` that returned `n` failed, as one of the kinds above:
+ * by the TLS layer's own answer on a TLS transport, never by an errno it
+ * did not set (#3846). */
+int  http_io_failure_kind(const Transport* t, int n);
+
 #define AE_X_DONE        0
 #define AE_X_WANT_READ   1
 #define AE_X_WANT_WRITE  2

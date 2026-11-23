@@ -3821,6 +3821,11 @@ pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
     p, n, err = conn_recv(pc.conn)
     if string.equals(err, "") != 1 {
         if p != null { bytes.wipe_free(p) }
+        // A read that waited out the socket's timeout is -2, any other
+        // failure -1 (HTTP_PT_RECV_TIMED_OUT): std.http tells a timeout
+        // from an I/O error by this, not by an errno the TLS layer may not
+        // have set (#3846).
+        if string.equals(err, "timeout") == 1 { return -2 }
         return -1
     }
     // A clean close_notify is EOF, which recv() reports as 0 -- not an error.
