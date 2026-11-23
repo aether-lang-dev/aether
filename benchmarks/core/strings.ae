@@ -10,6 +10,15 @@ per_op(t0: long, t1: long, n: int) -> float {
     return (t1 - t0) as float / n as float
 }
 
+struct Holder {
+    name: string
+}
+
+// Reads nothing of its argument: the row is the hold around the call.
+held_len(s: string) -> int {
+    return 1
+}
+
 main() {
     n = 2000000
     total = 0
@@ -116,6 +125,19 @@ main() {
         i = i + 1
     }
     println("row string_scan_char_at ${per_op(t0, os.now_monotonic_ns(), scans)} ns/scan")
+
+    // #3840: a string read from a field, passed to a call. The callee could
+    // store into the field, so the caller holds the argument for the call
+    // (R3): a reference taken, the place journaled, then forgotten and the
+    // reference released after it.
+    holder = Holder { name: string.concat("held ", "argument") }
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        total = total + held_len(holder.name)
+        i = i + 1
+    }
+    println("row string_held_arg ${per_op(t0, os.now_monotonic_ns(), n)} ns/call")
 
     if total == 0 { println("nothing measured") }
 }

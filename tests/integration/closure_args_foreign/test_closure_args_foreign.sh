@@ -54,7 +54,7 @@ AE
 }
 
 freed() {
-    grep -q '_ad_[0-9]* = (char\*)(mk(a)), .*_aether_callee_fn(f\.fn, "empty_closure_call: .*"))(f\.env, _ad_[0-9]*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/$1.c"
+    grep -q '_ad_[0-9]* = (char\*)(mk(a)), .*_aether_callee_fn(f\.fn, "empty_closure_call: .*"))(f\.env, _ad_[0-9]*), aether_unwind_forget_tok(_ad_[0-9]*_j, (const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/$1.c"
 }
 
 gen control "" ""

@@ -51,7 +51,10 @@ void aether_unwind_forget(const void* p);
 // holds). A drain releases what the slot holds then and leaves it empty, so
 // the slot's own stores and releases never touch the journal. Forgotten by
 // the place's address (aether_unwind_forget) where the slot goes out of scope.
-void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release);
+// 1 when the place is in the journal after the call, 0 when nothing was
+// written (no frame live, no room): an exit told 0 skips the forget (#3840,
+// runtime ABI revision 8).
+int aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release);
 // #3406: journal a place of an owned pointer type (`type T = owned ptr drop
 // f`): a drain gives what it holds to `drop` and leaves it empty. `drop` is
 // the compiler's thunk of the type's drop function (#3413: a drop may return

@@ -94,9 +94,9 @@ held h!
 h!+
 8 e!
 i!"
-grep -q '_ad_[0-9]* = (char\*)(mk(((const char\*)&_ae_slit_[0-9]*))), aether_unwind_track_str_place((const void\*)\&_ad_[0-9]*, NULL), apply(look, _ad_[0-9]*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c" \
+grep -q '_ad_[0-9]* = (char\*)(mk(((const char\*)&_ae_slit_[0-9]*))), _ad_[0-9]*_j = aether_unwind_track_str_place((const void\*)\&_ad_[0-9]*, NULL), apply(look, _ad_[0-9]*), aether_unwind_forget_tok(_ad_[0-9]*_j, (const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c" \
     || fail "the argument to apply() is not freed" "$tmp/borrowed.c"
-n="$(grep -c '_ad_[0-9]* = (char\*)(mk(a)), .*_aether_callee_fn(f\.fn, "empty_closure_call: .*"))(f\.env, _ad_[0-9]*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c")"
+n="$(grep -c '_ad_[0-9]* = (char\*)(mk(a)), .*_aether_callee_fn(f\.fn, "empty_closure_call: .*"))(f\.env, _ad_[0-9]*), aether_unwind_forget_tok(_ad_[0-9]*_j, (const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c")"
 [ "$n" = "3" ] || fail "an argument to a call through an fn parameter is not freed ($n of 3)" "$tmp/borrowed.c"
 
 # ---- a closure keeps its `string` parameter: the store takes its own
@@ -160,7 +160,7 @@ main() {
 AE
     run "kept_$shape" "k!
 zzzzzzzzzzzzzzzz!"
-    grep -q 'mk(((const char\*)&_ae_slit_[0-9]*))), aether_unwind_track_str_place((const void\*)\&_ad_[0-9]*, NULL), apply(keep, _ad_[0-9]*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/kept_$shape.c" \
+    grep -q 'mk(((const char\*)&_ae_slit_[0-9]*))), _ad_[0-9]*_j = aether_unwind_track_str_place((const void\*)\&_ad_[0-9]*, NULL), apply(keep, _ad_[0-9]*), aether_unwind_forget_tok(_ad_[0-9]*_j, (const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/kept_$shape.c" \
         || fail "kept_$shape: the closure's store takes its own reference, yet the argument is not freed" "$tmp/kept_$shape.c"
 done
 

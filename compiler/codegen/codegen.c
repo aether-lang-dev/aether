@@ -10168,7 +10168,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * places, and the journal knows places, not values. */
     print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
     print_line(gen, "extern int aether_unwind_track(const void*, AetherUnwindFree);");
-    print_line(gen, "extern void aether_unwind_track_place(const void*, const void*, AetherUnwindFree);");
+    print_line(gen, "extern int aether_unwind_track_place(const void*, const void*, AetherUnwindFree);");
     print_line(gen, "extern int aether_unwind_track_owned_place(const void*, void (*)(void*));");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
     /* #3787: a journal token, one per place the journal may name. 1: the
@@ -10229,8 +10229,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* A string place (`owned` the address of its flag, or NULL when it owns
      * whatever it holds), journaled at the frame it is declared in: a panic
      * caught by a `try` inside that frame leaves it to the place (#2690). */
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED void aether_unwind_track_str_place(const void* place, const void* owned) {");
-    print_line(gen, "    aether_unwind_track_place(place, owned, aether_unwind_free_str);");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int aether_unwind_track_str_place(const void* place, const void* owned) {");
+    print_line(gen, "    return aether_unwind_track_place(place, owned, aether_unwind_free_str);");
     print_line(gen, "}");
     /* Closure-env string capture: a closure env must OWN its captured
      * strings — the enclosing scope releases its own reference on

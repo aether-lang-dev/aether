@@ -895,20 +895,22 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
             fprintf(gen->output, w->held[h] ? "), 0)" : ")");
         }
         seq_next(gen, &w->seq);
-        /* #2923: journaled for the call, which may panic. #3787: a slice
-         * only when it holds a reference, by its own mark, with a token the
-         * forget after the call reads (`<temp>_j`). */
-        if (w->closure[h] == 3) {
-            seq_let_named(gen, &w->seq, "int", cg_internf("%s_j", names[h]));
+        /* #2923: journaled for the call, which may panic, with a token the
+         * forget after the call reads (`<temp>_j`): #3787 for a slice, only
+         * when it holds a reference, by its own mark; #3840 for a held
+         * string and a closure, whose track says whether it wrote an entry
+         * (outside every frame it writes none, and the forget is skipped).
+         * A panic still drains every place that was journaled. */
+        if (w->scoped[h]) continue;
+        seq_let_named(gen, &w->seq, "int", cg_internf("%s_j", names[h]));
+        if (w->closure[h] == 3)
             fprintf(gen->output, "aether_slice_journal((const void*)&%s, %s, %s)", names[h], names[h],
                     w->drop[h]);
-        } else if (w->closure[h])
+        else if (w->closure[h])
             fprintf(gen->output, "aether_unwind_track((const void*)&%s, _aether_closure_drop_unwind)",
                     names[h]);
-        else if (!w->scoped[h])
-            fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, NULL)", names[h]);
         else
-            continue;
+            fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, NULL)", names[h]);
         seq_next(gen, &w->seq);
     }
     /* Now bind the outer-arg to outer-temp substitutions. The bind
@@ -936,10 +938,7 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
         const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
         if (!nm || w->scoped[h]) continue;
         seq_next(gen, &w->seq);
-        if (w->closure[h] == 3)
-            fprintf(gen->output, "aether_unwind_forget_tok(%s_j, (const void*)&%s)", nm, nm);
-        else
-            fprintf(gen->output, "aether_unwind_forget((const void*)&%s)", nm);
+        fprintf(gen->output, "aether_unwind_forget_tok(%s_j, (const void*)&%s)", nm, nm);
         seq_next(gen, &w->seq);
         if (w->closure[h] == 3) {
             fprintf(gen->output, "%s((const void*)&%s)", w->drop[h], nm);

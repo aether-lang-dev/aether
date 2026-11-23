@@ -718,6 +718,11 @@ value and the frame's own body:
   place's entry calls `aether_unwind_forget` only on 1. A slice token of -1
   records a refusal for want of a frame: the depth a local's stores run at
   is its declaration's, so it is not asked again.
+- *A held argument's track says so too* (runtime ABI revision 8, #3840).
+  A string argument held for a call (and a closure argument) is journaled
+  by `aether_unwind_track_place` / `aether_unwind_track`, which return
+  whether they wrote the entry, and the forget after the call runs only on
+  1. The hold, its take and its release are unchanged.
 
 Store, leave, pass and return keep their meaning (R2, R3): every place
 releases what it holds on every exit exactly as before, and only journal
