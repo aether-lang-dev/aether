@@ -15399,6 +15399,25 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                 "expression, it lowers to a file-scope `static`, which C requires "
                                 "to have a constant initializer. Initialize it to a constant here "
                                 "and assign the computed value from a function at startup instead.");
+                        } else if (init->type == AST_ARRAY_LITERAL && !stmt->annotation) {
+                            /* An array literal is constant enough; what is
+                             * wrong is the spelling. An array `const` has
+                             * brackets on its name and is static storage
+                             * (naeb's ask, aether-array-literal-return-and-
+                             * const.md): the message about calls below sent
+                             * a reader to make([]T)/push instead. */
+                            const char* nm = stmt->value ? stmt->value : "NAMES";
+                            type_error_hint(
+                                aether_internf("a `const` that holds an array literal is "
+                                               "declared with brackets on its name: "
+                                               "`const %s[] = [...]`", nm),
+                                aether_internf("write `const %s[] = [...]` (static storage, "
+                                               "in a function or at module level; a function "
+                                               "may return it as a slice). See "
+                                               "docs/compile-time-eval.md", nm),
+                                stmt->line, stmt->column);
+                            free_type(init_type);
+                            return 0;
                         } else {
                             msg = aether_internf(
                                 "const initializer must be a compile-time constant expression, "

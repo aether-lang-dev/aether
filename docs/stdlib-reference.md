@@ -39,7 +39,7 @@ header comment is the authoritative description.
 | `std.guest` | A guest in a sandboxed child process and the protocol to it: the host's side, with the worker's side in `std.guest.child`. | 36 | [guide](../std/guest/README.md) · [source](../std/guest/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 33 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 171 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 164 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
@@ -2289,13 +2289,7 @@ main() {
 
 All wrappers auto-free the underlying response and return `("", err)` on failure: a transport failure names its cause, and a status other than 2xx names the status and its reason, `"HTTP 404 Not Found"` or `"HTTP 503 Service Unavailable"` (the number alone, `"HTTP 599"`, for a code nobody registered), so a missing page and a failing server read apart. For the body of such a response, or its headers, use `std.http.client`. Raw externs: `http_get_raw`, `http_get_with_timeout_raw`, `http_post_raw`, `http_put_raw`, `http_delete_raw`.
 
-**Connection reuse.** The client keeps a connection open after a response whose length was definite (`Content-Length` or chunked) and reuses it for the next request to the same origin, which is what HTTP/1.1 is for: a proxy or a polling client otherwise pays a TCP, and for HTTPS a TLS, handshake per request. It is on by default; a reverse proxy through `std.http.proxy` measured about 2x on the same box once it stopped dialling per request. Connections are keyed by origin, by the proxy actually dialled, by TLS, and by the verification the caller asked for, so a connection opened with a pinned CA or with verification off is never handed to a request that did not ask for that. A response with no definite length, or either side saying `Connection: close`, retires the connection instead of pooling it, and a streaming response (`stream()`) is never pooled because the caller may abandon it mid-body. A connection the peer closed while it sat idle looks live until it is used, so a pooled connection that returns nothing is redialled and the request sent once more, which is safe precisely because the server never saw it.
-
-- `http.client_pool_configure(max_idle, max_per_host, idle)` → `string` - Resize the pool: idle connections in total, idle connections to one origin, and how long an unused one is kept (a `Duration`). Defaults are `(64, 8, 15s)`. Keep the idle time under the upstream's own keep-alive timeout, or connections are closed while they sit here and every reuse costs a retry.
-- `http.client_pool_disable()` - Turn reuse off and close what is held.
-- `http.client_pool_clear()` - Close every idle connection, keeping reuse on. Worth calling before a measurement, or after a change that makes held connections invalid (a new CA, a rotated proxy).
-- `http.client_pool_idle_count()` → `int` - How many idle connections are held right now.
-- `http.client_rx_buffer_allocs()` → `long` - How many response buffers the client has allocated from nothing, over the life of the process. A pooled connection keeps the buffer its last response was read into and lends it to the next, so a run of requests over one kept connection allocates once, not once per request: ten requests over one connection read `1`, and `10` with pooling off. A buffer that grew past 64 KiB is not kept, so the idle pool cannot pin an outsized body. This is how to check the reuse rather than assume it.
+**Connection reuse.** Each of these one-line calls opens a connection of its own and closes it after the response. Reuse belongs to an owner: a `std.http.client` pool (`client.pool_new()`, below), handed to each request that may share its connections. Through 0.938.0 the client kept one idle pool for the whole process, keyed by origin, so a connection one caller had authenticated (NTLM and Negotiate authenticate the connection, not the request) served the next request from anyone in the program; `http.client_pool_configure`, `client_pool_disable`, `client_pool_clear`, `client_pool_idle_count` and `client_rx_buffer_allocs` went with it, replaced by `client.pool_configure`, `pool_clear`, `pool_idle_count` and `pool_rx_buffer_allocs` on a pool of the program's own. A reverse proxy's upstream connections are its proxy pool's (`proxy.pool_conns`).
 
 **Response accessors (used with raw externs):**
 - `http.response_status(response)` - Read HTTP status code (0 on transport failure)
@@ -2363,6 +2357,8 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, and `http_server_e
 - `http.get_header(req, name)` - Get request header
 - `http.get_query_param(req, name)` - Get query parameter
 - `http.get_path_param(req, name)` - Get URL path parameter
+- `http.request_conn_id(req)` → `long` - The connection that carried this request, as an id unique among the server's connections for as long as it runs (1, 2, ... in accept order), never reused as a remote port can be. For per-connection state: a proxy that pairs each client connection with an upstream connection of its own (`client.pool_new_pinned`), so a server that authenticates the connection (NTLM, Negotiate) sees one client per connection. `0` when the server cannot say: a request the proxy event loop served itself.
+- `http.server_on_conn_close(server, cb, user_data)` - Call `cb(conn_id, user_data)` when a connection closes, with the id `request_conn_id` gave its requests: where per-connection state is let go. `cb` is a `@c_callback` taking `(conn_id: long, user_data: ptr)`; it runs on the thread that closed the connection, after its last response, and several may run at once, so what it touches needs a lock. Set it before the server starts; `null` turns it off. A connection a handler took over (a WebSocket, a tunnel) is not reported.
 - `http.request_free(req)` - Free request
 
 **Response Building:**
@@ -2466,6 +2462,7 @@ proxy.mount(server, "/api", pool, opts)
 - `proxy.upstream_undrain(pool, base_url)` → `string` - re-admit to LB.
 - `proxy.pool_set_cookie_name(pool, name)` → `string` - cookie key for `cookie_hash` algo.
 - `proxy.rate_limit_set(pool, max_rps, burst)` → `string` - per-upstream token-bucket rate limit. `max_rps = 0` disables.
+- `proxy.pool_conns(pool)` → `ptr` - The `std.http.client` pool holding this proxy pool's idle upstream connections, borrowed from it (never `client.pool_free` it): count, clear or resize them with `client.pool_idle_count`, `client.pool_clear` and `client.pool_configure`. Every mount bound to the pool sends through it, and nothing else in the program does. Sized for a proxy when the pool is made: up to a quarter of the descriptor limit (64 to 1024), all of them to one upstream if need be, since each request in flight holds one and hands it back.
 
 **Health checks (one pthread per pool):**
 - `proxy.health_checks_enable(pool, probe_path, expect_status, interval_ms, timeout_ms, healthy_threshold, unhealthy_threshold)` → `string`
@@ -2540,6 +2537,26 @@ main() {
 - `client.send_stream(req)` → `(ptr, string)` - Like `send_request`, but the response body is streamed rather than buffered (see below)
 - `client.set_unix_socket(req, path)` → `string` - Send this request over the Unix-domain stream socket at `path` instead of dialling the URL's host (curl's `--unix-socket`). The URL still gives the request target and the `Host` header, so a Docker or Podman Engine API call is `client.request("GET", "http://localhost/v1.41/_ping")` plus `set_unix_socket(req, "/var/run/docker.sock")`. Redirects stay on the socket, no proxy applies, and pooled connections are kept per socket path. In an enforce block every request on it needs `fs_write` on `path`, pooled connection or not. `""` goes back to dialling the host.
 - `client.request_free(req)` - Free the request handle
+
+**Connection owners (pools):** a request sent with no pool opens a connection of its own and closes it after the response. To reuse connections, make a pool and send each request that may share them through it. A pool's connections serve the requests sent through that pool and no others: a connection one owner authenticated (NTLM and Negotiate authenticate the connection, not the request) never carries another owner's request, and two pools in one program never share one. Within a pool, a connection is kept after a response whose length was definite (`Content-Length` or chunked) when neither side asked to close, and is lent to the next request for the same origin, proxy, TLS backend and verification settings; a streaming response is never kept. A kept connection the peer closed while it sat idle is redialled once and the request sent again, which is safe because the server never saw it. One pool may be used from several threads at once. `docs/design/http-client-connection-owners.md` has the reasoning.
+
+```aether,fragment
+pool, perr = client.pool_new()
+defer client.pool_free(pool)                 // closes what it holds
+req = client.request("GET", "https://api.example.com/items")
+client.set_pool(req, pool)                   // take an idle connection, give it back after
+resp, err = client.send_request(req)
+client.request_free(req)
+```
+
+- `client.pool_new()` → `(ptr, string)` - A pool: up to 64 idle connections, 8 to one origin, each kept 15 s unused. The creator owns it and frees it with `pool_free`.
+- `client.pool_new_pinned()` → `(ptr, string)` - A pinned pool: at most one connection, dialled by the first request sent through it and kept for the next, with no idle expiry, so a sequence of requests through it rides one connection for as long as the server keeps it open. What a proxy needs to forward one client connection's requests over one upstream connection (pair it with `http.request_conn_id` and `http.server_on_conn_close`). A response that closes the connection drops it, and the next request dials again. One request at a time: a request sent through it while another is in flight goes out on a connection of its own, closed after its response, and the pinned connection stays the pool's.
+- `client.set_pool(req, pool)` → `string` - Send this request through `pool`; `null` (the default) gives it a connection of its own. The pool must outlive the send.
+- `client.pool_free(pool)` - Close every connection the pool holds and free it. Nothing may still be sending through it.
+- `client.pool_configure(pool, max_idle, max_per_host, idle)` → `string` - Resize the pool: idle connections in total, idle connections to one origin, and how long an unused one is kept (a `Duration`; `0ns` keeps it until used or cleared). `max_idle` `0` turns reuse off and closes what is held; `-1` leaves a setting as it is. Keep the idle time under the server's own keep-alive timeout, or connections are closed while they sit here and every reuse costs a retry.
+- `client.pool_clear(pool)` - Close every idle connection the pool holds, keeping its settings: after a change that makes held connections invalid (a new CA, a rotated proxy, a log-out on a connection-authenticated server), or before a measurement.
+- `client.pool_idle_count(pool)` → `int` - How many idle connections the pool holds right now.
+- `client.pool_rx_buffer_allocs(pool)` → `long` - How many response buffers requests through the pool allocated from nothing. A kept connection keeps the buffer its last response was read into and lends it to the next, so ten requests over one connection read `1`. A buffer that grew past 64 KiB is not kept. This is how to check the reuse rather than assume it.
 
 **TLS + forward proxy (per request):** the client is hardened by default, TLS
 peer verification is **on** and env proxies are **not** followed unless you opt

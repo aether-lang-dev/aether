@@ -1,8 +1,9 @@
 // Driver for the client connection-reuse test (#1653). The upstream accepts
 // one connection and then closes its listener, so the second and third
 // requests can only be answered over the connection the first one opened.
+// Reuse belongs to an owner: the three requests go through one pool.
 
-import std.http
+import std.http.client
 import std.io
 import std.string
 
@@ -13,55 +14,66 @@ fail(msg: string) {
     exit(1)
 }
 
+get(pool: ptr, url: string) -> (string, string) {
+    req = client.request("GET", url)
+    if req == null { fail("request() refused ${url}") }
+    defer client.request_free(req)
+    client.set_timeout(req, 10s)
+    client.set_pool(req, pool)
+    resp, err = client.send_request(req)
+    if err != "" { return "", err }
+    body = string.copy(client.response_body(resp))
+    client.response_free(resp)
+    return body, ""
+}
+
 main() {
     port = io.getenv("UPSTREAM_PORT")
     if port == 0 {
         fail("UPSTREAM_PORT not set")
     }
     url = "http://127.0.0.1:${port}/"
+    pool, perr = client.pool_new()
+    if perr != "" { fail(perr) }
 
-    // #2160: the buffer a response is read into goes back to the pool with
-    // its connection and is lent to the next response on it. Counted from
-    // here, so whatever the runtime allocated before main is not ours.
-    allocs_before = http.client_rx_buffer_allocs()
-
-    first, e1 = http.get(url)
+    first, e1 = get(pool, url)
     if e1 != "" { fail("first request: ${e1}") }
     if string.equals(first, "1") == 0 { fail("first response was '${first}', want '1'") }
 
-    if http.client_pool_idle_count() != 1 {
+    if client.pool_idle_count(pool) != 1 {
         fail("the connection was not kept after a Content-Length response")
     }
 
-    second, e2 = http.get(url)
+    second, e2 = get(pool, url)
     if e2 != "" { fail("second request: ${e2} (the connection was not reused)") }
     if string.equals(second, "2") == 0 {
         fail("second response was '${second}', want '2' (a redial would restart the count)")
     }
 
-    third, e3 = http.get(url)
+    third, e3 = get(pool, url)
     if e3 != "" { fail("third request: ${e3}") }
     if string.equals(third, "3") == 0 { fail("third response was '${third}', want '3'") }
 
-    // Three responses over ONE connection -- proven above, since the
+    // #2160: three responses over ONE connection -- proven above, since the
     // upstream closed its listener after the first accept -- must have
     // needed ONE receive buffer. Before #2160 each request allocated its
     // own (at least 16 KiB) and freed it, so this read 3.
-    allocs = http.client_rx_buffer_allocs() - allocs_before
+    allocs = client.pool_rx_buffer_allocs(pool)
     if allocs != 1 {
         fail("three requests over one kept connection allocated ${allocs} receive buffers, want 1 (the buffer is not travelling with the connection)")
     }
 
     // Drop the pooled connection: with the listener closed, a fresh dial has
     // nowhere to land, which is what proves the three above were reuse.
-    http.client_pool_clear()
-    if http.client_pool_idle_count() != 0 {
-        fail("client_pool_clear left connections behind")
+    client.pool_clear(pool)
+    if client.pool_idle_count(pool) != 0 {
+        fail("pool_clear left connections behind")
     }
-    _, e4 = http.get(url)
+    _, e4 = get(pool, url)
     if e4 == "" {
-        fail("a request after client_pool_clear succeeded, so the upstream was still dialable and the test proves nothing")
+        fail("a request after pool_clear succeeded, so the upstream was still dialable and the test proves nothing")
     }
+    client.pool_free(pool)
 
     println("PASS: three requests over one connection with one receive buffer, and none possible after the pool was cleared")
 }

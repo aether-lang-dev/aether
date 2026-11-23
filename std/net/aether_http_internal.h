@@ -140,6 +140,9 @@ typedef struct {
      * platform, Winsock's WSAETIMEDOUT and POSIX's would-block alike, and
      * is never written again (#3824). */
     int    send_failure;
+    /* The pool a fresh receive buffer is counted against
+     * (http_client_pool_rx_buffer_allocs_raw), or NULL. */
+    struct HttpClientPool* rx_pool;
 } HttpExchange;
 
 /* An upstream connection acquired without blocking. */
@@ -165,6 +168,9 @@ struct HttpUpstreamConnOpaque {
      * resolve (#3267). */
     HttpResolver* resolver;
     int  lookup;
+    /* The owner this connection was acquired for and is released to, or
+     * NULL for one closed on release (http_upstream_acquire). */
+    struct HttpClientPool* pool;
     char pool_key[512];
 };
 
@@ -260,6 +266,8 @@ const char* http_request_method_of(const HttpClientRequest* req);
 const char* http_request_url_of(const HttpClientRequest* req);
 const char* http_request_body_of(const HttpClientRequest* req, int* out_len);
 const char* http_request_content_type_of(const HttpClientRequest* req);
+/* The owner whose connections the request is sent through, or NULL. */
+HttpClientPool* http_request_pool_of(const HttpClientRequest* req);
 /* The most of a response the request holds (its own limit, else the
  * client's default), 0 for no bound; and the error past it, as the
  * blocking client words it (#3750). */

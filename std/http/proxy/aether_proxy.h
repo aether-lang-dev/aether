@@ -118,6 +118,11 @@ const char* aether_proxy_rate_limit_set(AetherProxyPool* pool,
  * hashes it (FNV-1a) to pick an upstream. Must be set before the
  * first request hits the LB picker; otherwise COOKIE_HASH falls
  * back to RR. */
+/* The client pool holding this proxy pool's idle upstream connections,
+ * borrowed: it lives as long as the proxy pool. Read and clear it with the
+ * http_client_pool_* calls (aether_http.h); never free it. */
+struct HttpClientPool* aether_proxy_pool_conns(AetherProxyPool* pool);
+
 const char* aether_proxy_pool_set_cookie_name(AetherProxyPool* pool,
                                               const char* cookie_name);
 

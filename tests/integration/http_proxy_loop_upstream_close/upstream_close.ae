@@ -12,10 +12,12 @@
 // An upstream with keep-alive turned off answers every request with
 // "Connection: close". One request through a bare proxy (the event loop on
 // Linux and macOS) and one through a proxy behind a program's middleware
-// (the worker path): neither may leave a connection in the client pool.
-// Every server listens on 127.0.0.1 and a port the kernel picks.
+// (the worker path): neither may leave a connection in the proxy pool's
+// connection owner (proxy.pool_conns). Every server listens on 127.0.0.1 and
+// a port the kernel picks.
 
 import std.http
+import std.http.client
 import std.http.proxy
 import std.string
 import std.tcp
@@ -44,18 +46,27 @@ start(server: ptr) -> int {
     return http.server_port(server)
 }
 
-gateway(up_url: string, worker: int) -> ptr {
+// A proxy server for `up_url`, with its pool and opts, which the caller
+// frees after the server (opts_free, then upstream_pool_free).
+gateway(up_url: string, worker: int) -> (ptr, ptr, ptr) {
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
     if worker == 1 {
         http.server_use_middleware(s, mw_pass, 0)
     }
-    merr = proxy.mount_simple(s, "/", up_url, 5)
+    pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+    aerr = proxy.upstream_add(pool, up_url, 1)
+    if aerr != "" {
+        println("FAIL: upstream_add: ${aerr}")
+        exit(1)
+    }
+    opts = proxy.opts_new()
+    merr = proxy.mount(s, "/", pool, opts)
     if merr != "" {
         println("FAIL: mount: ${merr}")
         exit(1)
     }
-    return s
+    return s, pool, opts
 }
 
 // One GET on a connection of its own; the status code.
@@ -102,13 +113,12 @@ main() {
     bad = 0
     g = 0
     while g < 2 {
-        s = gateway(up_url, g)
+        s, pool, opts = gateway(up_url, g)
         port = start(s)
         sleep(100)
-        http.client_pool_clear()
         got = status_of(port)
         sleep(100)
-        idle = http.client_pool_idle_count()
+        idle = client.pool_idle_count(proxy.pool_conns(pool))
         if got != "200" || idle != 0 {
             println("  FAIL a Connection: close answer (${names[g]}): got ${got} with ${idle} pooled, expected 200 with 0")
             bad = bad + 1
@@ -117,6 +127,8 @@ main() {
         }
         http.server_stop(s)
         http.server_free(s)
+        proxy.opts_free(opts)
+        proxy.upstream_pool_free(pool)
         g = g + 1
     }
 

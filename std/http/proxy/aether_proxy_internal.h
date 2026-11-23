@@ -122,6 +122,10 @@ typedef struct AetherUpstream {
 
 struct AetherProxyPool {
     AetherProxyLbAlgo algo;
+    /* The idle upstream connections, this pool's own: every request the
+     * proxy forwards through it is sent through them (both drivers), and
+     * nothing else in the program is (http_request_set_pool_raw). */
+    struct HttpClientPool* conns;
     int   request_timeout_sec;
     int   dial_timeout_ms;
     int   max_inflight_per_up;        /* 0 = uncapped */

@@ -95,6 +95,10 @@ typedef struct {
      * handler read it: what it read ended short, and the server answers
      * 408 and closes. */
     int     body_timed_out;
+    /* The id of the connection that carried this request
+     * (http_request_conn_id), 0 when the server cannot say. Trailing, as the
+     * fields above. */
+    int64_t conn_id;
 } HttpRequest;
 
 // HTTP Response
@@ -617,6 +621,12 @@ typedef struct HttpServer {
     // when the first is counted (http_server_ip_acquire).
     void* ip_buckets;
     pthread_mutex_t ip_lock;
+    // Connection identity (http_request_conn_id): the last id given to an
+    // accepted connection, and the program's callback for when one closes
+    // (http_server_on_conn_close), set before the server starts.
+    _Atomic int64_t last_conn_id;
+    void (*on_conn_close)(int64_t conn_id, void* user_data);
+    void* on_conn_close_ud;
 } HttpServer;
 
 // ============================================================================
@@ -1401,6 +1411,21 @@ const char* http_request_remote_addr(HttpRequest* req);
 // Companion port for `http_request_remote_addr`. Returns 0 when
 // unavailable (same conditions as the address).
 int         http_request_remote_port(HttpRequest* req);
+// The connection that carried this request, as an id unique among the
+// server's connections for as long as it runs (1, 2, ... in accept order),
+// so a handler can keep per-connection state: a proxy that pairs a client
+// connection with an upstream one, for a server that authenticates the
+// connection (NTLM, Negotiate). Unlike the remote port, an id is never
+// reused. 0 when the server cannot say: a request the proxy event loop
+// served itself.
+int64_t     http_request_conn_id(HttpRequest* req);
+// Call `cb(conn_id, user_data)` when a connection with an id closes, on the
+// thread that closes it, after its last response; several may run at once.
+// Set before the server starts; NULL turns it off. A connection a handler
+// took over (a WebSocket, a tunnel) is not reported: it is the handler's.
+void        http_server_on_conn_close(HttpServer* server,
+                                      void (*cb)(int64_t conn_id, void* user_data),
+                                      void* user_data);
 
 // Server-side socket name — what `getsockname(2)` reports for the
 // accepted fd. Needed when the listener binds 0.0.0.0 and the

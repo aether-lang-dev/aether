@@ -20,6 +20,7 @@
 #endif
 #include "../../std/net/aether_http.h"
 #include "../../std/net/aether_net.h"
+#include <stdatomic.h>
 #include "../../std/string/aether_string.h"
 #include "../../runtime/aether_callbacks.h"
 /* The URL resolver and the proxy URL parser (#3552), on every platform. */
@@ -255,36 +256,244 @@ TEST_CATEGORY(http_response_head_keeps_conn_rule, TEST_CATEGORY_NETWORK) {
  * at the client's cap of eight per host, every connection past the eighth was
  * closed on release and dialled again for the next request: measured as 5.61
  * TCP segments per request against nginx's 4.02, and a TIME_WAIT socket every
- * sixth request. Mounting a proxy has to resize the pool.
+ * sixth request. A proxy pool's own connections are sized for that, and no
+ * other owner's are touched: there is no process-wide pool to resize.
  */
 TEST_CATEGORY(http_pool_sized_for_proxy, TEST_CATEGORY_NETWORK) {
-    /* Start from the client's defaults, whatever an earlier test left. */
-    http_client_pool_configure_raw(64, 8, -1);
-
+    HttpClientPool* client = http_client_pool_new_raw();
+    ASSERT_NOT_NULL(client);
     int idle = 0, per_host = 0;
-    http_client_pool_caps_raw(&idle, &per_host);
+    http_client_pool_caps_raw(client, &idle, &per_host);
     ASSERT_EQ(64, idle);
     ASSERT_EQ(8, per_host);
 
-    AetherProxyOpts* opts = aether_proxy_opts_new();
-    ASSERT_NOT_NULL(opts);
-
-    http_client_pool_caps_raw(&idle, &per_host);
+    AetherProxyPool* proxy = aether_proxy_pool_new(AETHER_PROXY_LB_ROUND_ROBIN, 0, 0, 0);
+    ASSERT_NOT_NULL(proxy);
+    ASSERT_NOT_NULL(proxy->conns);
+    http_client_pool_caps_raw(proxy->conns, &idle, &per_host);
     ASSERT_TRUE(idle >= 64);
-    /* The point of the fix: one backend may take the whole pool, so the
-     * per-host cap must rise with it rather than stay at the client's eight. */
+    /* The point of the sizing: one backend may take the whole pool, so the
+     * per-host cap rises with it rather than staying at a client's eight. */
     ASSERT_TRUE(per_host >= 64);
     ASSERT_EQ(idle, per_host);
 
+    /* Another owner's pool is not resized by a proxy's. */
+    http_client_pool_caps_raw(client, &idle, &per_host);
+    ASSERT_EQ(64, idle);
+    ASSERT_EQ(8, per_host);
+
     /* Caps are only ever raised, so a deliberate configuration survives. */
-    http_client_pool_configure_raw(4096, 4096, -1);
-    aether_proxy_opts_free(aether_proxy_opts_new());
-    http_client_pool_caps_raw(&idle, &per_host);
+    http_client_pool_configure_raw(client, 4096, 4096, -1);
+    http_client_pool_size_for_proxy(client);
+    http_client_pool_caps_raw(client, &idle, &per_host);
     ASSERT_EQ(4096, idle);
     ASSERT_EQ(4096, per_host);
 
-    aether_proxy_opts_free(opts);
-    http_client_pool_configure_raw(64, 8, -1);
+    aether_proxy_pool_free(proxy);
+    http_client_pool_free_raw(client);
+}
+
+/* One pool used from several threads at once (std.http.client's pool_new is
+ * documented as safe for that): every request gets an answer, connections
+ * are reused within the pool, and freeing the pool closes what it holds. A
+ * loopback server, a thread per connection, answers each request with its
+ * connection's ordinal. Run under ThreadSanitizer by `make test-tsan`. */
+typedef struct {
+    int listen_fd;
+    atomic_int accepted;
+    atomic_int open;
+} PoolSrv;
+
+typedef struct { PoolSrv* srv; int fd; int id; } PoolSrvConn;
+
+static void* pool_srv_conn(void* arg) {
+    PoolSrvConn* c = (PoolSrvConn*)arg;
+    char buf[4096];
+    size_t have = 0;
+    for (;;) {
+        int n = (int)recv(c->fd, buf + have, (int)(sizeof(buf) - have - 1), 0);
+        if (n <= 0) break;
+        have += (size_t)n;
+        buf[have] = '\0';
+        char* end;
+        while ((end = strstr(buf, "\r\n\r\n")) != NULL) {
+            size_t used = (size_t)(end - buf) + 4;
+            /* GET /slow takes 300 ms to answer. */
+            if (strncmp(buf, "GET /slow ", 10) == 0) usleep(300 * 1000);
+            memmove(buf, buf + used, have - used + 1);
+            have -= used;
+            char body[32], out[128];
+            int bl = snprintf(body, sizeof(body), "%d", c->id);
+            int ol = snprintf(out, sizeof(out),
+                              "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", bl, body);
+            send(c->fd, out, ol, 0);
+        }
+    }
+    close(c->fd);
+    atomic_fetch_sub(&c->srv->open, 1);
+    free(c);
+    return NULL;
+}
+
+static void* pool_srv_accept(void* arg) {
+    PoolSrv* srv = (PoolSrv*)arg;
+    for (;;) {
+        int fd = accept(srv->listen_fd, NULL, NULL);
+        if (fd < 0) return NULL;   /* the listener was shut down */
+        PoolSrvConn* c = (PoolSrvConn*)malloc(sizeof(PoolSrvConn));
+        c->srv = srv;
+        c->fd = fd;
+        c->id = atomic_fetch_add(&srv->accepted, 1) + 1;
+        atomic_fetch_add(&srv->open, 1);
+        pthread_t th;
+        pthread_create(&th, NULL, pool_srv_conn, c);
+        pthread_detach(th);
+    }
+}
+
+typedef struct { HttpClientPool* pool; const char* url; int ok; } PoolUser;
+
+static void* pool_user(void* arg) {
+    PoolUser* u = (PoolUser*)arg;
+    for (int i = 0; i < 40; i++) {
+        HttpClientRequest* req = http_request_raw("GET", u->url);
+        http_request_set_pool_raw(req, u->pool);
+        http_request_set_timeout_raw(req, 10);
+        HttpResponse* resp = http_send_raw(req);
+        http_request_free_raw(req);
+        if (resp && http_response_status(resp) == 200) u->ok++;
+        http_response_free(resp);
+    }
+    return NULL;
+}
+
+/* Listen on loopback and start accepting; the port, or 0. */
+static int pool_srv_start(PoolSrv* srv, pthread_t* acceptor) {
+    srv->listen_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (srv->listen_fd < 0) return 0;
+    atomic_init(&srv->accepted, 0);
+    atomic_init(&srv->open, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t al = sizeof(a);
+    if (bind(srv->listen_fd, (struct sockaddr*)&a, sizeof(a)) != 0 ||
+        listen(srv->listen_fd, 64) != 0 ||
+        getsockname(srv->listen_fd, (struct sockaddr*)&a, &al) != 0 ||
+        pthread_create(acceptor, NULL, pool_srv_accept, srv) != 0) {
+        close(srv->listen_fd);
+        return 0;
+    }
+    return ntohs(a.sin_port);
+}
+
+static void pool_srv_stop(PoolSrv* srv, pthread_t acceptor) {
+    shutdown(srv->listen_fd, SHUT_RDWR);
+    close(srv->listen_fd);
+    pthread_join(acceptor, NULL);
+}
+
+/* The body of one GET through `pool`: the ordinal of the connection that
+ * carried it, or -1. */
+static int pool_get(HttpClientPool* pool, int port, const char* path) {
+    char url[96];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d%s", port, path);
+    HttpClientRequest* req = http_request_raw("GET", url);
+    http_request_set_pool_raw(req, pool);
+    http_request_set_timeout_raw(req, 10);
+    HttpResponse* resp = http_send_raw(req);
+    http_request_free_raw(req);
+    int id = -1;
+    if (resp && http_response_status(resp) == 200)
+        id = atoi(http_response_body_str(resp));
+    http_response_free(resp);
+    return id;
+}
+
+typedef struct { HttpClientPool* pool; int port; int id; } PinnedSlow;
+
+static void* pinned_slow(void* arg) {
+    PinnedSlow* s = (PinnedSlow*)arg;
+    s->id = pool_get(s->pool, s->port, "/slow");
+    return NULL;
+}
+
+/* A pinned pool lends its one connection to one request at a time. A request
+ * sent through it while another is in flight goes out on a connection of its
+ * own, closed after the response, and the pinned connection is still the
+ * pool's afterwards: what keeps an NTLM handshake a proxy forwards on the
+ * connection it began on. Without the guard the second request's connection
+ * took the pool's one place and the first's was closed when it came back. */
+TEST_CATEGORY(http_pinned_pool_lends_one_connection, TEST_CATEGORY_NETWORK) {
+    PoolSrv srv;
+    pthread_t acceptor;
+    int port = pool_srv_start(&srv, &acceptor);
+    ASSERT_TRUE(port > 0);
+    HttpClientPool* pinned = http_client_pool_new_pinned_raw();
+    ASSERT_NOT_NULL(pinned);
+    int idle = 0, per_host = 0;
+    http_client_pool_caps_raw(pinned, &idle, &per_host);
+    ASSERT_EQ(1, idle);
+    ASSERT_EQ(1, per_host);
+
+    int first = pool_get(pinned, port, "/a");
+    ASSERT_EQ(1, first);
+    PinnedSlow slow = { pinned, port, -1 };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, pinned_slow, &slow));
+    usleep(100 * 1000);                       /* /slow holds the connection */
+    int meanwhile = pool_get(pinned, port, "/b");
+    pthread_join(th, NULL);
+    ASSERT_EQ(first, slow.id);
+    ASSERT_TRUE(meanwhile > 0 && meanwhile != first);
+    ASSERT_EQ(first, pool_get(pinned, port, "/c"));   /* still the pinned one */
+    ASSERT_EQ(1, http_client_pool_idle_count_raw(pinned));
+    for (int i = 0; i < 200 && atomic_load(&srv.open) > 1; i++) usleep(10 * 1000);
+    ASSERT_EQ(1, atomic_load(&srv.open));     /* the other one was closed */
+
+    http_client_pool_free_raw(pinned);
+    for (int i = 0; i < 200 && atomic_load(&srv.open) > 0; i++) usleep(10 * 1000);
+    ASSERT_EQ(0, atomic_load(&srv.open));
+    pool_srv_stop(&srv, acceptor);
+}
+
+TEST_CATEGORY(http_pool_shared_by_threads, TEST_CATEGORY_NETWORK) {
+    PoolSrv srv;
+    pthread_t acceptor;
+    int port = pool_srv_start(&srv, &acceptor);
+    ASSERT_TRUE(port > 0);
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/", port);
+    HttpClientPool* pool = http_client_pool_new_raw();
+    ASSERT_NOT_NULL(pool);
+
+    enum { USERS = 4 };
+    PoolUser users[USERS];
+    pthread_t th[USERS];
+    for (int i = 0; i < USERS; i++) {
+        users[i].pool = pool;
+        users[i].url = url;
+        users[i].ok = 0;
+        ASSERT_EQ(0, pthread_create(&th[i], NULL, pool_user, &users[i]));
+    }
+    for (int i = 0; i < USERS; i++) pthread_join(th[i], NULL);
+    for (int i = 0; i < USERS; i++) ASSERT_EQ(40, users[i].ok);
+
+    /* 160 requests from four threads at once need at most four connections
+     * at a time, and the pool's cap of eight per origin keeps every one of
+     * them: no more than four were ever dialled. */
+    ASSERT_TRUE(atomic_load(&srv.accepted) <= USERS);
+    int held = http_client_pool_idle_count_raw(pool);
+    ASSERT_TRUE(held >= 1 && held <= 4);
+    ASSERT_EQ(held, atomic_load(&srv.open));
+
+    /* Freeing the pool closes what it held: the server sees every one go. */
+    http_client_pool_free_raw(pool);
+    for (int i = 0; i < 200 && atomic_load(&srv.open) > 0; i++) usleep(10 * 1000);
+    ASSERT_EQ(0, atomic_load(&srv.open));
+
+    pool_srv_stop(&srv, acceptor);
 }
 #endif  /* !_WIN32 */
 

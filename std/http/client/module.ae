@@ -44,6 +44,25 @@
 // Timeouts are explicit. There is no implicit default. Pass 0 to
 // opt out and block forever (rarely what you want; preserved as the
 // v1 wrappers' behaviour). Negative values are an error.
+//
+// Connections belong to an owner. A request sent with no pool opens a
+// connection of its own and closes it after the response. To reuse
+// connections, make a pool and send each request that may share them
+// through it:
+//
+//   pool, perr = client.pool_new()
+//   defer client.pool_free(pool)
+//   req = client.request("GET", url)
+//   client.set_pool(req, pool)        // take an idle one, give it back after
+//   resp, err = client.send_request(req)
+//
+// A pool's connections serve the requests sent through that pool and no
+// others, which matters wherever a server authenticates the CONNECTION
+// (NTLM, Negotiate): a connection one owner logged in never carries another
+// owner's request. pool_new_pinned holds ONE connection, for a sequence of
+// requests that must all ride it (a proxy forwarding one client connection's
+// requests upstream). docs/design/http-client-connection-owners.md has the
+// reasoning.
 
 // std.json is pulled in for the v2.1 JSON sugar wrappers
 // (post_json / response_body_json) at the bottom of this file.
@@ -56,6 +75,8 @@ import std.string
 exports(
     request, set_header, set_body, set_timeout, set_follow_redirects, set_insecure,
     set_cafile, set_partial_chain, set_tls_backend, set_stream, set_max_response, set_default_max_response, set_unix_socket, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
+    set_pool, pool_new, pool_new_pinned, pool_free, pool_configure, pool_clear,
+    pool_idle_count, pool_rx_buffer_allocs,
     send_request, send_stream,
     response_status, response_body, response_body_bytes, response_error, response_redirect_error,
     response_is_stream, response_read, response_take_conn,
@@ -88,6 +109,14 @@ extern http_request_use_env_proxy_raw(req: ptr, on: int) -> int
 extern http_request_use_http_proxy_raw(req: ptr, proxy_url: string) -> int
 extern http_request_ignore_http_proxy_raw(req: ptr) -> int
 extern http_request_free_raw(req: @frees ptr)
+extern http_request_set_pool_raw(req: ptr, pool: ptr) -> int
+extern http_client_pool_new_raw() -> ptr
+extern http_client_pool_new_pinned_raw() -> ptr
+extern http_client_pool_free_raw(pool: @frees ptr)
+extern http_client_pool_configure_raw(pool: ptr, max_idle: int, max_per_host: int, idle_ns: long) -> string
+extern http_client_pool_clear_raw(pool: ptr)
+extern http_client_pool_idle_count_raw(pool: ptr) -> int
+extern http_client_pool_rx_buffer_allocs_raw(pool: ptr) -> long
 extern http_send_raw(req: ptr) -> ptr
 
 extern http_response_status(response: ptr) -> int
@@ -332,6 +361,80 @@ ignore_http_proxy(req: ptr) -> string {
 
 // Free the request. No-op on null. Safe to call even after send().
 request_free(req: @frees ptr) { http_request_free_raw(req) }
+
+// ---- Connection owners ----
+//
+// A pool owns idle connections and lends them to the requests sent through
+// it, and to no others. There is no process-wide pool: a request with no
+// pool has a connection of its own, closed after its response.
+
+// A pool for requests that may share connections: (pool, "") or (null, why).
+// It keeps up to 64 idle connections, 8 to one origin, each for 15 s unused
+// (pool_configure changes that). A connection goes back to it only after a
+// response whose length was definite and that did not ask to close. The
+// creator owns it and frees it with pool_free.
+pool_new() -> (ptr, string) {
+    p = http_client_pool_new_raw()
+    if p == null { return null, "pool_new: out of memory, or a build without networking" }
+    return p, ""
+}
+
+// A pinned pool: (pool, "") or (null, why). It holds at most ONE
+// connection, dialled by the first request sent through it and kept for the
+// next, with no idle expiry: a sequence of requests through it rides one
+// connection for as long as the server keeps it open. That is what a proxy
+// needs to forward one client connection's requests over one upstream
+// connection, so a handshake that authenticates the connection (NTLM,
+// Negotiate) completes on the connection it began on and serves only that
+// client. A response that closes the connection (Connection: close, a body
+// ended by the close) drops it, and the next request dials again. Send one
+// request through it at a time: a second sent while one is in flight gets a
+// connection of its own, closed after its response. pool_clear drops the
+// connection; pool_free closes it.
+pool_new_pinned() -> (ptr, string) {
+    p = http_client_pool_new_pinned_raw()
+    if p == null { return null, "pool_new_pinned: out of memory, or a build without networking" }
+    return p, ""
+}
+
+// Close every connection the pool holds and free it. Nothing may still be
+// sending through it. No-op on null.
+pool_free(pool: @frees ptr) { http_client_pool_free_raw(pool) }
+
+// Resize the pool: how many idle connections it keeps in total, how many of
+// those may be to one origin, and how long an unused one is kept (0ns: until
+// it is used or the pool is cleared). max_idle 0 turns reuse off and closes
+// what is held; -1 leaves a setting as it is. Keep the idle time under the
+// server's own keep-alive timeout, or connections close while they sit here
+// and every reuse costs a retry. Returns "" or why not.
+pool_configure(pool: ptr, max_idle: int, max_per_host: int, idle: Duration) -> string {
+    if pool == null { return "pool_configure: no pool" }
+    return http_client_pool_configure_raw(pool, max_idle, max_per_host, idle)
+}
+
+// Close every idle connection the pool holds, keeping its settings. After a
+// change that makes held connections invalid (a new CA, a rotated proxy,
+// a log-out on a connection-authenticated server), or before a measurement.
+pool_clear(pool: ptr) { http_client_pool_clear_raw(pool) }
+
+// How many idle connections the pool holds right now.
+pool_idle_count(pool: ptr) -> int { return http_client_pool_idle_count_raw(pool) }
+
+// How many response buffers requests through this pool have allocated from
+// nothing. A kept connection keeps the buffer its last response was read
+// into and lends it to the next, so a run of requests over one connection
+// allocates once, not once per request: how to check reuse rather than
+// assume it. A buffer that grew past 64 KiB is not kept.
+pool_rx_buffer_allocs(pool: ptr) -> long { return http_client_pool_rx_buffer_allocs_raw(pool) }
+
+// Send this request through `pool`: it takes an idle connection the pool
+// holds for its origin, or dials one, and gives it back to the pool after a
+// response that leaves it reusable. null: a connection of the request's own
+// (the default). The pool must outlive the send. Returns "" or why not.
+set_pool(req: ptr, pool: ptr) -> string {
+    if http_request_set_pool_raw(req, pool) != 0 { return "set_pool failed (null req)" }
+    return ""
+}
 
 // Send the configured request and wait for the response. Returns
 // (resp, "") on success — the caller MUST free the response with

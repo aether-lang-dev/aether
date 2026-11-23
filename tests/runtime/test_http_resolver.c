@@ -130,7 +130,7 @@ TEST(http_resolver_never_waits_on_a_lookup) {
     ASSERT_EQ(1, rs_wait_for(&rs_lookups, 1));   /* the lookup is under way */
     ASSERT_EQ(0, http_resolver_answer(r, "slow.test", 8080, &a));
     HttpUpstreamConn up;
-    ASSERT_EQ(-1, http_upstream_acquire_nb("slow.test", 8080, 0, r, &up));
+    ASSERT_EQ(-1, http_upstream_acquire_nb(NULL, "slow.test", 8080, 0, r, &up));
     ASSERT_EQ(1, http_upstream_lookup(&up));
     ASSERT_EQ(1, http_resolver_answer(r, "127.0.0.1", 9, &a));   /* numeric: none */
     ASSERT_TRUE(rs_now_ms() - t0 < 1000);
@@ -203,7 +203,7 @@ TEST(http_resolver_fails_a_name_that_does_not_resolve) {
     ASSERT_EQ(1, rs_wait_for(&rs_answered, 1));
     int got = http_resolver_answer(r, "nohost.test", 80, &a);
     HttpUpstreamConn up;
-    int fd = http_upstream_acquire_nb("nohost.test", 80, 0, r, &up);
+    int fd = http_upstream_acquire_nb(NULL, "nohost.test", 80, 0, r, &up);
     int why = http_upstream_lookup(&up);
     /* Within the second the failure answers for, which starts when the
      * lookup ended. A runner stalled past it asks again, as it should, and

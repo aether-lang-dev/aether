@@ -126,7 +126,6 @@ main() {
         s = gateway(up_url, g)
         port = start(s)
         sleep(100)
-        http.client_pool_clear()
 
         timing = ""
         // Two at once, so the proxy holds two upstream connections.

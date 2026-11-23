@@ -1263,7 +1263,8 @@ static int ev_dial(EvDriver* d, EvConn* c, int next_addr) {
              : http_method_idempotent(http_request_method_of(c->px.outbound)) ? 1
              : HTTP_POOL_TAKE_CHECKED;
     int fd = next_addr ? http_upstream_redial(host, port, &c->up)
-                       : http_upstream_acquire_nb(host, port, pool, d->loop->resolver,
+                       : http_upstream_acquire_nb(http_request_pool_of(c->px.outbound),
+                                                  host, port, pool, d->loop->resolver,
                                                   &c->up);
     if (fd < 0) {
         free(path);

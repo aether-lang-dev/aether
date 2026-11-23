@@ -4,6 +4,10 @@
  * nothing else in the tree asserts it: the keep-alive test passes even when
  * the client sends `Connection: close`, because that upstream holds the
  * socket open regardless of what it is told.
+ *
+ * It answers two connections, one request each: the driver sends the probe
+ * once with no connection owner and once through a pool, whose heads differ
+ * in what they ask of the connection.
  */
 #include <stdio.h>
 #include <string.h>
@@ -30,6 +34,7 @@ int main(void) {
     printf("%d\n", ntohs(a.sin_port));
     fflush(stdout);
 
+    for (int round = 0; round < 2; round++) {
     raw_sock cs = accept(ls, NULL, NULL);
     if (cs == RAW_SOCK_INVALID) return 1;
 
@@ -62,6 +67,7 @@ int main(void) {
     send(cs, resp, (size_t)rl, 0);
 
     raw_socket_close(cs);
+    }
     raw_socket_close(ls);
     return 0;
 }
