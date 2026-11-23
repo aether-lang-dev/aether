@@ -1377,7 +1377,13 @@ static TcpServer* tcp_listen_impl(const char* address, int port, int allow_zero)
         return NULL;
     }
 
-    if (listen(sockfd, 5) < 0) {
+    /* SOMAXCONN, the kernel's own limit (net.core.somaxconn,
+     * kern.ipc.somaxconn; on Windows a maximum Winsock picks), as Go and
+     * nginx listen by default (#3832). The backlog was 5: a burst of
+     * connects the server had not accepted yet filled it, and past it
+     * Linux and macOS dropped the SYN, so a connect took a second longer
+     * with nothing in any log, and Windows refused it. */
+    if (listen(sockfd, SOMAXCONN) < 0) {
         close(sockfd);
         return NULL;
     }
@@ -1609,7 +1615,9 @@ TcpOpenResult tcp_listen_unix_raw(const char* path) {
         close(fd);
         return out;
     }
-    if (listen(fd, 16) != 0) {
+    /* SOMAXCONN, as tcp_listen_impl (#3832): a full queue refuses a Unix
+     * socket's connect (macOS) or blocks it (Linux). */
+    if (listen(fd, SOMAXCONN) != 0) {
         close(fd);
         remove(path);
         return out;

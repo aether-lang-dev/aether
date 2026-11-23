@@ -1,0 +1,64 @@
+// #3832: tcp.listen took a backlog of 5. A burst of connects the server had
+// not accepted yet filled the queue, and past it the kernel dropped the SYN
+// (Linux, macOS) or refused it (Windows): the client resent after a second,
+// or failed, with nothing in any log. It now listens with SOMAXCONN, the
+// kernel's own limit. 64 connects with no accept between them each complete
+// at once, and all 64 are then accepted.
+
+import std.tcp
+import std.list
+import std.os
+
+extern exit(code: int)
+
+main() {
+    srv, err = tcp.listen_on("127.0.0.1", 0)
+    if err != "" {
+        println("FAIL: listen: ${err}")
+        exit(1)
+    }
+    port = tcp.server_port(srv)
+    clients = list.new()
+    slowest = 0 as long
+    n = 64
+    i = 0
+    while i < n {
+        t0 = os.now_monotonic_ns()
+        sock, cerr = tcp.connect_timeout("127.0.0.1", port, 3000)
+        took = (os.now_monotonic_ns() - t0) / 1000000
+        if cerr != "" {
+            println("FAIL: connect ${i} of ${n} with none accepted: ${cerr} after ${took} ms")
+            exit(1)
+        }
+        if took > slowest { slowest = took }
+        _a = list.add(clients, sock)
+        i = i + 1
+    }
+    if slowest >= 500 {
+        println("FAIL: the slowest of ${n} queued connects took ${slowest} ms")
+        exit(1)
+    }
+    accepted = 0
+    while accepted < n {
+        if tcp.server_poll(srv, 2000) != 1 {
+            println("FAIL: ${accepted} of ${n} queued connections accepted")
+            exit(1)
+        }
+        conn, aerr = tcp.accept(srv)
+        if aerr != "" {
+            println("FAIL: accept ${accepted}: ${aerr}")
+            exit(1)
+        }
+        _c = tcp.close(conn)
+        accepted = accepted + 1
+    }
+    i = 0
+    while i < n {
+        c, _e = list.get(clients, i)
+        _d = tcp.close(c)
+        i = i + 1
+    }
+    list.free(clients)
+    _ = tcp.server_close(srv)
+    println("PASS #3832: ${n} queued connects, the slowest ${slowest} ms, all accepted")
+}
