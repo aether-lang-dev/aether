@@ -176,9 +176,11 @@ struct HttpUpstreamConnOpaque {
 #define HTTP_IO_RESET       3
 
 /* What the pure-TLS client's recv (aether_pure_tls_client_recv) returns for
- * a read that waited out the socket's receive timeout; -1 is any other
+ * a read that waited out the socket's receive timeout, and for one the
+ * peer's reset ended (its socket says so, tcp_reset_raw); -1 is any other
  * failure. */
 #define HTTP_PT_RECV_TIMED_OUT (-2)
+#define HTTP_PT_RECV_RESET     (-3)
 
 /* Why a read or a write on `t` that returned `n` failed, as one of the
  * kinds above: by the TLS layer's own answer on a TLS transport, never by

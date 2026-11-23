@@ -147,6 +147,9 @@ extern malloc(size: int) -> ptr
 // Adopt an already-connected fd (the http client hands us one, possibly a
 // forward-proxy CONNECT tunnel). Declared here as the server module does.
 extern tcp_socket_adopt_fd(fd: int) -> ptr
+// 1 when the last receive on a socket failed because the peer reset the
+// connection, as the socket recorded it then (std/net/aether_net.h).
+extern tcp_reset_raw(sock: ptr) -> int
 @c_include("aether_string_inline.h")
 @extern("aether_string_length_inline") string_length(s: string) -> int @c_import
 
@@ -3821,11 +3824,16 @@ pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
     p, n, err = conn_recv(pc.conn)
     if string.equals(err, "") != 1 {
         if p != null { bytes.wipe_free(p) }
-        // A read that waited out the socket's timeout is -2, any other
-        // failure -1 (HTTP_PT_RECV_TIMED_OUT): std.http tells a timeout
-        // from an I/O error by this, not by an errno the TLS layer may not
-        // have set (#3846).
+        // A read that waited out the socket's timeout is -2
+        // (HTTP_PT_RECV_TIMED_OUT), one the peer's reset ended -3
+        // (HTTP_PT_RECV_RESET), any other failure -1: std.http tells a
+        // timeout and a reset from an I/O error by this, not by an errno the
+        // TLS layer may not have set (#3846). The reset is the socket's own
+        // record of its last receive, so a record this layer refused after
+        // a receive that worked is no reset.
         if string.equals(err, "timeout") == 1 { return -2 }
+        c = pc.conn as *ClientConn
+        if tcp_reset_raw(c.sock) == 1 { return -3 }
         return -1
     }
     // A clean close_notify is EOF, which recv() reports as 0 -- not an error.

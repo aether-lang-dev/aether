@@ -23,6 +23,7 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* s, int m) {
 int tcp_send_bytes_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return -1; }
 int tcp_send_all_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return 0; }
 int tcp_receive_into_raw(TcpSocket* s, void* b, int c) { (void)s; (void)b; (void)c; return TCP_RECV_CLOSED; }
+int tcp_reset_raw(TcpSocket* s) { (void)s; return 0; }
 int tcp_close(TcpSocket* s) { (void)s; return 0; }
 TcpOpenResult tcp_connect_unix_raw(const char* p) {
     (void)p;
@@ -165,7 +166,26 @@ struct TcpSocket {
     long long due_ms;
     TcpCancel* cancel;
     int stop;
+    /* 1 when the last receive failed because the peer reset or aborted the
+     * connection (net_note_recv, tcp_reset_raw). */
+    int reset;
 };
+
+/* After a receive on `sock` that returned `received`: whether it failed
+ * because the peer reset or aborted the connection, read from the error it
+ * left, at once, before anything else can set another. Only -1 is a failed
+ * recv(2); a byte count, a close and a bound receive's own stops (a
+ * timeout, a deadline, a cancel) are no reset. */
+static void net_note_recv(TcpSocket* sock, int received) {
+    if (received != -1) { sock->reset = 0; return; }
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    sock->reset = e == WSAECONNRESET || e == WSAECONNABORTED;
+#else
+    int e = errno;
+    sock->reset = e == ECONNRESET || e == ECONNABORTED || e == EPIPE;
+#endif
+}
 
 /* A cancel handle (tcp_cancel_new_raw): a flag, and a descriptor that turns
  * readable when the flag is set, which every wait of a socket bound to it
@@ -195,6 +215,7 @@ static TcpSocket* net_sock_new(int fd) {
     sock->due_ms = 0;
     sock->cancel = NULL;
     sock->stop = TCP_STOP_NONE;
+    sock->reset = 0;
     return sock;
 }
 
@@ -994,6 +1015,12 @@ int tcp_stop_raw(TcpSocket* sock) {
     return sock ? sock->stop : TCP_STOP_NONE;
 }
 
+/* Whether the last receive on `sock` failed because the peer reset or
+ * aborted the connection (net_note_recv). */
+int tcp_reset_raw(TcpSocket* sock) {
+    return sock ? sock->reset : 0;
+}
+
 /* tcp_connect_raw held to the absolute deadline `due_ms` (aether_now_ns's
  * monotonic clock, in ms; 0 for none) and ended by `cancel` (NULL for none)
  * while it waits for the connection, every address the host resolves to;
@@ -1066,17 +1093,14 @@ char* tcp_receive_raw(TcpSocket* sock, int max_bytes) {
      * The buffer becomes the payload of the counted string returned. */
     char* buffer = (char*)aether_caps_malloc((size_t)max_bytes + 1);
     if (!buffer) return NULL;
-    int received = 0;
-    if (net_bound(sock)) {
-        received = net_recv_bound(sock, buffer, max_bytes);
-        if (received < -1) {
-            /* A receive timeout, a passed deadline or a cancel: the socket
-             * stays connected for its owner to close. */
-            aether_caps_free(buffer, (size_t)max_bytes + 1);
-            return NULL;
-        }
-    } else {
-        received = net_recv(sock->fd, buffer, max_bytes);
+    int received = net_bound(sock) ? net_recv_bound(sock, buffer, max_bytes)
+                                   : net_recv(sock->fd, buffer, max_bytes);
+    net_note_recv(sock, received);
+    if (received < -1) {
+        /* A receive timeout, a passed deadline or a cancel: the socket
+         * stays connected for its owner to close. */
+        aether_caps_free(buffer, (size_t)max_bytes + 1);
+        return NULL;
     }
 
     if (received <= 0) {
@@ -1114,20 +1138,17 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes) {
         return out;
     }
 
-    int received = 0;
-    if (net_bound(sock)) {
-        received = net_recv_bound(sock, buffer, max_bytes);
-        if (received < -1) {
-            aether_caps_free(buffer, (size_t)max_bytes);
-            /* Distinct from each other and from a close: the socket stays
-             * connected, and its owner closes it. */
-            if (received == TCP_RECV_DEADLINE) out._2 = TCP_ERR_DEADLINE;
-            else if (received == TCP_RECV_CANCELLED) out._2 = TCP_ERR_CANCELLED;
-            else out._2 = "timeout";
-            return out;
-        }
-    } else {
-        received = net_recv(sock->fd, buffer, max_bytes);
+    int received = net_bound(sock) ? net_recv_bound(sock, buffer, max_bytes)
+                                   : net_recv(sock->fd, buffer, max_bytes);
+    net_note_recv(sock, received);
+    if (received < -1) {
+        aether_caps_free(buffer, (size_t)max_bytes);
+        /* Distinct from each other and from a close: the socket stays
+         * connected, and its owner closes it. */
+        if (received == TCP_RECV_DEADLINE) out._2 = TCP_ERR_DEADLINE;
+        else if (received == TCP_RECV_CANCELLED) out._2 = TCP_ERR_CANCELLED;
+        else out._2 = "timeout";
+        return out;
     }
     if (received <= 0) {
         aether_caps_free(buffer, (size_t)max_bytes);
@@ -1300,13 +1321,10 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
  * dead), a null/closed handle or a bad buffer. */
 int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap) {
     if (!sock || !sock->connected || !buf || cap <= 0) return TCP_RECV_CLOSED;
-    int received = 0;
-    if (net_bound(sock)) {
-        received = net_recv_bound(sock, buf, cap);
-        if (received < -1) return received;   /* TIMEOUT, DEADLINE, CANCELLED */
-    } else {
-        received = net_recv(sock->fd, buf, cap);
-    }
+    int received = net_bound(sock) ? net_recv_bound(sock, buf, cap)
+                                   : net_recv(sock->fd, buf, cap);
+    net_note_recv(sock, received);
+    if (received < -1) return received;   /* TIMEOUT, DEADLINE, CANCELLED */
     if (received > 0) return received;
     if (received < 0 && aether_net_wouldblock()) return TCP_RECV_TIMEOUT;
     sock->connected = 0;

@@ -65,6 +65,13 @@ int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length);
 //   after another (#3108); the bytes sent, `length` unless a send failed.
 int tcp_send_all_raw(TcpSocket* sock, const void* data, int length);
 int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap);
+// tcp_reset_raw: 1 when the last receive on `sock` (tcp_receive_raw,
+//   tcp_receive_n_raw, tcp_receive_into_raw) failed because the peer reset
+//   or aborted the connection, else 0, a null handle included. Read from
+//   the error that receive left, when it failed, and kept on the socket, so
+//   a layer over the socket (the pure-Aether TLS client) can tell a reset
+//   from its own failures without an errno something later may have set.
+int tcp_reset_raw(TcpSocket* sock);
 int tcp_close(TcpSocket* sock);
 
 // Unix-domain stream sockets, as the same TcpSocket / TcpServer handles, so

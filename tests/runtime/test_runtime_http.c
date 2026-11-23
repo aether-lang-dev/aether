@@ -19,6 +19,7 @@
 #include <openssl/err.h>
 #endif
 #include "../../std/net/aether_http.h"
+#include "../../std/net/aether_net.h"
 #include "../../std/string/aether_string.h"
 /* The URL resolver and the proxy URL parser (#3552), on every platform. */
 #include "../../std/net/aether_http_internal.h"
@@ -1271,6 +1272,49 @@ TEST_CATEGORY(http_tls_read_failure_kind_ignores_stale_errno, TEST_CATEGORY_NETW
     T_CLOSE(fds[1]);
     SSL_CTX_free(ctx);
 #endif
+}
+
+/* A pure-TLS read the peer's reset ended is a reset, as it is over a plain
+ * socket and over OpenSSL (#3846): every pure-TLS failure but a timeout was
+ * an I/O error. The pure client tells one by HTTP_PT_RECV_RESET, from what
+ * its socket recorded of its last receive (tcp_reset_raw), never from an
+ * errno: a receive the peer reset says so, a receive that worked and the
+ * peer's orderly close do not. */
+TEST_CATEGORY(http_pure_tls_reset_is_a_reset, TEST_CATEGORY_NETWORK) {
+    int conn = 0;
+    Transport t;
+    memset(&t, 0, sizeof t);
+    t.sockfd = -1;
+    t.nonblocking = -1;
+    t.pure_tls = &conn;
+    stale_would_block();
+    ASSERT_EQ(HTTP_IO_RESET, http_io_failure_kind(&t, HTTP_PT_RECV_RESET));
+    stale_would_block();
+    ASSERT_EQ(HTTP_IO_OTHER, http_io_failure_kind(&t, -1));
+
+    for (int reset = 1; reset >= 0; reset--) {
+        int fds[2];
+        ASSERT_EQ(0, tcp_loopback_pair(fds));
+        TcpSocket* s = tcp_socket_adopt_fd(fds[0]);
+        ASSERT_NOT_NULL(s);
+        ASSERT_EQ(1, (int)send(fds[1], "x", 1, 0));
+        TcpReceiveResult got = tcp_receive_n_raw(s, 16);
+        ASSERT_EQ(1, got._1);
+        string_release(got._0);
+        ASSERT_EQ(0, tcp_reset_raw(s));
+        if (reset) {
+            /* A close with a zero linger sends a reset, not a FIN. */
+            struct linger lg;
+            lg.l_onoff = 1;
+            lg.l_linger = 0;
+            ASSERT_EQ(0, setsockopt(fds[1], SOL_SOCKET, SO_LINGER, (const char*)&lg, sizeof lg));
+        }
+        T_CLOSE(fds[1]);
+        got = tcp_receive_n_raw(s, 16);
+        ASSERT_NULL(got._0);
+        ASSERT_EQ(reset, tcp_reset_raw(s));
+        tcp_close(s);
+    }
 }
 
 /* Make `fd` block, or not. */
