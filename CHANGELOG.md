@@ -14,6 +14,419 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.940.0]
+
+### Fixed
+
+- **On Windows, `fs.make_temp_file` and `fs.make_temp_dir` in an enforce
+  block give each call a name of its own (#3817).** The names came from the
+  tick count alone, so every call within one 15 ms tick started at the same
+  name. A temporary directory made and removed, then a file asked for under
+  the same prefix, asked for that name again, and a delete still pending on
+  it failed the call ("cannot create temp file", intermittently, after
+  std.sandbox's junction-swap test). Each call now mixes in a process-wide
+  count, as the POSIX path does, and a name pending deletion is passed over
+  for the next. In a burst of 32 calls the old names repeated in 384 of 496
+  pairs; now none do.
+
+- **`for x in xs` covers every element of a slice of more than 2^31
+  elements, and `.len` past INT_MAX panics instead of wrapping (#3843).**
+  `.len` is an int; the length of a larger view came out negative, and a
+  loop to it ran the wrong number of times with no warning. A for-in now
+  counts in 64 bits, and `.len` is checked, as `string.length` is.
+
+- **`tcp.listen` queues connections up to the kernel's limit (#3832).** It
+  listened with a backlog of 5, so a burst of more connects than that before
+  the server accepted filled the queue: Linux and macOS dropped the SYN and
+  the client resent it a second later, with nothing in any log, and Windows
+  refused the connect after two seconds of retries. `tcp.listen`,
+  `tcp.listen_on` and the Unix socket listener (16 before) now listen with
+  `SOMAXCONN`, as Go and nginx do. 64 connects with none accepted: the 6th
+  failed after 2030 ms on Windows; now the slowest takes 20 ms.
+
+- **A POST the upstream already read is not sent to it again.** When a
+  pooled upstream connection ended with no byte of an answer, the HTTP
+  client and the reverse proxy (worker path and event loop alike) sent the
+  request again on a fresh connection whatever its method, so an upstream
+  that read a POST whole and then closed had it twice (RFC 9110 9.2.2). A
+  failure at the read is now retried only for GET, HEAD, OPTIONS, TRACE,
+  PUT and DELETE; another method gets the error, which the proxy answers
+  502. A failed write is retried for those methods too, and for another
+  only when none of the request went out: an upstream that read a POST's
+  head and closed without reading the body, or a send timeout on a slow
+  one, ended the write partway and had the POST again. So that an idle
+  connection the upstream closed long ago does not cost a POST its answer,
+  a pooled connection is checked before a non-idempotent request is written
+  on it (a poll and a one-byte peek) and dropped for a fresh dial when the
+  upstream has closed it, as Go's transport does (#3824).
+
+- **A pooled upstream connection that stays silent gets one timeout, not
+  two.** When a request on a reused connection got nothing back before its
+  timeout, the HTTP client (and so the reverse proxy's worker path) took the
+  connection for one the upstream had closed and sent the request again on
+  a fresh connection with a whole new timeout: the upstream had it twice,
+  and the proxy answered 504 only after both. It now returns the timeout at
+  the first, and the proxy answers 504 then, as its event loop already did.
+  On Windows a receive timeout is now recognised as one by the client's
+  read, where Winsock reports it as WSAETIMEDOUT (#3825).
+
+- **A reset is no longer reported, or answered, as a timeout.** The HTTP
+  client reported every failed read before a response as "recv timeout or
+  I/O error", and the reverse proxy, which answers 504 for a timeout, read
+  the word and answered 504 for an upstream that had reset the connection.
+  The client now names the kind: "request timed out before the response
+  arrived", "connection reset by the peer before the response arrived" or
+  "I/O error before the response arrived" (and "... response headers
+  arrived" for a streamed response). The proxy answers 504 for the first
+  and 502 for the others, on its worker path and on its event loop, whose
+  error names a reset too. Over TLS the kind is the TLS layer's own answer
+  (OpenSSL's, or the pure-Aether client's), not an errno it did not set: a
+  protocol error that left a stale EAGAIN behind was a timeout (#3846).
+
+- **Float comparisons keep IEEE's answer beside a NaN under GCC at -O1 and
+  up (#3848).** GCC 12 and later record the false edge of `a > n` as the
+  relation `a <= n`, which a NaN breaks. They chain such relations and fold a
+  later comparison wrong: from `a > n` and `n > b` both false, with n a NaN,
+  `a > b` became false for a = 1, b = 0, and std.lanes' pick_max returned the
+  min. `ae` now passes `--param relation-block-limit=0` to every GCC compile
+  it makes, at every -O level (a project's cflags, `AETHER_CFLAGS_EXTRA` or
+  the `$AE_CC` / `$CC` command can say -O2 on a `--quick` build), a
+  user-named inlining budget or not, and to a runtime or the vendored SQLite
+  it compiles from source. The Makefile builds the runtime's own C with it,
+  and `ae cflags` prints it when the compiler `ae` drives is a GCC that takes
+  it, for C built by hand from generated C. With no relations recorded there
+  is nothing to chain; the reduction answers right at -O3 with it. It
+  measured within noise on bench-core. Clang folds no such chain, and a GCC
+  without the parameter predates the optimiser.
+
+- **std.fs works on Windows paths past MAX_PATH (#3850).** An archive
+  std.zip extracted, or a tree made relative to directory handles, can hold
+  paths longer than 260 characters, and std.fs then could not stat, list,
+  delete or `remove_tree` what it had made: each call handed the path to a
+  Win32 call that stops at MAX_PATH (unless the process is long-path aware
+  and the LongPathsEnabled policy is on), and a listing cut its pattern at
+  MAX_PATH and came back empty. Every call std.fs makes by name (the
+  listings, `walk`, `glob` and `watch` too), and every one the sandbox
+  makes, now gives a path at or past the limit the way Rust's std does: made
+  absolute by GetFullPathNameW, which turns `/` into `\` and resolves `.`
+  and `..`, then prefixed `\\?\` (`\\?\UNC\` for a UNC path). A shorter
+  path is passed exactly as before. Inside an enforce block a long path is
+  resolved and matched against the grants as a short one is; the resolution
+  kept 260 bytes, so a long path was refused whatever the grants said.
+  Under Wine the final path of a handle on such a path is read whole too:
+  Wine's GetFinalPathNameByHandleW reads the name into a buffer of MAX_PATH
+  characters and fails past it, so a check that verifies a handle by its
+  final path refused every long path there; the name NtQueryObject gives is
+  taken as Wine takes it instead (this is `fs.realpath` too).
+  `make_temp_dir` and `make_temp_file` outside an enforce block name the
+  file themselves now, as they did inside one: GetTempFileNameA, which named
+  it, takes no directory past 246 characters. The names keep its shape
+  (three letters of the prefix, four hex digits, `.tmp`), and a directory is
+  made in one call, no longer as a file deleted and remade as a directory.
+
+- **A send to a null actor no longer leaks what its message owns.** A send
+  or a `try_send` to a null actor reference panics (#3172), but the message
+  was built by then: a string field held its own copy, or the fresh string
+  the send moved in, and the panic left them to no one, one leak per send.
+  The message is now released before the panic, as the receiver's handler
+  end releases it, for `!` and `try_send` alike. A dead actor or a full
+  mailbox was released already (#3847).
+
+- **The reverse proxy's retry policy retries TRACE.** Which methods may be
+  sent again was decided twice: the HTTP client's rule, which follows RFC
+  9110 9.2.2, and a list of the proxy's own that left TRACE out. The proxy
+  now reads the client's rule, so `opts_set_retry_policy` retries GET,
+  HEAD, OPTIONS, TRACE, PUT and DELETE, and still never POST or PATCH
+  (#3824).
+
+- **A send whose target panics no longer leaks its message.** A send took
+  its message's fields (a string copied, a received string moved on, #3827,
+  the rest published) and then read its target, so a target that panicked,
+  an index past a fixed array's end or a call that panics, left them to no
+  one. The target is now read first, in source order, before any field is
+  taken: its panic leaves the received message whole, and the handler's
+  release gives everything back. A null target is still released before
+  its panic (#3847).
+
+- **A panic out of a batched loop sends what the loop sent.** Outside an
+  actor, a `while` or `for` loop that only sends keeps its sends in the
+  thread's batch, sent at the loop's end. A panic in the loop, caught by a
+  `try` around it, jumped past that end: the messages stayed in the batch
+  until the thread's next send or wait, and on a thread with nothing more to
+  send (a worker's) they were never sent. The open batch is now an entry of
+  the unwind journal: the unwind to the `try` sends it, in order, and closes
+  it (#3826).
+
+- **A POST whose write timed out is not written again, on Windows too.**
+  A write that waits out the socket's send timeout is never written again,
+  since the upstream is alive and Winsock leaves what a timed-out send sent
+  undefined. Winsock says so with WSAETIMEDOUT, where POSIX says EAGAIN, and
+  the HTTP client read it as an I/O error: a POST whose head timed out
+  before a byte of it counted as sent went again on a fresh connection. A
+  failed write is now classified as a failed read is, one rule for both, and
+  a timeout is a timeout on every platform. A failed TLS write is classified
+  by the TLS layer's own answer, not by an errno it did not set: a write on
+  a connection a protocol error ended left a stale EAGAIN behind, and the
+  proxy's event loop waited for the socket to turn writable until the
+  deadline (#3824).
+
+- **A nested batch no longer drops the outer batch from the unwind
+  journal.** A batch opened inside an open one, on the same thread, updated
+  the one journal entry the thread's batch had and forgot it at its end, so
+  a panic in the outer loop after the inner one closed left the outer
+  batch's messages in the buffer until the thread's next send or wait; an
+  inner batch inside a `try` of its own moved the entry to that `try`,
+  whose unwind took it. The runtime now journals one entry per `try` depth
+  with an open batch, the first batch opened there journaling it and the
+  last one closed forgetting it, so the outer batch stays journaled until
+  its own end (#3826).
+
+- **An ask whose target panics no longer leaks its request.** An ask built
+  its request (its strings copied, its shared fields published) and then
+  read its target, so a target that panicked, an index past a fixed array's
+  end or a call that panics, left the copies to no one. An ask now reads its
+  target first, in source order, before any field is taken, as a send does,
+  and a null target releases the request before its panic. A one-field send
+  or ask reads its target first too, so a boxed closure in its field is not
+  left behind (#3827).
+
+- **A reset under the pure-Aether TLS client is reported as a reset.** Over
+  a plain socket and over OpenSSL, a read the upstream's reset ended was
+  "connection reset by the peer before the response arrived", which the
+  reverse proxy answers 502; under the pure-Aether TLS client every failure
+  that was not a timeout was "I/O error". A std.tcp socket now records
+  whether its last receive failed because the peer reset or aborted the
+  connection, read from the error that receive left (`tcp_reset_raw` in
+  std/net/aether_net.h), and the pure client reports such a read to the
+  HTTP client as a reset, never by an errno something later may have set
+  (#3824).
+
+- **A send or an ask to a null actor reference no longer leaks a closure
+  it boxed.** A closure stored into a `ptr` field of a message is boxed at
+  the send, and the box is the receiver's to give back: the message's
+  release leaves a `ptr` alone. A send to a null reference panics once the
+  message is built, and the box, with its reference to the closure's
+  environment, was left to no one, on a one-field message (the payload
+  carries the box), on any other message and on an ask. Everything the
+  message took is now given back before that panic: the fields it owns, by
+  its release, and each box the send made (#3847).
+
+- **`ae cflags --cc <compiler>`, and GCC's relation limit on cross builds.**
+  `ae cflags` printed the flags one compiler needs and another refuses
+  (Clang's bracket depth, GCC's `--param relation-block-limit=0`) for the
+  compiler `ae` drives, `$AE_CC`, `$CC` or the `gcc` on PATH, so a build
+  that compiles generated C with Clang by its own means got GCC's
+  parameter. `--cc` names the compiler the build uses, and that one is
+  asked; the help says which is asked without it. `ae build
+  --target=<triple>` now asks its cross compiler as the native build asks
+  its own and passes the relation limit (and, optimising, the inlining
+  budget) when it is a GCC that takes them: the float comparison folded
+  wrong beside a NaN is a GCC cross compiler's bug too. `zig cc` and
+  `xcrun clang` are Clang and get neither (#3848).
+
+- **The narrowed `-idirafter` list covers response files and the Homebrew
+  include directory.** A compile names only the list directories its
+  includes reach, and gives every one whenever the scan cannot follow
+  them. An `@file` response file in the cflags or in the `$AE_CC` / `$CC`
+  command was not among those cases, though it can hold any flag that
+  moves the search; it now gives every directory. And on macOS (Homebrew)
+  and FreeBSD (LOCALBASE), a header found only in the include directory
+  `ae` adds after the list was taken for a system header and not
+  followed, so a std header it included lost its directory and the build
+  failed; the scan now follows headers there too (#3841).
+
+- **A pure-Aether TLS write that timed out is not written again either.**
+  The pure TLS client reported a write that waited out the socket's send
+  timeout as any other failure, so the HTTP client took it for an I/O
+  error and wrote a POST whose head timed out with nothing counted as sent
+  again on a fresh connection. A std.tcp socket now records whether its
+  last send that waits for room ended by its send timeout
+  (`tcp_send_timed_out_raw` in std/net/aether_net.h), the pure client
+  reports such a write as a timeout, and the HTTP client's one rule for
+  timed-out writes refuses to send it again (#3824).
+
+- **A message dropped instead of handled no longer leaks a closure its send
+  boxed.** A closure stored into a `ptr` field of a message is boxed at the
+  send, and the box was the receiver's handler's to give back: a message
+  sent to an actor that had ended, queued to one when it ended or was
+  released, refused by a full bounded mailbox or by `try_send`, or of a type
+  its receiver has no handler for was dropped through its release, which
+  left a `ptr` alone, and the box with its reference to the closure's
+  environment leaked. The send now marks each box it makes in the message,
+  the handler's binding of the field takes it when the arm reads the
+  binding, and the message's release gives back every box still marked, on
+  every path where no handler took it: a send to a null reference, an ask
+  to an actor that has ended (whose request, strings included, was released
+  by no one), a reply the asker reads in part or that comes after its ask
+  timed out, and a field a handler binds and never reads. A one-field
+  message that boxes a closure travels whole, still in the message's own
+  bytes (#3847).
+
+### Performance
+
+- **`ae` builds the runtime and std include list only for a command that
+  compiles (#3834).** Every command walked the runtime/ and std/ trees for
+  the `-idirafter` list when it found the toolchain, though only compile
+  and link lines and `ae cflags` read it. It is now built where it is first
+  asked for: the same directories in the same order. A warm-cache
+  `ae run hello.ae` on Windows no longer pays for the walk.
+
+- **`ae` passes `-pipe` to the C compiler on Windows too (#3837).** Only the
+  POSIX compile line had it, so on Windows each stage of compiling the
+  generated C went through a temporary file. GCC, Clang and `zig cc` all
+  take it, and the tree's own Windows make already used it. A cold
+  `ae build` of hello is about 30 ms faster there.
+
+- **A program that uses no lanes no longer carries the std.lanes helpers
+  (#3839).** Every generated program held about 585 lines of lane helpers
+  and `#include <emmintrin.h>`, whatever it used. They now go only into a
+  program that has a lane type, imports a module at a `@target`, or has an
+  extern naming one of the `_ae_` lane helpers (`lanes.native8()`,
+  `lanes.cpu_has_avx2()`). Hello's preprocessed C went from 8,783 to 4,540
+  lines and its compile from about 144 to 130 ms on Windows.
+
+- **`string.length` and `string.char_at` read the string in place (#3836).**
+  They were out-of-line calls that checked the header's magic on every
+  call, so `while i < string.length(s)` made two calls per character and
+  the C compiler hoisted neither. std.string now binds them to `static
+  inline` reads in `aether_string_inline.h`, which it asks for with
+  `@c_include`; the std modules that declared the two names themselves
+  bind the same reads. The semantics are the same: null is 0 long, an
+  index out of range reads 0, a byte is 0..255, and a length past 2 GiB
+  panics. `string_length` and `string_char_at` stay exported for C, with
+  the same bodies. A scan of a 132-byte counted string went from about 400
+  to 270 ns (the new `string_scan_char_at` row of benchmarks/core). C that
+  compiles generated C with a hand-picked include list (rather than `ae
+  cflags`) needs `std/string` on it now.
+
+- **A string argument held for a call skips the journal work that does
+  nothing (#3840).** A string read from a field, an element or a module
+  `var` and passed to a call is held for the call, and was journaled for a
+  panic and forgotten after it with two out-of-line calls even outside
+  every `try`. `aether_unwind_track_place` now says whether it wrote the
+  entry, as `aether_unwind_track` does since #3787, and the forget runs
+  only then; a closure argument does the same. A panic still releases
+  every hold that was journaled. The runtime ABI revision is 8. A held
+  call went from 1.90 to 1.51 ns (the new `string_held_arg` row).
+
+- **Compiling a large program no longer grows with the square of its size
+  in the checker's and the code generator's name lookups (#3835).** Which
+  top-level constant, module `var` or enum member a name is, and whether a
+  reference is an entry constant or a module var, was a walk of the whole
+  program per question. One index answers them, built when the check
+  starts and kept current where a declaration is inserted. On a generated
+  program of 2000 constants, vars and functions, typecheck went from 387
+  to 78 ms and codegen from 237 to 104 ms (the new `names2000_phase_*`
+  rows of benchmarks/core).
+
+- **`ae run` and `ae build` ask the C compiler for its `--version` while
+  they do other work (#3842).** The answer is part of every cache key, and
+  the run (a process start and a temporary file, 10 to 12 ms on Windows)
+  was waited for before the key walked the headers and folded the
+  depfile. It now starts where the command begins and is waited for where
+  the key is put together. The answer is the same, asked on every key as
+  before and never remembered by the compiler's file identity: only the
+  waiting overlaps. A warm-cache `ae run` is about 10 ms faster on Windows.
+  A wait for that run that fails (its status reaped elsewhere) counts as no
+  answer and the compiler is asked again, and a parallel runtime compile
+  that reaps the run hands its status to the run's own wait.
+  A build that compiles the runtime from source (`--trace`, or no
+  libaether.a) no longer walks the headers for a key part it does not use:
+  a warm `ae build --trace` hit is about 8 ms faster.
+
+- **A program's compile line names only the header directories it needs
+  (#3841).** `ae` passed every runtime and std directory that holds a
+  header, 53 in a source tree, as `-idirafter`, where hello needs 3: the
+  compiler searched them all for each header. `ae` now follows the
+  generated C's includes (and those of the headers they reach, the
+  module `@c_include` headers and the `@source` files) and keeps the
+  directories they resolve in, in the list's order and still after the
+  system's (#2552). Anything it cannot follow keeps every directory, as
+  before: an include through a macro, an `#include_next`, flags that move
+  the search in the cflags or in the `$AE_CC` / `$CC` command itself, and
+  CPATH, C_INCLUDE_PATH or OBJC_INCLUDE_PATH set. Header names match in any
+  case as well as exactly, so an include spelled in another case on Windows
+  or macOS keeps its directory. Hello's preprocessed C and object are byte
+  for byte the same.
+
+- **A `for` loop that sends from outside an actor batches its sends, as a
+  `while` loop does (#3826).** Only `while` loops opened a send batch (#3117),
+  so `for i in 0..n { a ! M{} }` in main took the foreign send path for each
+  message: an entry count, the inflight count, the foreign lock and a wake
+  fence every time. A `for` loop now opens a batch under the same guard (no
+  call, print, ask, actor field read, `return` or labeled exit in it) and
+  sends it where the loop ends. `fanin_main_burst` (400k sends from main to
+  one actor): 148 to 114 ns a message on Windows, where the `while` form also
+  takes 114.
+
+- **`string.from_int` and `string.from_long` write their digits directly
+  (#3830).** Each formatted through `snprintf`, then measured the text again
+  with a `strlen` to make the string. They now write the decimal digits into
+  a stack buffer, as interpolation already did for integers, and copy them
+  into a string of exactly that length. The text is the same. The new
+  `string_from_int` row of benchmarks/core: 56.8 to 37.3 ns.
+
+- **An integral float is written without `snprintf` in JSON, interpolation
+  and `string.from_float` (#3828).** `json.num(5.0)` was formatted with
+  `%.15g` and parsed back to check the round trip, and `"${x}"` and
+  `string.from_float` formatted with `%g`, for a value whose text is just its
+  digits. A value with no fraction below 1e15 (JSON) or 1e6 (`%g`) now
+  writes its digits directly, "-0" for -0.0; every other value takes the
+  old path, so the text is the same byte for byte. `json_encode_5000_keys`:
+  593 to 105 us; the new `interp_float_integral` row: 149 to 47 ns.
+
+- **An owned `map.put` hashes and walks its key once (#3831).** A put of a
+  value the map takes over (any `map.put` codegen routes through the
+  adopting path, a built string's and a literal's alike) hashed the key and
+  walked its bucket for the replace check, again inside the plain put, and a
+  third time to find the new entry and flag it; a closure value a fourth.
+  One internal insert now does the walk once and stores the ownership flag
+  as it goes. The table grows at the same moments, so a map's iteration
+  order is unchanged. With 10-byte keys `map_put` takes 4% less; with
+  66-byte keys 22% (`map_put`) and 18% (the new `map_put_owned_value`).
+
+- **Memory accounting counts without a locked add (#3829).** Every
+  cap-aware allocation and free added its size to the calling thread's slot
+  with an atomic add, a locked instruction, although a slot has one writer
+  until more than 63 threads count. Each of the first 63 threads now owns a
+  slot and counts on it with a plain load and store; later threads share
+  the last slot, which keeps the atomic add. Setting a cap still moves every
+  slot into the capped counter, by recording how much of each it has moved
+  rather than emptying it, so no count is lost. A malloc and free of 40
+  bytes: 30.4 to 24.4 ns.
+
+- **`lanes.min4`, `max4`, `min8` and `max8` are one `minps` / `maxps` on x86
+  (#3815).** Each was a compare and a blend, which GCC never turned into the
+  one instruction, so a running minimum carried both on its loop chain. On
+  SSE they now lower to `minps` / `maxps`, and an eight-lane value held in
+  one AVX register to `vminps` / `vmaxps` on ymm, with the operand order
+  that is exactly `a < b ? a : b` (NaN and signed zeros included), so every
+  result keeps its bits. Other targets keep the compare and select. A
+  running `min4` or `min8`: 1.5 to 0.76 ns a step. The horizontal
+  reductions stay as they are: a shuffle tree was 2.2x faster on throughput
+  but 3% slower on a dependent chain.
+
+- **A handler that forwards a string it received moves it on instead of
+  copying it.** `R(s) -> { peer ! M { s: s } }` copied `s` on every hop: the
+  binding views the received message's field, which the message released
+  after the arm. When the send is the binding's last use, exact by
+  construction (the one read of the name in the arm, under no loop, closure
+  or `defer`, and nothing in the arm binds the name), the send takes the
+  reference out of the received message, which then releases nothing of it.
+  Any other use still copies: a read after the send, a send in a loop, a
+  closure that captures the binding, two sends of it.
+  `send_string_forwarded` went from 75 to 40 ns per message (best of nine,
+  Windows) (#3827).
+
+- **A thread that ends gives its memory-accounting slot back.** Each thread
+  that counts owns a slot it updates without a locked add (#3829), but
+  slots were never given back: once 63 threads had ever counted, every later
+  thread shared the last slot through a locked add, so a server with a
+  thread per connection, or a worker pool made again and again, contended on
+  one cache line. A thread now gives its slot back as it ends, with no lock:
+  the count stays in the slot, which every total sums, so nothing it counted
+  is lost, and the next thread to take the slot counts on from it.
+
 ## [0.939.0]
 
 ### Changed
