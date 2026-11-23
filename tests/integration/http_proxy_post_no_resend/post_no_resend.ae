@@ -11,17 +11,25 @@
 // not sent again after a failure at the read, and the proxy answers 502; its
 // pooled connection is checked before the write instead, so one the upstream
 // closed while it sat idle is dropped for a fresh dial and the POST is still
-// answered.
+// answered. The same holds at the write: an upstream may read a POST's head,
+// act on it and close without reading the body, which ends the proxy's write
+// partway. A failed write was sent again whatever the method; now a request
+// that is not idempotent goes again only when none of it went out.
 //
-// This program is the upstream, so neither case depends on timing. On a
-// kept client connection a GET leaves an upstream connection in the proxy's
-// pool. Then a POST: in the first case the upstream reads it whole on that
+// This program is the upstream, so no case depends on timing. On a kept
+// client connection a GET leaves an upstream connection in the proxy's pool.
+// Then a POST: in the first case the upstream reads it whole on that
 // connection and closes it unanswered, and the client must get 502 with no
 // new connection reaching the upstream; in the second the upstream has
 // closed that connection before the POST, and the POST must arrive on a new
-// one and be answered 200. Through a bare proxy (the event loop on Linux and
-// macOS) and through one behind a program's middleware (the worker path).
-// Every socket is on 127.0.0.1 and a port the kernel picks.
+// one and be answered 200; in the third the POST's body is more than the
+// socket buffers hold, and the upstream reads only its head before closing,
+// so the proxy's write fails partway and the client must get 502 with no new
+// connection reaching the upstream. Winsock takes the whole body into its
+// buffer at once, so on Windows the third case's failure shows at the read
+// instead, under the first case's rule. Through a bare proxy (the event loop
+// on Linux and macOS) and through one behind a program's middleware (the
+// worker path). Every socket is on 127.0.0.1 and a port the kernel picks.
 
 import std.http
 import std.http.proxy
@@ -171,6 +179,10 @@ main() {
         exit(1)
     }
     up_url = "http://127.0.0.1:${tcp.server_port(listener)}"
+    // 6 MiB: more than the loopback buffers take for a reader that stopped,
+    // and under the proxy's 8 MiB body cap.
+    big_post = string.concat("POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 6291456\r\n\r\n",
+        string.pad_end("", 6291456, 120))
 
     names = ["event loop", "worker path"]
     bad = 0
@@ -230,6 +242,29 @@ main() {
             bad = bad + 1
         } else {
             println("  PASS a POST after an idle close (${names[g]})")
+        }
+
+        // The upstream reads the head of a POST too large for the socket
+        // buffers on the pooled connection, and closes it with the body
+        // unread: the proxy's write fails partway.
+        http.client_pool_clear()
+        kb = kept(port, listener)
+        _wn, _werr = tcp.write_all(kb.client, string.bytes(big_post))
+        head = read_until(kb.up, "\r\n\r\n", 3000)
+        tcp.close(kb.up)
+        arrivals = 0
+        answer3 = status(answer_watching(kb.client, listener, 3000))
+        tcp.close(kb.client)
+        seen3 = 0
+        if string.index_of(head, "POST /p ") >= 0 {
+            seen3 = 1
+        }
+        result3 = "${kb.first} then ${answer3}, the POST reached the upstream ${seen3 + arrivals} time(s)"
+        if result3 != want {
+            println("  FAIL a POST whose body was not read (${names[g]}): got '${result3}', expected '${want}'")
+            bad = bad + 1
+        } else {
+            println("  PASS a POST whose body was not read (${names[g]})")
         }
 
         http.server_stop(s)

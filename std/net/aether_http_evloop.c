@@ -2052,8 +2052,12 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
              * instead of the read: the peer had already gone, and the write
              * is what discovers it. Nothing was delivered, so the request
              * goes again down a fresh connection rather than the client
-             * being dropped without an answer. */
-            if (r < 0 && c->up.reused && !c->up_stale_retried) {
+             * being dropped without an answer. A request that is not
+             * idempotent goes again only when none of it went out (#3824):
+             * an upstream that read its head and closed without reading the
+             * body ends the write partway, and may have acted on it. */
+            if (r < 0 && c->up.reused && !c->up_stale_retried &&
+                http_exchange_send_retryable(&c->x, AE_X_ERROR)) {
                 c->up_stale_retried = 1;
                 c->dial_fresh = 1;          /* #3260 */
                 ev_drop_upstream(d, c);

@@ -185,6 +185,10 @@ void http_exchange_init(HttpExchange* x, Transport* t,
 /* Arm the whole-exchange deadline from a request timeout (ns; 0 = none). */
 void http_exchange_set_timeout(HttpExchange* x, int64_t timeout_ns);
 int  http_exchange_send(HttpExchange* x);
+/* Whether a write that ended in `r` (not DONE) on a reused connection may
+ * go again on a fresh one: an idempotent request, or one none of which went
+ * out (#3824). */
+int  http_exchange_send_retryable(const HttpExchange* x, int r);
 int  http_exchange_recv(HttpExchange* x);
 
 

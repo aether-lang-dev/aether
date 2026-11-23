@@ -4042,6 +4042,22 @@ int http_exchange_send(HttpExchange* x) {
     return AE_X_DONE;
 }
 
+/* Whether a request whose write ended in `r` (http_exchange_send's result,
+ * not DONE) may be written again on a fresh connection (#3824). An
+ * idempotent one may. Another may only when none of it went out: an
+ * upstream that acts on the head and closes without reading the body ends
+ * the write partway, after it has the request, and a second POST is a
+ * second order. A write that waited out the socket's send timeout is not
+ * written again either: the upstream is alive, only slow, and on Winsock a
+ * send that timed out leaves the socket undefined, what it sent included.
+ * A TLS write
+ * counts what the TLS layer accepted, and a record it did not finish is
+ * one the upstream cannot decrypt, so cannot act on. */
+int http_exchange_send_retryable(const HttpExchange* x, int r) {
+    if (http_method_idempotent(x->method)) return 1;
+    return r == AE_X_ERROR && x->head_sent == 0 && x->body_sent == 0;
+}
+
 /* Read until this response ends where its own framing says it does, or until
  * the peer closes, which is the framing when nothing else declares one. */
 int http_exchange_recv(HttpExchange* x) {
@@ -4355,8 +4371,10 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * indistinguishable from a live one until it is used. Measured against an
      * upstream that closes after every response, 4% of requests landed in
      * that window. One redial covers it, bounded to a connection that came
-     * from the pool. A failed write is retried whatever the method: the
-     * upstream never had the whole request. A failure at the read with no
+     * from the pool. A failed write is retried for an idempotent method, and
+     * for another only when none of the request went out
+     * (http_exchange_send_retryable): an upstream may act on the head and
+     * close without reading the body. A failure at the read with no
      * response byte is retried for an idempotent method only (#3824): the
      * upstream may have read the request whole and acted on it before the
      * connection ended, and RFC 9110 9.2.2 lets a client repeat only a
@@ -4365,13 +4383,16 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * before the write. */
     int retried = 0;
     HttpExchange tx;
+    int send_r;
 
 send_request:
     http_exchange_init(&tx, &t, hdr, hdr_len, body, body_len, method);
     /* A WANT here is SO_SNDTIMEO firing on a transport this driver owns
-     * outright, which is a failed write like any other. */
-    if (http_exchange_send(&tx) != AE_X_DONE) {
-        if (reused && !retried) {
+     * outright, a failed write, which only an idempotent request writes
+     * again (http_exchange_send_retryable). */
+    send_r = http_exchange_send(&tx);
+    if (send_r != AE_X_DONE) {
+        if (reused && !retried && http_exchange_send_retryable(&tx, send_r)) {
             retried = 1;
             reused = 0;
             transport_close(&t);
