@@ -14,6 +14,84 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.938.0]
+
+### Fixed
+
+- **`string.to_float` on msvcrt links with the msvcrt WinLibs, and
+  `to_float` and `to_double` round correctly there (#3818).** The runtime
+  parsed floats with `_strtof_l`, which msvcrt.dll does not export. The
+  msvcrt WinLibs GCC 14.2 (mingw-w64 12) has no import for it, so with it
+  as `AE_CC` a program did not link ("undefined reference to
+  `__imp__strtof_l`"). MSYS2's MINGW64 (mingw-w64 15) links one that
+  narrows `_strtod_l`, which rounds twice: text just above a float tie came
+  out one ulp low ("1.00000005960464477540" gave 1.0, not 1 + 2^-23), text
+  just under `FLT_MAX` plus half an ulp overflowed, and text just above
+  2^-150 gave 0. msvcrt.dll's own `_strtod_l` misrounds doubles the same
+  way ("9007199254740993.0000000001" gave 2^53, not 2^53 + 2). Under
+  mingw-w64, msvcrt or UCRT, the runtime now parses both with mingw-w64's
+  correctly rounded parsers linked into the program,
+  under a comma-decimal locale too, and gets the bits of Windows' UCRT on
+  any ucrtbase.dll it runs on (Wine's rounds twice too). MSVC builds are
+  unchanged.
+
+- **A closure return of a number, where the closure returns a pointer, a
+  struct or a closure, is an error.** A closure's result is held in its
+  resolved C type, but what the return hands the caller (the retain, a
+  struct or sequence copy) is chosen from the value's own type. A returned
+  closure or struct the type checker had left typed `int` would have crossed
+  without its reference; such a return now stops the build and says why.
+  Numbers converting to numbers, and a closure returning a string on one
+  path and `null` on another, compile as before.
+
+- **A discarded call that returns a slice compiles clean under clang's
+  `-Wunused-value` again (#3821).** A statement such as `length_scratch()`,
+  where `length_scratch() -> float[]`, was emitted on 0.937 as a comma
+  expression ending in the temporary that holds the call's slice. Clang
+  reported "expression result unused", and projects building with warnings
+  as errors failed (ae3d on macOS, 37 suites). The statement is now cast to
+  `(void)`, as other discarded values are.
+
+- **The runtime compiled from source: four fixes to #3813's cache of it.**
+  Under `-flto` the cached runtime archive was made with plain `ar`, which
+  gives GCC's slim LTO objects no symbol index: the link failed, and the
+  archive was published, so every later build failed too. It is made by
+  the compiler's LTO-aware archiver now (`gcc-ar`, `llvm-ar`, `zig ar`), and
+  no archive is published, or linked, without a symbol index naming its
+  symbols; when no archiver makes one, the objects are linked. An archive
+  the cache would not take (`<slot>.tmp.<pid>`) is removed once the build is
+  done; it stayed for good, as the size cap skips temporaries, and a slot
+  path holding a directory now counts as a failed publish rather than a
+  published one. The program's cache key folds the runtime's sources when
+  the build compiles the runtime from source (`--trace`, no archive, or an
+  archive on another C runtime, by the decision the build makes, which is
+  remembered for the next build's key, a compiler that cannot be asked
+  included), with the runtime's source list (`build/MANIFEST`), so an edit
+  to a `runtime/*.c` file in a source tree no longer leaves `ae run`
+  serving the program built before it; a build that links the archive,
+  with cflags or without, walks the headers only, as before. And the C
+  runtime probe's control compile takes the project's cflags as the probe
+  does, and the probe text is warning-clean (it
+  declares what it defines, and its `#error` lines hold no apostrophe):
+  `-Werror` alone, or `-Werror -Wmissing-variable-declarations`, made the
+  archive's own compiler "target another C runtime", and the whole runtime
+  was compiled from source.
+
+### Performance
+
+- **A cold build by the archive's own compiler no longer asks it which C
+  runtime it targets (#3813).** `libaether.crt` now also names the compiler
+  that built `libaether.a` (`cc <id>`, the identity the build cache keys
+  on, which the new `ae cache ccid` prints), written only when that
+  compiler given no flags targets the recorded runtime. A build by the same
+  compiler with no cflags links the archive without the probe compile:
+  one compiler start less on every cold cache, 8 commands to 7 for
+  `ae build -v benchmarks/core/compile_heavy.ae`, 491 to 465 ms on Windows
+  (10 runs each). Any other compiler, any cflags, and a record without the
+  line are asked as before. The record is written with the archive, not
+  when `ae` relinks, so a compiler upgraded since the archive was built is
+  asked, not trusted.
+
 ## [0.937.0]
 
 ### Fixed
