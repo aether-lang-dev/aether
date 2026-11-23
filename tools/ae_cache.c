@@ -103,20 +103,34 @@ const char* get_home_dir(void) {
  * already what the writer was about to put there. Under a parallel build every
  * loser of the race did that write. link(2) is the primitive that says "only
  * if absent" and is atomic; a filesystem without hard links (EPERM/EXDEV/
- * ENOSYS: FAT, some network mounts) falls back to the rename this always did. */
+ * ENOSYS: FAT, some network mounts) falls back to the rename this always did.
+ *
+ * Taken means taken by a file: a slot path that holds a directory (or
+ * anything else) is no published entry, and the writer was told it had
+ * published, its temp gone, and linked or ran that directory. It is a failed
+ * publish (-1), the temp left to the caller, as on any other failure. */
+static int slot_is_file(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG;
+}
+
 int cache_publish(const char* tmp_path, const char* final_path) {
 #ifdef _WIN32
     /* Without MOVEFILE_REPLACE_EXISTING this fails when the slot is taken. */
     if (MoveFileExA(tmp_path, final_path, 0)) return 0;
     DWORD e = GetLastError();
-    if (e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) {
+    if ((e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) && slot_is_file(final_path)) {
         DeleteFileA(tmp_path);
         return 0;
     }
     return -1;
 #else
     if (link(tmp_path, final_path) == 0) { unlink(tmp_path); return 0; }
-    if (errno == EEXIST) { unlink(tmp_path); return 0; }
+    if (errno == EEXIST) {
+        if (!slot_is_file(final_path)) return -1;
+        unlink(tmp_path);
+        return 0;
+    }
     if (errno == EPERM || errno == EXDEV || errno == ENOSYS) {
         return rename(tmp_path, final_path);
     }
@@ -1649,6 +1663,66 @@ unsigned long long cache_runtime_key(const char* cc, const char* cflags, const c
     return h ? h : 1ULL;
 }
 
+unsigned long long cache_c_compiler_id(void) { return c_compiler_fingerprint(); }
+
+/* #3813: the record `make` leaves beside libaether.a (libaether.crt): the C
+ * runtime's name alone on the first line, then, each on a line of its own
+ * and in any order, `mingw-w64 <major>` and `cc <id>`, the identity
+ * (cache_c_compiler_id, as `ae cache ccid` prints it) of the compiler that
+ * built the archive, written only when that compiler with no flags targets
+ * the recorded runtime. An older ae reads the first two lines and nothing
+ * else, as it always did. */
+int cache_crt_record_read(char* name, size_t namesz, int* mingw, unsigned long long* built_by) {
+    if (namesz) name[0] = '\0';
+    *mingw = -1;
+    *built_by = 0;
+    const char* sep = strrchr(tc.lib, '/');
+    const char* bsep = strrchr(tc.lib, '\\');
+    if (bsep && (!sep || bsep > sep)) sep = bsep;
+    size_t dl = sep ? (size_t)(sep - tc.lib) : 0;
+    char* rec = str_join4(tc.lib, dl, dl ? "/" : "", "libaether.crt", "");
+    FILE* f = rec ? fopen(rec, "r") : NULL;
+    free(rec);
+    if (!f) return 0;
+    char line[256];
+    int ok = 0;
+    if (fgets(line, sizeof(line), f)) {
+        size_t n = strcspn(line, "\r\n");
+        ok = n > 0 && n < namesz;
+        for (size_t i = 0; ok && i < n; i++)
+            ok = (line[i] >= 'a' && line[i] <= 'z') || (line[i] >= '0' && line[i] <= '9') ||
+                 line[i] == '_';
+        if (ok) snprintf(name, namesz, "%.*s", (int)n, line);
+    }
+    while (ok && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        unsigned major = 0;
+        unsigned long long id = 0;
+        char tail = 0;
+        if (sscanf(line, "mingw-w64 %u%c", &major, &tail) == 1 && major < 1000)
+            *mingw = (int)major;
+        else if (strlen(line) == 19 && sscanf(line, "cc %16llx%c", &id, &tail) == 1)
+            *built_by = id;
+    }
+    fclose(f);
+    return ok;
+}
+
+/* Whether this build may compile the runtime from source rather than link
+ * libaether.a: when there is no archive (or --trace, which sets has_lib
+ * false), and when its record names a C runtime that only asking the
+ * compiler can settle (archive_crt_check in ae.c). Asking is left to the
+ * build; what is known without it is that the archive's own compiler,
+ * given no flags, links it. */
+static int runtime_may_be_from_source(void) {
+    if (!tc.has_lib) return 1;
+    char name[64];
+    int mingw;
+    unsigned long long built_by;
+    if (!cache_crt_record_read(name, sizeof(name), &mingw, &built_by)) return 0;
+    return !(built_by && !get_cflags()[0] && built_by == c_compiler_fingerprint());
+}
+
 /* "<path> <size> <mtime ns>" of the file `name` in the directory the program
  * `prog` (its first word) resolves to on PATH, into `out`; 0 when either is
  * not found. */
@@ -1814,7 +1888,21 @@ unsigned long long compute_cache_key(const char* ae_file,
      * about 120 files and 5 MB, measured at under 20 ms a build on Windows
      * (a cache hit went from 127 to 145 ms), against the stale result a
      * missed edit gives. */
-    if (tc.dev_mode && tc.src_root[0]) {
+    /* A runtime compiled from source is built from the .c files too, and the
+     * headers alone do not see an edit to one of them: the runtime archive
+     * got a new key (cache_runtime_key) and `ae run` served the program
+     * linked against the old one. So that key is folded in instead, over
+     * the same trees and the .c files in them (each file's content hash is
+     * remembered, #3532, but each is still looked at: a --trace hit went
+     * from 26 to 72 ms on Windows, against a stale program). The compiler
+     * and the flags it would also fold are this key's own already (ccid,
+     * the salt, the -O level), so they are left out of it here, where the
+     * build's compile line is not known. */
+    if (tc.dev_mode && tc.src_root[0] && runtime_may_be_from_source()) {
+        unsigned long long rt = cache_runtime_key("", "", tc.runtime_srcs);
+        if (rt) key_append(&key, ":rt=%016llx", rt);
+        else complete = 0;
+    } else if (tc.dev_mode && tc.src_root[0]) {
         static const char* hdr_dirs[] = { "runtime", "std" };
         unsigned long long hdr_acc = 1469598103934665603ULL;
         int hdr_count = 0;

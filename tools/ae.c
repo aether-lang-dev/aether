@@ -3823,13 +3823,25 @@ const char* c_backend_env_override(void) {
  * nothing is remembered; each caller says what that means for it.
  *
  * #3600: an answer that is told is remembered in the cache directory by
- * the compiler's identity, under the question asked (`flags` and `text`:
- * #3813's probe of the C runtime passes no flags, and two trees ask about
- * two runtimes), so later builds compile nothing. `name` names the probe's
- * files (`<name>.c`, `<name>.o`); the -v log shows each command, by that
- * name. 1 takes, 0 refuses, -1 cannot tell. */
-static int cc_probe_takes(const char* cc, const char* flags, const char* name, const char* text) {
-    char* question = ae_strdup_printf("%s\n%s", flags, text);
+ * the compiler's identity, under the question asked (`base`, `flags` and
+ * `text`: #3813's probe of the C runtime passes no flags, and two trees ask
+ * about two runtimes), so later builds compile nothing. `name` names the
+ * probe's files (`<name>.c`, `<name>.o`); the -v log shows each command, by
+ * that name. 1 takes, 0 refuses, -1 cannot tell.
+ *
+ * `base` (a leading space, or "") is what both compiles are given: flags the
+ * question is asked under rather than about, the project's cflags for the C
+ * runtime's. The control took none of them, so a flag of the user's that
+ * failed the probe alone (`-Werror -Wmissing-variable-declarations`, with a
+ * text that defined what it had not declared) read as a refusal: the
+ * compiler "targeted another C runtime". With the same `base` on both, such a
+ * flag fails both and says nothing. Each text declares what it defines, and
+ * its #error lines carry no apostrophe (an unpaired ' warns even in a block
+ * the #if skips, so -Werror alone failed both), so a warning flag fails
+ * neither. */
+static int cc_probe_takes(const char* cc, const char* base, const char* flags, const char* name,
+                          const char* text) {
+    char* question = ae_strdup_printf("%s\n%s\n%s", base, flags, text);
     if (!question) return -1;
     int known = cache_probe_memo_get(cc, question);
     if (known >= 0) { free(question); return known; }
@@ -3850,11 +3862,13 @@ static int cc_probe_takes(const char* cc, const char* flags, const char* name, c
     for (int form = 0; form < 2 && answer < 0; form++) {
         char* out = form == 0 ? ae_strdup_printf(" -fsyntax-only")
                               : ae_strdup_printf(" -c -o \"%s\"", probe_o);
-        char* probe = out ? ae_strdup_printf("%s%s%s \"%s\"", cc, flags, out, probe_c) : NULL;
+        char* probe = out ? ae_strdup_printf("%s%s%s%s \"%s\"", cc, base, flags, out, probe_c)
+                          : NULL;
         if (probe && run_cmd_quiet(probe) == 0) {
             answer = 1;
         } else {
-            char* control = out ? ae_strdup_printf("%s -DAE_PROBE_ANY%s \"%s\"", cc, out, probe_c)
+            char* control = out ? ae_strdup_printf("%s%s -DAE_PROBE_ANY%s \"%s\"", cc, base, out,
+                                                   probe_c)
                                 : NULL;
             if (control && run_cmd_quiet(control) == 0) answer = 0;
             free(control);
@@ -3885,8 +3899,8 @@ static const char* bracket_depth_flags(const char* cc) {
     free(asked);
     asked = strdup(cc);
     answer = "";
-    if (cc_probe_takes(cc, AETHER_CLANG_DEPTH_CFLAGS, "ae_bracket_probe",
-                       "int ae_bracket_probe;\n") == 1)
+    if (cc_probe_takes(cc, "", AETHER_CLANG_DEPTH_CFLAGS, "ae_bracket_probe",
+                       "extern int ae_bracket_probe;\nint ae_bracket_probe;\n") == 1)
         answer = AETHER_CLANG_DEPTH_CFLAGS;
     return answer;
 }
@@ -3930,11 +3944,11 @@ static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
     /* Clang defines __GNUC__ too, and so does a compiler built on it (icx,
      * zig cc): __clang__ tells them apart. The control compile defines
      * AE_PROBE_ANY, so it passes on any compiler. */
-    if (cc_probe_takes(cc, AETHER_GCC_INLINE_CFLAGS, "ae_inline_probe",
+    if (cc_probe_takes(cc, "", AETHER_GCC_INLINE_CFLAGS, "ae_inline_probe",
                        "#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
                        "#error not GCC\n"
                        "#endif\n"
-                       "int ae_inline_probe;\n") == 1)
+                       "extern int ae_inline_probe;\nint ae_inline_probe;\n") == 1)
         answer = AETHER_GCC_INLINE_CFLAGS;
     return answer;
 }
@@ -3992,12 +4006,21 @@ static void crt_name_of(const char* cc, const char* flags, const char* header, c
  * not provide, until the runtime stopped calling it on msvcrt, #3818).
  *
  * `make` records the archive's runtime beside it (libaether.crt, from
- * runtime/aether_crt_id.h): the name on the first line, `mingw-w64 <major>`
- * on the second where there is one. The compiler is asked, through the same
- * header, whether it targets that runtime (and that mingw-w64), with
- * cc_probe_takes, the answer remembered by its identity. On a mismatch the
- * archive is not linked and the runtime is compiled from source with `cc`,
- * as a --trace build does (#1333), and cached for it (ae_cached_runtime).
+ * runtime/aether_crt_id.h, read by cache_crt_record_read): the name on the
+ * first line, `mingw-w64 <major>` on the second where there is one. The
+ * compiler is asked, through the same header, whether it targets that
+ * runtime (and that mingw-w64), with cc_probe_takes, the answer remembered
+ * by its identity. On a mismatch the archive is not linked and the runtime
+ * is compiled from source with `cc`, as a --trace build does (#1333), and
+ * cached for it (ae_cached_runtime).
+ *
+ * The record also names the compiler that built the archive (`cc <id>`, its
+ * identity as the cache key has it), when that compiler given no flags
+ * targets the recorded runtime. A build by that same compiler with no
+ * cflags is not asked: the archive is its own and links. Asking was one
+ * more compiler start on every cold cache, about 25 ms on Windows, and an
+ * eighth of a cold build of benchmarks/core/compile_heavy.ae. Any other
+ * compiler, or any cflags, is asked as before.
  *
  * The archive is linked as before when there is nothing to compare: an
  * archive with no record (one an older tree built, or a platform with one C
@@ -4010,32 +4033,19 @@ static void archive_crt_check(const char* cc) {
         free(asked);
         asked = strdup(cc);
         matches = 1;
-        char lib_dir[sizeof(tc.lib)];
-        snprintf(lib_dir, sizeof(lib_dir), "%s", tc.lib);
-        char* slash = strrchr(lib_dir, '/');
-        char* bslash = strrchr(lib_dir, '\\');
-        if (bslash && (!slash || bslash > slash)) slash = bslash;
-        if (slash) *slash = '\0';
-        char* rec_path = ae_path_printf("%s/libaether.crt", lib_dir);
-        char* rec = rec_path ? ae_read_file(rec_path, NULL) : NULL;
-        free(rec_path);
         char name[64] = "";
-        int mingw = -1;   /* the second line's major, -1 when there is none */
-        if (rec) {
-            size_t n = strcspn(rec, "\r\n");
-            int ok = n > 0 && n < sizeof(name);
-            for (size_t i = 0; ok && i < n; i++)
-                ok = (rec[i] >= 'a' && rec[i] <= 'z') || (rec[i] >= '0' && rec[i] <= '9') ||
-                     rec[i] == '_';
-            if (ok) snprintf(name, sizeof(name), "%.*s", (int)n, rec);
-            const char* second = rec + n;
-            while (*second == '\r' || *second == '\n') second++;
-            unsigned major = 0;
-            char tail = 0;
-            if (ok && sscanf(second, "mingw-w64 %u%c", &major, &tail) >= 1 &&
-                (tail == 0 || tail == '\r' || tail == '\n') && major < 1000)
-                mingw = (int)major;
-            free(rec);
+        int mingw = -1;   /* the record's mingw-w64 major, -1 when there is none */
+        unsigned long long built_by = 0;
+        cache_crt_record_read(name, sizeof(name), &mingw, &built_by);
+        const char* user = get_cflags();
+        char ours[100];
+        if (mingw >= 0) snprintf(ours, sizeof(ours), "%s mingw-w64 %d", name, mingw);
+        else snprintf(ours, sizeof(ours), "%s", name);
+        if (name[0] && built_by && !user[0] && built_by == cache_c_compiler_id()) {
+            if (tc.verbose)
+                fprintf(stderr, "[toolchain] libaether.a is %s; %s built it: the archive is "
+                                "linked\n", ours, cc);
+            name[0] = '\0';   /* nothing to ask */
         }
         char* hdr_path = name[0] ? ae_path_printf("%s/runtime/aether_crt_id.h", tc.src_root) : NULL;
         char* header = hdr_path ? ae_read_file(hdr_path, NULL) : NULL;
@@ -4045,23 +4055,21 @@ static void archive_crt_check(const char* cc) {
             snprintf(mingw_check, sizeof(mingw_check),
                      "#if !defined(AE_PROBE_ANY) && "
                      "(!defined(AETHER_CRT_MINGW_MAJOR) || AETHER_CRT_MINGW_MAJOR != %d)\n"
-                     "#error another mingw-w64 than the archive's\n#endif\n", mingw);
+                     "#error another mingw-w64 than that of the archive\n#endif\n", mingw);
         char* text = header ? ae_strdup_printf("%s\n#if !defined(AE_PROBE_ANY) && "
                                                "!defined(AETHER_CRT_IS_%s)\n"
-                                               "#error another C runtime than the archive's\n"
-                                               "#endif\n%sint ae_crt_probe;\n",
+                                               "#error another C runtime than that of the archive\n"
+                                               "#endif\n%sextern int ae_crt_probe;\n"
+                                               "int ae_crt_probe;\n",
                                                header, name, mingw_check)
                             : NULL;
-        /* With the build's own cflags: `-mcrtdll=ucrt`, `--target` or
-         * `--sysroot` in them change the C runtime the compiler builds
-         * against, so the question asked without them is about another one.
-         * They are part of the question, so of the remembered answer too. */
-        const char* user = get_cflags();
+        /* With the build's own cflags, on the probe and on its control
+         * alike: `-mcrtdll=ucrt`, `--target` or `--sysroot` in them change
+         * the C runtime the compiler builds against, so the question asked
+         * without them is about another one. They are part of the question,
+         * so of the remembered answer too. */
         char* flags = user[0] ? ae_strdup_printf(" %s", user) : ae_strdup_printf("%s", "");
-        int told = text && flags ? cc_probe_takes(cc, flags, "ae_crt_probe", text) : -1;
-        char ours[100];
-        if (mingw >= 0) snprintf(ours, sizeof(ours), "%s mingw-w64 %d", name, mingw);
-        else snprintf(ours, sizeof(ours), "%s", name);
+        int told = text && flags ? cc_probe_takes(cc, flags, "", "ae_crt_probe", text) : -1;
         if (told == 0) {
             matches = 0;
             if (tc.verbose) {
@@ -5531,37 +5539,36 @@ static char* ae_precompile_runtime_srcs(const char* cc, const char* cflags, cons
     return ok ? list : NULL;
 }
 
-/* The archiver that goes with compiler `cc`, as a command (malloc'd), or NULL
- * when there is none to be had. `zig cc` is zig's clang, and its archiver is
- * `zig ar`: asked for one, zig's clang names whatever `ar` PATH holds (on one
- * Windows box, another toolchain's). Any other compiler names its own with
- * -print-prog-name=ar, as GCC gives the ar of its binutils. */
-static char* runtime_archiver(const char* cc) {
-    /* The first word, without quotes, and where the second one starts. */
-    const char* p = cc;
-    while (*p == ' ') p++;
-    char first[1100];
-    size_t n = 0;
-    if (*p == '"') {
-        p++;
-        while (*p && *p != '"' && n + 1 < sizeof(first)) first[n++] = *p++;
-        if (*p == '"') p++;
-    } else {
-        while (*p && *p != ' ' && n + 1 < sizeof(first)) first[n++] = *p++;
+/* Whether the words of `cc` and `flags` ask for link-time optimisation: the
+ * last of -flto, -flto=<how> and -fno-lto decides, as it does for GCC and
+ * Clang. */
+static int ae_flags_enable_lto(const char* cc, const char* flags) {
+    int lto = 0;
+    const char* parts[2] = { cc, flags };
+    for (int k = 0; k < 2; k++) {
+        const char* p = parts[k];
+        while (p && *p) {
+            while (*p == ' ' || *p == '\t') p++;
+            const char* w = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            size_t n = (size_t)(p - w);
+            if ((n == 5 && strncmp(w, "-flto", 5) == 0) || (n > 6 && strncmp(w, "-flto=", 6) == 0))
+                lto = 1;
+            else if (n == 8 && strncmp(w, "-fno-lto", 8) == 0)
+                lto = 0;
+        }
     }
-    first[n] = '\0';
-    while (*p == ' ') p++;
-    const char* base = first;
-    for (const char* q = first; *q; q++)
-        if (*q == '/' || *q == '\\') base = q + 1;
-    if ((strcmp(base, "zig") == 0 || strcmp(base, "zig.exe") == 0 ||
-         strcmp(base, "ZIG.EXE") == 0) &&
-        strncmp(p, "cc", 2) == 0 && (p[2] == ' ' || p[2] == '\0'))
-        return ae_strdup_printf("\"%s\" ar", first);
+    return lto;
+}
 
+/* What compiler `cc` answers to -print-prog-name=`prog`: a path that exists,
+ * quoted, as a command (malloc'd); "ar" for a bare `ar`, which PATH holds;
+ * else NULL. GCC answers with the bare name when it has no such program of
+ * its own, and that says nothing about which one PATH holds. */
+static char* cc_prog_name(const char* cc, const char* prog) {
     char out_path[1100];
     if (!ae_private_temp_path(out_path, sizeof(out_path), "ae_ar_name.out")) return NULL;
-    char* cmd = ae_strdup_printf("%s -print-prog-name=ar", cc);
+    char* cmd = ae_strdup_printf("%s -print-prog-name=%s", cc, prog);
     char line[1100] = "";
     if (cmd && run_cmd_capture_stdout(cmd, out_path) == 0) {
         FILE* f = fopen(out_path, "r");
@@ -5575,7 +5582,211 @@ static char* runtime_archiver(const char* cc) {
     line[strcspn(line, "\r\n")] = '\0';
     if (strchr(line, '/') || strchr(line, '\\'))
         return path_exists(line) ? ae_strdup_printf("\"%s\"", line) : NULL;
-    return strcmp(line, "ar") == 0 ? ae_strdup_printf("ar") : NULL;
+    return strcmp(line, "ar") == 0 && strcmp(prog, "ar") == 0 ? ae_strdup_printf("ar") : NULL;
+}
+
+/* `base` with the last `from` in it replaced by `to` (gcc.exe to gcc-ar.exe,
+ * x86_64-linux-gnu-gcc-13 to x86_64-linux-gnu-gcc-ar-13, clang-17 to
+ * llvm-ar-17), else `fallback`, into out. */
+static void ae_sibling_name(const char* base, const char* from, const char* to,
+                            const char* fallback, char* out, size_t outsz) {
+    const char* at = NULL;
+    for (const char* s = strstr(base, from); s; s = strstr(s + 1, from)) at = s;
+    if (at)
+        snprintf(out, outsz, "%.*s%s%s", (int)(at - base), base, to, at + strlen(from));
+    else
+        snprintf(out, outsz, "%s", fallback);
+}
+
+/* The archivers to try, in order, for the runtime compiler `cc` builds with
+ * `cflags`, as commands (malloc'd) into `out`; how many. `zig cc` is zig's
+ * clang, and its archiver is `zig ar`, which reads zig's LLVM bitcode as
+ * well: asked for one, zig's clang names whatever `ar` PATH holds (on one
+ * Windows box, another toolchain's). Any other compiler names its own `ar`
+ * with -print-prog-name=ar, as GCC gives the ar of its binutils.
+ *
+ * Under -flto the objects are the compiler's own intermediate code, and an
+ * archiver indexes their symbols only through the compiler's plugin: GCC's
+ * slim LTO objects went into the archive unindexed (`ar`: "plugin needed to
+ * handle lto object"), its index naming only __gnu_lto_slim, so the link found
+ * none of the runtime's symbols, and every later build linked that archive
+ * from the cache and failed too. So the compiler's LTO-aware archiver comes
+ * first: gcc-ar, which loads GCC's plugin, or llvm-ar, which reads bitcode,
+ * by the compiler's name; each beside the compiler, then where the compiler
+ * says, then on PATH; and plain `ar` last, which indexes fat LTO objects.
+ * ae_cached_runtime keeps the first archive that has a symbol index. */
+static int runtime_archivers(const char* cc, const char* cflags, char** out, int max) {
+    int n = 0;
+    /* The first word, without quotes, and where the second one starts. */
+    const char* p = cc;
+    while (*p == ' ') p++;
+    char first[1100];
+    size_t fn = 0;
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"' && fn + 1 < sizeof(first)) first[fn++] = *p++;
+        if (*p == '"') p++;
+    } else {
+        while (*p && *p != ' ' && fn + 1 < sizeof(first)) first[fn++] = *p++;
+    }
+    first[fn] = '\0';
+    while (*p == ' ') p++;
+    const char* base = first;
+    for (const char* q = first; *q; q++)
+        if (*q == '/' || *q == '\\') base = q + 1;
+    if ((strcmp(base, "zig") == 0 || strcmp(base, "zig.exe") == 0 ||
+         strcmp(base, "ZIG.EXE") == 0) &&
+        strncmp(p, "cc", 2) == 0 && (p[2] == ' ' || p[2] == '\0')) {
+        out[n] = ae_strdup_printf("\"%s\" ar", first);
+        return out[n] ? 1 : 0;
+    }
+
+    if (ae_flags_enable_lto(cc, cflags)) {
+        char* resolved = ae_resolve_program(first);
+        const char* rbase = resolved ? resolved : first;
+        for (const char* q = rbase; *q; q++)
+            if (*q == '/' || *q == '\\') rbase = q + 1;
+        char gcc_ar[300], llvm_ar[300];
+        ae_sibling_name(rbase, "gcc", "gcc-ar", "gcc-ar", gcc_ar, sizeof(gcc_ar));
+        ae_sibling_name(rbase, "clang", "llvm-ar", "llvm-ar", llvm_ar, sizeof(llvm_ar));
+        const char* tools[2];
+        int clang_named = strstr(rbase, "clang") != NULL;
+        tools[0] = clang_named ? llvm_ar : gcc_ar;
+        tools[1] = clang_named ? gcc_ar : llvm_ar;
+        for (int t = 0; t < 2 && n < max - 1; t++) {
+            char* found = NULL;
+            /* Beside the compiler, under the compiler's own name for it. */
+            if (resolved) {
+                char* beside = ae_path_printf("%.*s%s", (int)(rbase - resolved), resolved,
+                                              tools[t]);
+                char* there = beside ? ae_resolve_program(beside) : NULL;
+                if (there) found = ae_strdup_printf("\"%s\"", there);
+                free(there);
+                free(beside);
+            }
+            /* Where the compiler says it is; then PATH, by the plain name. */
+            const char* plain = t == (clang_named ? 0 : 1) ? "llvm-ar" : "gcc-ar";
+            if (!found) found = cc_prog_name(cc, plain);
+            if (!found) {
+                char* on_path = ae_resolve_program(plain);
+                if (on_path) found = ae_strdup_printf("\"%s\"", on_path);
+                free(on_path);
+            }
+            if (found) out[n++] = found;
+        }
+        free(resolved);
+    }
+    if (n < max) {
+        char* ar = cc_prog_name(cc, "ar");
+        if (ar) out[n++] = ar;
+    }
+    return n;
+}
+
+/* Whether the archive at `path` has a symbol index that names its members'
+ * symbols, the index a linker selects members by. The first member is the
+ * index: `/` (32-bit offsets) or `/SYM64/` in the GNU and COFF layout, a
+ * count and then the names; `__.SYMDEF` (`_64`, ` SORTED`) in the BSD and
+ * Darwin one, its name inline or after `#1/<length>`. An index naming
+ * __gnu_lto_slim is one an archiver made without GCC's LTO plugin: it has
+ * that marker of a slim LTO object and none of the object's own symbols. */
+static int ae_archive_has_symbol_index(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    unsigned char hdr[60];
+    char magic[8];
+    int ok = 0;
+    if (fread(magic, 1, 8, f) == 8 && memcmp(magic, "!<arch>\n", 8) == 0 &&
+        fread(hdr, 1, 60, f) == 60) {
+        char field[11];
+        memcpy(field, hdr + 48, 10);
+        field[10] = '\0';
+        unsigned long long size = strtoull(field, NULL, 10);
+        unsigned char* d = size > 0 && size < (256ULL << 20) ? malloc((size_t)size) : NULL;
+        if (d && fread(d, 1, (size_t)size, f) == (size_t)size) {
+            int gnu_width = memcmp(hdr, "/               ", 16) == 0 ? 4
+                          : memcmp(hdr, "/SYM64/         ", 16) == 0 ? 8 : 0;
+            if (gnu_width) {
+                /* A big-endian count, the offsets, then the names. */
+                unsigned long long count = 0;
+                if (size >= (unsigned long long)gnu_width)
+                    for (int i = 0; i < gnu_width; i++) count = (count << 8) | d[i];
+                unsigned long long at = (unsigned long long)gnu_width + count * gnu_width;
+                ok = count > 0 && count <= size && at <= size;
+                for (unsigned long long k = 0; ok && k < count; k++) {
+                    const unsigned char* name = d + at;
+                    const unsigned char* end = memchr(name, '\0', (size_t)(size - at));
+                    if (!end) { ok = 0; break; }
+                    if (strcmp((const char*)name, "__gnu_lto_slim") == 0) ok = 0;
+                    at += (unsigned long long)(end - name) + 1;
+                }
+            } else {
+                /* BSD: the name inline, or #1/<length> and then the name. */
+                const unsigned char* body = d;
+                unsigned long long left = size;
+                char name[40] = "";
+                if (memcmp(hdr, "#1/", 3) == 0) {
+                    unsigned long long nlen = strtoull((const char*)hdr + 3, NULL, 10);
+                    if (nlen < sizeof(name) && nlen <= size) {
+                        memcpy(name, d, (size_t)nlen);
+                        name[nlen] = '\0';
+                        body = d + nlen;
+                        left = size - nlen;
+                    }
+                } else {
+                    memcpy(name, hdr, 16);
+                    name[16] = '\0';
+                }
+                if (strncmp(name, "__.SYMDEF", 9) == 0) {
+                    /* Little-endian: the byte length of the ranlib entries
+                     * (two words each), then the entries. */
+                    int wide = strstr(name, "_64") != NULL;
+                    unsigned width = wide ? 8 : 4;
+                    unsigned long long bytes = 0;
+                    if (left >= width)
+                        for (int i = (int)width - 1; i >= 0; i--) bytes = (bytes << 8) | body[i];
+                    ok = bytes >= 2ULL * width && bytes <= left - width;
+                }
+            }
+        }
+        free(d);
+    }
+    fclose(f);
+    return ok;
+}
+
+/* #3813: a runtime archive made in the cache directory that could not be
+ * published there is linked from where it was made, then removed: at exit,
+ * after the link and after whatever ran the program. The cap skips `*.tmp.*`,
+ * so one left behind stayed for good. */
+static char* g_unpublished_rt[8];
+static int g_unpublished_rt_n;
+
+static void ae_remove_unpublished_rt(void) {
+    for (int i = 0; i < g_unpublished_rt_n; i++) {
+        remove(g_unpublished_rt[i]);
+        free(g_unpublished_rt[i]);
+    }
+    g_unpublished_rt_n = 0;
+}
+
+/* Whether `tmp` is now set to be removed at exit. */
+static int ae_remove_at_exit(const char* tmp) {
+    for (int i = 0; i < g_unpublished_rt_n; i++)
+        if (strcmp(g_unpublished_rt[i], tmp) == 0) return 1;
+    if (g_unpublished_rt_n == (int)(sizeof(g_unpublished_rt) / sizeof(g_unpublished_rt[0])))
+        return 0;
+    char* kept = strdup(tmp);
+    if (!kept) return 0;
+    if (g_unpublished_rt_n == 0) {
+        static int registered = 0;
+        if (!registered) {
+            registered = 1;
+            atexit(ae_remove_unpublished_rt);
+        }
+    }
+    g_unpublished_rt[g_unpublished_rt_n++] = kept;
+    return 1;
 }
 
 /* #3813: what a build without libaether.a links for the runtime: an
@@ -5588,10 +5799,15 @@ static char* runtime_archiver(const char* cc) {
  * two. The archive is keyed by cache_runtime_key (the compiler's identity,
  * the flags, the sources' content, the tree), so a hit is the runtime these
  * sources, flags and compiler make, and --trace has its own. It is made the
- * way every cache slot is: `ar rcs` into `<slot>.tmp.<pid>`, then
- * cache_publish, which leaves a slot another build published first alone,
- * so two first builds at once each link a whole archive. An archive links
- * as libaether.a does: the members a program needs, and no others. */
+ * way every cache slot is: into `<slot>.tmp.<pid>`, then cache_publish,
+ * which leaves a slot another build published first alone, so two first
+ * builds at once each link a whole archive. An archive links as libaether.a
+ * does: the members a program needs, and no others.
+ *
+ * Only an archive with a symbol index is published (runtime_archivers says
+ * which archivers are tried): a linker selects members by it, and one without
+ * links none of them. When no archiver makes one, the objects are linked, as
+ * when there is no archiver. */
 static char* ae_cached_runtime(const char* cc, const char* rt_cflags) {
     unsigned long long key = cache_runtime_key(cc, rt_cflags, tc.runtime_srcs);
     if (key) init_cache_dir();
@@ -5606,20 +5822,35 @@ static char* ae_cached_runtime(const char* cc, const char* rt_cflags) {
     }
     char* objs = ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
     if (!objs) return NULL;
-    char* ar = runtime_archiver(cc);
-    if (!ar) {
+    char* ars[4];
+    int nar = runtime_archivers(cc, rt_cflags, ars, (int)(sizeof(ars) / sizeof(ars[0])));
+    if (nar == 0) {
         if (tc.verbose) fprintf(stderr, "[cache] runtime: no archiver for %s; not cached\n", cc);
         return objs;
     }
     char tmp[800];
     snprintf(tmp, sizeof(tmp), "%s.tmp.%d", slot, (int)getpid());
-    char* cmd = ae_strdup_printf("%s rcs \"%s\" %s", ar, tmp, objs);
-    int made = cmd && run_cmd_quiet(cmd) == 0 && path_exists(tmp);
-    free(cmd);
-    free(ar);
+    int made = 0;
+    for (int i = 0; i < nar; i++) {
+        if (!made) {
+            remove(tmp);
+            char* cmd = ae_strdup_printf("%s rcs \"%s\" %s", ars[i], tmp, objs);
+            made = cmd && run_cmd_quiet(cmd) == 0 && path_exists(tmp);
+            free(cmd);
+            if (made && !ae_archive_has_symbol_index(tmp)) {
+                made = 0;
+                if (tc.verbose)
+                    fprintf(stderr, "[cache] runtime: %s made an archive with no symbol "
+                                    "index for its objects\n", ars[i]);
+            }
+        }
+        free(ars[i]);
+    }
     if (!made) {
         remove(tmp);
-        if (tc.verbose) fprintf(stderr, "[cache] runtime: the archive could not be made; not cached\n");
+        if (tc.verbose)
+            fprintf(stderr, "[cache] runtime: no archive with a symbol index could be made; "
+                            "not cached, the objects are linked\n");
         return objs;
     }
     char* link;
@@ -5627,9 +5858,16 @@ static char* ae_cached_runtime(const char* cc, const char* rt_cflags) {
         cache_enforce_limit(slot, 0);
         link = ae_strdup_printf("\"%s\"", slot);
         if (tc.verbose) fprintf(stderr, "[cache] runtime: %s (built)\n", slot);
-    } else {
-        /* A cache that takes no publish: this build links its own. */
+    } else if (ae_remove_at_exit(tmp)) {
+        /* A cache that takes no publish: this build links its own, and it
+         * goes once the build is done. */
         link = ae_strdup_printf("\"%s\"", tmp);
+        if (tc.verbose)
+            fprintf(stderr, "[cache] runtime: %s could not be published; linked from %s\n",
+                    slot, tmp);
+    } else {
+        remove(tmp);
+        link = NULL;
     }
     if (!link) return objs;
     free(objs);
@@ -8199,10 +8437,11 @@ static int print_command_help(const char* cmd) {
         printf("  --format=aeocha-v1   One aeocha v1 block per test file on stdout\n");
         printf("  -D NAME              Declare a build symbol for `when defined(NAME)`\n");
     } else if (strcmp(cmd, "cache") == 0) {
-        printf("Usage: ae cache [info|gc|clear]\n");
+        printf("Usage: ae cache [info|gc|clear|ccid]\n");
         printf("  info   Show the build cache's size, location and limit (the default)\n");
         printf("  gc     Evict least-recently-used builds down to the limit now\n");
         printf("  clear  Remove every cached build\n");
+        printf("  ccid   Print the identity of the C compiler a build would use\n");
     } else if (strcmp(cmd, "examples") == 0) {
         printf("Usage: ae examples [dir]\n");
         printf("  Build every example program under dir (default: examples) into build/examples/:\n");
@@ -13741,6 +13980,21 @@ static int cmd_examples(int argc, char** argv) {
 static int cmd_cache(int argc, char** argv) {
     const char* sub = argc > 0 ? argv[0] : "info";
 
+    /* The identity of the C compiler a build would use ($AE_CC, $CC, else
+     * the default), as the cache key folds it. `make` records it beside
+     * libaether.a, so a build by the archive's own compiler links the
+     * archive without asking which C runtime it targets (archive_crt_check).
+     * Before init_cache_dir: it reads and makes nothing there. */
+    if (strcmp(sub, "ccid") == 0) {
+        unsigned long long id = cache_c_compiler_id();
+        if (!id) {
+            fprintf(stderr, "ae cache ccid: the C compiler's identity is not known\n");
+            return 1;
+        }
+        printf("%016llx\n", id);
+        return 0;
+    }
+
     /* The directory the builder actually writes to, AETHER_CACHE_DIR included.
      * Guessing "$HOME/.aether/cache" here made `ae cache` report and clear a
      * directory the build was not using whenever that variable was set. */
@@ -13799,7 +14053,7 @@ static int cmd_cache(int argc, char** argv) {
         return 0;
     }
     if (strcmp(sub, "info") != 0) {
-        fprintf(stderr, "Usage: ae cache [info|gc|clear]\n");
+        fprintf(stderr, "Usage: ae cache [info|gc|clear|ccid]\n");
         return 1;
     }
 

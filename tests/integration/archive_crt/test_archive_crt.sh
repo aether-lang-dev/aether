@@ -15,6 +15,16 @@
 #      links the archive and says nothing.
 #   2b. On Windows, an archive recorded for another mingw-w64 major is
 #      compiled from source too.
+#   2c. cflags that change the C runtime (-mcrtdll=ucrt) are asked about.
+#   2d. The record names the compiler that built the archive (`cc <id>`, as
+#      `ae cache ccid` prints it), and a build by that compiler with no
+#      cflags, on a cold cache, links the archive without asking: no
+#      ae_crt_probe compile. Asking was one more compiler start on every
+#      cold cache (about 25 ms on Windows).
+#   2e. A warning flag of the user's (-Werror -Wmissing-variable-declarations)
+#      does not make the archive's own compiler "target another C runtime":
+#      the probe's control is compiled with the same cflags as the probe,
+#      and the probe declares what it defines.
 #   3. With zig (on PATH or under build/scratch/.zig), AE_CC="zig cc" builds
 #      and runs a program that panics and catches it.
 
@@ -101,7 +111,7 @@ if [ -n "$other_def" ] && [ -n "$REAL_CC" ]; then
         fail "the build with the archive's own compiler failed"
     elif grep -q "the runtime is compiled from source" "$TMP/same.log"; then
         fail "the archive's own compiler took the source fallback"
-    elif ! grep -q "^\[toolchain\] libaether.a is $crt[^;]*; .* targets the same: the archive is linked" "$TMP/same.log"; then
+    elif ! grep -Eq "^\[toolchain\] libaether.a is $crt[^;]*; .* (targets the same|built it): the archive is linked" "$TMP/same.log"; then
         fail "-v does not say the archive's own compiler targets its C runtime: $(grep '^\[toolchain\] libaether.a' "$TMP/same.log" | tail -1 | cut -c1-160)"
     fi
     done_what="$done_what; a compiler on $other compiles the runtime from source and says so, the archive's own links it"
@@ -149,6 +159,50 @@ if [ "$crt" = msvcrt ]; then
     grep -q "^\[toolchain\] libaether.a is msvcrt[^;]*; .* targets ucrt[^:]*: the runtime is compiled from source" "$TMP/mcrt.log" ||
         fail "with cflags -mcrtdll=ucrt, -v does not say the runtime was compiled from source for ucrt: $(grep '^\[toolchain\] libaether.a' "$TMP/mcrt.log" | tail -1 | cut -c1-160)"
     done_what="$done_what; cflags naming another C runtime (-mcrtdll=ucrt) are asked about too"
+fi
+
+# 2d. The compiler that built the archive, in the record, and not asked.
+built_by="$(sed -n 's/^cc \([0-9a-f]\{16\}\)$/\1/p' "$rec" 2>/dev/null | tr -d '\r' | head -n 1)"
+if [ -n "$crt" ]; then
+    mine="$("$AE" cache ccid 2>/dev/null | tr -d '\r')"
+    if [ -z "$built_by" ]; then
+        fail "build/libaether.crt does not name the compiler that built the archive (no 'cc <id>' line)"
+    elif [ "$mine" != "$built_by" ]; then
+        echo "  [SKIP] $NAME: step 2d: the C compiler here ($mine) is not the one that built the archive ($built_by)"
+    elif ! (cd "$TMP" && AETHER_CACHE_DIR="$TMP/cache_own" "$AE" build -v hello.ae -o own) > "$TMP/own.log" 2>&1; then
+        grep -i "error" "$TMP/own.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        fail "the cold build with the archive's own compiler failed"
+    elif grep -q "ae_crt_probe" "$TMP/own.log"; then
+        fail "on a cold cache the archive's own compiler was asked which C runtime it targets: $(grep ae_crt_probe "$TMP/own.log" | head -1 | cut -c1-160)"
+    elif ! grep -q "^\[toolchain\] libaether.a is $crt[^;]*; .* built it: the archive is linked" "$TMP/own.log"; then
+        fail "-v does not say the archive's own compiler built it: $(grep '^\[toolchain\] libaether.a' "$TMP/own.log" | tail -1 | cut -c1-160)"
+    else
+        done_what="$done_what; the archive's own compiler is not asked on a cold cache"
+    fi
+fi
+
+# 2e. A warning flag of the user's, on the archive's own compiler: asked
+# (cflags), and the answer is the archive's runtime. Only where the compiler
+# takes the flag (GCC 14 and later, Clang).
+if [ -n "$crt" ] && [ -n "$REAL_CC" ]; then
+    mkdir -p "$TMP/warn"
+    printf 'extern int ae_w;\nint ae_w;\n' > "$TMP/warn/w.c"
+    if "$REAL_CC" -Werror -Wmissing-variable-declarations -fsyntax-only "$TMP/warn/w.c" 2>/dev/null; then
+        cp "$TMP/hello.ae" "$TMP/warn/"
+        printf '[build]\ncflags = "-Werror -Wmissing-variable-declarations"\n' > "$TMP/warn/aether.toml"
+        # The build itself may stop on a warning in the generated C; the
+        # question here is what ae decided about the archive.
+        (cd "$TMP/warn" && AETHER_CACHE_DIR="$TMP/cache_warn" "$AE" build -v hello.ae -o warn) > "$TMP/warn.log" 2>&1
+        if grep -q "the runtime is compiled from source" "$TMP/warn.log"; then
+            fail "cflags -Werror -Wmissing-variable-declarations made the archive's own compiler 'target another C runtime': $(grep '^\[toolchain\] libaether.a' "$TMP/warn.log" | tail -1 | cut -c1-160)"
+        elif ! grep -q "^\[toolchain\] libaether.a is $crt[^;]*; .* targets the same: the archive is linked" "$TMP/warn.log"; then
+            fail "with cflags -Werror -Wmissing-variable-declarations, -v does not say the compiler targets the archive's runtime: $(grep '^\[toolchain\] libaether.a' "$TMP/warn.log" | tail -1 | cut -c1-160)"
+        else
+            done_what="$done_what; a warning flag of the user's is no other C runtime"
+        fi
+    else
+        echo "  [SKIP] $NAME: step 2e: $REAL_CC does not take -Wmissing-variable-declarations"
+    fi
 fi
 
 # 3. zig.

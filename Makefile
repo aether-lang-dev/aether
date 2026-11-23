@@ -2408,14 +2408,31 @@ $(BUILD_DIR)/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(
 # archive's objects are compiled with; the flags stamp moves when either
 # does. The name stays alone on the first line, which is all an older ae
 # reads. An empty file, not none, so make does not run this every time.
-$(BUILD_DIR)/libaether.crt: runtime/aether_crt_id.h $(BUILD_FLAGS_STAMP) | $(BUILD_DIR)
-	@pp=$$(printf '#include "runtime/aether_crt_id.h"\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n#ifdef AETHER_CRT_MINGW_MAJOR\nAETHER_CRT_MINGW AETHER_CRT_MINGW_MAJOR\n#endif\n' \
-	    | $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -E -P -x c - 2>/dev/null | tr -d '\r'); \
+#
+# Then `cc <id>`: the identity of the compiler that built the archive, as ae
+# has it (`ae cache ccid`, the cache key's c_compiler_fingerprint), so a
+# build by that compiler with no cflags links the archive without asking it
+# which runtime it targets, one compiler start less on a cold cache. Only
+# when the compiler given no flags at all, as ae asks it, names the same
+# runtime: CFLAGS such as -mcrtdll=ucrt change it. ccache runs the compiler
+# it names, and ae runs that compiler, so the identity is the compiler's.
+$(BUILD_DIR)/libaether.crt: runtime/aether_crt_id.h $(BUILD_FLAGS_STAMP) $(BUILD_DIR)/ae$(EXE_EXT) | $(BUILD_DIR)
+	@probe='#include "runtime/aether_crt_id.h"\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n#ifdef AETHER_CRT_MINGW_MAJOR\nAETHER_CRT_MINGW AETHER_CRT_MINGW_MAJOR\n#endif\n'; \
+	  pp=$$(printf "$$probe" | $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -E -P -x c - 2>/dev/null | tr -d '\r'); \
 	  crt=$$(printf '%s\n' "$$pp" | sed -n 's/^AETHER_CRT_RECORD //p'); \
 	  mingw=$$(printf '%s\n' "$$pp" | sed -n 's/^AETHER_CRT_MINGW \([0-9][0-9]*\)$$/\1/p'); \
-	  { printf '%s\n' "$$crt"; if [ -n "$$crt" ] && [ -n "$$mingw" ]; then printf 'mingw-w64 %s\n' "$$mingw"; fi; } > $@.tmp && \
+	  cc='$(CC)'; case "$$cc" in "ccache "*) cc="$${cc#ccache }" ;; esac; \
+	  pp0=$$(printf "$$probe" | $$cc -E -P -x c - 2>/dev/null | tr -d '\r'); \
+	  crt0=$$(printf '%s\n' "$$pp0" | sed -n 's/^AETHER_CRT_RECORD //p'); \
+	  mingw0=$$(printf '%s\n' "$$pp0" | sed -n 's/^AETHER_CRT_MINGW \([0-9][0-9]*\)$$/\1/p'); \
+	  ccid=""; \
+	  if [ -n "$$crt" ] && [ "$$crt0" = "$$crt" ] && [ "$$mingw0" = "$$mingw" ]; then \
+	    ccid=$$(AE_CC="$$cc" $(BUILD_DIR)/ae$(EXE_EXT) cache ccid 2>/dev/null | tr -d '\r' | sed -n '/^[0-9a-f]\{16\}$$/p'); \
+	  fi; \
+	  { printf '%s\n' "$$crt"; if [ -n "$$crt" ] && [ -n "$$mingw" ]; then printf 'mingw-w64 %s\n' "$$mingw"; fi; \
+	    if [ -n "$$ccid" ]; then printf 'cc %s\n' "$$ccid"; fi; } > $@.tmp && \
 	  mv $@.tmp $@ && \
-	  echo "✓ C runtime of libaether.a: $${crt:-(one on this platform, not recorded)}$${mingw:+, mingw-w64 $$mingw}"
+	  echo "✓ C runtime of libaether.a: $${crt:-(one on this platform, not recorded)}$${mingw:+, mingw-w64 $$mingw}$${ccid:+, built by C compiler $$ccid}"
 
 # Authoritative MANIFEST — list of link-suitable runtime + stdlib
 # .c files for downstream consumers (aetherBuild and similar tools)
