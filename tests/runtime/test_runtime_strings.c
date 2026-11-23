@@ -463,3 +463,44 @@ TEST_CATEGORY(string_publish_only_marks_counted, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(AETHER_STRING_SHARED_BIT | 1, s->ref_count);
     string_release(s);
 }
+
+/* #3830: string.from_int and from_long write their digits without snprintf.
+ * The text, its length and the string's shape are snprintf's "%d" / "%lld",
+ * checked over every value near zero, both ends of each width, and each
+ * power of ten and its neighbours. */
+static int from_signed_matches(long long v, int as_int) {
+    char want[32];
+    if (as_int) snprintf(want, sizeof(want), "%d", (int)v);
+    else snprintf(want, sizeof(want), "%lld", v);
+    AetherString* s = as_int ? string_from_int((int)v) : string_from_long(v);
+    int ok = s && is_aether_string(s) && s->length == strlen(want) &&
+             s->data[s->length] == '\0' && memcmp(s->data, want, s->length) == 0;
+    if (!ok) fprintf(stderr, "from_%s(%lld): got '%s', want '%s'\n",
+                     as_int ? "int" : "long", v, s ? s->data : "(null)", want);
+    if (s) string_release(s);
+    return ok;
+}
+
+TEST_CATEGORY(string_from_int_and_long_match_snprintf, TEST_CATEGORY_STDLIB) {
+    int bad = 0;
+    for (long long v = -100000; v <= 100000; v++) {
+        bad += !from_signed_matches(v, 1);
+        bad += !from_signed_matches(v, 0);
+    }
+    const long long ends[] = { INT_MIN, INT_MIN + 1, INT_MAX - 1, INT_MAX,
+                               LLONG_MIN, LLONG_MIN + 1, LLONG_MAX - 1, LLONG_MAX };
+    for (size_t i = 0; i < sizeof(ends) / sizeof(ends[0]); i++) {
+        if (ends[i] >= INT_MIN && ends[i] <= INT_MAX) bad += !from_signed_matches(ends[i], 1);
+        bad += !from_signed_matches(ends[i], 0);
+    }
+    for (long long p = 10; p > 0 && p <= LLONG_MAX / 10; p *= 10) {
+        for (long long d = -1; d <= 1; d++) {
+            long long vs[] = { p + d, -(p + d) };
+            for (int k = 0; k < 2; k++) {
+                if (vs[k] >= INT_MIN && vs[k] <= INT_MAX) bad += !from_signed_matches(vs[k], 1);
+                bad += !from_signed_matches(vs[k], 0);
+            }
+        }
+    }
+    ASSERT_EQ(0, bad);
+}

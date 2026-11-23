@@ -949,16 +949,23 @@ typedef struct {
 
 static void interp_put(InterpSink* k, const char* p, size_t n);
 
+/* The decimal digits of `magnitude`, written backwards so they end at
+ * `end`; returns where they start. At most 20 digits. */
+static inline char* decimal_digits(char* end, unsigned long long magnitude) {
+    char* p = end;
+    do {
+        *--p = (char)('0' + (int)(magnitude % 10));
+        magnitude /= 10;
+    } while (magnitude);
+    return p;
+}
+
 /* A plain %d / %u conversion (codegen writes no flags, width or precision)
  * in decimal, as printf would, without a call into snprintf: interpolation
  * is a hot path and most of its segments are integers. */
 static void interp_put_decimal(InterpSink* k, unsigned long long magnitude, int negative) {
     char buf[24];
-    char* p = buf + sizeof(buf);
-    do {
-        *--p = (char)('0' + (int)(magnitude % 10));
-        magnitude /= 10;
-    } while (magnitude);
+    char* p = decimal_digits(buf + sizeof(buf), magnitude);
     if (negative) *--p = '-';
     interp_put(k, p, (size_t)(buf + sizeof(buf) - p));
 }
@@ -1504,10 +1511,24 @@ int aether_string_is_string(const void* p) {
     return is_aether_string(p);
 }
 
+/* #3830: a signed integer's decimal text, as snprintf's "%lld" writes it,
+ * written straight into a string of its length: no format parsing, no
+ * strlen and no header check. The digits are interp_put_decimal's. */
+static AetherString* string_from_signed(long long value) {
+    char buf[24];
+    char* end = buf + sizeof(buf);
+    /* The magnitude in unsigned arithmetic, so LLONG_MIN is exact. */
+    char* p = decimal_digits(end, value < 0 ? 0ULL - (unsigned long long)value
+                                            : (unsigned long long)value);
+    if (value < 0) *--p = '-';
+    size_t n = (size_t)(end - p);
+    AetherString* s = string_alloc_inline(n);
+    if (s) memcpy(s->data, p, n);
+    return s;
+}
+
 AetherString* string_from_int(int value) {
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%d", value);
-    return string_new(buffer);
+    return string_from_signed(value);
 }
 
 // Sibling of string_from_int that preserves the full 64-bit range.
@@ -1516,9 +1537,7 @@ AetherString* string_from_int(int value) {
 // exceed INT_MAX reach for this instead of truncating through
 // `string_from_int`.
 AetherString* string_from_long(long long value) {
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%lld", value);
-    return string_new(buffer);
+    return string_from_signed(value);
 }
 
 // Aether's `float` lowers to C `double` (8 bytes), so the parameter
