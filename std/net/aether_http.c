@@ -685,7 +685,12 @@ static char* ssl_err_string(const char* prefix) {
 
 static int transport_send(Transport* t, const void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
-    if (t->ssl) return SSL_write(t->ssl, buf, len);
+    if (t->ssl) {
+        /* An empty error queue, as transport_recv leaves it: a failed write
+         * is classified by SSL_get_error too (http_io_failure_kind). */
+        ERR_clear_error();
+        return SSL_write(t->ssl, buf, len);
+    }
 #endif
     if (t->pure_tls) return pt_client_send(t->pure_tls, buf, len);
     /* EPIPE, not SIGPIPE, for a peer that has gone (a pooled connection
@@ -3992,25 +3997,26 @@ static int http_io_would_block(void) {
 #endif
 }
 
-/* Why a read on `t` just failed, by kind, read from the error the failing
- * call left (#3846): HTTP_IO_TIMED_OUT when it waited out the socket's
- * receive timeout (a would-block on a transport this driver uses blocking,
- * which is how POSIX reports SO_RCVTIMEO, or Winsock's WSAETIMEDOUT),
- * HTTP_IO_WOULD_BLOCK for a non-blocking transport with nothing yet,
- * HTTP_IO_RESET when the peer reset or aborted the connection, and
- * HTTP_IO_OTHER for anything else. A timeout and a reset were one "recv
- * timeout or I/O error", which the proxy answers 504 for both. The kinds
- * are in aether_http_internal.h.
+/* Why a read or a write on `t` just failed, by kind, read from the error
+ * the failing call left (#3846): HTTP_IO_TIMED_OUT when it waited out the
+ * socket's receive or send timeout (a would-block on a transport this
+ * driver uses blocking, which is how POSIX reports SO_RCVTIMEO and
+ * SO_SNDTIMEO, or Winsock's WSAETIMEDOUT), HTTP_IO_WOULD_BLOCK for a
+ * non-blocking transport that cannot go on yet, HTTP_IO_RESET when the peer
+ * reset or aborted the connection, and HTTP_IO_OTHER for anything else. A
+ * timeout and a reset were one "recv timeout or I/O error", which the proxy
+ * answers 504 for both. The kinds are in aether_http_internal.h.
  *
- * `n` is what the read returned. A TLS read is classified by the TLS
- * layer's own answer, not by errno or WSAGetLastError: a TLS failure that
- * made no failing system call (a protocol error, a bad record) leaves
- * whatever an earlier call set there, and a stale EAGAIN read as a timeout
- * answered 504 and kept an idempotent request from going again. OpenSSL's
- * WANT_READ or WANT_WRITE is the timeout, its SSL_ERROR_SYSCALL a failed
- * system call whose error is this call's, and anything else an I/O error;
- * the pure-TLS client says a timeout by HTTP_PT_RECV_TIMED_OUT, and any
- * other failure is an I/O error. */
+ * `n` is what the read or the write returned. A TLS read or write is
+ * classified by the TLS layer's own answer, not by errno or
+ * WSAGetLastError: a TLS failure that made no failing system call (a
+ * protocol error, a bad record) leaves whatever an earlier call set there,
+ * and a stale EAGAIN read as a timeout answered 504 and kept an idempotent
+ * request from going again. OpenSSL's WANT_READ or WANT_WRITE is the
+ * timeout, its SSL_ERROR_SYSCALL a failed system call whose error is this
+ * call's, and anything else an I/O error; the pure-TLS client says a
+ * timeout by HTTP_PT_RECV_TIMED_OUT, and any other failure is an I/O
+ * error. */
 static int http_os_failure_kind(int blocking);
 int http_io_failure_kind(const Transport* t, int n) {
     /* -1 is a pure-TLS transport, which this client reads blocking. */
@@ -4062,6 +4068,21 @@ static const char* http_recv_failure_text(int kind, int head_only) {
                      : "I/O error before the response arrived";
 }
 
+/* What a write that returned `n` (not a byte taken) means for the
+ * exchange: a non-blocking transport that cannot go on yet waits for the
+ * descriptor (WANT_WRITE); any other failure ends the write, its kind in
+ * send_failure. Classified as a failed read is (http_io_failure_kind), by
+ * the TLS layer's own answer on a TLS transport: a write on a connection a
+ * protocol error ended makes no system call, and a stale EAGAIN read as
+ * "not writable yet" kept the event loop waiting for writability until the
+ * deadline. */
+static int http_exchange_send_failed(HttpExchange* x, int n) {
+    int kind = http_io_failure_kind(x->t, n);
+    if (kind == HTTP_IO_WOULD_BLOCK) return AE_X_WANT_WRITE;
+    x->send_failure = kind;
+    return AE_X_ERROR;
+}
+
 /* Write the request head, then the body. Bodies are written raw so embedded
  * NULs survive. */
 int http_exchange_send(HttpExchange* x) {
@@ -4069,13 +4090,13 @@ int http_exchange_send(HttpExchange* x) {
         int n = transport_send(x->t, x->head + x->head_sent,
                                (int)(x->head_len - x->head_sent));
         if (n > 0) { x->head_sent += (size_t)n; continue; }
-        return http_io_would_block() ? AE_X_WANT_WRITE : AE_X_ERROR;
+        return http_exchange_send_failed(x, n);
     }
     while (x->body && x->body_sent < x->body_len) {
         int n = transport_send(x->t, x->body + x->body_sent,
                                x->body_len - x->body_sent);
         if (n > 0) { x->body_sent += n; continue; }
-        return http_io_would_block() ? AE_X_WANT_WRITE : AE_X_ERROR;
+        return http_exchange_send_failed(x, n);
     }
     return AE_X_DONE;
 }
@@ -4085,15 +4106,17 @@ int http_exchange_send(HttpExchange* x) {
  * idempotent one may. Another may only when none of it went out: an
  * upstream that acts on the head and closes without reading the body ends
  * the write partway, after it has the request, and a second POST is a
- * second order. A write that waited out the socket's send timeout is not
- * written again either: the upstream is alive, only slow, and on Winsock a
- * send that timed out leaves the socket undefined, what it sent included.
- * A TLS write
- * counts what the TLS layer accepted, and a record it did not finish is
- * one the upstream cannot decrypt, so cannot act on. */
+ * second order. A write that waited out the socket's send timeout
+ * (send_failure HTTP_IO_TIMED_OUT, on every platform) is not written again
+ * either: the upstream is alive, only slow, and on Winsock a send that
+ * timed out leaves the socket undefined, what it sent included, so a head
+ * counted as unsent may have gone. A TLS write counts what the TLS layer
+ * accepted, and a record it did not finish is one the upstream cannot
+ * decrypt, so cannot act on. */
 int http_exchange_send_retryable(const HttpExchange* x, int r) {
     if (http_method_idempotent(x->method)) return 1;
-    return r == AE_X_ERROR && x->head_sent == 0 && x->body_sent == 0;
+    return r == AE_X_ERROR && x->send_failure != HTTP_IO_TIMED_OUT &&
+           x->head_sent == 0 && x->body_sent == 0;
 }
 
 /* Read until this response ends where its own framing says it does, or until
@@ -4425,9 +4448,9 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
 
 send_request:
     http_exchange_init(&tx, &t, hdr, hdr_len, body, body_len, method);
-    /* A WANT here is SO_SNDTIMEO firing on a transport this driver owns
-     * outright, a failed write, which only an idempotent request writes
-     * again (http_exchange_send_retryable). */
+    /* A write that waited out SO_SNDTIMEO on this blocking transport is a
+     * failed write of the timeout kind, which only an idempotent request
+     * writes again (http_exchange_send_retryable). */
     send_r = http_exchange_send(&tx);
     if (send_r != AE_X_DONE) {
         if (reused && !retried && http_exchange_send_retryable(&tx, send_r)) {

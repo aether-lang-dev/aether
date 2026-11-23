@@ -134,6 +134,12 @@ typedef struct {
      * HTTP_IO_RESET or HTTP_IO_OTHER (aether_http.c), 0 being OTHER, so a
      * timeout and a reset are told apart (#3846). */
     int    recv_failure;
+    /* Why the last write failed, when one did, in the same kinds: a write
+     * is classified as a read is (http_io_failure_kind), so a write that
+     * waited out the socket's send timeout is HTTP_IO_TIMED_OUT on every
+     * platform, Winsock's WSAETIMEDOUT and POSIX's would-block alike, and
+     * is never written again (#3824). */
+    int    send_failure;
 } HttpExchange;
 
 /* An upstream connection acquired without blocking. */
@@ -162,7 +168,8 @@ struct HttpUpstreamConnOpaque {
     char pool_key[512];
 };
 
-/* Why a read failed (HttpExchange.recv_failure, #3846). */
+/* Why a read or a write failed (HttpExchange.recv_failure, send_failure,
+ * #3846). */
 #define HTTP_IO_OTHER       0
 #define HTTP_IO_TIMED_OUT   1
 #define HTTP_IO_WOULD_BLOCK 2
@@ -173,9 +180,9 @@ struct HttpUpstreamConnOpaque {
  * failure. */
 #define HTTP_PT_RECV_TIMED_OUT (-2)
 
-/* Why a read on `t` that returned `n` failed, as one of the kinds above:
- * by the TLS layer's own answer on a TLS transport, never by an errno it
- * did not set (#3846). */
+/* Why a read or a write on `t` that returned `n` failed, as one of the
+ * kinds above: by the TLS layer's own answer on a TLS transport, never by
+ * an errno it did not set (#3846). */
 int  http_io_failure_kind(const Transport* t, int n);
 
 #define AE_X_DONE        0
@@ -197,7 +204,7 @@ void http_exchange_set_timeout(HttpExchange* x, int64_t timeout_ns);
 int  http_exchange_send(HttpExchange* x);
 /* Whether a write that ended in `r` (not DONE) on a reused connection may
  * go again on a fresh one: an idempotent request, or one none of which went
- * out (#3824). */
+ * out and whose write did not time out (#3824). */
 int  http_exchange_send_retryable(const HttpExchange* x, int r);
 int  http_exchange_recv(HttpExchange* x);
 

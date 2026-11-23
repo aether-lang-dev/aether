@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <fcntl.h>
 #endif
 #include <pthread.h>
 #include <errno.h>
@@ -1271,3 +1272,98 @@ TEST_CATEGORY(http_tls_read_failure_kind_ignores_stale_errno, TEST_CATEGORY_NETW
     SSL_CTX_free(ctx);
 #endif
 }
+
+/* Make `fd` block, or not. */
+static int t_set_blocking(int fd, int blocking) {
+#ifdef _WIN32
+    u_long nb = blocking ? 0 : 1;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &nb) == 0 ? 0 : -1;
+#else
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) return -1;
+    return fcntl(fd, F_SETFL, blocking ? (fl & ~O_NONBLOCK) : (fl | O_NONBLOCK));
+#endif
+}
+
+/* Write into `fd` until it takes no more, its peer reading nothing: the
+ * next blocking send on it waits for its send timeout. */
+static int t_fill_send_buffer(int fd) {
+    static char chunk[65536];
+    if (t_set_blocking(fd, 0) != 0) return -1;
+    for (int size = (int)sizeof chunk; size >= 1; size /= 16) {
+        while (send(fd, chunk, size, 0) > 0) {}
+    }
+    return t_set_blocking(fd, 1);
+}
+
+/* A write that waits out the socket's send timeout is a timeout on every
+ * platform (#3824): Winsock says WSAETIMEDOUT where POSIX says EAGAIN, and
+ * it read as an I/O error, so a POST whose head timed out before a byte of
+ * it went was written again on a fresh connection, though Winsock leaves
+ * what a timed-out send sent undefined. */
+TEST_CATEGORY(http_send_timeout_is_not_written_again, TEST_CATEGORY_NETWORK) {
+    static const char head[] = "POST /order HTTP/1.1\r\nHost: up\r\nContent-Length: 0\r\n\r\n";
+    int fds[2];
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+#ifdef _WIN32
+    DWORD tv = 100;
+#else
+    struct timeval tv = { 0, 100000 };
+#endif
+    ASSERT_EQ(0, setsockopt(fds[0], SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv));
+    Transport t;
+    memset(&t, 0, sizeof t);
+    t.sockfd = fds[0];
+    HttpExchange x;
+    int r = AE_X_DONE;
+    /* A kernel may free room in the buffer while the test runs; the case is
+     * a send that timed out having sent nothing, so it is set up again then. */
+    for (int attempt = 0; attempt < 5; attempt++) {
+        ASSERT_EQ(0, t_fill_send_buffer(fds[0]));
+        http_exchange_init(&x, &t, head, sizeof head - 1, NULL, 0, "POST");
+        r = http_exchange_send(&x);
+        if (r != AE_X_DONE && x.head_sent == 0) break;
+    }
+    ASSERT_TRUE(r != AE_X_DONE);
+    ASSERT_EQ(0, (int)x.head_sent);
+    ASSERT_EQ(HTTP_IO_TIMED_OUT, x.send_failure);
+    ASSERT_EQ(0, http_exchange_send_retryable(&x, r));
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+}
+
+#ifdef AETHER_HAS_OPENSSL
+/* A failed TLS write is classified as a failed TLS read is (#3846), by the
+ * TLS layer's own answer: a write on a connection whose handshake met a
+ * protocol error makes no system call, and a stale EAGAIN read as "the
+ * socket is not writable yet" kept the event loop waiting for writability
+ * until the deadline. */
+TEST_CATEGORY(http_tls_write_failure_kind_ignores_stale_errno, TEST_CATEGORY_NETWORK) {
+    static const char head[] = "GET / HTTP/1.1\r\nHost: up\r\n\r\n";
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    ASSERT_NOT_NULL(ctx);
+    int fds[2];
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    const char* junk = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+    send(fds[1], junk, (int)strlen(junk), 0);
+    SSL* ssl = SSL_new(ctx);
+    ASSERT_NOT_NULL(ssl);
+    SSL_set_fd(ssl, fds[0]);
+    SSL_set_connect_state(ssl);
+    ERR_clear_error();
+    ASSERT_TRUE(SSL_connect(ssl) <= 0);
+    Transport t;
+    memset(&t, 0, sizeof t);
+    t.sockfd = fds[0];
+    t.ssl = ssl;
+    HttpExchange x;
+    http_exchange_init(&x, &t, head, sizeof head - 1, NULL, 0, "GET");
+    stale_would_block();
+    ASSERT_EQ(AE_X_ERROR, http_exchange_send(&x));
+    ASSERT_EQ(HTTP_IO_OTHER, x.send_failure);
+    SSL_free(ssl);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+    SSL_CTX_free(ctx);
+}
+#endif
