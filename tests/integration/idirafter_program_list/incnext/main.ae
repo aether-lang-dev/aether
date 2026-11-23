@@ -1,0 +1,9 @@
+// probe.h reaches a std header through #include_next, whose search resumes
+// after the directory probe.h was found in: the scan does not follow it, and
+// the compile line names every header directory.
+@c_include("probe.h")
+extern probe_magic() -> int @c_import
+
+main() {
+    println("magic ${probe_magic()}")
+}

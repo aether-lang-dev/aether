@@ -5,6 +5,10 @@
   generated C's includes (and those of the headers they reach, the
   module `@c_include` headers and the `@source` files) and keeps the
   directories they resolve in, in the list's order and still after the
-  system's (#2552). Anything it cannot follow, such as an include through
-  a macro or cflags that move the search, keeps every directory, as
-  before. Hello's preprocessed C and object are byte for byte the same.
+  system's (#2552). Anything it cannot follow keeps every directory, as
+  before: an include through a macro, an `#include_next`, flags that move
+  the search in the cflags or in the `$AE_CC` / `$CC` command itself, and
+  CPATH, C_INCLUDE_PATH or OBJC_INCLUDE_PATH set. Header names match in any
+  case as well as exactly, so an include spelled in another case on Windows
+  or macOS keeps its directory. Hello's preprocessed C and object are byte
+  for byte the same.

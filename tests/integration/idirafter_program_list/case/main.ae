@@ -1,0 +1,9 @@
+// probe.h includes a std header spelled in another case. On a
+// case-insensitive file system the compiler opens it, and the scan keeps
+// its directory.
+@c_include("probe.h")
+extern probe_magic() -> int @c_import
+
+main() {
+    println("magic ${probe_magic()}")
+}
