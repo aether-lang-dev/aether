@@ -4025,6 +4025,10 @@ static void crt_name_of(const char* cc, const char* flags, const char* header, c
  * The archive is linked as before when there is nothing to compare: an
  * archive with no record (one an older tree built, or a platform with one C
  * runtime), no header to ask with, or a compiler that cannot be asked. */
+static int g_crt_refused = 0;   /* archive_crt_check refused libaether.a */
+
+int ae_archive_crt_refused(void) { return g_crt_refused; }
+
 static void archive_crt_check(const char* cc) {
     static char* asked = NULL;
     static int matches = 1;
@@ -4070,6 +4074,10 @@ static void archive_crt_check(const char* cc) {
          * so of the remembered answer too. */
         char* flags = user[0] ? ae_strdup_printf(" %s", user) : ae_strdup_printf("%s", "");
         int told = text && flags ? cc_probe_takes(cc, flags, "", "ae_crt_probe", text) : -1;
+        /* For the next build's cache key (ae_runtime_from_source). A
+         * compiler that could not be asked is asked again next time, as
+         * cc_probe_takes remembers no such answer, so neither is this. */
+        if (name[0] && (told >= 0 || !header)) cache_crt_decision_put(told == 0);
         if (told == 0) {
             matches = 0;
             if (tc.verbose) {
@@ -4093,7 +4101,10 @@ static void archive_crt_check(const char* cc) {
         free(text);
         free(header);
     }
-    if (!matches) tc.has_lib = false;
+    if (!matches) {
+        tc.has_lib = false;
+        g_crt_refused = 1;
+    }
 }
 
 #ifndef _WIN32
@@ -6007,6 +6018,37 @@ static char* generated_c_compile_flags(const char* cc, bool optimize, const char
     return ae_strdup_printf("%s%s%s%s%s%s%s%s", base_opt, gcc_inline_budget_flags(cc, optimize),
                             harden_cflags(optimize), user_cflags[0] ? " " : "", user_cflags,
                             avx, g_trace ? " -DAETHER_TRACE" : "", bracket_depth_flags(cc));
+}
+
+/* Whether this build compiles the runtime from source, for its cache key,
+ * which is made before the compile line: when there is no libaether.a, under
+ * --trace, and when archive_crt_check refuses the archive for its C runtime.
+ * That decision is the build's own: the archive's compiler with no cflags
+ * links it, a decision an earlier build made for this compiler, record and
+ * cflags is read back (cache_crt_decision_get), and otherwise the compiler is
+ * found and asked now, as build_gcc_cmd would a moment later. */
+int ae_runtime_from_source(void) {
+    if (tc.has_lib) {
+        char name[64];
+        int mingw;
+        unsigned long long built_by;
+        if (!cache_crt_record_read(name, sizeof(name), &mingw, &built_by)) return 0;
+        if (built_by && !get_cflags()[0] && built_by == cache_c_compiler_id()) return 0;
+        int known = cache_crt_decision_get();
+        if (known == 0) return 0;
+        if (known < 0) {
+            const char* cc = NULL;
+#ifdef _WIN32
+            if (find_gcc_windows(false)) cc = s_gcc_cmd;
+#else
+            cc = posix_driven_cc();
+#endif
+            if (!cc) return 0;
+            archive_crt_check(cc);
+            if (tc.has_lib) return 0;
+        }
+    }
+    return 1;
 }
 
 void build_gcc_cmd(char* cmd, size_t size,

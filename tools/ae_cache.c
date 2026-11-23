@@ -1708,19 +1708,53 @@ int cache_crt_record_read(char* name, size_t namesz, int* mingw, unsigned long l
     return ok;
 }
 
-/* Whether this build may compile the runtime from source rather than link
- * libaether.a: when there is no archive (or --trace, which sets has_lib
- * false), and when its record names a C runtime that only asking the
- * compiler can settle (archive_crt_check in ae.c). Asking is left to the
- * build; what is known without it is that the archive's own compiler,
- * given no flags, links it. */
-static int runtime_may_be_from_source(void) {
-    if (!tc.has_lib) return 1;
-    char name[64];
-    int mingw;
-    unsigned long long built_by;
-    if (!cache_crt_record_read(name, sizeof(name), &mingw, &built_by)) return 0;
-    return !(built_by && !get_cflags()[0] && built_by == c_compiler_fingerprint());
+/* #3813: what archive_crt_check decided, remembered in the cache directory,
+ * so the cache key of the next build knows it without finding the compiler
+ * (on Windows a cmd.exe and a gcc start, about 40 ms) and asking it. It is
+ * kept by everything the decision is made from: the compiler's identity,
+ * the record beside the archive, runtime/aether_crt_id.h and the project's
+ * cflags. 0 when there is nowhere to keep it. */
+static int crt_decision_path(char* out, size_t outsz) {
+    unsigned long long ccid = c_compiler_fingerprint();
+    if (!ccid || !tc.src_root[0]) return 0;
+    const char* sep = strrchr(tc.lib, '/');
+    const char* bsep = strrchr(tc.lib, '\\');
+    if (bsep && (!sep || bsep > sep)) sep = bsep;
+    size_t dl = sep ? (size_t)(sep - tc.lib) : 0;
+    char* rec = str_join4(tc.lib, dl, dl ? "/" : "", "libaether.crt", "");
+    char* hdr = str_join4(tc.src_root, strlen(tc.src_root), "/runtime/aether_crt_id.h", "", "");
+    unsigned long long rh = rec ? file_hash(rec) : 0, hh = hdr ? file_hash(hdr) : 0;
+    free(rec);
+    free(hdr);
+    if (!rh) return 0;
+    unsigned long long h = fnv64_more(fnv64_str("crt-decision\n"), get_cflags());
+    h = (h * 1099511628211ULL) ^ rh;
+    h = (h * 1099511628211ULL) ^ hh;
+    h = (h * 1099511628211ULL) ^ ccid;
+    init_cache_dir();
+    snprintf(out, outsz, "%s/%016llx.probe", s_cache_dir, h);
+    return 1;
+}
+
+int cache_crt_decision_get(void) {
+    char path[1200];
+    if (!crt_decision_path(path, sizeof(path))) return -1;
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    int c = fgetc(f);
+    fclose(f);
+    return c == '1' ? 1 : c == '0' ? 0 : -1;
+}
+
+void cache_crt_decision_put(int from_source) {
+    char path[1200], tmp[1300];
+    if (!crt_decision_path(path, sizeof(path))) return;
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
+    FILE* f = fopen(tmp, "w");
+    if (!f) return;
+    int ok = fputc(from_source ? '1' : '0', f) != EOF;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok || cache_publish(tmp, path) != 0) remove(tmp);
 }
 
 /* "<path> <size> <mtime ns>" of the file `name` in the directory the program
@@ -1854,7 +1888,10 @@ unsigned long long compute_cache_key(const char* ae_file,
     unsigned long long ccid = c_compiler_fingerprint();
     if (!ccid) key.oom = 1;
     key_append(&key, ":ccid=%016llx", ccid);
-    if (tc.has_lib) {
+    /* An archive refused for its C runtime is still the archive this key
+     * names: the decision may be made between a build's lookup key and its
+     * publish key (ae_runtime_from_source), and both are to be the same. */
+    if (tc.has_lib || ae_archive_crt_refused()) {
         unsigned long long lib_hash = file_hash(tc.lib);
         if (lib_hash) key_append(&key, ":lib=%016llx", lib_hash);
         /* #3813: the record of the archive's C runtime decides, with the
@@ -1891,15 +1928,18 @@ unsigned long long compute_cache_key(const char* ae_file,
     /* A runtime compiled from source is built from the .c files too, and the
      * headers alone do not see an edit to one of them: the runtime archive
      * got a new key (cache_runtime_key) and `ae run` served the program
-     * linked against the old one. So that key is folded in instead, over
-     * the same trees and the .c files in them (each file's content hash is
-     * remembered, #3532, but each is still looked at: a --trace hit went
-     * from 26 to 72 ms on Windows, against a stale program). The compiler
-     * and the flags it would also fold are this key's own already (ccid,
-     * the salt, the -O level), so they are left out of it here, where the
-     * build's compile line is not known. */
-    if (tc.dev_mode && tc.src_root[0] && runtime_may_be_from_source()) {
-        unsigned long long rt = cache_runtime_key("", "", tc.runtime_srcs);
+     * linked against the old one. So when this build compiles the runtime
+     * from source (ae_runtime_from_source: the decision the build makes,
+     * --trace, no archive, or another C runtime), that key is folded in
+     * instead, over the same trees and the .c files in them; a build that
+     * links the archive walks the headers only, as before. The compiler and
+     * the flags the runtime key would also fold are this key's own already
+     * (ccid, the salt, the -O level), so they are left out of it here,
+     * where the build's compile line is not known. */
+    if (tc.dev_mode && tc.src_root[0] && ae_runtime_from_source()) {
+        /* No source list: it is read only once the compile line is made,
+         * after this key, and the walk sees every file it can name. */
+        unsigned long long rt = cache_runtime_key("", "", "");
         if (rt) key_append(&key, ":rt=%016llx", rt);
         else complete = 0;
     } else if (tc.dev_mode && tc.src_root[0]) {

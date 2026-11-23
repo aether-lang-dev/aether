@@ -276,6 +276,16 @@ unsigned long long cache_c_compiler_id(void);
  * mingw-w64 major (-1 for none) and the identity of the compiler that built
  * the archive (0 for none). 1 when the record names a runtime, else 0. */
 int cache_crt_record_read(char* name, size_t namesz, int* mingw, unsigned long long* built_by);
+/* What archive_crt_check decided for this compiler, record, header and
+ * cflags, remembered in the cache directory: 1 the runtime is compiled from
+ * source, 0 the archive is linked, -1 not known. */
+int  cache_crt_decision_get(void);
+void cache_crt_decision_put(int from_source);
+/* ae.c: whether this build compiles the runtime from source (no archive,
+ * --trace, or an archive on another C runtime), as the build decides it;
+ * and whether the archive was refused for its C runtime. */
+int ae_runtime_from_source(void);
+int ae_archive_crt_refused(void);
 /* #3600: "<path> <size> <mtime ns>" of the file `name` beside the program
  * `prog` (its first word, looked up on PATH): 1, or 0 when either is not
  * found. */

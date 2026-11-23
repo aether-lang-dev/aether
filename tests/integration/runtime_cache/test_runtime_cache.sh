@@ -10,20 +10,28 @@
 # products, its sources linked, runtime/ copied so it can be edited), so an
 # edit stays here.
 #
+# The whole runtime is compiled once, in step 1. Every later step is about
+# the cache around it, so it runs against a runtime of two small sources of
+# its own (the toolchain's MANIFEST, which lists what is compiled, swapped
+# for one that names them): each such build compiles two files, archives
+# them and then fails to link a program, which needs the real runtime. What
+# those steps check is what ae made and said before the link.
+#
 #   1. A first program builds the runtime archive; a second, different
-#      program reuses it (`ae build -v` says "(built)", then "(hit)"), and
-#      both run.
-#   2. A flag change builds another; so does an edit to a runtime source.
-#   3. Two first builds at once both succeed and run, and the cache holds
-#      one archive and no half-written one.
-#   4. The program's own key: a rebuild of an unchanged program is a cache
-#      hit, and after an edit to a runtime .c file it is not. The key hashed
-#      the runtime's headers only, so the edit gave the runtime archive a new
-#      key while the program was served as it was.
-#   5. Under -flto the archive is made by the compiler's LTO-aware archiver
+#      program reuses it (`ae build -v` says "(built)", then "(hit)"), both
+#      run, and the first again is a cache hit.
+#   2. A flag change builds another archive; so does an edit to a runtime
+#      source.
+#   3. The program's own key: unchanged, it is the same key; after an edit
+#      to a runtime .c file it is another. The key hashed the runtime's
+#      headers only, so the edit gave the runtime archive a new key while
+#      the program was served as it was.
+#   4. Under -flto the archive is made by the compiler's LTO-aware archiver
 #      (gcc-ar, llvm-ar): plain `ar` gave GCC's slim LTO objects no symbol
 #      index, the link failed, and the broken archive was published for
-#      every later build. Two programs build, the second from the cache.
+#      every later build. A C program linked against the cached archive
+#      with -flto finds its symbols and runs.
+#   5. Two first builds at once leave one archive and no half-written one.
 #   6. An archive the cache does not take (its slot is a directory) is
 #      linked from where it was made and removed after the link: the size
 #      cap skips `*.tmp.*`, so it stayed for good.
@@ -58,9 +66,13 @@ for f in ae ae.exe aetherc aetherc.exe libaether.a libaether_main.a libaether.cr
     [ -f "$ROOT/build/$f" ] && cp "$ROOT/build/$f" "$PRIV/build/"
 done
 AE="$PRIV/build/ae"
+# The small runtime of the later steps, in the tree from the start, so the
+# tree the whole runtime is keyed by does not change under step 1.
+printf 'int rc_tiny_a(int x);\nint rc_tiny_a(int x) { return x + 1; }\n' > "$PRIV/runtime/rc_tiny_a.c"
+printf 'int rc_tiny_b(int x);\nint rc_tiny_b(int x) { return x * 2; }\n' > "$PRIV/runtime/rc_tiny_b.c"
 
 mkdir -p "$TMP/proj"
-for i in 1 2 3 4 5 6 7 8 9; do
+for i in 1 2 3 4 5 6 7 8 9 10 11; do
     printf 'main() {\n    n = %d\n    println("program ${n}")\n}\n' "$i" > "$TMP/proj/p$i.ae"
 done
 
@@ -75,74 +87,109 @@ build() {
     [ "$got" = "program $1" ] || { fail "p$1 printed '$got'"; return 1; }
     return 0
 }
+# tiny <n> <log>: the same build against the small runtime; the link fails.
+tiny() { (cd "$TMP/proj" && "$AE" build -v --quick --trace "p$1.ae" -o "p$1") > "$TMP/$2" 2>&1; }
 # runtime <log>: built, hit or none, from the -v line.
 runtime() { tr -d '\r' < "$TMP/$1" | sed -n -E 's/^\[cache\] runtime: .* \((built|hit)\)$/\1/p' | head -1; }
-# program_hit <log>: whether the program itself came from the cache.
+# slot <log>: the archive the -v line names.
+slot() { tr -d '\r' < "$TMP/$1" | sed -n -E 's/^\[cache\] runtime: (.*) \((built|hit)\)$/\1/p' | head -1; }
+# key <log>: the program's cache key the build publishes under: the one it
+# names after aetherc ran, else the one it looked up.
+key() {
+    k="$(tr -d '\r' < "$TMP/$1" | sed -n 's/^\[cache\] publish key: //p' | head -1)"
+    [ -n "$k" ] || k="$(tr -d '\r' < "$TMP/$1" | sed -n -E 's/^\[cache\] (miss|hit): ([0-9a-f]{16})$/\2/p' | head -1)"
+    printf '%s' "$k"
+}
 program_hit() { tr -d '\r' < "$TMP/$1" | grep -q '^\[cache\] hit: '; }
+# tmps <dir>: whether a runtime archive's temporary is left in a cache.
+tmps() { ls "$1" 2>/dev/null | grep '^rt-.*\.tmp\.' | head -1; }
 
 AETHER_CACHE_DIR="$TMP/cache"
 export AETHER_CACHE_DIR
 
-# 1.
+# 1. The whole runtime.
 build 1 b1.log && [ "$(runtime b1.log)" != built ] &&
     fail "the first program did not build the runtime archive: '$(runtime b1.log)'"
 build 2 b2.log && [ "$(runtime b2.log)" != hit ] &&
     fail "a second program did not reuse the runtime archive: '$(runtime b2.log)'"
-
-# 2. A flag change, then a source edit.
-AETHER_CFLAGS_EXTRA="-DAE_RUNTIME_CACHE_FLAG=1"
-export AETHER_CFLAGS_EXTRA
-build 3 b3.log && [ "$(runtime b3.log)" != built ] &&
-    fail "a flag change reused the runtime archive: '$(runtime b3.log)'"
-unset AETHER_CFLAGS_EXTRA
-# 4, before the edit: the unchanged p1 again is a hit.
 build 1 b1again.log && ! program_hit b1again.log &&
     fail "a rebuild of an unchanged program was not a cache hit"
-printf '\n/* runtime_cache: an edit */\n' >> "$PRIV/runtime/aether_runtime.c"
-build 4 b4.log && [ "$(runtime b4.log)" != built ] &&
-    fail "an edited runtime source reused the runtime archive: '$(runtime b4.log)'"
-# 4, after it: p1 is built again, against the edited runtime.
-build 1 b1edit.log && program_hit b1edit.log &&
-    fail "after an edit to a runtime .c file, the program built before it was served from the cache"
 
-# 3. Two first builds at once, into a cache of their own.
-AETHER_CACHE_DIR="$TMP/cache2"
+# The small runtime from here on.
+printf 'runtime/rc_tiny_a.c\nruntime/rc_tiny_b.c\n' > "$PRIV/build/MANIFEST"
+AETHER_CACHE_DIR="$TMP/tcache"
 export AETHER_CACHE_DIR
-build 5 b5.log & pid5=$!
-build 6 b6.log & pid6=$!
-wait "$pid5" || fail "one of two concurrent first builds failed"
-wait "$pid6" || fail "one of two concurrent first builds failed"
-archives=$(ls "$TMP/cache2" 2>/dev/null | grep -c '^rt-.*\.a$')
-[ "$archives" = 1 ] || fail "two concurrent first builds left $archives runtime archives, not 1"
-if ls "$TMP/cache2" 2>/dev/null | grep -q '^rt-.*\.tmp\.'; then
-    fail "two concurrent first builds left a half-written runtime archive"
-fi
 
-# 5. -flto, into a cache of its own.
-AETHER_CACHE_DIR="$TMP/cache_lto"
+# 2 and 3. A flag change, then a source edit.
+tiny 3 t3.log
+tiny 4 t4.log
+tiny 3 t3again.log
+a="$(slot t3.log)"
+if [ "$(runtime t3.log)" != built ] || [ "$(runtime t4.log)" != hit ] || [ "$(slot t4.log)" != "$a" ]; then
+    fail "the small runtime was not built once and reused: '$(runtime t3.log)' then '$(runtime t4.log)'"
+fi
+[ -n "$(key t3.log)" ] && [ "$(key t3.log)" = "$(key t3again.log)" ] ||
+    fail "an unchanged program did not keep its key: '$(key t3.log)', then '$(key t3again.log)'"
+AETHER_CFLAGS_EXTRA="-DAE_RUNTIME_CACHE_FLAG=1"
+export AETHER_CFLAGS_EXTRA
+tiny 5 t5.log
+[ "$(runtime t5.log)" = built ] && [ "$(slot t5.log)" != "$a" ] ||
+    fail "a flag change reused the runtime archive: '$(runtime t5.log)' $(slot t5.log)"
+unset AETHER_CFLAGS_EXTRA
+printf '\n/* runtime_cache: an edit */\n' >> "$PRIV/runtime/rc_tiny_a.c"
+tiny 3 t3edit.log
+[ "$(runtime t3edit.log)" = built ] && [ "$(slot t3edit.log)" != "$a" ] ||
+    fail "an edited runtime source reused the runtime archive: '$(runtime t3edit.log)'"
+[ -n "$(key t3edit.log)" ] && [ "$(key t3edit.log)" != "$(key t3.log)" ] ||
+    fail "after an edit to a runtime .c file, the program kept the key it was built under before it: $(key t3edit.log)"
+
+# 4. -flto, into a cache of its own: the archive links.
+REAL_CC="$(command -v gcc 2>/dev/null || command -v cc 2>/dev/null)"
+AETHER_CACHE_DIR="$TMP/lcache"
 AETHER_CFLAGS_EXTRA="-flto"
 export AETHER_CACHE_DIR AETHER_CFLAGS_EXTRA
-build 7 b7.log && [ "$(runtime b7.log)" != built ] &&
-    fail "under -flto the first program did not build the runtime archive: '$(runtime b7.log)'"
-build 8 b8.log && [ "$(runtime b8.log)" != hit ] &&
-    fail "under -flto a second program did not reuse the runtime archive: '$(runtime b8.log)'"
+tiny 6 t6.log
 unset AETHER_CFLAGS_EXTRA
-
-# 6. The slot of this tree's archive (the one step 3 made) taken by a
-# directory, in a cache of its own.
-slot="$(ls "$TMP/cache2" 2>/dev/null | grep '^rt-.*\.a$' | head -1)"
-if [ -z "$slot" ]; then
-    fail "step 3 left no runtime archive to name the slot of step 6"
-else
-    AETHER_CACHE_DIR="$TMP/cache3"
-    export AETHER_CACHE_DIR
-    mkdir -p "$TMP/cache3/$slot"
-    build 9 b9.log
-    if ls "$TMP/cache3" 2>/dev/null | grep -q '^rt-.*\.tmp\.'; then
-        fail "an archive the cache did not take was left in it: $(ls "$TMP/cache3" | grep '\.tmp\.' | head -1)"
+lto="$(slot t6.log)"
+if [ "$(runtime t6.log)" != built ] || [ -z "$lto" ]; then
+    fail "under -flto no runtime archive was built: $(grep '^\[cache\] runtime' "$TMP/t6.log" | tail -1 | cut -c1-160)"
+elif [ -n "$REAL_CC" ]; then
+    printf 'int rc_tiny_a(int x);\nint rc_tiny_b(int x);\nint main(void) { return rc_tiny_a(rc_tiny_b(3)) == 7 ? 0 : 1; }\n' > "$TMP/lto_main.c"
+    lto_path="$(printf '%s' "$lto" | tr -d '"')"
+    if ! "$REAL_CC" -flto "$TMP/lto_main.c" "$lto_path" -o "$TMP/lto_main" > "$TMP/lto_link.log" 2>&1; then
+        grep -i "undefined\|error" "$TMP/lto_link.log" | head -2 | cut -c1-200 | sed 's/^/        /'
+        fail "a program linked with -flto against the cached runtime archive did not find its symbols"
+    elif ! "$TMP/lto_main"; then
+        fail "the program linked against the -flto runtime archive did not run"
     fi
 fi
 
+# 5. Two first builds at once, into a cache of their own.
+AETHER_CACHE_DIR="$TMP/cache2"
+export AETHER_CACHE_DIR
+tiny 7 t7.log & pid7=$!
+tiny 8 t8.log & pid8=$!
+wait "$pid7"
+wait "$pid8"
+archives=$(ls "$TMP/cache2" 2>/dev/null | grep -c '^rt-.*\.a$')
+[ "$archives" = 1 ] || fail "two concurrent first builds left $archives runtime archives, not 1"
+[ -z "$(tmps "$TMP/cache2")" ] || fail "two concurrent first builds left a half-written runtime archive"
+
+# 6. The slot of step 5's archive taken by a directory, in a cache of its own.
+s="$(ls "$TMP/cache2" 2>/dev/null | grep '^rt-.*\.a$' | head -1)"
+if [ -z "$s" ]; then
+    fail "step 5 left no runtime archive to name the slot of step 6"
+else
+    AETHER_CACHE_DIR="$TMP/cache3"
+    export AETHER_CACHE_DIR
+    mkdir -p "$TMP/cache3/$s"
+    tiny 9 t9.log
+    grep -q "^\[cache\] runtime: .* could not be published; linked from " "$TMP/t9.log" ||
+        fail "-v does not say the runtime archive was linked from where it was made: $(grep '^\[cache\] runtime' "$TMP/t9.log" | tail -1 | cut -c1-160)"
+    [ -z "$(tmps "$TMP/cache3")" ] ||
+        fail "an archive the cache did not take was left in it: $(tmps "$TMP/cache3")"
+fi
+
 [ "$fails" -eq 0 ] || exit 1
-echo "  [PASS] $NAME: the runtime is compiled once and reused by the next program; a flag change or a source edit rebuilds it, and the edit rebuilds the program too; two first builds at once both link; -flto archives link and are reused; an archive the cache does not take is removed after the link"
+echo "  [PASS] $NAME: the runtime is compiled once and reused by the next program; a flag change or a source edit makes another, and the edit gives the program another key; a -flto archive links; two first builds at once leave one archive; an archive the cache does not take is removed after the link"
 exit 0
