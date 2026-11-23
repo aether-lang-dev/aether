@@ -20,7 +20,8 @@
 // hello.ae into a cache that has built compile_heavy.ae (what nearly every
 // build of the test sweep is), and aetherc's own phases of compiling
 // compile_heavy.ae from `--time-phases` (missing from a tree whose aetherc
-// has no such flag).
+// has no such flag), and of a generated program of 2000 constants, module
+// vars and functions (`names2000_phase_*`, #3835).
 //
 // The table goes to stdout, and a tab separated copy (name, unit, base,
 // branch) to BENCH_OUT, by default build/bench-core.tsv.
@@ -30,6 +31,7 @@ import std.fs
 import std.list
 import std.string
 import std.floatarr
+import std.strbuilder
 
 extern exit(code: int)
 
@@ -133,7 +135,7 @@ record_rows(t: ptr, best: ptr, out: string) {
 
 // `phase <name> <ms> <cpu ms>` lines from aetherc --time-phases: the wall
 // clock is the one recorded (a base tree's aetherc may print no CPU time).
-record_phases(t: ptr, best: ptr, out: string) {
+record_phases(t: ptr, best: ptr, out: string, prefix: string) {
     lines = string.split(out, "\n")
     n = string.array_size(lines)
     i = 0
@@ -144,7 +146,7 @@ record_phases(t: ptr, best: ptr, out: string) {
             if string.array_size(parts) >= 3 {
                 v, err = string.to_double(string.array_get(parts, 2))
                 if err == "" {
-                    record(t, best, "compile_phase_${string.array_get(parts, 1)}", "ms", v)
+                    record(t, best, "${prefix}${string.array_get(parts, 1)}", "ms", v)
                 }
             }
             string.array_free(parts)
@@ -152,6 +154,39 @@ record_phases(t: ptr, best: ptr, out: string) {
         i = i + 1
     }
     string.array_free(lines)
+}
+
+// #3835: a program of `n` constants, `n` module vars and `n` functions, each
+// function declaring two locals from two constants and a var, and folding
+// a condition, into `path`. 1 when written.
+names_program(path: string, n: int) -> int {
+    b = strbuilder.new(n * 160)
+    i = 0
+    while i < n {
+        _c = strbuilder.append(b, "const C${i} = ${i}\n")
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        _v = strbuilder.append(b, "var g${i} = ${i}\n")
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        a = (i + 1) % n
+        k = (i + 7) % n
+        _f = strbuilder.append(b, "\nf${i}(x: int) -> int {\n    y = x + C${i} + C${a}\n")
+        _g = strbuilder.append(b, "    z = y * 2 + g${k}\n    if x > 1000000 {\n")
+        _h = strbuilder.append(b, "        return f${a}(z)\n    }\n    return z\n}\n")
+        i = i + 1
+    }
+    _m = strbuilder.append(b, "\nmain() {\n    println(\"\${f0(1)}\")\n}\n")
+    text = strbuilder.finish(b)
+    err = fs.write(path, text)
+    if err != "" {
+        return 0
+    }
+    return 1
 }
 
 ms_since(t0: long) -> float {
@@ -240,7 +275,15 @@ run_round(t: ptr, root: string, tree: string, tag: string, dir: string, progs: p
 
     phases, st3 = sh_run("cd ${tree} && ./build/aetherc --time-phases ${root}/benchmarks/core/compile_heavy.ae ${dir}/${tag}_heavy.c 2>&1")
     if st3 == 0 {
-        record_phases(t, best, phases)
+        record_phases(t, best, phases, "compile_phase_")
+    }
+
+    // #3835: aetherc's phases on a generated program of 2000 constants,
+    // module vars and functions (names_program), whose lookups by name
+    // grew with the square of its size.
+    nphases, st5 = sh_run("cd ${tree} && ./build/aetherc --time-phases ${dir}/names_2000.ae ${dir}/${tag}_names.c 2>&1")
+    if st5 == 0 {
+        record_phases(t, best, nphases, "names2000_phase_")
     }
 }
 
@@ -297,6 +340,7 @@ main() {
     out_path = env_or("BENCH_OUT", "build/bench-core.tsv")
     dir = "${root}/build/bench-core"
     _m = sh_run("mkdir -p ${dir}")
+    _np = names_program("${dir}/names_2000.ae", 2000)
     progs = string.split(env_or("BENCH_ONLY", PROGRAMS), ",")
     owns = string.split(env_or("BENCH_OWNERSHIP", OWNERSHIP), ",")
 

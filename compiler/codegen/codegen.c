@@ -629,6 +629,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->module_global_var_is_program = NULL;
     gen->module_global_var_is_string = NULL;
     gen->module_global_var_count = 0;
+    strmap_init(&gen->module_global_var_by_name);
     gen->current_origin_module = NULL;
     gen->generating_lvalue = 0;  // Not generating lvalue by default
     gen->interp_as_printf = 0;  // Default: interp generates _aether_interp() not printf()
@@ -1040,6 +1041,7 @@ void code_generator_release(CodeGenerator* gen) {
             free(gen->module_global_var_is_program);
             free(gen->module_global_var_is_string);
         }
+        strmap_free(&gen->module_global_var_by_name);
         clear_heap_string_vars(gen);
         clear_captured_string_params(gen);
         clear_try_clobbered_vars(gen);  /* Issue #501 follow-up */
@@ -1090,21 +1092,20 @@ int is_var_declared(CodeGenerator* gen, const char* var_name) {
 // index in the registry, or -1.
 static int module_global_var_index(CodeGenerator* gen, const char* name) {
     if (!name) return -1;
-    for (int i = 0; i < gen->module_global_var_count; i++) {
-        if (strcmp(gen->module_global_vars[i], name) == 0) {
-            /* The program's own globals are not a module's: in a function
-             * merged from a module a bare `ok` is that function's local,
-             * which C's scoping then shadows the program's `ok` with. Read
-             * as the global, a module's `ok = file_delete_raw(path)` became
-             * a store to the program's `var ok` (aether-ui
-             * asks/aether-program-global-leaks-into-module-scope.md). */
-            if (gen->module_global_var_is_program &&
-                gen->module_global_var_is_program[i] && gen->current_origin_module)
-                return -1;
-            return i;
-        }
-    }
-    return -1;
+    /* #3835: by the index, not a walk of the list; the names are deduped,
+     * so the index holds the one slot the walk stopped at. */
+    int i = (int)(intptr_t)strmap_get(&gen->module_global_var_by_name, name) - 1;
+    if (i < 0 || i >= gen->module_global_var_count) return -1;
+    /* The program's own globals are not a module's: in a function
+     * merged from a module a bare `ok` is that function's local,
+     * which C's scoping then shadows the program's `ok` with. Read
+     * as the global, a module's `ok = file_delete_raw(path)` became
+     * a store to the program's `var ok` (aether-ui
+     * asks/aether-program-global-leaks-into-module-scope.md). */
+    if (gen->module_global_var_is_program &&
+        gen->module_global_var_is_program[i] && gen->current_origin_module)
+        return -1;
+    return i;
 }
 
 int is_module_global_var(CodeGenerator* gen, const char* name) {
@@ -1144,8 +1145,7 @@ int is_actor_state_var(CodeGenerator* gen, const char* name) {
 void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
                                 int kind) {
     if (!name) return;
-    for (int i = 0; i < gen->module_global_var_count; i++)
-        if (strcmp(gen->module_global_vars[i], name) == 0) return;
+    if (strmap_has(&gen->module_global_var_by_name, name)) return;   /* #3835 */
     char** grown = realloc(gen->module_global_vars,
                            sizeof(char*) * (gen->module_global_var_count + 1));
     if (!grown) return;
@@ -1161,6 +1161,8 @@ void register_module_global_var(CodeGenerator* gen, const char* name, int is_pro
     flags[gen->module_global_var_count] = is_program ? 1 : 0;
     strs[gen->module_global_var_count] = (unsigned char)kind;
     gen->module_global_vars[gen->module_global_var_count++] = strdup(name);
+    strmap_put(&gen->module_global_var_by_name, name,
+               (void*)(intptr_t)gen->module_global_var_count);
 }
 
 // Helper: mark variable as declared in current function
@@ -7098,44 +7100,59 @@ static void prefix_value(ASTNode* node) {
 }
 
 /* The entry constants renamed, by their source names. `callable[i]` marks a
- * typed fn-pointer constant, which a call names too (#2648). */
+ * typed fn-pointer constant, which a call names too (#2648). #3835: `index`
+ * maps a name to its first position + 1, and `callable` at that position
+ * says whether any constant of the name is callable: a reference was
+ * compared against every constant, so renaming the references of a program
+ * of N constants and N functions grew with N squared (578 ms of codegen at
+ * N = 4000). */
 typedef struct {
     const char** names;
     char* callable;
     int count;
+    StrMap index;
 } EntryConsts;
 
-/* Mark in `bound` (parallel to ec->names) each entry constant's name that
- * something in `node`'s subtree other than `self` may bind
- * (ast_names_without_binding). */
+/* The first position of the entry constant `name`, -1 for none. */
+static int entry_const_at(const EntryConsts* ec, const char* name) {
+    return (int)(intptr_t)strmap_get(&ec->index, name) - 1;
+}
+
+/* Mark in `bound` (by each name's first position) each entry constant's
+ * name that something in `node`'s subtree other than `self` may bind
+ * (ast_names_without_binding), with `stamp`: the top-level declaration's
+ * own, so the marks of the one before need no clearing. */
 static void collect_bound_consts(const ASTNode* node, const ASTNode* self,
-                                 const EntryConsts* ec, char* bound) {
+                                 const EntryConsts* ec, int* bound, int stamp) {
     if (!node) return;
     if (node != self && node->value && !ast_names_without_binding(node)) {
-        for (int i = 0; i < ec->count; i++) {
-            if (!bound[i] && strcmp(ec->names[i], node->value) == 0) bound[i] = 1;
-        }
+        int i = entry_const_at(ec, node->value);
+        if (i >= 0) bound[i] = stamp;
     }
     for (int i = 0; i < node->child_count; i++) {
-        collect_bound_consts(node->children[i], self, ec, bound);
+        collect_bound_consts(node->children[i], self, ec, bound, stamp);
     }
 }
 
-/* #2648: does the callee `call` name the constant `name`, a module's dot
- * written as the merged name's underscore (`cbmod.CB` for `cbmod_CB`)? */
-static int call_names_const(const char* call, const char* name) {
-    for (; *call && *name; call++, name++)
-        if (*call != *name && !(*call == '.' && *name == '_')) return 0;
-    return *call == *name;
+/* #2648: the callee `call` as the merged name of a constant it names, a
+ * module's dot written as the underscore (`cbmod.CB` for `cbmod_CB`); a
+ * constant's name has no dot. In `buf` when it fits, else malloc'd (the
+ * caller frees what is not `buf`). */
+static char* call_const_spelling(const char* call, char* buf, size_t bufsz) {
+    size_t n = strlen(call);
+    char* out = n < bufsz ? buf : (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t k = 0; k <= n; k++) out[k] = call[k] == '.' ? '_' : call[k];
+    return out;
 }
 
 /* Rename each reference to an entry constant that the enclosing top-level
- * declaration does not bind (`bound`). A name the declaration does bind (a
- * parameter or local named like the constant, anywhere in the function,
- * its closures or its actor) is left as written, as it always was: C
- * resolves it to that binding, so no reference is ever pointed at the
- * constant that did not mean it. */
-static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const char* bound) {
+ * declaration does not bind (`bound` at `stamp`). A name the declaration
+ * does bind (a parameter or local named like the constant, anywhere in the
+ * function, its closures or its actor) is left as written, as it always
+ * was: C resolves it to that binding, so no reference is ever pointed at
+ * the constant that did not mean it. */
+static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const int* bound,
+                                 int stamp) {
     if (!node) return;
     switch (node->type) {
         /* Identifiers here are names, not values: an export or import
@@ -7153,28 +7170,25 @@ static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const cha
             break;
     }
     if (node->type == AST_IDENTIFIER && node->value) {
-        for (int i = 0; i < ec->count; i++) {
-            if (!bound[i] && strcmp(ec->names[i], node->value) == 0) {
-                prefix_value(node);
-                break;
-            }
-        }
+        int i = entry_const_at(ec, node->value);
+        if (i >= 0 && bound[i] != stamp) prefix_value(node);
     }
     /* #2648: `CB(i)` through a typed fn-pointer constant names it as the
      * call's own name, with no identifier for it; a module's, `cbmod.CB(21)`,
      * in the dotted form of its merged name `cbmod_CB`. */
     if (node->type == AST_FUNCTION_CALL && node->value) {
-        for (int i = 0; i < ec->count; i++) {
-            if (ec->callable[i] && !bound[i] && call_names_const(node->value, ec->names[i])) {
-                char* renamed = prefixed_name(AE_CONST_PREFIX, ec->names[i]);
-                free(node->value);
-                node->value = renamed;
-                break;
-            }
+        char buf[256];
+        char* spelled = call_const_spelling(node->value, buf, sizeof(buf));
+        int i = entry_const_at(ec, spelled);
+        if (spelled != buf) free(spelled);
+        if (i >= 0 && ec->callable[i] && bound[i] != stamp) {
+            char* renamed = prefixed_name(AE_CONST_PREFIX, ec->names[i]);
+            free(node->value);
+            node->value = renamed;
         }
     }
     for (int i = 0; i < node->child_count; i++) {
-        rename_const_refs_in(node->children[i], ec, bound);
+        rename_const_refs_in(node->children[i], ec, bound, stamp);
     }
 }
 
@@ -7196,7 +7210,7 @@ static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const cha
  * source language: the symbol catalog and export lists
  * (const_public_name). */
 static void rename_entry_constants(ASTNode* program) {
-    EntryConsts ec = { NULL, NULL, 0 };
+    EntryConsts ec = { NULL, NULL, 0, { 0 } };
     for (int i = 0; i < program->child_count; i++) {
         if (entry_const_decl(program->children[i])) ec.count++;
     }
@@ -7204,24 +7218,29 @@ static void rename_entry_constants(ASTNode* program) {
     ec.names = malloc(sizeof(char*) * (size_t)ec.count);
     ec.callable = calloc((size_t)ec.count, 1);
     if (!ec.names || !ec.callable) { free(ec.names); free(ec.callable); return; }
+    strmap_init(&ec.index);
     ec.count = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* cd = entry_const_decl(program->children[i]);
         if (!cd) continue;
         if (!cd->source_name) cd->source_name = strdup(cd->value);
         if (!cd->source_name) continue;
-        ec.callable[ec.count] = (char)is_fnptr_const_decl(cd);
+        int first = entry_const_at(&ec, cd->source_name);
+        if (first < 0) {
+            first = ec.count;
+            strmap_put(&ec.index, cd->source_name, (void*)(intptr_t)(first + 1));
+        }
+        if (is_fnptr_const_decl(cd)) ec.callable[first] = 1;
         ec.names[ec.count++] = cd->source_name;
     }
     /* References first, against the names as written; then the
      * declarations themselves. */
-    char* bound = calloc((size_t)ec.count, 1);
-    if (!bound) { free(ec.names); free(ec.callable); return; }
+    int* bound = calloc((size_t)ec.count, sizeof(int));
+    if (!bound) { free(ec.names); free(ec.callable); strmap_free(&ec.index); return; }
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
-        memset(bound, 0, (size_t)ec.count);
-        collect_bound_consts(child, entry_const_decl(child), &ec, bound);
-        rename_const_refs_in(child, &ec, bound);
+        collect_bound_consts(child, entry_const_decl(child), &ec, bound, i + 1);
+        rename_const_refs_in(child, &ec, bound, i + 1);
     }
     free(bound);
     for (int i = 0; i < program->child_count; i++) {
@@ -7230,6 +7249,7 @@ static void rename_entry_constants(ASTNode* program) {
     }
     free(ec.names);
     free(ec.callable);
+    strmap_free(&ec.index);
 }
 
 /* The name a constant was declared with: what the symbol catalog records and

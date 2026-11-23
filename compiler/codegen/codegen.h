@@ -89,6 +89,10 @@ typedef struct {
     // top-level function and main; closures inherit their function's.
     const char* current_origin_module;
     int module_global_var_count;
+    // #3835: module_global_vars by name, its index + 1 (the names are
+    // deduped, so one each): an identifier asked whether it is one walked
+    // the list, the program's vars times its identifiers.
+    StrMap module_global_var_by_name;
     int generating_lvalue;  // Track if we're generating an assignment target (lvalue)
     /* #3029: versioning on the unbounded-view sentinel. While a function's
      * view body is emitted, `slice_view_names` are its slice parameters,

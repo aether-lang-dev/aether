@@ -1526,10 +1526,204 @@ static void type_error_code_hint(const char* message, const char* hint,
     error_count++;
 }
 
+/* ---- The program's top-level names (#3835) --------------------------------
+ *
+ * The checker asks which top-level declaration a name is once per variable
+ * declaration, per constant read and per condition the evaluator folds, and
+ * each question walked program->children, so checking a program grew with
+ * the square of its size: 1.5 s of typecheck at 4000 functions, x3.9 per
+ * doubling. One index answers each kind of question by a probe.
+ *
+ * It is built when typecheck_program starts and kept current where the
+ * checker inserts a top-level node (tc_names_inserted): a node added at the
+ * end can only be a first match, one added anywhere else, and a reorder,
+ * rebuild the index at the next probe, and so does a child count the index
+ * did not see change. Each kind keeps the FIRST declaration in program
+ * order, the one the walk returned, and a hit is checked against the node
+ * before it is returned. Only while typecheck_program runs: codegen renames
+ * the entry constants afterwards, and a question asked then walks, as it
+ * always did. */
+static ASTNode* global_var_decl(ASTNode* child);
+
+typedef struct {
+    ASTNode* program;    /* the program indexed; NULL when off */
+    int count;           /* the child count the index covers */
+    int stale;           /* rebuild at the next probe */
+    StrMap consts;       /* `const NAME`, not a var: tc_program_const */
+    StrMap globals;      /* `var NAME`: tc_program_global_var */
+    StrMap globals_any;  /* `var NAME`, `export var` too: global_var_decl */
+    StrMap valued;       /* a const or var NAME with an initializer */
+    StrMap enum_members; /* `<Enum>_<Member>`: the first enum's child index + 1 */
+} TcNames;
+
+static TcNames g_tc_names;
+
+static int tc_names_is_const(const ASTNode* c) {
+    return c && c->type == AST_CONST_DECLARATION && c->value &&
+           !(c->annotation && strcmp(c->annotation, "global_var") == 0);
+}
+
+static int tc_names_is_global(const ASTNode* c) {
+    return c && c->type == AST_CONST_DECLARATION && c->value && c->annotation &&
+           strcmp(c->annotation, "global_var") == 0;
+}
+
+static int tc_names_is_valued(const ASTNode* c) {
+    return c && c->type == AST_CONST_DECLARATION && c->value && c->child_count > 0;
+}
+
+/* Child `i` of the program into the index, where no earlier child of its
+ * kind and name is. */
+static void tc_names_add(TcNames* x, ASTNode* c, int i) {
+    if (!c) return;
+    if (tc_names_is_const(c) && !strmap_has(&x->consts, c->value))
+        strmap_put(&x->consts, c->value, c);
+    if (tc_names_is_global(c) && !strmap_has(&x->globals, c->value))
+        strmap_put(&x->globals, c->value, c);
+    ASTNode* g = global_var_decl(c);
+    if (g && !strmap_has(&x->globals_any, g->value)) strmap_put(&x->globals_any, g->value, g);
+    if (tc_names_is_valued(c) && !strmap_has(&x->valued, c->value))
+        strmap_put(&x->valued, c->value, c);
+    if (c->type == AST_ENUM_DEFINITION && c->value) {
+        for (int m = 0; m < c->child_count; m++) {
+            ASTNode* mem = c->children[m];
+            if (!mem || mem->type != AST_ENUM_MEMBER || !mem->value) continue;
+            size_t el = strlen(c->value), ml = strlen(mem->value);
+            char* key = (char*)aether_xrealloc(NULL, el + 1 + ml + 1);
+            memcpy(key, c->value, el);
+            key[el] = '_';
+            memcpy(key + el + 1, mem->value, ml + 1);
+            if (!strmap_has(&x->enum_members, key))
+                strmap_put(&x->enum_members, key, (void*)(intptr_t)(i + 1));
+            free(key);
+        }
+    }
+}
+
+static void tc_names_clear(TcNames* x) {
+    strmap_free(&x->consts);
+    strmap_free(&x->globals);
+    strmap_free(&x->globals_any);
+    strmap_free(&x->valued);
+    strmap_free(&x->enum_members);
+    strmap_init(&x->consts);
+    strmap_init(&x->globals);
+    strmap_init(&x->globals_any);
+    strmap_init(&x->valued);
+    strmap_init(&x->enum_members);
+}
+
+static void tc_names_build(ASTNode* program) {
+    TcNames* x = &g_tc_names;
+    tc_names_clear(x);
+    x->program = program;
+    x->count = program ? program->child_count : 0;
+    x->stale = 0;
+    for (int i = 0; i < x->count; i++) tc_names_add(x, program->children[i], i);
+}
+
+/* The index of `program`, current; NULL when there is none to ask (the
+ * caller walks). */
+static TcNames* tc_names_for(ASTNode* program) {
+    TcNames* x = &g_tc_names;
+    if (!program || x->program != program) return NULL;
+    if (x->stale || x->count != program->child_count) tc_names_build(program);
+    return x;
+}
+
+/* #3835: `node` was just inserted into `program`'s children at `at`. */
+void tc_names_inserted(ASTNode* program, ASTNode* node, int at) {
+    TcNames* x = &g_tc_names;
+    if (!program || x->program != program || x->stale) return;
+    if (at == program->child_count - 1 && x->count == at) {
+        tc_names_add(x, node, at);
+        x->count = program->child_count;
+    } else {
+        x->stale = 1;
+    }
+}
+
+/* #3835: index `program` (typecheck_program does, for the program it
+ * checks), and stop. */
+void tc_names_begin(ASTNode* program) {
+    tc_names_build(program);
+}
+
+void tc_names_end(void) {
+    tc_names_clear(&g_tc_names);
+    g_tc_names.program = NULL;
+    g_tc_names.count = 0;
+    g_tc_names.stale = 0;
+}
+
+/* #3835: the program's children were reordered. */
+void tc_names_reordered(ASTNode* program) {
+    if (program && g_tc_names.program == program) g_tc_names.stale = 1;
+}
+
+/* Which map of the index a question asks. */
+enum { TCN_CONST, TCN_GLOBAL, TCN_GLOBAL_ANY, TCN_VALUED };
+
+static StrMap* tc_names_map(TcNames* x, int kind) {
+    switch (kind) {
+        case TCN_CONST: return &x->consts;
+        case TCN_GLOBAL: return &x->globals;
+        case TCN_GLOBAL_ANY: return &x->globals_any;
+        default: return &x->valued;
+    }
+}
+
+static int tc_names_fits(const ASTNode* n, int kind, const char* name) {
+    if (!n || !n->value || strcmp(n->value, name) != 0) return 0;
+    switch (kind) {
+        case TCN_CONST: return tc_names_is_const(n);
+        case TCN_GLOBAL: return tc_names_is_global(n);
+        case TCN_GLOBAL_ANY: return tc_names_is_global(n);   /* global_var_decl's node */
+        default: return tc_names_is_valued(n);
+    }
+}
+
+/* The first top-level declaration of `kind` named `name` when the index
+ * answers for `program`: 1, with it (NULL for none) in *out. 0 when there
+ * is no index to ask, and the caller walks. A node the index holds that is
+ * no longer of its kind or name rebuilds the index once. */
+static int tc_names_probe(ASTNode* program, int kind, const char* name, ASTNode** out) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+        TcNames* x = tc_names_for(program);
+        if (!x || !name) return 0;
+        ASTNode* n = (ASTNode*)strmap_get(tc_names_map(x, kind), name);
+        if (!n || tc_names_fits(n, kind, name)) {
+            *out = n;
+            return 1;
+        }
+        x->stale = 1;
+    }
+    return 0;
+}
+
+/* #3835: for contract_eval's resolve_identifier, the first top-level
+ * `const` or `var` named `name` that has an initializer. 1 with it (or
+ * NULL) in *out while the index answers for `program`, else 0. */
+int tc_program_names_valued(ASTNode* program, const char* name, ASTNode** out) {
+    return tc_names_probe(program, TCN_VALUED, name, out);
+}
+
+/* #3835: for contract_eval's resolve_identifier, the index of the first
+ * enum that has a member spelled `<Enum>_<Member>` as `qualified`, -1 for
+ * none. 1 while the index answers for `program`, else 0. */
+int tc_program_names_enum_at(ASTNode* program, const char* qualified, int* at) {
+    TcNames* x = tc_names_for(program);
+    if (!x || !qualified) return 0;
+    *at = (int)(intptr_t)strmap_get(&x->enum_members, qualified) - 1;
+    return 1;
+}
+
 /* The program-level `const NAME = ...` (not a module `var`), or NULL: a
  * quote reads a constant with a literal value as that literal. */
 ASTNode* tc_program_const(const char* name) {
     ASTNode* program = aether_typecheck_program_node();
+    ASTNode* hit;
+    if (tc_names_probe(program, TCN_CONST, name, &hit)) return hit;
     for (int i = 0; program && name && i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (c && c->type == AST_CONST_DECLARATION && c->value && strcmp(c->value, name) == 0 &&
@@ -1543,6 +1737,8 @@ ASTNode* tc_program_const(const char* name) {
  * reads one as a capture whose cell is the global itself. */
 ASTNode* tc_program_global_var(const char* name) {
     ASTNode* program = aether_typecheck_program_node();
+    ASTNode* hit;
+    if (tc_names_probe(program, TCN_GLOBAL, name, &hit)) return hit;
     for (int i = 0; program && name && i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (c && c->type == AST_CONST_DECLARATION && c->value && strcmp(c->value, name) == 0 &&
@@ -1551,6 +1747,7 @@ ASTNode* tc_program_global_var(const char* name) {
     }
     return NULL;
 }
+
 
 /* analysis/quote.c reports a construct a quote cannot hold through this. */
 static void quote_report_error(const char* message, const char* hint, int line,
@@ -4217,6 +4414,8 @@ static ASTNode* global_var_decl(ASTNode* child);
  * NULL for any other binding. */
 static ASTNode* module_var_named(const char* name) {
     ASTNode* program = aether_typecheck_program_node();
+    ASTNode* hit;
+    if (tc_names_probe(program, TCN_GLOBAL_ANY, name, &hit)) return hit;   /* #3835 */
     for (int i = 0; program && i < program->child_count; i++) {
         ASTNode* g = global_var_decl(program->children[i]);
         if (g && strcmp(g->value, name) == 0) return g;
@@ -5817,9 +6016,32 @@ static void collect_references(ASTNode* node, TrackedVars* t) {
  * notice only because its setters read-modify-write (`x = x + 1`).
  * Caller passes the module-global name set so these writes are not
  * mistaken for unused local declarations. */
+/* #3835: the names collect_global_var_names gave the third pass, as a set.
+ * Its passes ask whether a name is one once per declaration and per store,
+ * and a walk of the array made that the program's globals times its
+ * statements. Kept for the array it was made from (`g_global_set_of`); any
+ * other array is walked. */
+static const char** g_global_set_of = NULL;
+static StrMap g_global_set;
+
+static void global_set_make(const char** names, int count) {
+    strmap_free(&g_global_set);
+    strmap_init(&g_global_set);
+    g_global_set_of = names;
+    for (int i = 0; names && i < count; i++)
+        if (names[i]) strmap_put(&g_global_set, names[i], (void*)1);
+}
+
+static void global_set_drop(void) {
+    strmap_free(&g_global_set);
+    strmap_init(&g_global_set);
+    g_global_set_of = NULL;
+}
+
 static int is_module_global_name(const char** global_names, int global_count,
                                  const char* name) {
     if (!name || !global_names) return 0;
+    if (global_names == g_global_set_of) return strmap_has(&g_global_set, name);
     for (int i = 0; i < global_count; i++) {
         if (global_names[i] && strcmp(global_names[i], name) == 0) return 1;
     }
@@ -6796,6 +7018,7 @@ static void order_const_declarations(ASTNode* program) {
         for (int i = 0; i < co.count && !co.reported; i++) const_order_visit(&co, i);
         if (!co.reported) {
             for (int i = 0; i < co.count; i++) program->children[co.slots[i]] = co.order[i];
+            tc_names_reordered(program);   /* #3835 */
         }
     }
     free(co.decls);
@@ -7423,9 +7646,25 @@ static void declare_down_message(ASTNode* program) {
     memmove(&program->children[1], &program->children[0],
             (size_t)(program->child_count - 1) * sizeof(ASTNode*));
     program->children[0] = def;
+    tc_names_inserted(program, def, 0);   /* #3835 */
 }
 
+static int typecheck_program_checked(ASTNode* program);
+
+/* #3835: the program's name index lives while the program is checked; a
+ * check of another program inside this one leaves it to be rebuilt. */
 int typecheck_program(ASTNode* program) {
+    ASTNode* outer = g_tc_names.program;
+    if (program && program->type == AST_PROGRAM) tc_names_build(program);
+    int r = typecheck_program_checked(program);
+    tc_names_clear(&g_tc_names);
+    g_tc_names.program = outer;
+    g_tc_names.stale = 1;
+    global_set_drop();
+    return r;
+}
+
+static int typecheck_program_checked(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
     g_typecheck_program = program;
@@ -8339,6 +8578,7 @@ int typecheck_program(ASTNode* program) {
     // unused-variable pass must not flag write-only setters for them.
     int global_var_count = 0;
     const char** global_var_names = collect_global_var_names(program, &global_var_count);
+    global_set_make(global_var_names, global_var_count);   /* #3835 */
 
     // Third pass: unused variable + unreachable code analysis. Its
     // diagnostics name the file each definition came from, as the second
@@ -8374,6 +8614,7 @@ int typecheck_program(ASTNode* program) {
     g_tc_file = NULL;
     g_keep_scope = NULL;
 
+    global_set_drop();
     free(global_var_names);
 
     /* #2684: a function whose result is not void must return on every path.
@@ -11142,6 +11383,7 @@ static void report_borrowed_keep(KeepSet* s, ASTNode* at, Carried c, const char*
 }
 
 static int is_global_name(const char* n, const char** globals, int nglobals) {
+    if (n && globals && globals == g_global_set_of) return strmap_has(&g_global_set, n);
     for (int g = 0; n && g < nglobals; g++)
         if (!strcmp(globals[g], n)) return 1;
     return 0;

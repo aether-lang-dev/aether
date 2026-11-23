@@ -149,6 +149,24 @@ Symbol* lookup_symbol_local(SymbolTable* table, const char* name);
 ASTNode* tc_program_const(const char* name);
 /* docs/quote.md: the program-level `var NAME` (a global variable), or NULL. */
 ASTNode* tc_program_global_var(const char* name);
+/* #3835: the program's top-level name index, while typecheck_program runs.
+ * Each answers 1 with the first declaration of its kind (NULL for none) as
+ * a walk of the program's children would, or 0 when the index does not
+ * answer for `program` (the caller walks): the first `const` or `var` named
+ * `name` with an initializer, and the child index of the first enum with a
+ * member spelled `qualified` (`<Enum>_<Member>`, -1 for none). */
+int tc_program_names_valued(ASTNode* program, const char* name, ASTNode** out);
+int tc_program_names_enum_at(ASTNode* program, const char* qualified, int* at);
+/* #3835: `node` was just inserted into `program`'s children at `at`; the
+ * index takes it in, or is rebuilt at its next probe. */
+void tc_names_inserted(ASTNode* program, ASTNode* node, int at);
+/* #3835: `program`'s children were reordered; the index is rebuilt at its
+ * next probe. */
+void tc_names_reordered(ASTNode* program);
+/* #3835: index `program` now (typecheck_program does, for the program it
+ * checks), and stop indexing. */
+void tc_names_begin(ASTNode* program);
+void tc_names_end(void);
 /* #2007: unlink and free the newest symbol of `table`. The one way to remove
  * a symbol, so the hash index stays in step with the list. */
 void pop_symbol(SymbolTable* table);

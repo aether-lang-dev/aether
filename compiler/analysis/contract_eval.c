@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "contract_eval.h"
+#include "typechecker.h"   /* #3835: the program's name index */
 
 #define CONTRACT_EVAL_MAX_DEPTH 32
 
@@ -69,6 +70,8 @@ static int parse_literal(ASTNode* e, ConstVal* out) {
 }
 
 static int eval_value(ASTNode* e, ContractEnv* env, ConstVal* out, int depth);
+static int resolve_enum_member(const char* name, ASTNode* program, int from,
+                               ContractEnv* paramless, ConstVal* out, int depth);
 
 /* Resolve an identifier to a compile-time value:
  *   1. a bound parameter (call-site folding) — the argument expression is
@@ -97,6 +100,19 @@ static int resolve_identifier(const char* name, ContractEnv* env,
     if (!program) return 0;
     ContractEnv paramless = {{0}, {0}, 0, program};
 
+    /* #3835: while the program is checked, its name index answers both
+     * walks below with the declaration they would stop at. */
+    ASTNode* valued;
+    if (tc_program_names_valued(program, name, &valued)) {
+        if (valued) {
+            if (valued->annotation && strcmp(valued->annotation, "global_var") == 0) return 0;
+            return eval_value(valued->children[0], &paramless, out, depth + 1);
+        }
+        int at;
+        if (!tc_program_names_enum_at(program, name, &at) || at < 0) return 0;
+        return resolve_enum_member(name, program, at, &paramless, out, depth);
+    }
+
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (c && c->type == AST_CONST_DECLARATION && c->value &&
@@ -111,7 +127,14 @@ static int resolve_identifier(const char* name, ContractEnv* env,
         }
     }
 
-    for (int i = 0; i < program->child_count; i++) {
+    return resolve_enum_member(name, program, 0, &paramless, out, depth);
+}
+
+/* The enum member `name` spells (`<Enum>_<Member>`), looked for in the
+ * enums from child `from` of the program on. */
+static int resolve_enum_member(const char* name, ASTNode* program, int from,
+                               ContractEnv* paramless, ConstVal* out, int depth) {
+    for (int i = from; i < program->child_count; i++) {
         ASTNode* en = program->children[i];
         if (!en || en->type != AST_ENUM_DEFINITION || !en->value) continue;
         int64_t next = 0;
@@ -120,7 +143,7 @@ static int resolve_identifier(const char* name, ContractEnv* env,
             if (!mem || mem->type != AST_ENUM_MEMBER || !mem->value) continue;
             if (mem->child_count > 0 && mem->children[0]) {
                 ConstVal mv;
-                if (!eval_value(mem->children[0], &paramless, &mv, depth + 1) ||
+                if (!eval_value(mem->children[0], paramless, &mv, depth + 1) ||
                     mv.kind == CV_FLOAT)
                     break;   /* opaque member value poisons the rest of this enum */
                 next = mv.i;
