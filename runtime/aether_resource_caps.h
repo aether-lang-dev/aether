@@ -258,6 +258,11 @@ int aether_exec_should_stop(void);
  * std.mem's heap_in_use), which reads the allocator itself (#2310). */
 uint64_t aether_caps_used_bytes(void);
 
+/* Test hook (runtime C tests only, #3829): 1 when the calling thread counts
+ * on a slot of its own, 0 when it shares the one every thread past the owned
+ * slots shares. A thread that has not counted yet takes its slot first. */
+int aether_caps_thread_owns_slot(void);
+
 /* ============================================================
  * Cap-aware allocator wrappers
  * ============================================================

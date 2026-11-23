@@ -202,6 +202,66 @@ TEST_CATEGORY(caps_owned_slots_exact_under_folds, TEST_CATEGORY_STDLIB) {
     aether_caps_free(floor_block, 1 << 20);
 }
 
+/* #3829: a thread gives its owned slot back when it ends, its count folded
+ * into the exact total first, and a later thread takes it. Slots were never
+ * given back: after 63 threads had ever counted, every later one shared the
+ * last slot through a locked add, so a thread per connection, or a worker
+ * pool made again and again, contended on one line. 500 short-lived threads,
+ * 8 at a time, each allocate and free and keep one block it made, freed
+ * later on this thread: no count is lost with the threads, and a thread made
+ * after them all owns a slot. */
+#define CAPS_CHURN_THREADS 500
+#define CAPS_CHURN_AT_ONCE 8
+static void* caps_churn_kept[CAPS_CHURN_THREADS];
+static void* caps_churn_worker(void* arg) {
+    int t = (int)(intptr_t)arg;
+    for (int r = 0; r < 16; r++) {
+        void* p = aether_caps_malloc((size_t)(24 + r));
+        if (p) aether_caps_free(p, (size_t)(24 + r));
+    }
+    caps_churn_kept[t] = aether_caps_malloc((size_t)(40 + t % 9));
+    return NULL;
+}
+static void* caps_owns_probe(void* arg) {
+    *(int*)arg = aether_caps_thread_owns_slot();
+    return NULL;
+}
+
+TEST_CATEGORY(caps_slots_given_back_at_thread_exit, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    uint64_t before = aether_caps_used_bytes();
+    uint64_t kept = 0;
+    for (int i = 0; i < CAPS_CHURN_THREADS; i += CAPS_CHURN_AT_ONCE) {
+        pthread_t t[CAPS_CHURN_AT_ONCE];
+        int n = CAPS_CHURN_THREADS - i < CAPS_CHURN_AT_ONCE ? CAPS_CHURN_THREADS - i
+                                                             : CAPS_CHURN_AT_ONCE;
+        for (int k = 0; k < n; k++)
+            ASSERT_EQ(0, pthread_create(&t[k], NULL, caps_churn_worker, (void*)(intptr_t)(i + k)));
+        for (int k = 0; k < n; k++) pthread_join(t[k], NULL);
+    }
+    int nulls = 0;
+    for (int i = 0; i < CAPS_CHURN_THREADS; i++) {
+        nulls += caps_churn_kept[i] == NULL;
+        kept += (uint64_t)(40 + i % 9);
+    }
+    ASSERT_EQ(0, nulls);
+    ASSERT_TRUE(aether_caps_used_bytes() == before + kept);
+
+    pthread_t probe;
+    int owns = -1;
+    ASSERT_EQ(0, pthread_create(&probe, NULL, caps_owns_probe, &owns));
+    pthread_join(probe, NULL);
+    ASSERT_EQ(1, owns);
+
+    /* A cap set now sees exactly what the ended threads left. */
+    aether_caps_set_memory_cap(before + kept + 64);
+    ASSERT_TRUE(aether_caps_used_bytes() == before + kept);
+    aether_caps_set_memory_cap(0);
+    for (int i = 0; i < CAPS_CHURN_THREADS; i++)
+        aether_caps_free(caps_churn_kept[i], (size_t)(40 + i % 9));
+    ASSERT_TRUE(aether_caps_used_bytes() == before);
+}
+
 TEST_CATEGORY(caps_saturating_decrement, TEST_CATEGORY_STDLIB) {
     /* Free more than we allocated → counter saturates at 0 in
      * release. (Debug builds would assert; this test only runs the
