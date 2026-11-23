@@ -1,0 +1,8 @@
+// probe.h, beside this file, includes a std header by its bare name from a
+// directory only the -idirafter list names: the scan follows it there.
+@c_include("probe.h")
+extern probe_magic() -> int @c_import
+
+main() {
+    println("magic ${probe_magic()}")
+}

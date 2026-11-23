@@ -2149,9 +2149,56 @@ static int append_include_one_dir(char** out, size_t* out_size, size_t* pos, con
     return append_include_flag(out, out_size, pos, "-I", path);
 }
 
+/* #3841: the headers of the toolchain's -idirafter directories, recorded
+ * while tc_build_include_flags lists them: each name with the position of
+ * its directory in the list, and the directories in that order. A name is
+ * resolved to the first directory that has it, as the compiler searches
+ * them. `s_hdr_ok` is 0 when a listing could not be recorded whole; the
+ * compile line then names every directory. */
+typedef struct { char* name; int dir; } HdrName;
+static HdrName* s_hdr_names = NULL;
+static int s_hdr_name_count = 0, s_hdr_name_cap = 0;
+static char** s_hdr_dirs = NULL;
+static int s_hdr_dir_count = 0, s_hdr_dir_cap = 0;
+static int s_hdr_ok = 1;
+static int s_hdr_recording = 0;
+
+static void hdr_record_name(const char* name, size_t len) {
+    if (!s_hdr_recording || !s_hdr_ok) return;
+    if (s_hdr_name_count == s_hdr_name_cap) {
+        int cap = s_hdr_name_cap ? s_hdr_name_cap * 2 : 256;
+        HdrName* grown = realloc(s_hdr_names, sizeof(HdrName) * (size_t)cap);
+        if (!grown) { s_hdr_ok = 0; return; }
+        s_hdr_names = grown;
+        s_hdr_name_cap = cap;
+    }
+    char* copy = malloc(len + 1);
+    if (!copy) { s_hdr_ok = 0; return; }
+    memcpy(copy, name, len);
+    copy[len] = '\0';
+    s_hdr_names[s_hdr_name_count].name = copy;
+    s_hdr_names[s_hdr_name_count].dir = s_hdr_dir_count;   /* the one appended next */
+    s_hdr_name_count++;
+}
+
+static void hdr_record_dir(const char* dir) {
+    if (!s_hdr_recording || !s_hdr_ok) return;
+    if (s_hdr_dir_count == s_hdr_dir_cap) {
+        int cap = s_hdr_dir_cap ? s_hdr_dir_cap * 2 : 128;
+        char** grown = realloc(s_hdr_dirs, sizeof(char*) * (size_t)cap);
+        if (!grown) { s_hdr_ok = 0; return; }
+        s_hdr_dirs = grown;
+        s_hdr_dir_cap = cap;
+    }
+    s_hdr_dirs[s_hdr_dir_count] = strdup(dir);
+    if (!s_hdr_dirs[s_hdr_dir_count]) { s_hdr_ok = 0; return; }
+    s_hdr_dir_count++;
+}
+
 /* Does `dir` hold a C header? Only such a directory can resolve an include:
  * one without (a module of .ae and .c files, a directory of directories)
- * would only be one more place the compiler looks in vain. */
+ * would only be one more place the compiler looks in vain. While the list
+ * is being built (#3841) every header's name is recorded too. */
 static int dir_has_header(const char* dir) {
 #ifdef _WIN32
     char pattern[1024];
@@ -2161,7 +2208,13 @@ static int dir_has_header(const char* dir) {
     if (h == INVALID_HANDLE_VALUE) return 0;
     int found = 0;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { found = 1; break; }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        found = 1;
+        if (!s_hdr_recording) break;
+        /* The pattern can match by a short name too: only a real `.h` is
+         * recorded. */
+        size_t n = strlen(fd.cFileName);
+        if (n > 2 && strcmp(fd.cFileName + n - 2, ".h") == 0) hdr_record_name(fd.cFileName, n);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return found;
@@ -2170,9 +2223,12 @@ static int dir_has_header(const char* dir) {
     if (!d) return 0;
     int found = 0;
     struct dirent* ent;
-    while (!found && (ent = readdir(d)) != NULL) {
+    while ((!found || s_hdr_recording) && (ent = readdir(d)) != NULL) {
         size_t n = strlen(ent->d_name);
-        found = n > 2 && strcmp(ent->d_name + n - 2, ".h") == 0;
+        if (n > 2 && strcmp(ent->d_name + n - 2, ".h") == 0) {
+            found = 1;
+            hdr_record_name(ent->d_name, n);
+        }
     }
     closedir(d);
     return found;
@@ -2215,8 +2271,10 @@ static int walk_dirs_emit_includes(const char* root, char** out, size_t* out_siz
     if (!root || !*root) return 1;
     if (walk_skips_dir(root)) return 1;
     // The root itself first.
-    if (dir_has_header(root) &&
-        !append_include_flag(out, out_size, pos, "-idirafter ", root)) return 0;
+    if (dir_has_header(root)) {
+        if (!append_include_flag(out, out_size, pos, "-idirafter ", root)) return 0;
+        hdr_record_dir(root);   /* #3841 */
+    }
 
 #ifdef _WIN32
     char pattern[1024];
@@ -2661,12 +2719,305 @@ found_root:
  * Never NULL; empty only when memory ran out before the first flag. */
 static void tc_build_include_flags(void);
 
+static int hdr_name_cmp(const void* a, const void* b);
+
 const char* tc_include_flags(void) {
     if (!s_include_flags_built) {
         s_include_flags_built = 1;
+        /* #3841: the headers each directory holds, recorded as it is listed. */
+        for (int i = 0; i < s_hdr_name_count; i++) free(s_hdr_names[i].name);
+        for (int i = 0; i < s_hdr_dir_count; i++) free(s_hdr_dirs[i]);
+        s_hdr_name_count = s_hdr_dir_count = 0;
+        s_hdr_ok = 1;
+        s_hdr_recording = 1;
         tc_build_include_flags();
+        s_hdr_recording = 0;
+        if (s_hdr_ok && s_hdr_name_count > 1)
+            qsort(s_hdr_names, (size_t)s_hdr_name_count, sizeof(HdrName), hdr_name_cmp);
     }
     return tc.include_flags ? tc.include_flags : "";
+}
+
+/* ---- The -idirafter directories one program needs (#3841) ----------------
+ *
+ * The toolchain list names every runtime and std directory that holds a
+ * header, 53 in a source tree, and the compiler searches them for every
+ * header a program includes that is not its own or the system's: hello's
+ * preprocessing went from 73 to 62 ms with the 5 it needs. The directories
+ * a compile needs are the ones its C files' includes resolve in, and the
+ * includes of what those resolve to, in turn: a text scan of every
+ * `#include` and `__has_include`, under an `#if` or not, which can only
+ * keep a directory too many. A name resolves where the compiler would find
+ * it: a quoted one beside the file that includes it first, then in the -I
+ * directories ahead of the list (include/ and each module's @c_include
+ * directory), then in the list's first directory that has it. The
+ * directories it keeps go on the line in the list's order, as -idirafter
+ * (#2552: a user's or the system's header of the same name still wins).
+ *
+ * Anything the scan cannot follow gives the whole list, as before: an
+ * include through a macro, a file it cannot read, more files than it
+ * holds, user cflags that move the search (-I, -isystem, -iquote,
+ * -include, -imacros, -nostdinc), a header listing that was not recorded
+ * whole, or memory running out. */
+#define PROGRAM_INCLUDE_SCAN_MAX 512
+
+typedef struct {
+    char** files;            /* found, scanned or waiting */
+    int count, cap, next;
+    unsigned char* need;     /* per s_hdr_dirs */
+    const char** idirs;      /* -I directories, in order */
+    int nidirs;
+    int failed;
+} IncludeScan;
+
+static int hdr_name_cmp(const void* a, const void* b) {
+    const HdrName* x = (const HdrName*)a;
+    const HdrName* y = (const HdrName*)b;
+    int c = strcmp(x->name, y->name);
+    return c ? c : x->dir - y->dir;
+}
+
+/* The first list directory holding header `name` (no directory part), -1
+ * for none. */
+static int hdr_first_dir(const char* name) {
+    int lo = 0, hi = s_hdr_name_count - 1, at = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = strcmp(s_hdr_names[mid].name, name);
+        if (c == 0) { at = mid; hi = mid - 1; }
+        else if (c < 0) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return at < 0 ? -1 : s_hdr_names[at].dir;
+}
+
+/* `dir` and `name` joined, in a buffer the caller frees; NULL out of memory. */
+static char* scan_join(const char* dir, size_t dlen, const char* name, size_t nlen) {
+    char* p = malloc(dlen + 1 + nlen + 1);
+    if (!p) return NULL;
+    memcpy(p, dir, dlen);
+    p[dlen] = '/';
+    memcpy(p + dlen + 1, name, nlen);
+    p[dlen + 1 + nlen] = '\0';
+    return p;
+}
+
+/* `path` onto the scan, once (taken over; freed when already there). */
+static void scan_push(IncludeScan* s, char* path) {
+    if (!path) { s->failed = 1; return; }
+    for (int i = 0; i < s->count; i++) {
+        if (strcmp(s->files[i], path) == 0) { free(path); return; }
+    }
+    if (s->count >= PROGRAM_INCLUDE_SCAN_MAX) { free(path); s->failed = 1; return; }
+    if (s->count == s->cap) {
+        int cap = s->cap ? s->cap * 2 : 64;
+        char** grown = realloc(s->files, sizeof(char*) * (size_t)cap);
+        if (!grown) { free(path); s->failed = 1; return; }
+        s->files = grown;
+        s->cap = cap;
+    }
+    s->files[s->count++] = path;
+}
+
+static int scan_is_absolute(const char* p) {
+    return p[0] == '/' || p[0] == '\\' || (p[0] && p[1] == ':');
+}
+
+/* Where the include `name` of `file` resolves, onto the scan, its list
+ * directory marked. A name in none of the places the scan knows is the
+ * system's, and not followed. */
+static void scan_resolve(IncludeScan* s, const char* file, const char* name, size_t nlen,
+                         int quoted) {
+    if (nlen == 0) { s->failed = 1; return; }
+    char* nm = malloc(nlen + 1);
+    if (!nm) { s->failed = 1; return; }
+    memcpy(nm, name, nlen);
+    nm[nlen] = '\0';
+    if (scan_is_absolute(nm)) {
+        if (path_exists(nm)) scan_push(s, nm);
+        else free(nm);
+        return;
+    }
+    if (quoted) {
+        const char* cut = NULL;
+        for (const char* q = file; *q; q++) if (*q == '/' || *q == '\\') cut = q;
+        char* beside = cut ? scan_join(file, (size_t)(cut - file), nm, nlen)
+                           : scan_join(".", 1, nm, nlen);
+        if (!beside) { free(nm); s->failed = 1; return; }
+        if (path_exists(beside)) { free(nm); scan_push(s, beside); return; }
+        free(beside);
+    }
+    for (int i = 0; i < s->nidirs; i++) {
+        char* p = scan_join(s->idirs[i], strlen(s->idirs[i]), nm, nlen);
+        if (!p) { free(nm); s->failed = 1; return; }
+        if (path_exists(p)) { free(nm); scan_push(s, p); return; }
+        free(p);
+    }
+    int d = -1;
+    if (!strchr(nm, '/') && !strchr(nm, '\\')) {
+        d = hdr_first_dir(nm);
+    } else {
+        /* A name with a directory part: asked of each list directory. */
+        for (int i = 0; d < 0 && i < s_hdr_dir_count; i++) {
+            char* p = scan_join(s_hdr_dirs[i], strlen(s_hdr_dirs[i]), nm, nlen);
+            if (!p) { free(nm); s->failed = 1; return; }
+            if (path_exists(p)) d = i;
+            free(p);
+        }
+    }
+    if (d >= 0) {
+        s->need[d] = 1;
+        scan_push(s, scan_join(s_hdr_dirs[d], strlen(s_hdr_dirs[d]), nm, nlen));
+    }
+    free(nm);
+}
+
+/* The name a `"..."` or `<...>` at `p` spells, its length in *len; NULL when
+ * `p` is neither (a macro). */
+static const char* scan_spelled(const char* p, size_t* len, int* quoted) {
+    while (*p == ' ' || *p == '\t') p++;
+    char close = *p == '"' ? '"' : *p == '<' ? '>' : 0;
+    if (!close) return NULL;
+    const char* end = strchr(p + 1, close);
+    if (!end) return NULL;
+    *quoted = close == '"';
+    *len = (size_t)(end - p - 1);
+    return p + 1;
+}
+
+/* Every `#include` and `__has_include` of `file`, resolved. */
+static void scan_file(IncludeScan* s, const char* file) {
+    FILE* f = fopen(file, "r");
+    if (!f) { s->failed = 1; return; }
+    char* line = NULL;
+    size_t cap = 0;
+    int got;
+    while (!s->failed && (got = ae_read_line(f, &line, &cap)) > 0) {
+        const char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (strncmp(p, "include", 7) == 0 || strncmp(p, "import", 6) == 0) {
+                p += strncmp(p, "include", 7) == 0 ? 7 : 6;
+                if (strncmp(p, "_next", 5) == 0) p += 5;
+                size_t len;
+                int quoted;
+                const char* nm = scan_spelled(p, &len, &quoted);
+                if (!nm) { s->failed = 1; break; }   /* an include through a macro */
+                scan_resolve(s, file, nm, len, quoted);
+            }
+        }
+        for (const char* h = strstr(line, "__has_include"); h && !s->failed;
+             h = strstr(h + 1, "__has_include")) {
+            const char* q = h + strlen("__has_include");
+            if (strncmp(q, "_next", 5) == 0) q += 5;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '(') continue;   /* `defined(__has_include)` and the like */
+            size_t len;
+            int quoted;
+            const char* nm = scan_spelled(q + 1, &len, &quoted);
+            if (!nm) { s->failed = 1; break; }
+            scan_resolve(s, file, nm, len, quoted);
+        }
+    }
+    if (got < 0) s->failed = 1;
+    free(line);
+    fclose(f);
+}
+
+/* The include flags of the compile of `c_file` (and the C files `extra`
+ * and `config_c` list, compiled on the same line): the toolchain list's -I
+ * and the -idirafter directories the compile needs, or the whole list. */
+static const char* program_include_flags(const char* c_file, const char* extra,
+                                         const char* config_c, const char* user_cflags,
+                                         const char* ae_includes) {
+    const char* full = tc_include_flags();
+    static const char* const moves[] = { "-I", "-isystem", "-iquote", "-include", "-imacros",
+                                         "-idirafter", "-nostdinc", "--include", NULL };
+    for (int i = 0; user_cflags && moves[i]; i++)
+        if (strstr(user_cflags, moves[i])) return full;
+    if (!s_hdr_ok || s_hdr_dir_count == 0) return full;
+    /* The list's own -I comes first: everything up to its first -idirafter. */
+    const char* first = strstr(full, " -idirafter ");
+    size_t head = first ? (size_t)(first - full) : strlen(full);
+
+    IncludeScan s;
+    memset(&s, 0, sizeof(s));
+    s.need = calloc((size_t)s_hdr_dir_count, 1);
+    /* The -I directories: the list's own, then each @c_include one. */
+    size_t ae_len = ae_includes ? strlen(ae_includes) : 0;
+    char* idir_text = malloc(head + ae_len + 2);
+    s.idirs = malloc(sizeof(char*) * (head + ae_len + 2));
+    if (!s.need || !idir_text || !s.idirs) s.failed = 1;
+    if (!s.failed) {
+        char* w = idir_text;
+        const char* srcs[2] = { full, ae_includes ? ae_includes : "" };
+        size_t lens[2] = { head, ae_len };
+        for (int k = 0; k < 2; k++) {
+            const char* p = srcs[k];
+            const char* end = p + lens[k];
+            while (p < end) {
+                while (p < end && *p == ' ') p++;
+                if (p + 2 > end || p[0] != '-' || p[1] != 'I') break;
+                p += 2;
+                int q = p < end && *p == '"';
+                if (q) p++;
+                const char* stop = p;
+                while (stop < end && (q ? *stop != '"' : *stop != ' ')) stop++;
+                s.idirs[s.nidirs++] = w;
+                memcpy(w, p, (size_t)(stop - p));
+                w += stop - p;
+                *w++ = '\0';
+                p = stop + (q && stop < end ? 1 : 0);
+            }
+        }
+    }
+    if (!s.failed) scan_push(&s, strdup(c_file));
+    const char* lists[2] = { extra, config_c };
+    for (int k = 0; k < 2 && !s.failed; k++) {
+        const char* cursor = lists[k] ? lists[k] : "";
+        size_t lcap = strlen(cursor) + 1;
+        char* tok = malloc(lcap);
+        if (!tok) { s.failed = 1; break; }
+        while (!s.failed && extras_next(&cursor, tok, lcap)) {
+            size_t n = strlen(tok);
+            if (n > 2 && strcmp(tok + n - 2, ".c") == 0) scan_push(&s, strdup(tok));
+        }
+        free(tok);
+    }
+    while (!s.failed && s.next < s.count) scan_file(&s, s.files[s.next++]);
+
+    static char* out = NULL;
+    static size_t out_cap = 0;
+    const char* result = full;
+    if (!s.failed) {
+        size_t pos = head;
+        if (str_buf_grow(&out, &out_cap, head + 1)) {
+            memcpy(out, full, head);
+            out[head] = '\0';
+            int ok = 1, kept = 0;
+            for (int d = 0; ok && d < s_hdr_dir_count; d++) {
+                if (!s.need[d]) continue;
+                ok = append_include_flag(&out, &out_cap, &pos, "-idirafter ", s_hdr_dirs[d]);
+                kept++;
+            }
+            if (ok) {
+                result = out;
+                if (tc.verbose)
+                    fprintf(stderr, "[include] %d of %d header directories, from %d files\n",
+                            kept, s_hdr_dir_count, s.count);
+            }
+        }
+    }
+    if (result == full && tc.verbose)
+        fprintf(stderr, "[include] every header directory (the includes could not all be followed)\n");
+    for (int i = 0; i < s.count; i++) free(s.files[i]);
+    free(s.files);
+    free(s.need);
+    free(idir_text);
+    free(s.idirs);
+    return result;
 }
 
 static void tc_build_include_flags(void) {
@@ -6424,7 +6775,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_cmd, opt, tc_include_flags(), ae_includes, c_file, config_c, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, binimport_link(), rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            s_gcc_cmd, opt, program_include_flags(c_file, extra, config_c, user_cflags, ae_includes), ae_includes, c_file, config_c, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, binimport_link(), rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -6709,7 +7060,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, opt, tc_include_flags(), ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
+            cc, opt, program_include_flags(c_file, extra, config_c, user_cflags, ae_includes), ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
