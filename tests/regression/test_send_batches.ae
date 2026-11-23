@@ -99,5 +99,66 @@ main() {
     }
     sleep(500)
     check(d.count == 5, "a loop left by a labeled break kept ${5 - d.count} of 5 messages")
+
+    // #3826: a `for` loop is batched as a `while` loop is. Its mixed
+    // messages keep their order.
+    f = spawn(Sum())
+    for i in 0..40 {
+        if i % 2 == 0 {
+            f ! Add { n: i }
+        } else {
+            f ! Note { n: i, tag: "odd" }
+        }
+    }
+    wait_for_idle()
+    check(f.count == 40, "the mixed for loop delivered ${f.count} of 40")
+    check(f.in_order == 1, "a for loop's payload message overtook a one-int one")
+
+    // A `for` inside a `while` and a `while` inside a `for` join the outer
+    // loop's batch.
+    g = spawn(Sum())
+    h = spawn(Sum())
+    i = 0
+    while i < 10 {
+        g ! Add { n: i }
+        for j in 0..2 {
+            h ! Add { n: i * 2 + j }
+        }
+        i = i + 1
+    }
+    for p in 0..10 {
+        h ! Add { n: 20 + p * 2 }
+        j = 0
+        while j < 1 {
+            h ! Add { n: 21 + p * 2 }
+            j = j + 1
+        }
+    }
+    wait_for_idle()
+    check(g.count == 10, "the while loop's messages around a for: ${g.count} of 10")
+    check(h.count == 40, "the nested for and while messages: ${h.count} of 40")
+    check(h.in_order == 1, "nested for and while loops reordered their messages")
+
+    // A `for` left by a plain `break` sends its batch where the loop ends:
+    // nothing flushes after it, so the messages must have gone there.
+    q = spawn(Sum())
+    for n in 0..10 {
+        q ! Add { n: n }
+        if n == 4 { break }
+    }
+    sleep(500)
+    check(q.count == 5, "a for loop left by break kept ${5 - q.count} of 5 messages")
+
+    // A `for` a labeled break leaves is not batched.
+    r = spawn(Sum())
+    outer2: for k2 in 0..3 {
+        check(k2 == 0, "the labeled break did not leave the outer for loop")
+        for j2 in 0..10 {
+            r ! Add { n: j2 }
+            if j2 == 4 { break outer2 }
+        }
+    }
+    sleep(500)
+    check(r.count == 5, "a for loop left by a labeled break kept ${5 - r.count} of 5 messages")
     println("PASS #3117: loops batch only what cannot wait, in order, nothing lost")
 }

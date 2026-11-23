@@ -949,6 +949,43 @@ TEST(codegen_wide_message_has_natural_alignment) {
     free(buf);
 }
 
+/* #3826: a `for` loop in main that only sends is batched as a `while` loop
+ * is (#3117): one batch opened before it, its sends added to the batch, and
+ * the batch sent after it. One that prints between its sends is not. */
+TEST(codegen_for_loop_sends_are_batched) {
+    char* buf = generate_typechecked(
+        "message Hit { n: int }\n"
+        "actor Sink {\n"
+        "    state total = 0\n"
+        "    receive { Hit(n) -> { total = total + n } }\n"
+        "}\n"
+        "main() {\n"
+        "    s = spawn(Sink())\n"
+        "    for i in 0..100 { s ! Hit { n: i } }\n"
+        "}\n");
+    ASSERT_NOT_NULL(buf);
+    const char* start = strstr(buf, "scheduler_send_batch_start();");
+    ASSERT_NOT_NULL(start);
+    const char* add = strstr(start, "scheduler_send_batch_add(");
+    ASSERT_NOT_NULL(add);
+    ASSERT_NOT_NULL(strstr(add, "scheduler_send_batch_flush();"));
+    free(buf);
+
+    buf = generate_typechecked(
+        "message Hit { n: int }\n"
+        "actor Sink {\n"
+        "    state total = 0\n"
+        "    receive { Hit(n) -> { total = total + n } }\n"
+        "}\n"
+        "main() {\n"
+        "    s = spawn(Sink())\n"
+        "    for i in 0..100 { s ! Hit { n: i }\n println(i) }\n"
+        "}\n");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "scheduler_send_batch_start();") == NULL);
+    free(buf);
+}
+
 /* Like generate_typechecked, with the --emit-header file as well. */
 static char* generate_with_header(const char* source, char** header_out) {
     int count;

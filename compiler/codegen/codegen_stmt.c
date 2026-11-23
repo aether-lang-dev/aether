@@ -12081,6 +12081,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * header declared a new one, so `i = 5; for (i = 0; i < 3; i++)
              * {}` left `i` at 5. */
             int assign_init = loop_var && for_init->type_inferred;
+            /* #3826: a `for` loop's sends are batched as a `while` loop's
+             * are (#3117), under the same guard: outside an actor, not
+             * inside a loop already batching, and nothing in the loop
+             * (its init, condition, step or body) can wait between two
+             * sends. The guard refuses a `return` and a labeled `break` or
+             * `continue`, so the loop is left only past its end, where the
+             * flush is. Unbatched, `for i in 0..n { a ! M{} }` in main took
+             * the foreign send path for every message: 112-143 ns a message
+             * where the `while` form took 18-23. */
+            int for_batch = contains_send_expression(stmt) && gen->current_actor == NULL &&
+                            !gen->in_main_loop && loop_sends_without_waiting(stmt);
+            if (for_batch) {
+                print_line(gen, "scheduler_send_batch_start();");
+                gen->in_main_loop = 1;
+            }
             int cell_init = !assign_init && loop_var && is_promoted_capture(gen, loop_var);
             /* #2742: the loop's variable is owned as the binding a while-loop
              * rewrite makes, in the same block of its own:
@@ -12250,6 +12265,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * one a C `break` cannot express (#2696). */
             if (for_lbl_idx >= 0 && gen->loop_label_break_used[for_lbl_idx]) {
                 print_line(gen, "__ae_brk_%d: ;", gen->loop_label_id[for_lbl_idx]);
+            }
+            if (for_batch) {
+                print_line(gen, "scheduler_send_batch_flush();");
+                gen->in_main_loop = 0;
             }
             if (own_block) {
                 /* #2737: the loop's reference to its cell; #2742: what the
