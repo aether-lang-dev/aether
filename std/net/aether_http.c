@@ -3984,6 +3984,46 @@ static int http_io_would_block(void) {
 #endif
 }
 
+/* Why a read on `t` just failed, by kind, read from the error the failing
+ * call left (#3846): HTTP_IO_TIMED_OUT when it waited out the socket's
+ * receive timeout (a would-block on a transport this driver uses blocking,
+ * which is how POSIX reports SO_RCVTIMEO, or Winsock's WSAETIMEDOUT),
+ * HTTP_IO_WOULD_BLOCK for a non-blocking transport with nothing yet,
+ * HTTP_IO_RESET when the peer reset or aborted the connection, and
+ * HTTP_IO_OTHER for anything else. A timeout and a reset were one "recv
+ * timeout or I/O error", which the proxy answers 504 for both. The kinds
+ * are in aether_http_internal.h. */
+static int http_io_failure_kind(const Transport* t) {
+    /* -1 is a pure-TLS transport, which this client reads blocking. */
+    int blocking = t->nonblocking != 1;
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    if (e == WSAEWOULDBLOCK) return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
+    if (e == WSAETIMEDOUT) return HTTP_IO_TIMED_OUT;
+    if (e == WSAECONNRESET || e == WSAECONNABORTED) return HTTP_IO_RESET;
+#else
+    int e = errno;
+    if (e == EAGAIN || e == EWOULDBLOCK) return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
+    if (e == ETIMEDOUT) return HTTP_IO_TIMED_OUT;
+    if (e == ECONNRESET || e == ECONNABORTED || e == EPIPE) return HTTP_IO_RESET;
+#endif
+    return HTTP_IO_OTHER;
+}
+
+/* What a read that failed before a response, or its head, arrived says, by
+ * the kind of failure: the proxy answers 504 for a timeout ("timed out")
+ * and 502 for the others (#3846). */
+static const char* http_recv_failure_text(int kind, int head_only) {
+    if (kind == HTTP_IO_TIMED_OUT)
+        return head_only ? "request timed out before the response headers arrived"
+                         : "request timed out before the response arrived";
+    if (kind == HTTP_IO_RESET)
+        return head_only ? "connection reset by the peer before the response headers arrived"
+                         : "connection reset by the peer before the response arrived";
+    return head_only ? "I/O error before the response headers arrived"
+                     : "I/O error before the response arrived";
+}
+
 /* Write the request head, then the body. Bodies are written raw so embedded
  * NULs survive. */
 int http_exchange_send(HttpExchange* x) {
@@ -4016,10 +4056,15 @@ int http_exchange_recv(HttpExchange* x) {
         int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
         if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
         if (n < 0) {
-            if (http_io_would_block()) return AE_X_WANT_READ;
-#ifdef _WIN32
-            if (WSAGetLastError() == WSAETIMEDOUT) x->recv_timed_out = 1;
-#endif
+            int kind = http_io_failure_kind(x->t);
+            if (kind == HTTP_IO_WOULD_BLOCK) return AE_X_WANT_READ;
+            x->recv_failure = kind;
+            if (kind == HTTP_IO_TIMED_OUT) {
+                x->recv_timed_out = 1;
+                /* A blocking transport's WANT is its receive timeout, which
+                 * the blocking client has always read as a failed read. */
+                if (http_io_would_block()) return AE_X_WANT_READ;
+            }
             return AE_X_ERROR;
         }
         /* Past the response limit, the read ends there (#3750): a server
@@ -4302,6 +4347,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     int    recv_err = 0;
     int    timed_out = 0;   /* the whole-request budget ran out mid-response */
     int    waited_out = 0;  /* ... or a read waited its whole timeout (#3825) */
+    int    recv_kind = HTTP_IO_OTHER;   /* why a failed read failed (#3846) */
     int    rx_complete_at_deadline = 0;  /* ... but the response had already ended */
     int    truncated = 0;
     HttpRespFraming framing = {0};
@@ -4410,12 +4456,15 @@ send_request:
             hend = (char*)http_find_header_end(hb, hlen);
             if (hend) break;
         }
+        /* Read from the error the failed read left, before anything else
+         * can change it: a timeout and a reset are told apart (#3846). */
+        int skind = sn < 0 ? http_io_failure_kind(&t) : HTTP_IO_OTHER;
         if (sn < 0) serr = 1;
         if (!hend) {
             free(hb);
             transport_close(&t);
             response->error = string_new(
-                serr ? "recv timeout or I/O error"
+                serr ? http_recv_failure_text(skind, 1)
                      : "connection closed before response headers");
             return response;
         }
@@ -4534,10 +4583,10 @@ send_request:
         int rc = http_exchange_recv(&rx);
         timed_out = rx.timed_out;
         /* The budget ran out, or the socket's receive timeout (the same
-         * length, SO_RCVTIMEO) fired first, which a blocking transport
-         * reports as a WANT on POSIX and as WSAETIMEDOUT on Windows: the
-         * upstream held the connection silent. */
-        waited_out = rx.timed_out || rc == AE_X_WANT_READ || rx.recv_timed_out;
+         * length, SO_RCVTIMEO) fired first (recv_timed_out, on every
+         * platform): the upstream held the connection silent. */
+        waited_out = rx.timed_out || rx.recv_timed_out;
+        recv_kind = waited_out ? HTTP_IO_TIMED_OUT : rx.recv_failure;
         rx_complete_at_deadline = rx.complete || rx.peer_closed;
         full_response = rx.buf;
         total_len     = rx.len;
@@ -4701,9 +4750,10 @@ send_request:
     }
     if (recv_err && !header_end) {
         http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
-        response->error = string_new(
-            timed_out ? "request timed out before the response arrived"
-                      : "recv timeout or I/O error");
+        /* By kind (#3846): a timeout, which the proxy answers 504, and a
+         * reset or another I/O error, 502, were one "recv timeout or I/O
+         * error" and all answered 504. */
+        response->error = string_new(http_recv_failure_text(recv_kind, 0));
         return response;
     }
     /* A response that stopped short of the length it declared is an error

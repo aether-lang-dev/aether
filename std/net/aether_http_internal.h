@@ -126,10 +126,14 @@ typedef struct {
      * too_large is set once a read passes it. */
     size_t max_len;
     int    too_large;
-    /* A read failed because the socket's receive timeout fired, where the
-     * platform says so with an error rather than a would-block (Winsock's
-     * WSAETIMEDOUT; POSIX reports it as a WANT_READ) (#3825). */
+    /* A read failed because the socket's receive timeout fired: Winsock's
+     * WSAETIMEDOUT, or a would-block on a transport used blocking, which is
+     * how POSIX reports it (#3825, #3846). */
     int    recv_timed_out;
+    /* Why the last read failed, when one did: HTTP_IO_TIMED_OUT,
+     * HTTP_IO_RESET or HTTP_IO_OTHER (aether_http.c), 0 being OTHER, so a
+     * timeout and a reset are told apart (#3846). */
+    int    recv_failure;
 } HttpExchange;
 
 /* An upstream connection acquired without blocking. */
@@ -157,6 +161,12 @@ struct HttpUpstreamConnOpaque {
     int  lookup;
     char pool_key[512];
 };
+
+/* Why a read failed (HttpExchange.recv_failure, #3846). */
+#define HTTP_IO_OTHER       0
+#define HTTP_IO_TIMED_OUT   1
+#define HTTP_IO_WOULD_BLOCK 2
+#define HTTP_IO_RESET       3
 
 #define AE_X_DONE        0
 #define AE_X_WANT_READ   1

@@ -2100,7 +2100,12 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
                 continue;
             }
             if (r < 0) {
-                r = ev_upstream_failed(d, c, "connection closed before a response", 1);
+                /* A reset says so, in the blocking client's words, as the
+                 * worker path's answer does (#3846); the proxy answers 502
+                 * either way. */
+                r = ev_upstream_failed(d, c, c->x.recv_failure == HTTP_IO_RESET
+                                       ? "connection reset by the peer before the response arrived"
+                                       : "connection closed before a response", 1);
                 if (r <= 0) return r;
                 continue;
             }

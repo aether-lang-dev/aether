@@ -1,0 +1,175 @@
+// An upstream that resets the connection is answered 502, and the error
+// names the reset; only a timeout is answered 504 (#3846).
+//
+// The HTTP client reported every failed read before a response as "recv
+// timeout or I/O error", and the reverse proxy reads "timeout" as a timeout:
+// a reset, which is no timeout, was answered 504. The client now tells the
+// kinds apart, a timeout ("timed out"), a reset ("connection reset by the
+// peer") and another I/O error, so the proxy answers 504 for the first and
+// 502 for the others, on the worker path and on the event loop.
+//
+// This program is the upstream. On a kept client connection a GET leaves an
+// upstream connection in the proxy's pool. The next GET reaches the upstream
+// on it, which closes it unanswered; the proxy sends the GET again on a
+// fresh connection, and the upstream closes that one with the request
+// unread, which resets it. The client must get 502 with a body naming the
+// reset. Through a bare proxy (the event loop on Linux and macOS) and
+// through one behind a program's middleware (the worker path). Every socket
+// is on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    merr = proxy.mount_simple(s, "/", up_url, 5)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// What `sock` sends until `marker` has arrived, it closes, or `ms` pass.
+read_until(sock: ptr, marker: string, ms: int) -> string {
+    wire = ""
+    waited = 0
+    while waited < ms {
+        ready, _perr = tcp.poll(sock, 50)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                return wire
+            }
+            wire = string.concat(wire, chunk)
+            if string.index_of(wire, marker) >= 0 {
+                return wire
+            }
+        } else {
+            waited = waited + 50
+        }
+    }
+    return wire
+}
+
+// The next connection to `listener` within `ms`, or null.
+accept_within(listener: ptr, ms: int) -> ptr {
+    if tcp.server_poll(listener, ms) != 1 {
+        return null
+    }
+    sock, aerr = tcp.accept(listener)
+    if aerr != "" {
+        return null
+    }
+    return sock
+}
+
+status(wire: string) -> string {
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+const ANSWER = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\np"
+const GET = "GET /p HTTP/1.1\r\nHost: x\r\n\r\n"
+
+main() {
+    println("=== a reset upstream is answered 502, naming the reset (#3846) ===")
+    listener, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: listen: ${lerr}")
+        exit(1)
+    }
+    up_url = "http://127.0.0.1:${tcp.server_port(listener)}"
+
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        s = gateway(up_url, g)
+        port = start(s)
+        sleep(100)
+        http.client_pool_clear()
+
+        k, kerr = tcp.connect("127.0.0.1", port)
+        if kerr != "" {
+            println("FAIL: connect")
+            exit(1)
+        }
+        tcp.write(k, GET)
+        up = accept_within(listener, 3000)
+        if up == null {
+            println("FAIL: the first request reached no upstream connection (${names[g]})")
+            exit(1)
+        }
+        _head = read_until(up, "\r\n\r\n", 3000)
+        tcp.write(up, ANSWER)
+        first = status(read_until(k, "\r\n\r\n", 3000))
+
+        // The pooled connection ends unanswered, and the retry's fresh one
+        // is closed with the request in it unread: a reset.
+        tcp.write(k, GET)
+        _again = read_until(up, "\r\n\r\n", 3000)
+        tcp.close(up)
+        retry = accept_within(listener, 3000)
+        how = "no retry"
+        if retry != null {
+            how = "retry reset"
+            arrived, _rperr = tcp.poll(retry, 3000)
+            if !arrived {
+                how = "retry carried nothing"
+            }
+            tcp.close(retry)
+        }
+        wire = read_until(k, "reset", 3000)
+        tcp.close(k)
+        named = "not named"
+        if string.index_of(wire, "connection reset by the peer") >= 0 {
+            named = "named"
+        }
+        result = "${first} then ${status(wire)} after the ${how}, reset ${named}"
+        want = "200 then 502 after the retry reset, reset named"
+        if result != want {
+            println("  FAIL an upstream that resets (${names[g]}): got '${result}', expected '${want}'")
+            bad = bad + 1
+        } else {
+            println("  PASS an upstream that resets (${names[g]})")
+        }
+        http.server_stop(s)
+        http.server_free(s)
+        g = g + 1
+    }
+
+    tcp.server_close(listener)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}
