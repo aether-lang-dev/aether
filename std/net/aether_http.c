@@ -4015,7 +4015,13 @@ int http_exchange_recv(HttpExchange* x) {
         }
         int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
         if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
-        if (n < 0)  return http_io_would_block() ? AE_X_WANT_READ : AE_X_ERROR;
+        if (n < 0) {
+            if (http_io_would_block()) return AE_X_WANT_READ;
+#ifdef _WIN32
+            if (WSAGetLastError() == WSAETIMEDOUT) x->recv_timed_out = 1;
+#endif
+            return AE_X_ERROR;
+        }
         /* Past the response limit, the read ends there (#3750): a server
          * could make the client grow this buffer for as long as it kept
          * sending. The limit is on the head and the body's payload: a
@@ -4295,6 +4301,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     int    n = 0;
     int    recv_err = 0;
     int    timed_out = 0;   /* the whole-request budget ran out mid-response */
+    int    waited_out = 0;  /* ... or a read waited its whole timeout (#3825) */
     int    rx_complete_at_deadline = 0;  /* ... but the response had already ended */
     int    truncated = 0;
     HttpRespFraming framing = {0};
@@ -4526,6 +4533,11 @@ send_request:
         rx.max_len = max_response > 0 ? (size_t)max_response : 0;
         int rc = http_exchange_recv(&rx);
         timed_out = rx.timed_out;
+        /* The budget ran out, or the socket's receive timeout (the same
+         * length, SO_RCVTIMEO) fired first, which a blocking transport
+         * reports as a WANT on POSIX and as WSAETIMEDOUT on Windows: the
+         * upstream held the connection silent. */
+        waited_out = rx.timed_out || rc == AE_X_WANT_READ || rx.recv_timed_out;
         rx_complete_at_deadline = rx.complete || rx.peer_closed;
         full_response = rx.buf;
         total_len     = rx.len;
@@ -4588,10 +4600,15 @@ send_request:
      * as no answer at all: retire the connection and ask again on a fresh
      * one. Only for a connection that came from the pool — a freshly dialled
      * one returning nonsense is the upstream's answer, not a stale socket. */
+    /* Not after the request's timeout (#3825): an upstream that held the
+     * connection silent for all of it did not close it, and it may be
+     * working on the request. Sent again, the request cost a second whole
+     * timeout before the proxy answered 504, and the upstream had it twice;
+     * the event loop answers 504 at the first (ev_expire). */
     int desynced = reused && total_len > 0
                 && (total_len < 5 || strncmp(full_response, "HTTP/", 5) != 0);
 
-    if ((total_len == 0 || desynced) && reused && !retried && idempotent) {
+    if ((total_len == 0 || desynced) && reused && !retried && idempotent && !waited_out) {
         retried = 1;
         reused = 0;
         transport_close(&t);

@@ -126,6 +126,10 @@ typedef struct {
      * too_large is set once a read passes it. */
     size_t max_len;
     int    too_large;
+    /* A read failed because the socket's receive timeout fired, where the
+     * platform says so with an error rather than a would-block (Winsock's
+     * WSAETIMEDOUT; POSIX reports it as a WANT_READ) (#3825). */
+    int    recv_timed_out;
 } HttpExchange;
 
 /* An upstream connection acquired without blocking. */

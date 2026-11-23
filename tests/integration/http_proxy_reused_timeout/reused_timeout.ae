@@ -1,0 +1,196 @@
+// A request whose pooled upstream connection stays silent past the timeout
+// is answered 504 once, not sent again (#3825).
+//
+// The worker path's client took a reused connection that produced nothing
+// before the request's timeout for one the upstream had closed, and sent
+// the request again on a fresh connection with a whole new timeout. The
+// upstream, which may have been working on it, had it twice, and the proxy
+// answered 504 only after two timeouts. The event loop answers 504 at the
+// first; now the worker path does too.
+//
+// This program is the upstream. On a kept client connection a GET leaves an
+// upstream connection in the proxy's pool; the next GET reaches the upstream
+// on it and gets no answer. The proxy's upstream timeout is one second, and
+// the client must get 504 within two and a half, with no new connection
+// reaching the upstream. Through a bare proxy (the event loop on Linux and
+// macOS) and through one behind a program's middleware (the worker path).
+// Every socket is on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    merr = proxy.mount_simple(s, "/", up_url, 1)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// What `sock` sends until a head has ended, it closes, or `ms` pass.
+read_head(sock: ptr, ms: int) -> string {
+    wire = ""
+    waited = 0
+    while waited < ms {
+        ready, _perr = tcp.poll(sock, 50)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                return wire
+            }
+            wire = string.concat(wire, chunk)
+            if string.index_of(wire, "\r\n\r\n") >= 0 {
+                return wire
+            }
+        } else {
+            waited = waited + 50
+        }
+    }
+    return wire
+}
+
+// The next connection to `listener` within `ms`, or null.
+accept_within(listener: ptr, ms: int) -> ptr {
+    if tcp.server_poll(listener, ms) != 1 {
+        return null
+    }
+    sock, aerr = tcp.accept(listener)
+    if aerr != "" {
+        return null
+    }
+    return sock
+}
+
+status(wire: string) -> string {
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+const ANSWER = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\np"
+const GET = "GET /p HTTP/1.1\r\nHost: x\r\n\r\n"
+
+// New connections to the upstream while a client waited for its answer.
+var arrivals: int = 0
+
+// The client's answer head on `k` within `ms`, accepting (and closing)
+// every connection that reaches `listener` meanwhile.
+answer_watching(k: ptr, listener: ptr, ms: int) -> string {
+    wire = ""
+    waited = 0
+    while waited < ms {
+        extra = accept_within(listener, 0)
+        if extra != null {
+            arrivals = arrivals + 1
+            tcp.close(extra)
+        }
+        ready, _perr = tcp.poll(k, 50)
+        if ready {
+            chunk, rerr = tcp.read(k, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                return wire
+            }
+            wire = string.concat(wire, chunk)
+            if string.index_of(wire, "\r\n\r\n") >= 0 {
+                return wire
+            }
+        } else {
+            waited = waited + 50
+        }
+    }
+    return wire
+}
+
+main() {
+    println("=== a silent reused upstream connection is answered 504 once (#3825) ===")
+    listener, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: listen: ${lerr}")
+        exit(1)
+    }
+    up_url = "http://127.0.0.1:${tcp.server_port(listener)}"
+
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        s = gateway(up_url, g)
+        port = start(s)
+        sleep(100)
+        http.client_pool_clear()
+
+        k, kerr = tcp.connect("127.0.0.1", port)
+        if kerr != "" {
+            println("FAIL: connect")
+            exit(1)
+        }
+        tcp.write(k, GET)
+        up = accept_within(listener, 3000)
+        if up == null {
+            println("FAIL: the first request reached no upstream connection (${names[g]})")
+            exit(1)
+        }
+        _head = read_head(up, 3000)
+        tcp.write(up, ANSWER)
+        first = status(read_head(k, 3000))
+
+        // The next one reaches the upstream on the pooled connection, which
+        // stays open and silent.
+        tcp.write(k, GET)
+        held = read_head(up, 3000)
+        seen = 0
+        if string.index_of(held, "\r\n\r\n") >= 0 {
+            seen = 1
+        }
+        arrivals = 0
+        answer = status(answer_watching(k, listener, 2500))
+        tcp.close(up)
+        tcp.close(k)
+        result = "${first} then ${answer}, the request reached the upstream ${seen + arrivals} time(s)"
+        want = "200 then 504, the request reached the upstream 1 time(s)"
+        if result != want {
+            println("  FAIL a reused connection held silent (${names[g]}): got '${result}', expected '${want}'")
+            bad = bad + 1
+        } else {
+            println("  PASS a reused connection held silent (${names[g]})")
+        }
+        http.server_stop(s)
+        http.server_free(s)
+        g = g + 1
+    }
+
+    tcp.server_close(listener)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}
