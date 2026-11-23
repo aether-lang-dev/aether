@@ -242,8 +242,9 @@ whose field is that binding's one read in the arm, under no loop, closure or
 it empty, so the message's release after the arm releases nothing of it. A
 send or an ask reads its target before it takes any field, so a target that
 panics (an index, a call) finds every place still full and nothing copied; a
-null target, found after the takes, releases the message before its panic
-(#3847). Any
+null target, found after the takes, gives back what the message took before
+its panic (#3847): the fields it owns, by its release, and each closure the
+send boxed into a `ptr` field, which a `ptr` does not own. Any
 other forward copies, one count operation too many at worst (R5). A value
 read from a published place carries the bit with it.
 

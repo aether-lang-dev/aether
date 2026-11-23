@@ -1,0 +1,123 @@
+// Regression (#3847): a send or an ask to a null actor reference releases
+// the closure it boxed into a `ptr` field.
+//
+// A closure stored into a `ptr` field is boxed at the send (#2890), and the
+// box, with its reference to the closure's environment, is the receiver's
+// to give back (release_closure): a `ptr` owns nothing, so the message's
+// release leaves it alone. A send to a null reference panics (#3172) once
+// the message is built, and the box was left to no one, one leak per send:
+// on the one-field path (the payload carries the box), on the heap path,
+// and on an ask. Everything the message took is now given back before the
+// panic: the fields it owns, by its release, and each box it made.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same sends grows by exactly 0
+// (mem.steady_growth). Elsewhere the leak gates cover this program.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Run { f: ptr }
+message RunN { f: ptr, n: int }
+message Ask { f: ptr, n: int }
+message Done { v: int }
+message Hop { text: string }
+
+// Never reached: the handlers that would release the boxes.
+actor Worker {
+    receive {
+        Run(f) -> { release_closure(f) }
+        RunN(f, n) -> { release_closure(f) }
+        Ask(f, n) -> {
+            release_closure(f)
+            reply Done { v: n }
+        }
+    }
+}
+
+// A send from an actor's handler, to a null reference, of a closure that
+// holds the received string.
+actor Relay {
+    state next: actor_ref = null
+    state caught = 0
+    receive {
+        Hop(text) -> {
+            try {
+                next ! Run { f: || { println(text) } }
+            } catch e {
+                caught = caught + 1
+            }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3847: ${msg}")
+        exit(1)
+    }
+}
+
+// Each closure holds a string built at run time, so its environment is an
+// allocation of its own that the box keeps.
+fn sends(n: int) -> int {
+    let nobody: actor_ref = null
+    let no_worker: actor_ref[Worker] = null
+    caught = 0
+    i = 0
+    while i < n {
+        tag = string.concat("tag-", string.from_int(i))
+        try {
+            nobody ! Run { f: || { println(tag) } }
+        } catch e {
+            caught = caught + 1
+        }
+        try {
+            why = try_send(nobody, Run { f: || { println(tag) } })
+            println("unreachable: ${why}")
+        } catch e {
+            caught = caught + 1
+        }
+        try {
+            nobody ! RunN { f: || { println(tag) }, n: i }
+        } catch e {
+            caught = caught + 1
+        }
+        try {
+            int v = no_worker ? Ask { f: || { println(tag) }, n: i }
+            caught = caught - 1000 * (v + 1)
+        } catch e {
+            caught = caught + 1
+        }
+        i = i + 1
+    }
+    return caught
+}
+
+fn hops(r: ptr, n: int) {
+    i = 0
+    while i < n {
+        r ! Hop { text: string.from_int(i) }
+        i = i + 1
+    }
+    wait_for_idle()
+}
+
+main() {
+    relay = spawn(Relay())
+    check(sends(50) == 200, "a send to null was not a panic")
+    hops(relay, 50)
+    check(relay.caught == 50, "the relay caught ${relay.caught} of 50")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            sends(50)
+            hops(relay, 50)
+        }, 5)
+    check(grown == 0, "sends to null grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

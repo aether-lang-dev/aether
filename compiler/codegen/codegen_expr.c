@@ -6320,6 +6320,50 @@ static void emit_send_target_read(CodeGenerator* gen, const char* var, ASTNode* 
     fprintf(gen->output, ")");
 }
 
+/* What message literal `message` took for its fields, given back when its
+ * target is null, before that panic (#3847): the fields the message owns,
+ * by its release, as the receiver's handler end releases them, and each
+ * closure the send boxed into a `ptr` field (emit_closure_into_ptr). A
+ * `ptr` owns nothing, so the release leaves a box to its receiver, and with
+ * no receiver the box and its reference to the environment were no one's.
+ * `lv` is the message's struct, or NULL for a one-field message, whose
+ * field is the payload `payload` (an intptr_t). With `emit`, writes the
+ * releases as a comma-separated list of void expressions. Returns how many
+ * there are: none when the message took nothing it owns. */
+static int message_take_releases(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def,
+                                 const char* lv, const char* payload, int emit) {
+    int n = 0;
+    if (lv && message_owns_fields(gen, message->value)) {
+        if (emit) fprintf(gen->output, "_aether_msg_release_%s(&%s)", message->value, lv);
+        n++;
+    }
+    for (int i = 0; i < message->child_count; i++) {
+        ASTNode* fi = message->children[i];
+        if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
+        MessageFieldDef* f = find_msg_field(msg_def, fi->value);
+        ASTNode* v = fi->children[0];
+        if (!f || f->type_kind != TYPE_PTR || !fn_value_into_ptr(gen, v) || bare_top_level_fn(gen, v))
+            continue;
+        if (emit) {
+            if (n) fprintf(gen->output, ", ");
+            if (lv) fprintf(gen->output, "_aether_release_closure(%s.%s)", lv, fi->value);
+            else fprintf(gen->output, "_aether_release_closure((void*)(intptr_t)%s)", payload);
+        }
+        n++;
+    }
+    return n;
+}
+
+/* The releases of message_take_releases as a statement run when the target
+ * read into `to` is null, or nothing when the message took nothing. */
+static void emit_null_target_releases(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def,
+                                      const char* lv, const char* payload, const char* to) {
+    if (!message_take_releases(gen, message, msg_def, lv, payload, 0)) return;
+    fprintf(gen->output, "if (!%s) (void)(", to);
+    message_take_releases(gen, message, msg_def, lv, payload, 1);
+    fprintf(gen->output, "); ");
+}
+
 /* Length of the valid UTF-8 sequence starting at `s`, or 1 if the
  * bytes do not form one (lone continuation byte, truncated sequence,
  * overlong-agnostic on purpose: structural validity is enough here).
@@ -14271,6 +14315,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 }
                             }
                             fprintf(gen->output, ", NULL, {NULL, 0, 0}}; ");
+                            /* #3847: a closure boxed into the payload is given
+                             * back before a null target's panic. */
+                            emit_null_target_releases(gen, message, msg_def, NULL, "_imsg.payload_int",
+                                                      "_ae_to");
 
                             if (try_var) {
                                 fprintf(gen->output, "%s = scheduler_try_send(", try_var);
@@ -14362,13 +14410,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * one moved in, #3827). The target was read
                              * before any of them was taken, but a null one
                              * is found only now, and is a panic (#3172),
-                             * try_send's too: the message is released
-                             * first, as the receiver's handler end would
-                             * release it, or that panic left its fields to
-                             * no one. */
-                            if (message_owns_fields(gen, message->value))
-                                fprintf(gen->output, "if (!_ae_to) _aether_msg_release_%s(&_msg); ",
-                                        message->value);
+                             * try_send's too: what the message took is given
+                             * back first (message_take_releases), or that
+                             * panic left it to no one. */
+                            emit_null_target_releases(gen, message, msg_def, "_msg", NULL, "_ae_to");
                             /* #3117: in a batched loop every send joins the
                              * batch, so a payload message keeps its place
                              * among the loop's one-int ones. */
@@ -14481,9 +14526,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * once found the request's strings copied and its
                          * shared fields published, and left them to no
                          * one. A null target is found once the fields are
-                         * taken, and the request is released before that
-                         * panic (#3847), on both paths. */
-                        int ask_owns = message_owns_fields(gen, message->value);
+                         * taken, and what the request took is given back
+                         * before that panic (#3847, message_take_releases),
+                         * on both paths. */
+                        int ask_takes = message_take_releases(gen, message, msg_def, "_msg", NULL, 0);
 
                         // Emit the ask expression with GCC/MSVC guards
                         fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
@@ -14512,9 +14558,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
                         emit_message_publishes(gen, message, "_msg", NULL);
-                        if (ask_owns)
-                            fprintf(gen->output, "if (!_ask_to) _aether_msg_release_%s(&_msg); ",
-                                    message->value);
+                        emit_null_target_releases(gen, message, msg_def, "_msg", NULL, "_ask_to");
 
                         fprintf(gen->output, "void* _ask_r = scheduler_ask_message_status(");
                         emit_send_target_read(gen, "_ask_to", target, "ask");
@@ -14567,7 +14611,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         /* Its strings are copies of its own, made in the
                          * literal (#466): no statement follows it here. */
                         const char* mv = NULL;
-                        if (ask_owns || message_has_array_fields(gen, message) ||
+                        if (ask_takes || message_has_array_fields(gen, message) ||
                             message_needs_publish(gen, message)) {
                             /* Its arrays are filled and its shared fields
                              * published once it exists, and a null target
@@ -14581,10 +14625,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, " }");
                             emit_message_array_fills(gen, message, mv, &s);
                             emit_message_publishes(gen, message, mv, &s);
-                            if (ask_owns) {
+                            if (ask_takes) {
                                 seq_next(gen, &s);
-                                fprintf(gen->output, "(%s ? (void)0 : _aether_msg_release_%s(&%s))", to,
-                                        message->value, mv);
+                                fprintf(gen->output, "(%s ? (void)0 : (void)(", to);
+                                message_take_releases(gen, message, msg_def, mv, NULL, 1);
+                                fprintf(gen->output, "))");
                             }
                         }
                         seq_next(gen, &s);
