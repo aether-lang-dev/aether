@@ -2786,15 +2786,19 @@ const char* tc_include_flags(void) {
  * keep a directory too many. A name resolves where the compiler would find
  * it: a quoted one beside the file that includes it first, then in the -I
  * directories ahead of the list (include/ and each module's @c_include
- * directory), then in the list's first directory that has it. The
- * directories it keeps go on the line in the list's order, as -idirafter
- * (#2552: a user's or the system's header of the same name still wins).
+ * directory), then in the list's first directory that has it, then in the
+ * Homebrew (LOCALBASE) include directory a macOS or FreeBSD line carries
+ * after the list, whose headers are followed, though that directory is not
+ * the list's to keep. The directories it keeps go on the line in the
+ * list's order, as -idirafter (#2552: a user's or the system's header of
+ * the same name still wins).
  *
  * Anything the scan cannot follow gives the whole list, as before: an
  * include through a macro, an `#include_next` (or `__has_include_next`),
  * a file it cannot read, more files than it holds, flags that move the
  * search (-I, -isystem, -iquote, -idirafter, -include, -imacros,
- * -iwithprefix, -nostdinc) in the user's cflags or in the $AE_CC / $CC
+ * -iwithprefix, -nostdinc) or an @file response file, which may hold any
+ * of them, in the user's cflags or in the $AE_CC / $CC
  * command itself, CPATH, C_INCLUDE_PATH or OBJC_INCLUDE_PATH set (each a
  * search list of the compiler's own), a header listing that was not
  * recorded whole, or memory running out.
@@ -2810,8 +2814,49 @@ typedef struct {
     unsigned char* need;     /* per s_hdr_dirs */
     const char** idirs;      /* -I directories, in order */
     int nidirs;
+    /* Directories the compile searches after the list, none of them the
+     * list's: the Homebrew (LOCALBASE) include directory. */
+    const char* after[1];
+    int nafter;
     int failed;
 } IncludeScan;
+
+#if defined(__APPLE__) || defined(__FreeBSD__)
+/* The prefix Homebrew (macOS) or the ports (FreeBSD) install under:
+ * HOMEBREW_PREFIX, else /opt/homebrew; LOCALBASE, else /usr/local
+ * (macos_homebrew_flags says why). */
+static const char* homebrew_prefix(void) {
+#if defined(__APPLE__)
+    const char* prefix = getenv("HOMEBREW_PREFIX");
+    if (!prefix || !*prefix) prefix = "/opt/homebrew";
+#else
+    const char* prefix = getenv("LOCALBASE");
+    if (!prefix || !*prefix) prefix = "/usr/local";
+#endif
+    return prefix;
+}
+#endif
+
+/* The include directory of homebrew_prefix, when it exists and can be
+ * quoted on a command line, which macos_homebrew_flags puts on a native
+ * compile line after the list; NULL for none, and on every other platform.
+ * Kept for the run. */
+static const char* homebrew_include_dir(void) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    static int asked = 0;
+    static char* dir = NULL;
+    if (!asked) {
+        asked = 1;
+        const char* prefix = homebrew_prefix();
+        char* inc = ae_path_printf("%s/include", prefix);
+        if (inc && strchr(prefix, '"') == NULL && dir_exists(inc)) dir = inc;
+        else free(inc);
+    }
+    return dir;
+#else
+    return NULL;
+#endif
+}
 
 /* Header names compared with ASCII case folded: on a case-insensitive file
  * system (Windows, macOS by default) `#include "Aether_Foo.h"` opens
@@ -2891,6 +2936,19 @@ static int scan_is_absolute(const char* p) {
     return p[0] == '/' || p[0] == '\\' || (p[0] && p[1] == ':');
 }
 
+/* A name the list does not hold, asked of the directories searched after it
+ * (IncludeScan.after): the file found there is followed, so a header of its
+ * that includes one only the list has keeps that directory. None of them is
+ * the list's, so none is marked. */
+static void scan_after(IncludeScan* s, const char* nm, size_t nlen) {
+    for (int i = 0; i < s->nafter; i++) {
+        char* p = scan_join(s->after[i], strlen(s->after[i]), nm, nlen);
+        if (!p) { s->failed = 1; return; }
+        if (path_exists(p)) { scan_push(s, p); return; }
+        free(p);
+    }
+}
+
 /* Where the include `name` of `file` resolves, onto the scan, its list
  * directory marked. A name in none of the places the scan knows is the
  * system's, and not followed. */
@@ -2932,6 +2990,7 @@ static void scan_resolve(IncludeScan* s, const char* file, const char* name, siz
             scan_push(s, scan_join(s_hdr_dirs[h->dir], strlen(s_hdr_dirs[h->dir]), h->name,
                                    strlen(h->name)));
         }
+        if (found[0] < 0) scan_after(s, nm, nlen);
         free(nm);
         return;
     }
@@ -2947,6 +3006,8 @@ static void scan_resolve(IncludeScan* s, const char* file, const char* name, siz
     if (d >= 0) {
         s->need[d] = 1;
         scan_push(s, scan_join(s_hdr_dirs[d], strlen(s_hdr_dirs[d]), nm, nlen));
+    } else {
+        scan_after(s, nm, nlen);
     }
     free(nm);
 }
@@ -3010,6 +3071,21 @@ static void scan_file(IncludeScan* s, const char* file) {
     fclose(f);
 }
 
+/* Whether `args` (a command's arguments, or NULL) names an @file response
+ * file: an `@` that starts a word, quoted or not, or an item of a comma
+ * list (-Wp,@file). Read as text, as the flags above are: at worst a
+ * needless fallback. */
+static int args_name_response_file(const char* args) {
+    if (!args) return 0;
+    for (const char* p = args; *p; p++) {
+        if (*p != '@') continue;
+        char before = p == args ? ' ' : p[-1];
+        if (before == ' ' || before == '\t' || before == '"' || before == '\'' || before == ',')
+            return 1;
+    }
+    return 0;
+}
+
 /* The include flags of the compile of `c_file` (and the C files `extra`
  * and `config_c` list, compiled on the same line): the toolchain list's -I
  * and the -idirafter directories the compile needs, or the whole list. */
@@ -3039,6 +3115,9 @@ static const char* program_include_flags(const char* cc, const char* c_file,
         if (user_cflags && strstr(user_cflags, moves[i])) return full;
         if (strstr(cc_args, moves[i])) return full;
     }
+    /* An @file argument: a response file, whose flags the compiler reads
+     * and the scan does not, so any of the above may be in it. */
+    if (args_name_response_file(user_cflags) || args_name_response_file(cc_args)) return full;
     /* The compiler's own search lists from the environment: CPATH is
      * searched as -I is, ahead of the list, and the others as -isystem;
      * a header there can include one only the list has. */
@@ -3053,6 +3132,7 @@ static const char* program_include_flags(const char* cc, const char* c_file,
 
     IncludeScan s;
     memset(&s, 0, sizeof(s));
+    if (homebrew_include_dir()) s.after[s.nafter++] = homebrew_include_dir();
     s.need = calloc((size_t)s_hdr_dir_count, 1);
     /* The -I directories: the list's own, then each @c_include one. */
     size_t ae_len = ae_includes ? strlen(ae_includes) : 0;
@@ -5779,26 +5859,20 @@ static const char* macos_homebrew_flags(int linking) {
 #if defined(__APPLE__) || defined(__FreeBSD__)
     static char* flags[2] = { NULL, NULL };
     if (!flags[0]) {
-#if defined(__APPLE__)
-        const char* prefix = getenv("HOMEBREW_PREFIX");
-        if (!prefix || !*prefix) prefix = "/opt/homebrew";
-#else
-        const char* prefix = getenv("LOCALBASE");
-        if (!prefix || !*prefix) prefix = "/usr/local";
-#endif
-        char* inc = ae_path_printf("%s/include", prefix);
-        char* lib = ae_path_printf("%s/lib", prefix);
-        if (strchr(prefix, '"') == NULL && dir_exists(inc)) {
+        /* The directory the include-list scan follows headers into too
+         * (homebrew_include_dir, #3841). */
+        const char* inc = homebrew_include_dir();
+        if (inc) {
+            char* lib = ae_path_printf("%s/lib", homebrew_prefix());
             flags[0] = ae_path_printf(" -idirafter \"%s\"", inc);
-            flags[1] = dir_exists(lib)
+            flags[1] = lib && dir_exists(lib)
                 ? ae_path_printf(" -idirafter \"%s\" -L\"%s\"", inc, lib)
                 : ae_path_printf("%s", flags[0]);
+            free(lib);
         } else {
             flags[0] = ae_path_printf("%s", "");
             flags[1] = ae_path_printf("%s", "");
         }
-        free(inc);
-        free(lib);
     }
     return flags[linking ? 1 : 0];
 #else

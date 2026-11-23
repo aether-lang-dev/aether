@@ -21,6 +21,13 @@
 #   7. case/ (on a case-insensitive file system only): the std header
 #      spelled in another case; the scan keeps its directory, the line is
 #      still narrowed, and the program builds and prints `magic 1`.
+#   8. hello with an @file response file in the $AE_CC command or in the
+#      cflags (AETHER_CFLAGS_EXTRA), which the scan does not read: every
+#      directory.
+#   9. brew/ (macOS and FreeBSD only): a header found only in the Homebrew
+#      (LOCALBASE) include directory ae adds includes a std header found
+#      only through the list; the scan follows it there, the line is still
+#      narrowed, and the program builds and prints `magic 1`.
 # The #2552 order holds: every one is -idirafter, after the system's.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -42,8 +49,9 @@ unset AETHER_HOME AE_CC CPATH C_INCLUDE_PATH OBJC_INCLUDE_PATH
 fails=0
 fail() { echo "  [FAIL] $NAME: $1"; fails=$((fails + 1)); }
 
+unset HOMEBREW_PREFIX LOCALBASE AETHER_CFLAGS_EXTRA
 cp -r "$SCRIPT_DIR/hello.ae" "$SCRIPT_DIR/transitive" "$SCRIPT_DIR/macro" \
-    "$SCRIPT_DIR/incnext" "$SCRIPT_DIR/case" "$TMP/"
+    "$SCRIPT_DIR/incnext" "$SCRIPT_DIR/case" "$SCRIPT_DIR/brew" "$TMP/"
 cd "$TMP" || exit 1
 
 full=$("$AE" cflags 2>/dev/null | tr ' ' '\n' | grep -c -x -- '-idirafter')
@@ -112,6 +120,32 @@ hello_every cc_include "AE_CC with -include" "AE_CC=$CC_BASE -include $Q/empty.h
 hello_every cpath "CPATH" "CPATH=$Q"
 hello_every c_include_path "C_INCLUDE_PATH" "C_INCLUDE_PATH=$Q"
 hello_every objc_include_path "OBJC_INCLUDE_PATH" "OBJC_INCLUDE_PATH=$Q"
+
+# A response file, whose flags the scan cannot see: here it moves the search.
+printf -- '-iquote %s\n' "$Q" > q/flags.rsp
+hello_every cc_rsp "AE_CC with an @file" "AE_CC=$CC_BASE @$Q/flags.rsp"
+hello_every cflags_rsp "an @file in the cflags" "AETHER_CFLAGS_EXTRA=@$Q/flags.rsp"
+
+# A header only the Homebrew (macOS) or LOCALBASE (FreeBSD) include directory
+# holds, which `ae` puts on the line after the list.
+case "$(uname -s)" in
+    Darwin) brew_var=HOMEBREW_PREFIX ;;
+    FreeBSD) brew_var=LOCALBASE ;;
+    *) brew_var="" ;;
+esac
+if [ -n "$brew_var" ]; then
+    if ! (cd brew && env "$brew_var=$TMP/brew" "$AE" build -v main.ae --extra probe.c -o main) \
+            > brew.log 2>&1; then
+        grep -i -m3 "error" brew.log | cut -c1-200 | sed 's/^/        /'
+        fail "brew/main.ae, a std header included from the $brew_var include directory, did not build"
+    else
+        out="$(./brew/main | tr -d '\r')"
+        [ "$out" = "magic 1" ] || fail "brew/main.ae printed '$out', not 'magic 1'"
+        n=$(dirs brew.log)
+        [ "$n" -lt "$full" ] ||
+            fail "brew/: the line names every directory ($n), not the ones the scan found"
+    fi
+fi
 
 # A header spelled in another case, where the file system folds case.
 : > case_probe

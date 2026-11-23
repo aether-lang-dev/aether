@@ -1,0 +1,9 @@
+// probe.c includes <hbprobe.h>, found only in the Homebrew (macOS) or
+// LOCALBASE (FreeBSD) include directory ae puts on the line, and that
+// header includes a std header by its bare name, found only through the
+// list: the scan follows the header there, and keeps the std directory.
+extern probe_magic() -> int
+
+main() {
+    println("magic ${probe_magic()}")
+}
