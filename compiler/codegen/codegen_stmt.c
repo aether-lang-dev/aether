@@ -9779,6 +9779,21 @@ static void emit_print_statement_value(CodeGenerator* gen, ASTNode* stmt) {
     }
 }
 
+/* A C type a value of which owns nothing: an integer, a float or a bool,
+ * as c_result_type spells them. Converting one to another is C's return
+ * conversion, with no ownership to choose. */
+static int c_type_is_number(const char* ct) {
+    static const char* const numbers[] = {
+        "int", "unsigned int", "long", "long long", "unsigned long long", "short", "char",
+        "unsigned char", "signed char", "bool", "_Bool", "float", "double", "int8_t",
+        "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "size_t", "intptr_t", "uintptr_t", NULL
+    };
+    for (int i = 0; numbers[i]; i++)
+        if (strcmp(ct, numbers[i]) == 0) return 1;
+    return 0;
+}
+
 static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
 
@@ -13457,6 +13472,35 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * compiler rejected against a `const char*`-returning
                      * function. */
                     Type* ret_type = fn_typed ? fn_ret : stmt->children[0]->node_type;
+                    /* A closure's result takes its resolved signature's C
+                     * type, but the ownership of what it returns (the R3
+                     * retain, a struct or sequence copy, a slice's guard)
+                     * is chosen from the value's own type below. Where the
+                     * two name different kinds of value, that choice would
+                     * be made for the wrong one: a returned closure or
+                     * struct typed `int` would cross without its retain.
+                     * That is the checker's gap (a value it leaves typed
+                     * `int`), so it is an error here, said, not a conversion
+                     * (review of #3807). Numbers converting to numbers are
+                     * C's ordinary return conversion and carry no
+                     * ownership. */
+                    if (closure_ct && ret_type && ret_type->kind != TYPE_UNKNOWN &&
+                        ret_type->kind != TYPE_VOID) {
+                        const char* value_ct = c_result_type(ret_type);
+                        int value_is_number =
+                            ret_type->kind == TYPE_ENUM || (value_ct && c_type_is_number(value_ct));
+                        if (value_ct && strcmp(value_ct, closure_ct) != 0 &&
+                            !(value_is_number && c_type_is_number(closure_ct))) {
+                            const char* msg = aether_internf(
+                                "this return's value is %s, but the closure returns %s (the type "
+                                "of its first return); a closure returns one kind of value from "
+                                "every return",
+                                type_spelled(ret_type), closure_ct);
+                            AetherError e = { stmt->source_file, NULL, stmt->line, stmt->column,
+                                              msg, NULL, NULL, AETHER_ERR_TYPE_MISMATCH };
+                            aether_error_report(&e);
+                        }
+                    }
                     const char* ret_c_type =
                         closure_ct ? closure_ct
                         : (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
