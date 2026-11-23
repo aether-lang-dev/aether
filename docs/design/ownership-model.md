@@ -239,7 +239,10 @@ its last use (#3827): the arm's binding views the message's field, and a send
 whose field is that binding's one read in the arm, under no loop, closure or
 `defer`, with nothing in the arm binding the name
 (binding_read_is_last_use), takes the reference out of the place and leaves
-it empty, so the message's release after the arm releases nothing of it. Any
+it empty, so the message's release after the arm releases nothing of it. A
+send reads its target before it takes any field, so a target that panics (an
+index, a call) finds every place still full; a null target, found after the
+takes, releases the message before its panic (#3847). Any
 other forward copies, one count operation too many at worst (R5). A value
 read from a published place carries the bit with it.
 

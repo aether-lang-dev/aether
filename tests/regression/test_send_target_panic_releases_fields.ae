@@ -1,0 +1,112 @@
+// Regression (#3827, #3847): a send whose target panics leaks nothing of
+// the message it was building.
+//
+// A send built its message first, then evaluated its target: the fields
+// were taken by then (a string copied, a received string moved out of the
+// arm's message, #3827), so a target that panicked (an index past a fixed
+// array's end, a call that panics) left the copy, the moved string and the
+// published fields to no one, one leak per send. The target is now
+// evaluated first, before any field is taken, so its panic leaves the
+// received message holding what it held, and the arm's release of it gives
+// back everything. A null target is still found after the fields are
+// taken, and the message is released before that panic (#3847).
+//
+// Each arm sends a received string on its last use (moved) and a string it
+// reads twice (copied). The check runs where the heap count is exact
+// (mem.heap_in_use_exact): after a warm-up, some window of the same sends
+// grows by exactly 0 (mem.steady_growth). Elsewhere the leak gates cover
+// this program.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Line { text: string, kept: string, n: int }
+message Idx { text: string, kept: string, i: int }
+message Call { text: string, kept: string }
+message Null { text: string, kept: string }
+
+// Never spawned: Line's handler, so the message has a release.
+actor Sink {
+    state total = 0
+    receive {
+        Line(text, kept, n) -> { total = total + n + string.length(text) + string.length(kept) }
+    }
+}
+
+// A target that is never reached: the call panics first.
+fn pick(i: int) -> actor_ref {
+    if i >= 0 {
+        panic("pick: no peer ${i}")
+    }
+    return null
+}
+
+actor Relay {
+    state peers: actor_ref[2]
+    state next: actor_ref = null
+    state caught = 0
+    receive {
+        // An index past the array's end panics in the target.
+        Idx(text, kept, i) -> {
+            if kept == "" { caught = caught - 1000 }
+            try {
+                peers[i] ! Line { text: text, kept: kept, n: 1 }
+            } catch e {
+                caught = caught + 1
+            }
+        }
+        // A call that panics as the target.
+        Call(text, kept) -> {
+            if kept == "" { caught = caught - 1000 }
+            try {
+                pick(1) ! Line { text: text, kept: kept, n: 1 }
+            } catch e {
+                caught = caught + 1
+            }
+        }
+        // A null target: the fields are taken, then released (#3847).
+        Null(text, kept) -> {
+            if kept == "" { caught = caught - 1000 }
+            try {
+                next ! Line { text: text, kept: kept, n: 1 }
+            } catch e {
+                caught = caught + 1
+            }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3827: ${msg}")
+        exit(1)
+    }
+}
+
+fn round(r: ptr, n: int) {
+    i = 0
+    while i < n {
+        r ! Idx { text: string.from_int(i), kept: string.concat(string.from_int(i), "-k"), i: 2 + i % 3 }
+        r ! Call { text: string.from_int(i), kept: string.concat(string.from_int(i), "-k") }
+        r ! Null { text: string.from_int(i), kept: string.concat(string.from_int(i), "-k") }
+        i = i + 1
+    }
+    wait_for_idle()
+}
+
+main() {
+    relay = spawn(Relay())
+    round(relay, 50)
+    check(relay.caught == 150, "the relay caught ${relay.caught} of 150")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            round(relay, 50)
+        }, 5)
+    check(grown == 0, "sends whose target panicked grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

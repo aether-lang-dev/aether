@@ -5936,7 +5936,10 @@ void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init)
  * empty, so the arm's release of the message releases nothing of it:
  * `_aether_msg_str(place, 1)` hands the reference over when its count is 1,
  * and else copies and releases the place's reference. The send reads the
- * place, not the binding, so what moves is what the place held. */
+ * place, not the binding, so what moves is what the place held. The take
+ * comes after the send has read its target, which can panic (an index, a
+ * call): a panic there finds the place still full, and the arm's release
+ * gives the string back. */
 const char* message_binding_move_place(CodeGenerator* gen, ASTNode* init) {
     if (!gen->msg_binding_body || !init || init->type != AST_IDENTIFIER || !init->value)
         return NULL;
@@ -14287,6 +14290,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             // Hoist any array literals to static locals first so
                             // their storage outlives the send-expression block.
                             fprintf(gen->output, "{ ");
+                            /* The target first, in source order, before the
+                             * message takes anything (#3827, #3847): a target
+                             * can panic (an index past a fixed array's end, a
+                             * call), and a panic there once found the fields
+                             * taken (a string copied, a received string moved
+                             * out of its message, the rest published) and left
+                             * them to no one. Evaluated here, its panic leaves
+                             * every field where it was, and the place a move
+                             * would have emptied still holds its string for
+                             * the arm's release. */
+                            fprintf(gen->output, "void* _ae_to = ");
+                            emit_send_target_value(gen, target);
+                            fprintf(gen->output, "; ");
                             emit_message_array_hoists(gen, message, msg_def);
                             fprintf(gen->output, "%s _msg = { ._message_id = %d",
                                     message->value, msg_def->message_id);
@@ -14336,14 +14352,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             emit_message_publishes(gen, message, "_msg", NULL);
                             /* #3847: the message owns its fields from here
                              * (a string copied, a fresh one or a received
-                             * one moved in, #3827). A null target is a
-                             * panic (#3172), try_send's too: the message is
-                             * released first, as the receiver's handler end
-                             * would release it, or the panic left its
-                             * fields to no one. */
-                            fprintf(gen->output, "void* _ae_to = ");
-                            emit_send_target_value(gen, target);
-                            fprintf(gen->output, "; ");
+                             * one moved in, #3827). The target was read
+                             * before any of them was taken, but a null one
+                             * is found only now, and is a panic (#3172),
+                             * try_send's too: the message is released
+                             * first, as the receiver's handler end would
+                             * release it, or that panic left its fields to
+                             * no one. */
                             if (message_owns_fields(gen, message->value))
                                 fprintf(gen->output, "if (!_ae_to) _aether_msg_release_%s(&_msg); ",
                                         message->value);
