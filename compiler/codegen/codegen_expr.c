@@ -6291,16 +6291,30 @@ int ask_timeout_ms(ASTNode* ask) {
 // does for a call through a null function pointer: the send read the null
 // actor's fields and the process died of an access violation, past the
 // barrier that catches an actor's panic.
-static void emit_send_target(CodeGenerator* gen, ASTNode* target, const char* cast_type,
-                             const char* op) {
+/* The target `target` names, as a `void*`. */
+static void emit_send_target_value(CodeGenerator* gen, ASTNode* target) {
     int needs_intptr = target->node_type &&
         (target->node_type->kind == TYPE_INT || target->node_type->kind == TYPE_INT64);
-    fprintf(gen->output, "(%s)_aether_send_target((void*)(", cast_type);
+    fprintf(gen->output, "(void*)(");
     if (needs_intptr) fprintf(gen->output, "(intptr_t)");
     generate_expression(gen, target);
-    fprintf(gen->output, "), \"null_actor_%s: %s to a null actor reference at \" ", op, op);
+    fprintf(gen->output, ")");
+}
+
+/* The panic's reason for a send or an ask (`op`) to a null `target`. */
+static void emit_send_target_why(CodeGenerator* gen, ASTNode* target, const char* op) {
+    fprintf(gen->output, "\"null_actor_%s: %s to a null actor reference at \" ", op, op);
     emit_slice_diag_file(gen, target);
-    fprintf(gen->output, " \":%d:%d\")", target->line, target->column);
+    fprintf(gen->output, " \":%d:%d\"", target->line, target->column);
+}
+
+static void emit_send_target(CodeGenerator* gen, ASTNode* target, const char* cast_type,
+                             const char* op) {
+    fprintf(gen->output, "(%s)_aether_send_target(", cast_type);
+    emit_send_target_value(gen, target);
+    fprintf(gen->output, ", ");
+    emit_send_target_why(gen, target, op);
+    fprintf(gen->output, ")");
 }
 
 /* Length of the valid UTF-8 sequence starting at `s`, or 1 if the
@@ -14303,16 +14317,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     message_binding_move_place(gen, message_field_init_expr(message, f->name)))
                                     moves = 1;
                             }
-                            /* #3827: a field that moves a received string
-                             * on leaves the message it came in empty, so
-                             * nothing that can panic runs between the move
-                             * and the send: the target, the one operand
-                             * left, is evaluated first. */
-                            if (moves) {
-                                fprintf(gen->output, "void* _ae_to = ");
-                                emit_send_target(gen, target, "void*", "send");
-                                fprintf(gen->output, "; ");
-                            }
                             if (has_str) {
                                 /* Prototypes (string_new_with_length,
                                  * aether_string_data, aether_string_
@@ -14331,6 +14335,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 }
                             }
                             emit_message_publishes(gen, message, "_msg", NULL);
+                            /* #3847: the message owns its fields from here
+                             * (a string copied, a fresh one or a received
+                             * one moved in, #3827). A null target is a
+                             * panic (#3172), try_send's too: the message is
+                             * released first, as the receiver's handler end
+                             * would release it, or the panic left its
+                             * fields to no one. */
+                            fprintf(gen->output, "void* _ae_to = ");
+                            emit_send_target_value(gen, target);
+                            fprintf(gen->output, "; ");
+                            if (message_owns_fields(gen, message->value))
+                                fprintf(gen->output, "if (!_ae_to) _aether_msg_release_%s(&_msg); ",
+                                        message->value);
                             /* #3117: in a batched loop every send joins the
                              * batch, so a payload message keeps its place
                              * among the loop's one-int ones. */
@@ -14339,9 +14356,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             else
                                 fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
                                                                        : "aether_send_message(");
-                            if (moves) fprintf(gen->output, "_ae_to");
-                            else emit_send_target(gen, target, "void*", "send");
-                            fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
+                            fprintf(gen->output, "_aether_send_target(_ae_to, ");
+                            emit_send_target_why(gen, target, "send");
+                            fprintf(gen->output, "), &_msg, sizeof(%s)); }", message->value);
                         }
                     } else {
                         fprintf(gen->output, "/* ERROR: unknown message type %s */", message->value ? message->value : "<?>");
