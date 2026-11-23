@@ -14,6 +14,158 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.937.0]
+
+### Fixed
+
+- **A cache hit writes the program as a new file, so macOS no longer kills
+  its next run.** `ae build` copied the cached binary over the previous
+  one in place: the program that had run kept its inode with new bytes,
+  and macOS killed the next run of it (`Killed: 9`) though its bytes and
+  signature were fine. Every file ae writes from another (a cached binary,
+  a shared library, a DLL beside a program, a package's files) now goes to
+  a temporary beside it, renamed over it (#3801).
+
+- **A function or variable named like a `<stdatomic.h>` name compiles.**
+  Every generated program includes it, and a program's own
+  `atomic_load(p: ptr) -> int` reached C under the name of its macro and
+  did not compile; an imported module's function hid it behind the
+  module's prefix, and `ae pad --verify`, which compiles a module alone,
+  failed on it. Its generic functions, types and memory_order constants are
+  now renamed as the other C library names are. `ae pad --verify` tells a
+  failed assertion (the layout report disagrees with the compiler) from C
+  that did not compile, and its summary names the files that failed
+  (#3806).
+
+- **An `--emit=lib` export's result crosses as its own type, or the export
+  gets no alias.** A result type the public ABI had no spelling for fell
+  back to `int32_t`: a slice result did not compile, an actor reference (a
+  pointer) was cut to 32 bits, and a `bit_set` lost its high 32 bits. Such
+  a result now skips the alias with a warning, as such a parameter does;
+  an enum crosses as `int32_t`, a `bit_set` as `uint64_t` and a bitstruct
+  as its backing word, as parameters and results alike (#3808).
+
+- **`AE_CC="zig cc"` gets the bracket depth it takes (#3810).** `ae` asks the
+  C compiler about a flag by compiling a probe with `-fsyntax-only`, but
+  `zig cc` adds `-c` and an output of its own to every clang command and
+  reads the object back, so every probe failed with "FileNotFound", flag or
+  not, and read as a refusal: `-fbracket-depth` (#3574) was never given. A
+  probe whose control compile fails too now says "cannot tell" and tries the
+  next form, `-c` into a temporary object, and only a compile that tells is
+  remembered. One probe helper serves the bracket depth and the GCC inlining
+  budget (#3779).
+
+- **A `return` gives back every temporary its statement made (#3811).** A
+  return chose its C shape before emitting its value, from a guess at
+  whether the value would hold a temporary for its statement, and a value
+  the guess missed was returned bare, its temporary's release emitted after
+  the `return` where it never ran. `return gs.len` of a module-level slice
+  `var` kept one reference to the var's buffer per call, so a buffer the var
+  let go of later was never freed, and inside a `try` left a journal entry
+  naming a slot of a frame that had returned. Every return with a value now
+  computes it into the result, then gives back the statement's temporaries
+  and runs the scope's defers, then returns; the guess is gone.
+
+- **The build cache knows a C compiler by the command as given (#3814).** The
+  cache key folds in the first line of the C compiler's `--version` (#2477),
+  but asked it of each program named in `$AE_CC` / `$CC` alone: `zig cc`
+  asked `zig --version`, which every zig refuses alike, and the `cc` word was
+  looked up on PATH and asked of whatever compiler that was (MinGW GCC's
+  `cc.exe` on Windows). A zig upgrade was served the old one's binaries. The
+  version is now asked of the whole command, `zig cc --version`, which names
+  zig's clang.
+
+- **`ae build --emit=obj` compiles the object as the executable is compiled
+  (#3812).** A native `--emit=obj` ran the C compiler with the include paths
+  and nothing else: no `-fwrapv`, so signed overflow was undefined in the
+  object and defined in the executable; no optimisation level; and none of
+  the project's `[build] cflags` or `AETHER_CFLAGS_EXTRA`, so a program that
+  needs a define from them built as an executable and not as an object. The
+  object's compile line now takes the flags from the same place as the
+  executable's compile step (`-O2` or `-O0 -g`, `-fwrapv`, the hardening
+  defines, the GCC inlining budget, the user's cflags, Clang's bracket
+  depth). A cross `--emit=obj` already carried them.
+
+- **`libaether.a` is linked only by a compiler on its own C runtime
+  (#3813).** The archive is compiled against one C runtime's headers and
+  imports its symbols: on Windows, `AE_CC="zig cc"` (UCRT) could not link
+  any program that used `try` against the MINGW64 (msvcrt) archive,
+  "undefined symbol: __declspec(dllimport) _setjmp". `make` now records the
+  archive's C runtime in `libaether.crt` beside it (and installs and ships
+  it there), from `runtime/aether_crt_id.h`; `ae` asks the build compiler
+  through the same header, remembering the answer by the compiler's
+  identity, and when the runtimes differ compiles the runtime from source
+  with that compiler, as `--trace` does (`ae build -v` says why). An archive
+  with no record is linked as before. The WinLibs GCC `ae` downloads on
+  Windows when no gcc is on PATH (UCRT, while the releases' archive is
+  msvcrt) takes the same fallback, and its zip is now checked against a
+  pinned SHA-256 before it is unpacked; nothing checked it before.
+
+- **A budget or a C runtime the project names is the one `ae` uses (#3779,
+  #3813).** `AE_CC="gcc --param inline-unit-growth=50"` put the user's
+  budget ahead of `ae`'s 100 on the line, so `ae`'s won; when the command or
+  the project's cflags name `inline-unit-growth`, `ae` now gives none. The C
+  runtime check asked the compiler without the project's cflags, so
+  `-mcrtdll=ucrt` (or a `--target`, a `--sysroot`) in them was not seen and
+  an msvcrt archive was linked into a UCRT program; the cflags are part of
+  the question and of its remembered answer now. `ae build -v` says when the
+  archive is linked because the compiler targets its runtime, and when
+  because the compiler could not be asked.
+
+- **`fs.make_temp_file` and `fs.make_temp_dir` say where and why they failed
+  (#3817).** Both returned a bare "cannot create temp file" or "cannot create
+  temp dir", so a refusal, a missing directory and a name that could not be
+  made looked the same in a log. They now give the directory and the OS
+  reason, as `fs.read` does ("C:\tmp\box/d: No such file or directory"), on
+  every path: inside an enforce block, and on Windows, where
+  `GetTempFileNameA`'s error now reaches `errno`.
+
+### Performance
+
+- **A slice that holds no reference costs no unwind journal call (#3787).**
+  A slice local bound to a call, a call's slice read in place or passed
+  straight to a call, a loop's slice and a module `var`'s read were each
+  journaled for a caught panic where they were set and forgotten at every
+  exit, two out-of-line calls, even when the value was a view of memory no
+  count covers (`p as T[]` returned from an accessor), for which a drain
+  gives back nothing. Such a place is now journaled by its value's own mark
+  (`AETHER_SLICE_MADE`, `AETHER_SLICE_STRING`): a view costs a flag test,
+  and a store that brings a counted value journals the place then. A local
+  the frame may change unseen (grown in place, its address taken, stored
+  into inside a `try` it is declared outside of) is journaled from its
+  declaration, as before. `aether_unwind_track` now returns whether it
+  journaled, and every exit skips `aether_unwind_forget` when it did not,
+  so a counted value outside every `try` costs one call, not two (runtime
+  ABI revision 7).
+
+- **GCC gets an inlining budget sized for a whole program (#3779).** aetherc
+  emits a program as one C translation unit, and GCC refuses every inline
+  past 40% growth of a unit, a cap sized for an ordinary C file: in a large
+  program the small hot helpers stayed real calls, `inline-unit-growth limit
+  reached` on 2,671 call sites of aephysics. `ae` now passes GCC
+  `--param inline-unit-growth=100` on optimising builds (not at -O0, not with
+  `--size`, not to Clang), ahead of the project's cflags so a budget of its
+  own wins. aephysics without its own inlining parameters: joint grid 15.18
+  to 11.02 ms a step, large pyramid 7.06 to 6.37, ragdoll rain 5.62 to 4.67,
+  the speed its hand-set parameters gave, in 1.41 MB against their 1.59 MB.
+  See docs/build-system.md, "The inlining budget and GCC".
+
+- **The runtime `ae` compiles from source is built once per compiler
+  (#3813).** A build that cannot link `libaether.a` (a compiler on another C
+  runtime, or `--trace`) compiled the 119 runtime and std sources for every
+  new program, 10 to 47 s each on Windows. It is now kept in the build cache
+  as an archive, keyed by the compiler's identity, the flags and the content
+  of the runtime and std sources, and every later program with the same
+  compiler and flags links it: with the WinLibs GCC `ae` downloads, the
+  second program builds in 0.43 s where the first takes 29 s. It is still
+  paid once per compiler, flag set (`ae run` and `ae build` each build one)
+  and source state. `ae build -v` names it, `(built)` or `(hit)`. Two first
+  builds at once each publish whole, as every cache slot is. On Windows
+  `libaether.crt` records the archive's mingw-w64 major on a second line, and
+  a compiler on another mingw-w64 compiles the runtime from source too (the
+  same C runtime by name with other import libraries did not link); an `ae`
+  that reads only the first line behaves as before.
+
 ## [0.936.0]
 
 ### Added
