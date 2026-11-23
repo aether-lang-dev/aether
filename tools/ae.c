@@ -3960,13 +3960,16 @@ static void crt_name_of(const char* cc, const char* flags, const char* header, c
     char* cmd = ae_strdup_printf("%s%s -E -P \"%s\"", cc, flags, src);
     if (cmd && run_cmd_capture_stdout(cmd, got) == 0) {
         FILE* g = fopen(got, "r");
+        /* A C runtime's name ("msvcrt", "glibc") and a mingw-w64 major are
+         * short; the precisions say how short, so a line of the compiler's
+         * output is never copied whole into them. */
         char line[256], name[64] = "", mingw[32] = "";
         while (g && fgets(line, sizeof(line), g)) {
             line[strcspn(line, "\r\n")] = '\0';
             if (strncmp(line, "AETHER_CRT_RECORD ", 18) == 0)
-                snprintf(name, sizeof(name), "%s", line + 18);
+                snprintf(name, sizeof(name), "%.63s", line + 18);
             else if (strncmp(line, "AETHER_CRT_MINGW ", 17) == 0)
-                snprintf(mingw, sizeof(mingw), "%s", line + 17);
+                snprintf(mingw, sizeof(mingw), "%.31s", line + 17);
         }
         if (g) fclose(g);
         if (name[0] && mingw[0]) snprintf(out, outsz, "%s mingw-w64 %s", name, mingw);
@@ -4061,7 +4064,7 @@ static void archive_crt_check(const char* cc) {
         if (told == 0) {
             matches = 0;
             if (tc.verbose) {
-                char theirs[256]; /* a whole line of crt_name_of's read */
+                char theirs[128]; /* crt_name_of: a name of 63 and a major of 31 */
                 crt_name_of(cc, flags, header, theirs, sizeof(theirs));
                 fprintf(stderr, "[toolchain] libaether.a is %s; %s targets %s: the runtime is "
                                 "compiled from source\n",
