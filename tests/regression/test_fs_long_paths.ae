@@ -182,6 +182,7 @@ main() {
         d4 = make_with_zip("granted, std.zip", r3)
         check_tree("granted, std.zip", r3, d4, "pwned!")
     }
+    sandbox.free(granted)
 
     // 4. A level granting only a sibling refuses every call on the long
     // paths the tree from 3 still has, and leaves the tree as it is.
@@ -202,6 +203,7 @@ main() {
         // nothing is removed.
         _rt = fs.remove_tree(r3)
     }
+    sandbox.free(other)
     if fs.exists("${deep3}/x.txt") != 1 { fail("refused: the leaf is gone") }
     if fs.exists("${deep3}/new") != 0 { fail("refused: mkdir_p made a directory") }
     if fs.exists("${deep3}/new.txt") != 0 { fail("refused: write made a file") }
