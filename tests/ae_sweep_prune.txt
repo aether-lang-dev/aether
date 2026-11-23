@@ -153,6 +153,7 @@ tests/integration/http_tls_handshake_timeout/
 tests/integration/http_server_hook_state/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
+tests/integration/http_client_conn_owners/
 tests/integration/http_client_custom_ca/
 tests/integration/http_client_connect_proxy/
 tests/integration/http_client_dechunk/

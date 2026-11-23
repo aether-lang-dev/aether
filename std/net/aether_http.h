@@ -106,14 +106,6 @@ void http_response_free(HttpResponse* response);
 // Returned const char* pointers from the `_str` / headers / error accessors
 // are borrowed — owned by the response struct and valid only until
 // http_response_free().
-/* Idle connection pool (#1653). Reuse is on by default; a connection is kept
- * only when the response framing was definite and neither side asked to close.
- * `max_idle` 0 disables reuse and drops what is held, -1 leaves a setting
- * alone. */
-/* Raise the connection pool's caps to suit a reverse proxy, whose upstream
- * connections are held for the length of a request and returned, not kept for
- * a handful of hosts. Sized from the descriptor budget; only ever raises, so
- * a deliberate configuration is preserved. */
 /* A millisecond clock a driver may pin for one pass of its event loop, so the
  * several readers in a request share one counter access. Pin AFTER waiting: a
  * poll that blocks for its timeout would otherwise leave the pass looking at a
@@ -122,21 +114,43 @@ void     http_clock_pin(void);
 void     http_clock_unpin(void);
 uint64_t http_clock_ms(void);
 
-void http_client_pool_size_for_proxy(void);
-
+/* Connection owners (#1653). A pool holds idle connections for the requests
+ * sent through it (http_request_set_pool_raw) and for no one else: a request
+ * with no pool has a connection of its own, closed after its response. A
+ * connection is kept only when the response framing was definite and neither
+ * side asked to close. There is no process-wide pool: connections one owner
+ * authenticated (NTLM, Negotiate) never serve another owner's request.
+ *
+ * new: up to 64 idle connections, 8 to one origin, each kept 15 s unused.
+ * new_pinned: at most one connection, kept until used, cleared or freed, for
+ * a sequence of requests that must ride one connection (a proxy mirroring a
+ * client connection upstream). free closes every connection the pool holds;
+ * nothing may still be sending through it. One pool may be used from several
+ * threads at once. */
+typedef struct HttpClientPool HttpClientPool;
+HttpClientPool* http_client_pool_new_raw(void);
+HttpClientPool* http_client_pool_new_pinned_raw(void);
+void http_client_pool_free_raw(HttpClientPool* pool);
+/* `max_idle` 0 disables reuse and drops what is held; `idle_ns` 0 keeps an
+ * unused connection until it is used or cleared; -1 leaves a setting alone. */
+const char* http_client_pool_configure_raw(HttpClientPool* pool, int max_idle,
+                                           int max_per_host, int64_t idle_ns);
+void http_client_pool_clear_raw(HttpClientPool* pool);
+int  http_client_pool_idle_count_raw(HttpClientPool* pool);
 /* The pool's current caps. */
-void http_client_pool_caps_raw(int* max_idle, int* max_per_host);
-
-const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
-                                           int64_t idle_ns);
-void http_client_pool_clear_raw(void);
-int  http_client_pool_idle_count_raw(void);
+void http_client_pool_caps_raw(HttpClientPool* pool, int* max_idle, int* max_per_host);
+/* Raise a pool's caps to suit a reverse proxy, whose upstream connections are
+ * held for the length of a request and returned, not kept for a handful of
+ * hosts. Sized from the descriptor budget; only ever raises, so a deliberate
+ * configuration is preserved. */
+void http_client_pool_size_for_proxy(HttpClientPool* pool);
+/* Receive buffers requests through `pool` allocated from nothing (#2160). */
+long long http_client_pool_rx_buffer_allocs_raw(HttpClientPool* pool);
 
 /* Why a pure-TLS handshake failed reaches the request as the callback's
  * reason (runtime/aether_callbacks.h), and the Windows trust anchors both
  * HTTPS clients use (#2675) are in aether_tls_trust.h: neither through this
  * file, which std.cryptography.tls13_client would link for them (#3426). */
-long long http_client_rx_buffer_allocs_raw(void);
 
 int http_response_status(HttpResponse* response);
 // Returns an OWNED, retained AetherString (cast to const char*). Unlike the
@@ -353,6 +367,11 @@ int http_request_set_stream_raw(HttpClientRequest* req, int on);
 // No proxy applies. In an enforce block the connect needs fs_write on
 // `path`. Returns 0, or -1 on a NULL request or out of memory.
 int http_request_set_unix_socket_raw(HttpClientRequest* req, const char* path);
+// Send through `pool` (see HttpClientPool above): reuse its idle connections
+// and give this one back to it. NULL (the default): a connection of the
+// request's own, closed after the response. The pool is not owned by the
+// request and must outlive the send.
+int http_request_set_pool_raw(HttpClientRequest* req, HttpClientPool* pool);
 
 // Forward-proxy control (aether#1012). Default is DIRECT — std.http.client does
 // NOT follow $HTTP_PROXY unless the program opts in, the hardened inverse of the
@@ -485,12 +504,15 @@ int http_find_header_in_block(const char* block, const char* end,
  * http_upstream_connected to find out whether it succeeded. */
 typedef struct HttpUpstreamConnOpaque HttpUpstreamConn;
 
-int  http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out);
+/* `pool` is the owner the connection is taken from and released to; NULL
+ * dials a connection that is closed on release. */
+int  http_upstream_acquire(HttpClientPool* pool, const char* host, int port,
+                           HttpUpstreamConn* out);
 /* As above, but `allow_pool` 0 forces a fresh connection. Use it when a pooled
  * connection has just been found closed: the pool may hold more of them, and
  * spending a retry on another corpse is how a client ends up with nothing. */
-int  http_upstream_acquire_ex(const char* host, int port, int allow_pool,
-                              HttpUpstreamConn* out);
+int  http_upstream_acquire_ex(HttpClientPool* pool, const char* host, int port,
+                              int allow_pool, HttpUpstreamConn* out);
 /* 1 when the connect has completed, 0 when it is still in flight, -1 when it
  * failed. A caller woken by a poller must handle 0 by waiting again: a wakeup
  * does not promise this descriptor is the one that became ready. */
@@ -511,8 +533,9 @@ typedef struct HttpResolver HttpResolver;
  * fails with http_upstream_lookup saying why: 1 when the answer is still to
  * come, which the resolver says when it arrives, -1 when the name does not
  * resolve. A redial of such a connection asks the same resolver. */
-int  http_upstream_acquire_nb(const char* host, int port, int allow_pool,
-                              HttpResolver* resolver, HttpUpstreamConn* out);
+int  http_upstream_acquire_nb(HttpClientPool* pool, const char* host, int port,
+                              int allow_pool, HttpResolver* resolver,
+                              HttpUpstreamConn* out);
 int  http_upstream_lookup(const HttpUpstreamConn* c);
 void http_upstream_release(HttpUpstreamConn* c, int keep);
 /* Whether a response head lets its connection carry another request: not

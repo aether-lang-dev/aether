@@ -1,9 +1,13 @@
-// The load balancer under measurement. BACKENDS and PORT come from the
-// environment; NO_UPSTREAM_REUSE=1 turns the client's connection pool off so
-// the same binary measures both sides of the comparison.
+// The load balancer under measurement: the proxy std.http.server.lb mounts,
+// built here from std.http.proxy so its connection owner can be reached.
+// BACKENDS ("url;url;...") and PORT come from the environment;
+// NO_UPSTREAM_REUSE=1 turns reuse off in the proxy pool's connection owner
+// (proxy.pool_conns), so the same binary measures both sides of the
+// comparison.
 
 import std.http
-import std.http.server.lb
+import std.http.client
+import std.http.proxy
 import std.io
 import std.string
 
@@ -14,23 +18,46 @@ main() {
         println("PORT and BACKENDS must be set")
         return
     }
+    pool = proxy.upstream_pool_new("round_robin", 30, 0, 0)
+    rest = backends
+    more = 1
+    while more == 1 {
+        idx = string.index_of(rest, ";")
+        url = rest
+        if idx >= 0 {
+            url = string.substring(rest, 0, idx)
+            rest = string.substring(rest, idx + 1, string.length(rest))
+        } else {
+            more = 0
+        }
+        if string.length(url) > 0 { _ = proxy.upstream_add(pool, url, 1) }
+    }
     no_reuse = io.getenv("NO_UPSTREAM_REUSE")
     if no_reuse != 0 && string.length(no_reuse) > 0 {
-        http.client_pool_disable()
+        _ = client.pool_configure(proxy.pool_conns(pool), 0, -1, -1ns)
     }
+
+    server = http.server_create(string.get_int(port_s))
+    http.server_set_host(server, "127.0.0.1")
     // TLS_CERT/TLS_KEY turn the listener into a TLS terminator, so the same
     // binary measures the cleartext and the TLS path.
     cert = io.getenv("TLS_CERT")
     key = io.getenv("TLS_KEY")
-    err = ""
     if cert != 0 && string.length(cert) > 0 && key != 0 && string.length(key) > 0 {
-        err = lb.serve_tls("127.0.0.1", string.get_int(port_s), "round_robin", backends,
-            cert, key, lb.no_health(), lb.no_breaker(), lb.no_cache())
-    } else {
-        err = lb.serve("127.0.0.1", string.get_int(port_s), "round_robin", backends,
-            lb.no_health(), lb.no_breaker(), lb.no_cache())
+        terr = http.server_set_tls(server, cert, key)
+        if terr != "" {
+            println("lb: tls: ${terr}")
+            return
+        }
     }
-    if err != "" {
-        println("lb: ${err}")
+    opts = proxy.opts_new()
+    merr = proxy.mount(server, "/", pool, opts)
+    if merr != "" {
+        println("lb: mount: ${merr}")
+        return
+    }
+    serr = http.server_start(server)
+    if serr != "" {
+        println("lb: ${serr}")
     }
 }

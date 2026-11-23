@@ -42,7 +42,15 @@ descriptors, not on the `cores * 2` worker count. `AETHER_HTTP_PARKING=0`
 turns that off if a regression needs bisecting.
 
 For the client, `http.get` / `http.post` return a response object that must be
-freed with `http_response_free`. Connection reuse is on by default.
+freed with `http_response_free`. Each opens a connection of its own and
+closes it after the response. Connection reuse belongs to an owner:
+`std.http.client`'s `pool_new()`, handed to each request that may share its
+connections (`set_pool`), and to no others, so a connection one owner
+authenticated (NTLM, Negotiate) never serves another's request.
+`pool_new_pinned()` keeps a sequence of requests on one connection, which with
+`http.request_conn_id` and `http.server_on_conn_close` lets a proxy pair each
+client connection with an upstream one. See
+`docs/design/http-client-connection-owners.md`.
 
 The client sends a URL's path and query, never its fragment. Everything from
 the first `#` stays with the client, as RFC 3986 and 9110 say and as curl and

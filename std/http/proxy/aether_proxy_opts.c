@@ -24,17 +24,11 @@ AetherProxyOpts* aether_proxy_opts_new(void) {
     o->preserve_host  = 0;
     o->max_body_bytes = 8 * 1024 * 1024;
 
-    /* Mounting a proxy changes what the connection pool is for: its upstream
-     * connections are held for one request and handed back, where a client's
-     * are kept for a few hosts. Left at the client's caps, every connection
-     * past the eighth to a backend was closed on release and redialled. */
     /* Read once here rather than per request: a mount happens on one thread
      * at start-up, and a getenv on the request path would be both a cost and
      * a race. */
     const char* direct = getenv("AETHER_PROXY_DIRECT");
     o->direct_disabled = (direct && direct[0] == '0' && direct[1] == '\0');
-
-    http_client_pool_size_for_proxy();
     return o;
 }
 

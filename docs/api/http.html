@@ -36,15 +36,6 @@
     <li><a href="#put">put</a></li>
     <li><a href="#delete">delete</a></li>
     <li><a href="#status_text">status_text</a></li>
-    <li><a href="#client_pool_configure_raw">client_pool_configure_raw</a></li>
-    <li><a href="#client_pool_clear_raw">client_pool_clear_raw</a></li>
-    <li><a href="#client_pool_idle_count_raw">client_pool_idle_count_raw</a></li>
-    <li><a href="#client_rx_buffer_allocs_raw">client_rx_buffer_allocs_raw</a></li>
-    <li><a href="#client_pool_configure">client_pool_configure</a></li>
-    <li><a href="#client_pool_disable">client_pool_disable</a></li>
-    <li><a href="#client_pool_clear">client_pool_clear</a></li>
-    <li><a href="#client_pool_idle_count">client_pool_idle_count</a></li>
-    <li><a href="#client_rx_buffer_allocs">client_rx_buffer_allocs</a></li>
     <li><a href="#server_create">server_create</a></li>
     <li><a href="#server_bind_raw">server_bind_raw</a></li>
     <li><a href="#server_error">server_error</a></li>
@@ -176,6 +167,8 @@
     <li><a href="#query_param">query_param</a></li>
     <li><a href="#request_remote_addr">request_remote_addr</a></li>
     <li><a href="#request_remote_port">request_remote_port</a></li>
+    <li><a href="#request_conn_id">request_conn_id</a></li>
+    <li><a href="#server_on_conn_close">server_on_conn_close</a></li>
     <li><a href="#request_local_addr">request_local_addr</a></li>
     <li><a href="#request_local_port">request_local_port</a></li>
     <li><a href="#request_scheme">request_scheme</a></li>
@@ -404,50 +397,6 @@
       <pre class="usage"><code>status_text(code) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">code: int</span></p>
       <p class="doc">The reason phrase registered for a status code (&quot;Not Found&quot; for 404), or &quot;&quot; for a code nobody registered. Names a status a std.http.client response carries as well as the ones the wrappers below report.</p>
-    </div>
-    <div class="function" id="client_pool_configure_raw" data-name="client_pool_configure_raw">
-      <h3 class="function-name">client_pool_configure_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>client_pool_configure_raw(max_idle, max_per_host, idle_ns) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">max_idle: int, max_per_host: int, idle_ns: long</span></p>
-      <p class="doc">HTTP Client — raw ptr-returning externs. These are the escape hatch for code that needs direct access to the underlying HttpResponse struct (e.g. to inspect headers and body together, or to implement custom retry logic). Most callers should use the Go-style wrappers below. Idle connection pool. The client keeps a connection open after a response whose length was definite and reuses it for the next request to the same origin, which is what HTTP/1.1 is designed for: a proxy or a polling client otherwise pays a TCP (and TLS) handshake per request. Reuse is on by default. Connections are keyed by origin, the proxy actually dialled, TLS, and the verification the caller asked for, so a pinned-CA or verification-off connection is never handed to a request that did not ask for it.</p>
-    </div>
-    <div class="function" id="client_pool_clear_raw" data-name="client_pool_clear_raw">
-      <h3 class="function-name">client_pool_clear_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>client_pool_clear_raw()</code></pre>
-    </div>
-    <div class="function" id="client_pool_idle_count_raw" data-name="client_pool_idle_count_raw">
-      <h3 class="function-name">client_pool_idle_count_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>client_pool_idle_count_raw() <span class="arrow">-&gt;</span> int</code></pre>
-    </div>
-    <div class="function" id="client_rx_buffer_allocs_raw" data-name="client_rx_buffer_allocs_raw">
-      <h3 class="function-name">client_rx_buffer_allocs_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>client_rx_buffer_allocs_raw() <span class="arrow">-&gt;</span> long</code></pre>
-    </div>
-    <div class="function" id="client_pool_configure" data-name="client_pool_configure">
-      <h3 class="function-name">client_pool_configure <span class="kind">fn</span></h3>
-      <pre class="usage"><code>client_pool_configure(max_idle, max_per_host, idle) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">max_idle: int, max_per_host: int, idle: Duration</span></p>
-      <p class="doc">Resize the idle connection pool: how many idle connections to keep in total, how many of those may be to one origin, and how long an unused one is kept before it is closed. The defaults are the call below. http.client_pool_configure(64, 8, 15s) Keep the idle time under the upstream's own keep-alive timeout, or the server closes connections while they sit here and every reuse costs a retry.</p>
-    </div>
-    <div class="function" id="client_pool_disable" data-name="client_pool_disable">
-      <h3 class="function-name">client_pool_disable <span class="kind">fn</span></h3>
-      <pre class="usage"><code>client_pool_disable()</code></pre>
-      <p class="doc">Turn connection reuse off and close what is held. Every request then opens its own connection, which is what the client did before reuse existed.</p>
-    </div>
-    <div class="function" id="client_pool_clear" data-name="client_pool_clear">
-      <h3 class="function-name">client_pool_clear <span class="kind">fn</span></h3>
-      <pre class="usage"><code>client_pool_clear()</code></pre>
-      <p class="doc">Close every idle connection. Useful before measuring, and after a change that makes held connections invalid (a new CA, a rotated proxy).</p>
-    </div>
-    <div class="function" id="client_pool_idle_count" data-name="client_pool_idle_count">
-      <h3 class="function-name">client_pool_idle_count <span class="kind">fn</span></h3>
-      <pre class="usage"><code>client_pool_idle_count() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">How many idle connections are held right now.</p>
-    </div>
-    <div class="function" id="client_rx_buffer_allocs" data-name="client_rx_buffer_allocs">
-      <h3 class="function-name">client_rx_buffer_allocs <span class="kind">fn</span></h3>
-      <pre class="usage"><code>client_rx_buffer_allocs() <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="doc">How many response buffers the client has had to allocate from nothing, over the life of the process. A pooled connection keeps the buffer its last response was read into and lends it to the next, so a run of requests over one kept connection allocates once, not once per request -- which is what this lets a program, or a test, check rather than assume. Responses whose buffer grew past 64 KiB are not kept, so the idle pool cannot pin an outsized body.</p>
     </div>
     <div class="function" id="server_create" data-name="server_create">
       <h3 class="function-name">server_create <span class="kind">extern</span></h3>
@@ -1167,6 +1116,18 @@
       <h3 class="function-name">request_remote_port <span class="kind">fn</span></h3>
       <pre class="usage"><code>request_remote_port(req) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_conn_id" data-name="request_conn_id">
+      <h3 class="function-name">request_conn_id <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_conn_id(req) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+      <p class="doc">The connection that carried this request, as an id unique among the server's connections for as long as it runs (1, 2, ... in accept order). For per-connection state: a proxy that pairs each client connection with an upstream connection of its own (std.http.client's pool_new_pinned), so a server that authenticates the connection (NTLM, Negotiate) sees one client per connection. Unlike request_remote_port, an id is never reused while the server runs. 0 when the server cannot say: a request the proxy event loop served itself.</p>
+    </div>
+    <div class="function" id="server_on_conn_close" data-name="server_on_conn_close">
+      <h3 class="function-name">server_on_conn_close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_on_conn_close(server, cb, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, cb: ptr, user_data: ptr</span></p>
+      <p class="doc">Call `cb(conn_id, user_data)` when a connection closes, with the id request_conn_id gave its requests: where per-connection state is let go. `cb` is a `@c_callback` taking (conn_id: long, user_data: ptr); it runs on the thread that closed the connection, after its last response, and several may run at once, so state it touches needs a lock. Set it before the server starts; null turns it off. A connection a handler took over (a WebSocket, a tunnel) is not reported.</p>
     </div>
     <div class="function" id="request_local_addr" data-name="request_local_addr">
       <h3 class="function-name">request_local_addr <span class="kind">fn</span></h3>

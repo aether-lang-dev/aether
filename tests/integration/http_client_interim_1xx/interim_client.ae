@@ -16,9 +16,12 @@ fn check(cond: bool, msg: string) {
     }
 }
 
-put(url: string, method: string, stream: int) -> (int, string, string) {
+// One request through `pool`, the owner that keeps the connection for the
+// next request.
+put(url: string, method: string, stream: int, pool: ptr) -> (int, string, string) {
     req = client.request(method, url)
     client.set_timeout(req, 5s)
+    client.set_pool(req, pool)
     client.set_header(req, "Expect", "100-continue")
     client.set_body(req, string.bytes("0123456789"), "application/octet-stream")
     if stream != 0 {
@@ -57,14 +60,16 @@ main() {
         stream = 1
     }
     url = "http://127.0.0.1:${port}/c/b"
-    status, body, err = put(url, "PUT", stream)
+    pool, perr = client.pool_new()
+    check(perr == "", "pool_new: ${perr}")
+    status, body, err = put(url, "PUT", stream, pool)
     match mode {
         "continue" -> {
             check(err == "", "send failed: ${err}")
             check(status == 201 && body == "made", "status ${status} body '${body}', want 201 'made'")
             if stream == 0 {
                 // The same connection again: the interim head left nothing behind.
-                s2, b2, e2 = put(url, "PUT", 0)
+                s2, b2, e2 = put(url, "PUT", 0, pool)
                 check(e2 == "" && s2 == 200 && b2 == "second",
                     "second request: status ${s2} body '${b2}' err '${e2}'")
             }
@@ -78,5 +83,6 @@ main() {
             check(status == 101, "status ${status}, want 101 (final, not skipped)")
         }
     }
+    client.pool_free(pool)
     println("PASS: ${mode}")
 }
