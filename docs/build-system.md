@@ -456,6 +456,7 @@ Both `ae run` and `ae build` cache compiled binaries in `~/.aether/cache/`. The 
 - Every imported lib module's *content*: the `.ae`/`.c`/`.h` files under each lib-search directory, walked recursively. This covers both an explicit `--lib`/`$AETHER_LIB_DIR` directory and the **default `lib/`** the compiler searches when neither is set (the `src/main.ae` + `lib/<name>/module.ae` package layout). Because entries are content-hashed rather than keyed on mtime+size, a same-second, same-size edit (a one-character constant flip in an editor-save loop) still invalidates the cache, and a bare `touch` does not. The walk runs on Windows too (`FindFirstFileA`, #1235), with the same depth and entry caps, so a lib-module edit invalidates the cache on every platform.
 - The optimisation level (`-O0` for `ae run` and `ae build --quick`, `-O2` for default `ae build`)
 - The C compiler: `$AE_CC` / `$CC` as written, each program it names (its path and content), and the first line of the command's `--version`, asked of the command as written (`zig cc --version`, zig's clang, where `zig --version` is refused alike by every zig, #3814). A `--version` run that cannot be started, dies on a signal or prints nothing is tried again, up to three times, and how it ended is part of the key, so a compiler that never answers `--version` (tcc) keys the same every time (#3707). One that still has not answered after three tries leaves the build uncached; `ae build -v` prints each run's outcome on its `[cache] ccid:` line.
+- `libaether.crt` beside the archive, the C runtime it was built against, which with the compiler decides whether the archive is linked or the runtime is compiled from source (#3813)
 
 `ae run` and `ae build` use separate cache slots so toggling between them doesn't churn one entry back and forth.
 
@@ -801,27 +802,45 @@ symbols: MinGW GCC's msvcrt headers declare `_setjmp` as an msvcrt import, so
 an msvcrt archive linked by a UCRT compiler (`AE_CC="zig cc"`) failed on
 `undefined symbol: __declspec(dllimport) _setjmp` as soon as a program used
 `try` (#3813), and two C runtimes in one program disagree on `FILE`, `errno`
-and the heap besides. `make` writes the archive's runtime to `libaether.crt`
-beside it (msvcrt or ucrt on Windows, glibc, musl, bionic or uclibc on Linux;
-nothing where a platform has one C runtime), from `runtime/aether_crt_id.h`.
-`ae` asks the build compiler, through the same header, whether it targets that
-runtime; the answer is kept in the cache directory by the compiler's identity.
-When it does not, `ae` does not link the archive and compiles the runtime from
-source with that compiler, as `--trace` does, and `ae build -v` says why:
+and the heap besides. On Windows the mingw-w64 major counts too: the same C
+runtime by name comes with other import libraries (an archive MSYS2's
+mingw-w64 15 built imports `_strtof_l`, which WinLibs GCC 14.2's mingw-w64 12
+does not provide). `make` writes the archive's runtime to `libaether.crt`
+beside it, from `runtime/aether_crt_id.h`: the name on the first line (msvcrt
+or ucrt on Windows, glibc, musl, bionic or uclibc on Linux; nothing where a
+platform has one C runtime) and, on Windows, `mingw-w64 <major>` on the
+second. An `ae` that reads only the first line compares the runtime alone, as
+it did. `ae` asks the build compiler, through the same header, whether it
+targets that runtime and mingw-w64; the answer is kept in the cache directory
+by the compiler's identity. When it does not, `ae` does not link the archive
+and compiles the runtime from source with that compiler, as `--trace` does,
+and `ae build -v` says why:
 
 ```
-[toolchain] libaether.a is msvcrt; zig cc targets ucrt: the runtime is compiled from source
+[toolchain] libaether.a is msvcrt mingw-w64 15; zig cc targets ucrt mingw-w64 13: the runtime is compiled from source
 ```
 
 An archive with no record (one an older tree built) is linked as before. The
-fallback costs the runtime's compile on a program's first build and nothing
-after it: a try and catch program, Windows, `AE_CC="zig cc"` against an msvcrt
-archive, took 10 to 11 s to build (about 20 s the first time, with zig's own
-object cache cold) against 1.7 to 2.0 s with GCC linking the archive, and 0.5 s
-against 0.4 s on a cache hit. The WinLibs GCC that `ae` downloads on Windows
-when no gcc is on PATH is GCC 14.2.0 on UCRT, while the Windows releases'
-archive is msvcrt (they are built in MSYS2 MINGW64), so it takes the source
-fallback; its zip is checked against a pinned SHA-256 before it is unpacked.
+runtime compiled from source is kept in the build cache as an archive, one per
+compiler (its identity, #3814), flags (`--trace` has its own) and runtime and
+std sources (their content, so an edit or another tree is another archive),
+and every later program with that compiler links it: `ae build -v` names it,
+`[cache] runtime: <path> (built)` the first time and `(hit)` after. Measured
+on Windows, a try and catch program and then a second, different one, each a
+first build in a fresh build cache except for the runtime:
+
+| compiler | first program | second program |
+|---|---|---|
+| GCC (MSYS2), linking libaether.a | 0.43 to 0.46 s | 0.43 to 0.46 s |
+| `AE_CC="zig cc"` (UCRT), runtime from source | 2.1 s, with zig's own object cache warm (about 20 s cold) | 0.67 s |
+| WinLibs GCC 14.2 UCRT, runtime from source | 29.3 s | 0.43 s |
+| GCC (MSYS2) `--trace`, runtime from source | 28.1 s | 0.37 s |
+
+Before the runtime was cached, every new program paid the first column. The
+WinLibs GCC that `ae` downloads on Windows when no gcc is on PATH is GCC 14.2.0
+on UCRT, while the Windows releases' archive is msvcrt (they are built in
+MSYS2 MINGW64), so it takes the source fallback; its zip is checked against a
+pinned SHA-256 before it is unpacked.
 
 The same-OS, cross-arch cell is then a one-liner. On an x86_64 Linux host with
 a cross-gcc installed:

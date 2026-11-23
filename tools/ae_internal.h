@@ -264,6 +264,9 @@ void cache_note_published(void);
  * the question and anything else its answer depends on. */
 int cache_probe_memo_get(const char* cc, const char* what);
 void cache_probe_memo_put(const char* cc, const char* what, int answer);
+/* #3813: the key of the runtime compiled from source for compiler `cc` with
+ * `cflags` from the sources `srcs`, cached as an archive; 0 for none. */
+unsigned long long cache_runtime_key(const char* cc, const char* cflags, const char* srcs);
 /* #3600: "<path> <size> <mtime ns>" of the file `name` beside the program
  * `prog` (its first word, looked up on PATH): 1, or 0 when either is not
  * found. */

@@ -2399,18 +2399,23 @@ $(BUILD_DIR)/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(
 
 # The C runtime libaether.a is built against (#3813), in libaether.crt beside
 # it: msvcrt or ucrt on Windows, glibc, musl, bionic or uclibc on Linux,
-# empty where the platform has one C runtime. `ae` links the archive only
-# with a C compiler that targets the same one; with any other it compiles the
-# runtime from source, as a --trace build does (#1333). The name comes from
+# empty where the platform has one C runtime, and on Windows a second line,
+# `mingw-w64 <major>`, the mingw-w64 whose import libraries it was linked
+# for. `ae` links the archive only with a C compiler that targets the same
+# runtime (and mingw-w64); with any other it compiles the runtime from
+# source, as a --trace build does (#1333). The name comes from
 # runtime/aether_crt_id.h, preprocessed by the compiler and flags the
 # archive's objects are compiled with; the flags stamp moves when either
-# does. An empty file, not none, so make does not run this every time.
+# does. The name stays alone on the first line, which is all an older ae
+# reads. An empty file, not none, so make does not run this every time.
 $(BUILD_DIR)/libaether.crt: runtime/aether_crt_id.h $(BUILD_FLAGS_STAMP) | $(BUILD_DIR)
-	@crt=$$(printf '#include "runtime/aether_crt_id.h"\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n' \
-	    | $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -E -P -x c - 2>/dev/null \
-	    | sed -n 's/^AETHER_CRT_RECORD //p' | tr -d '\r'); \
-	  printf '%s\n' "$$crt" > $@.tmp && mv $@.tmp $@ && \
-	  echo "✓ C runtime of libaether.a: $${crt:-(one on this platform, not recorded)}"
+	@pp=$$(printf '#include "runtime/aether_crt_id.h"\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n#ifdef AETHER_CRT_MINGW_MAJOR\nAETHER_CRT_MINGW AETHER_CRT_MINGW_MAJOR\n#endif\n' \
+	    | $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -E -P -x c - 2>/dev/null | tr -d '\r'); \
+	  crt=$$(printf '%s\n' "$$pp" | sed -n 's/^AETHER_CRT_RECORD //p'); \
+	  mingw=$$(printf '%s\n' "$$pp" | sed -n 's/^AETHER_CRT_MINGW \([0-9][0-9]*\)$$/\1/p'); \
+	  { printf '%s\n' "$$crt"; if [ -n "$$crt" ] && [ -n "$$mingw" ]; then printf 'mingw-w64 %s\n' "$$mingw"; fi; } > $@.tmp && \
+	  mv $@.tmp $@ && \
+	  echo "✓ C runtime of libaether.a: $${crt:-(one on this platform, not recorded)}$${mingw:+, mingw-w64 $$mingw}"
 
 # Authoritative MANIFEST — list of link-suitable runtime + stdlib
 # .c files for downstream consumers (aetherBuild and similar tools)

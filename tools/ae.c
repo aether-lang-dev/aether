@@ -3935,9 +3935,10 @@ static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
 
 static char* ae_read_file(const char* path, long* out_len);
 
-/* The C runtime runtime/aether_crt_id.h names for compiler `cc` (its
- * AETHER_CRT_NAME, by preprocessing `header`), into `out`; "" when it names
- * none or the compiler cannot be run. For the -v line only. */
+/* The C runtime runtime/aether_crt_id.h names for compiler `cc`, as the
+ * record spells it ("msvcrt mingw-w64 15", "glibc"), into `out`, by
+ * preprocessing `header`; "" when it names none or the compiler cannot be
+ * run. For the -v line only. */
 static void crt_name_of(const char* cc, const char* header, char* out, size_t outsz) {
     out[0] = '\0';
     char src[1100], got[1100];
@@ -3945,20 +3946,24 @@ static void crt_name_of(const char* cc, const char* header, char* out, size_t ou
         !ae_private_temp_path(got, sizeof(got), "ae_crt_name.out")) return;
     FILE* f = fopen(src, "w");
     if (!f) return;
-    fprintf(f, "%s\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n", header);
+    fprintf(f, "%s\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n"
+               "#ifdef AETHER_CRT_MINGW_MAJOR\nAETHER_CRT_MINGW AETHER_CRT_MINGW_MAJOR\n#endif\n",
+            header);
     fclose(f);
     char* cmd = ae_strdup_printf("%s -E -P \"%s\"", cc, src);
     if (cmd && run_cmd_capture_stdout(cmd, got) == 0) {
         FILE* g = fopen(got, "r");
-        char line[256];
+        char line[256], name[64] = "", mingw[32] = "";
         while (g && fgets(line, sizeof(line), g)) {
-            if (strncmp(line, "AETHER_CRT_RECORD ", 18) == 0) {
-                line[strcspn(line, "\r\n")] = '\0';
-                snprintf(out, outsz, "%s", line + 18);
-                break;
-            }
+            line[strcspn(line, "\r\n")] = '\0';
+            if (strncmp(line, "AETHER_CRT_RECORD ", 18) == 0)
+                snprintf(name, sizeof(name), "%s", line + 18);
+            else if (strncmp(line, "AETHER_CRT_MINGW ", 17) == 0)
+                snprintf(mingw, sizeof(mingw), "%s", line + 17);
         }
         if (g) fclose(g);
+        if (name[0] && mingw[0]) snprintf(out, outsz, "%s mingw-w64 %s", name, mingw);
+        else snprintf(out, outsz, "%s", name);
     }
     free(cmd);
     remove(src);
@@ -3971,12 +3976,17 @@ static void crt_name_of(const char* cc, const char* header, char* out, size_t ou
  * headers declare _setjmp as an msvcrt import, and AE_CC="zig cc", which
  * links UCRT, failed on "undefined symbol: __declspec(dllimport) _setjmp" as
  * soon as a program used try; two C runtimes in one program disagree on FILE,
- * errno and the heap besides. `make` records the archive's runtime beside it
- * (libaether.crt, from runtime/aether_crt_id.h); the compiler is asked,
- * through the same header, whether it targets that runtime (cc_probe_takes,
- * the answer remembered by its identity). On a mismatch the archive is not
- * linked and the runtime is compiled from source with `cc`, as a --trace
- * build does (#1333).
+ * errno and the heap besides. On Windows the mingw-w64 major counts too: an
+ * archive MSYS2's mingw-w64 15 built imports _strtof_l, which mingw-w64 12
+ * (WinLibs GCC 14.2, msvcrt like it) does not provide.
+ *
+ * `make` records the archive's runtime beside it (libaether.crt, from
+ * runtime/aether_crt_id.h): the name on the first line, `mingw-w64 <major>`
+ * on the second where there is one. The compiler is asked, through the same
+ * header, whether it targets that runtime (and that mingw-w64), with
+ * cc_probe_takes, the answer remembered by its identity. On a mismatch the
+ * archive is not linked and the runtime is compiled from source with `cc`,
+ * as a --trace build does (#1333), and cached for it (ae_cached_runtime).
  *
  * The archive is linked as before when there is nothing to compare: an
  * archive with no record (one an older tree built, or a platform with one C
@@ -3999,6 +4009,7 @@ static void archive_crt_check(const char* cc) {
         char* rec = rec_path ? ae_read_file(rec_path, NULL) : NULL;
         free(rec_path);
         char name[64] = "";
+        int mingw = -1;   /* the second line's major, -1 when there is none */
         if (rec) {
             size_t n = strcspn(rec, "\r\n");
             int ok = n > 0 && n < sizeof(name);
@@ -4006,24 +4017,42 @@ static void archive_crt_check(const char* cc) {
                 ok = (rec[i] >= 'a' && rec[i] <= 'z') || (rec[i] >= '0' && rec[i] <= '9') ||
                      rec[i] == '_';
             if (ok) snprintf(name, sizeof(name), "%.*s", (int)n, rec);
+            const char* second = rec + n;
+            while (*second == '\r' || *second == '\n') second++;
+            unsigned major = 0;
+            char tail = 0;
+            if (ok && sscanf(second, "mingw-w64 %u%c", &major, &tail) >= 1 &&
+                (tail == 0 || tail == '\r' || tail == '\n') && major < 1000)
+                mingw = (int)major;
             free(rec);
         }
         char* hdr_path = name[0] ? ae_path_printf("%s/runtime/aether_crt_id.h", tc.src_root) : NULL;
         char* header = hdr_path ? ae_read_file(hdr_path, NULL) : NULL;
         free(hdr_path);
+        char mingw_check[200] = "";
+        if (mingw >= 0)
+            snprintf(mingw_check, sizeof(mingw_check),
+                     "#if !defined(AE_PROBE_ANY) && "
+                     "(!defined(AETHER_CRT_MINGW_MAJOR) || AETHER_CRT_MINGW_MAJOR != %d)\n"
+                     "#error another mingw-w64 than the archive's\n#endif\n", mingw);
         char* text = header ? ae_strdup_printf("%s\n#if !defined(AE_PROBE_ANY) && "
                                                "!defined(AETHER_CRT_IS_%s)\n"
                                                "#error another C runtime than the archive's\n"
-                                               "#endif\nint ae_crt_probe;\n", header, name)
+                                               "#endif\n%sint ae_crt_probe;\n",
+                                               header, name, mingw_check)
                             : NULL;
         if (text && cc_probe_takes(cc, "", "ae_crt_probe", text) == 0) {
             matches = 0;
             if (tc.verbose) {
-                char theirs[256]; /* a whole line of crt_name_of's read */
+                /* theirs: a whole line of crt_name_of's read; ours: the
+                 * archive's 64-byte name and its mingw-w64 major. */
+                char theirs[256], ours[96];
                 crt_name_of(cc, header, theirs, sizeof(theirs));
+                if (mingw >= 0) snprintf(ours, sizeof(ours), "%s mingw-w64 %d", name, mingw);
+                else snprintf(ours, sizeof(ours), "%s", name);
                 fprintf(stderr, "[toolchain] libaether.a is %s; %s targets %s: the runtime is "
                                 "compiled from source\n",
-                        name, cc, theirs[0] ? theirs : "another C runtime");
+                        ours, cc, theirs[0] ? theirs : "another C runtime");
             }
         }
         free(text);
@@ -5475,6 +5504,111 @@ static char* ae_precompile_runtime_srcs(const char* cc, const char* cflags, cons
     return ok ? list : NULL;
 }
 
+/* The archiver that goes with compiler `cc`, as a command (malloc'd), or NULL
+ * when there is none to be had. `zig cc` is zig's clang, and its archiver is
+ * `zig ar`: asked for one, zig's clang names whatever `ar` PATH holds (on one
+ * Windows box, another toolchain's). Any other compiler names its own with
+ * -print-prog-name=ar, as GCC gives the ar of its binutils. */
+static char* runtime_archiver(const char* cc) {
+    /* The first word, without quotes, and where the second one starts. */
+    const char* p = cc;
+    while (*p == ' ') p++;
+    char first[1100];
+    size_t n = 0;
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"' && n + 1 < sizeof(first)) first[n++] = *p++;
+        if (*p == '"') p++;
+    } else {
+        while (*p && *p != ' ' && n + 1 < sizeof(first)) first[n++] = *p++;
+    }
+    first[n] = '\0';
+    while (*p == ' ') p++;
+    const char* base = first;
+    for (const char* q = first; *q; q++)
+        if (*q == '/' || *q == '\\') base = q + 1;
+    if ((strcmp(base, "zig") == 0 || strcmp(base, "zig.exe") == 0 ||
+         strcmp(base, "ZIG.EXE") == 0) &&
+        strncmp(p, "cc", 2) == 0 && (p[2] == ' ' || p[2] == '\0'))
+        return ae_strdup_printf("\"%s\" ar", first);
+
+    char out_path[1100];
+    if (!ae_private_temp_path(out_path, sizeof(out_path), "ae_ar_name.out")) return NULL;
+    char* cmd = ae_strdup_printf("%s -print-prog-name=ar", cc);
+    char line[1100] = "";
+    if (cmd && run_cmd_capture_stdout(cmd, out_path) == 0) {
+        FILE* f = fopen(out_path, "r");
+        if (f) {
+            if (!fgets(line, sizeof(line), f)) line[0] = '\0';
+            fclose(f);
+        }
+    }
+    free(cmd);
+    remove(out_path);
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strchr(line, '/') || strchr(line, '\\'))
+        return path_exists(line) ? ae_strdup_printf("\"%s\"", line) : NULL;
+    return strcmp(line, "ar") == 0 ? ae_strdup_printf("ar") : NULL;
+}
+
+/* #3813: what a build without libaether.a links for the runtime: an
+ * archive of it in the build cache, compiled once per compiler and flags
+ * and reused by every later program, else the objects of this build, else
+ * NULL (the link command compiles the sources, as before).
+ *
+ * The fallback compiled the 119 runtime and std sources for every new
+ * program: 10 to 47 s a first build, where linking libaether.a takes about
+ * two. The archive is keyed by cache_runtime_key (the compiler's identity,
+ * the flags, the sources' content, the tree), so a hit is the runtime these
+ * sources, flags and compiler make, and --trace has its own. It is made the
+ * way every cache slot is: `ar rcs` into `<slot>.tmp.<pid>`, then
+ * cache_publish, which leaves a slot another build published first alone,
+ * so two first builds at once each link a whole archive. An archive links
+ * as libaether.a does: the members a program needs, and no others. */
+static char* ae_cached_runtime(const char* cc, const char* rt_cflags) {
+    unsigned long long key = cache_runtime_key(cc, rt_cflags, tc.runtime_srcs);
+    if (key) init_cache_dir();
+    if (!key || !s_cache_dir[0])
+        return ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
+    char slot[700];
+    snprintf(slot, sizeof(slot), "%s/rt-%016llx.a", s_cache_dir, key);
+    if (path_exists(slot)) {
+        cache_touch(slot);
+        if (tc.verbose) fprintf(stderr, "[cache] runtime: %s (hit)\n", slot);
+        return ae_strdup_printf("\"%s\"", slot);
+    }
+    char* objs = ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
+    if (!objs) return NULL;
+    char* ar = runtime_archiver(cc);
+    if (!ar) {
+        if (tc.verbose) fprintf(stderr, "[cache] runtime: no archiver for %s; not cached\n", cc);
+        return objs;
+    }
+    char tmp[800];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", slot, (int)getpid());
+    char* cmd = ae_strdup_printf("%s rcs \"%s\" %s", ar, tmp, objs);
+    int made = cmd && run_cmd_quiet(cmd) == 0 && path_exists(tmp);
+    free(cmd);
+    free(ar);
+    if (!made) {
+        remove(tmp);
+        if (tc.verbose) fprintf(stderr, "[cache] runtime: the archive could not be made; not cached\n");
+        return objs;
+    }
+    char* link;
+    if (cache_publish(tmp, slot) == 0) {
+        cache_enforce_limit(slot, 0);
+        link = ae_strdup_printf("\"%s\"", slot);
+        if (tc.verbose) fprintf(stderr, "[cache] runtime: %s (built)\n", slot);
+    } else {
+        /* A cache that takes no publish: this build links its own. */
+        link = ae_strdup_printf("\"%s\"", tmp);
+    }
+    if (!link) return objs;
+    free(objs);
+    return link;
+}
+
 /* Source fallback (no libaether.a): the defines that compile the vendored
  * engines from the MANIFEST sources instead of trusting this box to have the
  * libraries the toolchain's build box had. PCRE2 (#1389) turns
@@ -5845,7 +5979,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     } else {
         if (!ae_runtime_srcs_ready()) { free(opt); set_failing_cmd(cmd, size); return; }
-        /* #2757: the runtime sources compiled to objects in parallel, when
+        /* The runtime archive this compiler and these flags made before (#3813),
+         * else (#2757) the runtime sources compiled to objects in parallel, when
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
         if (!g_emit_obj && !g_emit_csrc) {
@@ -5853,7 +5988,7 @@ void build_gcc_cmd(char* cmd, size_t size,
              * any other include directory (see ae_vendored_src_defs). */
             char* rt_cflags = ae_strdup_printf("%s %s %s %s", vendored_src_defs, opt,
                                                tc.include_flags, ae_includes);
-            if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(s_gcc_cmd, rt_cflags, tc.runtime_srcs);
+            if (rt_cflags) rt_objs = ae_cached_runtime(s_gcc_cmd, rt_cflags);
             free(rt_cflags);
         }
         /* Order matters, same as the POSIX branch: the host-bridge .a
@@ -6130,7 +6265,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     } else {
         if (!ae_runtime_srcs_ready()) { free(opt); set_failing_cmd(cmd, size); return; }
-        /* #2757: the runtime sources compiled to objects in parallel, when
+        /* The runtime archive this compiler and these flags made before (#3813),
+         * else (#2757) the runtime sources compiled to objects in parallel, when
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
         if (!g_emit_obj && !g_emit_csrc) {
@@ -6139,7 +6275,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             char* rt_cflags = ae_strdup_printf("%s %s %s %s %s", vendored_src_defs, opt,
                                                tc.include_flags, ae_includes,
                                                macos_homebrew_flags(0));
-            if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
+            if (rt_cflags) rt_objs = ae_cached_runtime(cc, rt_cflags);
             free(rt_cflags);
         }
         // Order matters: host-bridge .a files reference runtime

@@ -1094,7 +1094,12 @@ static void walk_entry(TreeWalk* w, const char* name, int is_dir, int depth) {
         else walk_dir(w, depth + 1);
         return;
     }
-    if (w->headers_only ? !walk_is_header(name) : !walk_is_source(name)) return;
+    /* headers_only: 1 the headers, 2 the C (headers and .c), 0 all sources. */
+    size_t nl = strlen(name);
+    int c_file = nl > 2 && strcmp(name + nl - 2, ".c") == 0;
+    if (w->headers_only == 1 ? !walk_is_header(name)
+        : w->headers_only == 2 ? !(c_file || walk_is_header(name))
+                               : !walk_is_source(name)) return;
     if (w->count >= TREE_WALK_MAX_FILES) {
         w->incomplete = "has more than 4096 source files";
         return;
@@ -1604,6 +1609,46 @@ void cache_probe_memo_put(const char* cc, const char* what, int answer) {
     if (!ok || cache_publish(tmp, path) != 0) remove(tmp);
 }
 
+/* #3813: the key of the runtime ae compiles from source for one compiler
+ * and caches as an archive (ae.c, ae_cached_runtime). What decides its
+ * objects: the compiler, by the identity the build cache trusts
+ * (c_compiler_fingerprint, #3814) and the command as written; `cflags`, the
+ * whole flag string the sources are compiled with (the -O level, -fwrapv,
+ * the user's cflags, -DAETHER_TRACE for --trace, the vendored defines and
+ * the include paths, which name the tree); `srcs`, the list compiled (from
+ * the MANIFEST, by path); and the content of every .c and .h under the
+ * runtime, std and include trees, walked as the build cache walks them
+ * (#2707), so an edit to any of them, or another tree, is another runtime.
+ * 0 when a part cannot be known (an unknown compiler, a walk that could not
+ * see everything): no key, and the runtime is compiled for this build only. */
+unsigned long long cache_runtime_key(const char* cc, const char* cflags, const char* srcs) {
+    unsigned long long ccid = c_compiler_fingerprint();
+    if (!ccid || !tc.src_root[0]) return 0;
+    unsigned long long h = fnv64_more(fnv64_more(fnv64_str(cc ? cc : ""), "\n"), cflags ? cflags : "");
+    h = fnv64_more(fnv64_more(h, "\n"), srcs ? srcs : "");
+    h = (h * 1099511628211ULL) ^ ccid;
+    char* trees[3];
+    trees[0] = str_join4(tc.src_root, strlen(tc.src_root), "/runtime", "", "");
+    trees[1] = str_join4(tc.src_root, strlen(tc.src_root), "/std", "", "");
+    trees[2] = tc.dev_mode ? str_join4(tc.root, strlen(tc.root), "/include", "", "")
+                           : str_join4(tc.root, strlen(tc.root), "/include/aether", "", "");
+    unsigned long long acc = 1469598103934665603ULL;
+    int count = 0, complete = 1;
+    for (int i = 0; i < 3; i++) {
+        if (!trees[i]) { complete = 0; continue; }
+        const char* why = complete ? hash_tree_kind(trees[i], &acc, &count, 2) : NULL;
+        if (why) {
+            if (tc.verbose) fprintf(stderr, "[cache] runtime: no key: %s %s\n", trees[i], why);
+            complete = 0;
+        }
+        free(trees[i]);
+    }
+    if (!complete || count == 0) return 0;
+    h = (h * 1099511628211ULL) ^ acc;
+    h = (h * 1099511628211ULL) ^ (unsigned long long)count;
+    return h ? h : 1ULL;
+}
+
 /* "<path> <size> <mtime ns>" of the file `name` in the directory the program
  * `prog` (its first word) resolves to on PATH, into `out`; 0 when either is
  * not found. */
@@ -1738,6 +1783,21 @@ unsigned long long compute_cache_key(const char* ae_file,
     if (tc.has_lib) {
         unsigned long long lib_hash = file_hash(tc.lib);
         if (lib_hash) key_append(&key, ":lib=%016llx", lib_hash);
+        /* #3813: the record of the archive's C runtime decides, with the
+         * compiler, whether the archive is linked at all or the runtime is
+         * compiled from source (archive_crt_check), so it is part of what
+         * the binary is built from. */
+        {
+            const char* sep = strrchr(tc.lib, '/');
+            const char* bsep = strrchr(tc.lib, '\\');
+            if (bsep && (!sep || bsep > sep)) sep = bsep;
+            size_t dl = sep ? (size_t)(sep - tc.lib) : 0;
+            char* rec = str_join4(tc.lib, dl, dl ? "/" : "", "libaether.crt", "");
+            unsigned long long rec_hash = rec ? file_hash(rec) : 0;
+            if (!rec) key.oom = 1;
+            free(rec);
+            if (rec_hash) key_append(&key, ":crt=%016llx", rec_hash);
+        }
         unsigned long long contrib_hash = hash_contrib_archives(tc.lib);
         if (contrib_hash)
             key_append(&key, ":contrib=%016llx", contrib_hash);

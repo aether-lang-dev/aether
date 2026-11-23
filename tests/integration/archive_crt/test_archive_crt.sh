@@ -13,6 +13,8 @@
 #      the other runtime's macro on the probes only) builds with the source
 #      fallback, -v says so, and the program runs; the compiler as it is
 #      links the archive and says nothing.
+#   2b. On Windows, an archive recorded for another mingw-w64 major is
+#      compiled from source too.
 #   3. With zig (on PATH or under build/scratch/.zig), AE_CC="zig cc" builds
 #      and runs a program that panics and catches it.
 
@@ -90,7 +92,7 @@ if [ -n "$other_def" ] && [ -n "$REAL_CC" ]; then
     elif [ "$("$TMP/other" | tr -d '\r')" != "crt ok" ]; then
         fail "the program built from the source fallback did not print 'crt ok'"
     fi
-    grep -q "^\[toolchain\] libaether.a is $crt; .* targets $other: the runtime is compiled from source" "$TMP/other.log" ||
+    grep -q "^\[toolchain\] libaether.a is $crt[^;]*; .* targets $other[^:]*: the runtime is compiled from source" "$TMP/other.log" ||
         fail "-v does not say the runtime was compiled from source for a compiler on $other: $(grep '^\[toolchain\]' "$TMP/other.log" | tail -1 | cut -c1-160)"
     # The compiler as it is: the archive, and no such line.
     if ! (cd "$TMP" && "$AE" build -v hello.ae -o same) > "$TMP/same.log" 2>&1; then
@@ -99,6 +101,31 @@ if [ -n "$other_def" ] && [ -n "$REAL_CC" ]; then
         fail "the archive's own compiler took the source fallback"
     fi
     done_what="$done_what; a compiler on $other compiles the runtime from source and says so, the archive's own links it"
+fi
+
+# 2b. On Windows the record's second line is the archive's mingw-w64 major,
+# and a compiler on another mingw-w64 takes the source fallback too: the
+# same C runtime by name, other import libraries (WinLibs GCC 14.2's
+# mingw-w64 12 has no _strtof_l import, which MSYS2's 15 archive takes). A
+# toolchain of its own here, whose record names a mingw-w64 no compiler has.
+mingw="$(sed -n 's/^mingw-w64 \([0-9][0-9]*\)$/\1/p' "$rec" 2>/dev/null | tr -d '\r' | head -n 1)"
+if [ -n "$mingw" ] && [ -n "$crt" ]; then
+    PRIV="$TMP/tc"
+    mkdir -p "$PRIV/build"
+    for d in runtime std include; do ln -s "$ROOT/$d" "$PRIV/$d"; done
+    for f in ae ae.exe aetherc aetherc.exe libaether.a libaether_main.a MANIFEST aether_manifest.o; do
+        [ -f "$ROOT/build/$f" ] && cp "$ROOT/build/$f" "$PRIV/build/"
+    done
+    printf '%s\nmingw-w64 99\n' "$crt" > "$PRIV/build/libaether.crt"
+    if ! (cd "$TMP" && "$PRIV/build/ae" build -v hello.ae -o mingw) > "$TMP/mingw.log" 2>&1; then
+        grep -i "error" "$TMP/mingw.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        fail "the build against an archive of another mingw-w64 failed"
+    elif [ "$("$TMP/mingw" | tr -d '\r')" != "crt ok" ]; then
+        fail "the program built for another mingw-w64 did not print 'crt ok'"
+    fi
+    grep -q "^\[toolchain\] libaether.a is $crt mingw-w64 99; .* targets $crt mingw-w64 $mingw: the runtime is compiled from source" "$TMP/mingw.log" ||
+        fail "-v does not say the runtime was compiled from source for mingw-w64 $mingw against an archive of 99: $(grep '^\[toolchain\]' "$TMP/mingw.log" | tail -1 | cut -c1-160)"
+    done_what="$done_what; a compiler on another mingw-w64 compiles it from source too"
 fi
 
 # 3. zig.
