@@ -71,7 +71,8 @@
 //   The picker is not it. pick_round_robin is one atomic_fetch_add on the
 //   cursor plus atomic loads in upstream_eligible, and its only mutex
 //   (u->rl_lock) is skipped entirely unless rate limiting is configured. The
-//   pthread_mutex time a profile shows on this path is the client's idle pool
+//   pthread_mutex time a profile shows on this path is the proxy pool's idle
+//   connections (proxy.pool_conns)
 //   and the worker queue. The cost #1739's allocation census found was header
 //   storage and the client's receive buffer, and all of it is addressed: one
 //   allocation per outbound header with an O(1) append, an arena-backed

@@ -347,12 +347,17 @@ static void* enters_unattached(void* arg) {
 extern void     http_clock_pin(void);
 extern void     http_clock_unpin(void);
 extern uint64_t http_clock_ms(void);
-extern void*    http_get_raw(const char* url);
 extern int      http_response_status(void* r);
 extern int      http_response_body_length(void* r);
 extern const char* http_response_header_raw(void* r, const char* name);
 extern void     http_response_free(void* r);
-extern int      http_client_pool_idle_count_raw(void);
+extern void*    http_client_pool_new_raw(void);
+extern void     http_client_pool_free_raw(void* pool);
+extern int      http_client_pool_idle_count_raw(void* pool);
+extern void*    http_request_raw(const char* method, const char* url);
+extern int      http_request_set_pool_raw(void* req, void* pool);
+extern void     http_request_free_raw(void* req);
+extern void*    http_send_raw(void* req);
 extern void*    list_new(void);
 extern void     list_free(void* list);
 extern void     aether_sandbox_push(void* grants);
@@ -495,6 +500,9 @@ static int start_server(void) {
 
 #define POOL_ROUNDS 300
 static _Atomic int g_pool_bad = 0;
+/* One connection pool both tasks send through: its lock is the context
+ * lock in a cooperative build. */
+static void* g_pool = NULL;
 
 static void* pool_task(void* arg) {
     const char* who = (const char*)arg;
@@ -503,7 +511,10 @@ static void* pool_task(void* arg) {
         char url[128], path[64];
         snprintf(path, sizeof path, "/%s/%d", who, i);
         snprintf(url, sizeof url, "http://127.0.0.1:%d%s", g_port, path);
-        void* r = http_get_raw(url);
+        void* req = http_request_raw("GET", url);
+        http_request_set_pool_raw(req, g_pool);
+        void* r = http_send_raw(req);
+        http_request_free_raw(req);
         if (!r || http_response_status(r) != 200 || http_response_body_length(r) != 2 ||
             strcmp(http_response_header_raw(r, "X-Path"), path) != 0 ||
             strcmp(http_response_header_raw(r, "X-Pair"), "a, b") != 0) {
@@ -609,12 +620,15 @@ static int tcpstop(void) {
 
 static int pool(void) {
     if (start_server() != 0) { fprintf(stderr, "no local server\n"); return 2; }
+    g_pool = http_client_pool_new_raw();
+    if (!g_pool) { fprintf(stderr, "no pool\n"); return 2; }
     pthread_t a, b;
     pthread_create(&a, NULL, pool_task, (void*)"A");
     pthread_create(&b, NULL, pool_task, (void*)"B");
     pthread_join(a, NULL);
     pthread_join(b, NULL);
-    int idle = http_client_pool_idle_count_raw();
+    int idle = http_client_pool_idle_count_raw(g_pool);
+    http_client_pool_free_raw(g_pool);
     printf("pool: %d requests from two tasks, %d wrong, %s idle\n", 2 * POOL_ROUNDS,
            atomic_load(&g_pool_bad), idle >= 1 && idle <= 8 ? "some" : "a wrong count of");
     return atomic_load(&g_pool_bad) ? 1 : 0;

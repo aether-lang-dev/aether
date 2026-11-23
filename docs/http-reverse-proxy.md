@@ -618,6 +618,7 @@ proxy.mount_simple(server, path_prefix, upstream_url, request_timeout_sec) -> st
 
 // ---- Observability
 proxy.pool_metrics_text(pool) -> string              // Prometheus 0.0.4
+proxy.pool_conns(pool) -> ptr                        // its upstream connections' std.http.client pool
 ```
 
 All `string`-returning functions are Go-style: `""` is success;

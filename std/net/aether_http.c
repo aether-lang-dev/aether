@@ -246,7 +246,16 @@ int http_response_is_stream_raw(HttpResponse* r) { (void)r; return 0; }
 const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (void)max; return (const char*)string_empty(); }
 /* Linked by the proxy, which is built without networking too (#2517). */
 const char* http_response_body_str(HttpResponse* r) { (void)r; return ""; }
-void http_client_pool_size_for_proxy(void) {}
+HttpClientPool* http_client_pool_new_raw(void) { return NULL; }
+HttpClientPool* http_client_pool_new_pinned_raw(void) { return NULL; }
+void http_client_pool_free_raw(HttpClientPool* p) { (void)p; }
+void http_client_pool_clear_raw(HttpClientPool* p) { (void)p; }
+const char* http_client_pool_configure_raw(HttpClientPool* p, int i, int h, int64_t ns) { (void)p; (void)i; (void)h; (void)ns; return "networking disabled at build time"; }
+int http_client_pool_idle_count_raw(HttpClientPool* p) { (void)p; return 0; }
+long long http_client_pool_rx_buffer_allocs_raw(HttpClientPool* p) { (void)p; return 0; }
+void http_client_pool_caps_raw(HttpClientPool* p, int* i, int* h) { (void)p; if (i) *i = 0; if (h) *h = 0; }
+void http_client_pool_size_for_proxy(HttpClientPool* p) { (void)p; }
+int http_request_set_pool_raw(HttpClientRequest* r, HttpClientPool* p) { (void)r; (void)p; return -1; }
 #else
 
 #include <stdio.h>
@@ -760,7 +769,7 @@ struct HttpStream {
 };
 
 // -----------------------------------------------------------------
-// Idle connection pool (#1653)
+// Connection owners: an idle pool per owner (#1653)
 //
 // HTTP/1.1 connections are persistent, and a client that closes after every
 // response pays a TCP handshake (and a TLS handshake) per request. Measured
@@ -768,14 +777,33 @@ struct HttpStream {
 // and its 8% dropped requests: the proxy dialled its upstream once per
 // request.
 //
-// A connection is only returned here when the response framing was definite
-// (Content-Length or chunked) and neither side asked to close, so nothing is
-// ever reused when the connection itself was the message delimiter. Entries
-// are keyed by everything that makes two connections non-interchangeable:
-// origin, the proxy actually dialled, TLS, and the verification the caller
-// asked for. A pooled socket the peer closed while idle is indistinguishable
-// from a live one until it is used, so the request path retries once on a
-// fresh connection when a reused one fails before any response byte arrives.
+// Who may reuse a connection is the owner's to say, not the process's. The
+// pool used to be one per process, keyed by origin, so a connection one
+// caller had authenticated served the next request from anyone in the
+// program: NTLM and Negotiate authenticate the CONNECTION, and a recording
+// proxy forwarding for several clients sent an anonymous client's request as
+// the user another client had logged in (servirtium-vcr, 2026-11-23). Now a
+// pool is a value, HttpClientPool, made by http_client_pool_new_raw and
+// handed to each request that may share its connections
+// (http_request_set_pool_raw). A request with no pool has a connection of
+// its own, closed after its response. A pinned pool
+// (http_client_pool_new_pinned_raw) holds at most one connection and never
+// lets it expire, so a sequence of requests through it rides one connection:
+// what a proxy needs to mirror one client connection upstream.
+//
+// A connection is only returned to its pool when the response framing was
+// definite (Content-Length or chunked) and neither side asked to close, so
+// nothing is ever reused when the connection itself was the message
+// delimiter. Within a pool, entries are keyed by everything that makes two
+// connections non-interchangeable: origin, the proxy actually dialled, TLS,
+// and the verification the caller asked for. A pooled socket the peer closed
+// while idle is indistinguishable from a live one until it is used, so the
+// request path retries once on a fresh connection when a reused one fails
+// before any response byte arrives.
+//
+// One pool may be used from several threads at once: its list is under its
+// own lock, and a connection is out of the list while a request has it, so
+// no two requests ever hold the same connection.
 // -----------------------------------------------------------------
 
 #define HTTP_POOL_KEY_MAX 512
@@ -787,67 +815,86 @@ typedef struct HttpIdleConn {
     struct HttpIdleConn* next;
 } HttpIdleConn;
 
-/* CRITICAL_SECTION, which the thread shim maps pthread_mutex_t to on Windows,
- * has no static initialiser, so the lock is created once through an atomic
- * gate there. Same shape as runtime/sandbox/aether_audit.c. */
+struct HttpClientPool {
 #if defined(AETHER_NO_THREADING)
-/* A cooperative build's mutex is a no-op, and with task contexts several
- * tasks reach this pool at once. It stays one pool, shared on purpose (a
- * connection one task put back is the next request's to reuse, whichever
- * task makes it; a pool per task would hold idle sockets per task), so it
- * takes a real lock: the context lock, whose waiter relaxes through the
- * port (aether_frames.h). Held only for list work and the closes of
- * expired entries, as the mutex is. */
-#include "../../runtime/actors/aether_frames.h"   /* aether_context_lock */
-static atomic_flag http_pool_flag = ATOMIC_FLAG_INIT;
-#define http_pool_enter() aether_context_lock(&http_pool_flag)
-#define http_pool_leave() aether_context_unlock(&http_pool_flag)
-#elif defined(_WIN32)
-static pthread_mutex_t http_pool_mutex;
-static atomic_int      http_pool_mutex_state = 0;   /* 0 unset, 1 setting, 2 ready */
-static pthread_mutex_t* http_pool_lock(void) {
-    int expected = 0;
-    if (atomic_compare_exchange_strong(&http_pool_mutex_state, &expected, 1)) {
-        pthread_mutex_init(&http_pool_mutex, NULL);
-        atomic_store(&http_pool_mutex_state, 2);
-    } else {
-        while (atomic_load(&http_pool_mutex_state) != 2) { /* one-shot spin */ }
-    }
-    return &http_pool_mutex;
-}
+    /* A cooperative build's mutex is a no-op, and with task contexts several
+     * tasks may send through one pool at once, so the pool takes a real
+     * lock: the context lock, whose waiter relaxes through the port
+     * (aether_frames.h). Held only for list work and the closes of expired
+     * entries. */
+    atomic_flag     flag;
 #else
-static pthread_mutex_t http_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t* http_pool_lock(void) { return &http_pool_mutex; }
+    pthread_mutex_t mutex;
 #endif
-#if !defined(AETHER_NO_THREADING)
-#define http_pool_enter() pthread_mutex_lock(http_pool_lock())
-#define http_pool_leave() pthread_mutex_unlock(http_pool_lock())
-#endif
+    HttpIdleConn*   head;
+    int             count;
+    int             enabled;
+    int             max_idle;
+    int             max_per_key;
+    /* How long an unused connection is kept; 0 keeps it until it is used,
+     * cleared or the pool is freed (a pinned pool's setting). */
+    int64_t         idle_ms;
+    /* When the oldest pooled connection becomes eligible for expiry, or
+     * INT64_MAX when there is nothing to expire (#1719).
+     *
+     * Taking and putting both swept the whole idle list on every request,
+     * under the pool lock. With the default 15s idle window and a proxy
+     * reusing its upstreams continuously, that sweep frees nothing on the
+     * overwhelming majority of calls. Tracking the earliest deadline lets
+     * both skip the walk until that time arrives. A lower bound, not an
+     * exact answer: a stale-early value costs one redundant sweep, never a
+     * missed expiry. */
+    int64_t         next_expiry_ms;
+    /* Receive buffers requests through this pool allocated from nothing
+     * (#2160); see http_client_pool_rx_buffer_allocs_raw. */
+    atomic_llong    rx_fresh_allocs;
+    /* A pinned pool (http_client_pool_new_pinned_raw), and whether a request
+     * through it is in flight (http_send_raw). */
+    int             pinned;
+    atomic_int      busy;
+};
 
-static HttpIdleConn*   http_pool_head = NULL;
-static int             http_pool_count = 0;
-static int             http_pool_enabled = 1;
-static int             http_pool_max_idle = 64;
-static int             http_pool_max_per_key = 8;
-static int64_t         http_pool_idle_ms = 15000;
-/* When the oldest pooled connection becomes eligible for expiry, or INT64_MAX
- * when the pool is empty (#1719).
- *
- * http_pool_take and http_pool_put both swept the whole idle list on every
- * request, under the global pool mutex. With the default 15s idle window and a
- * proxy reusing its upstreams continuously, that sweep frees nothing on the
- * overwhelming majority of calls -- it is a list walk per request to discover
- * there is nothing to do. Tracking the earliest deadline lets both callers skip
- * the walk outright until that time actually arrives.
- *
- * Kept deliberately coarse: it is a lower bound, not an exact answer. Entries
- * are only ever added with a fresh idle_since_ms, so the earliest deadline can
- * only move later when the list shrinks, and recomputing it during a sweep we
- * were doing anyway is free. A stale-early value costs one redundant sweep,
- * never a missed expiry. */
-static int64_t         http_pool_next_expiry_ms = INT64_MAX;
+#if defined(AETHER_NO_THREADING)
+#include "../../runtime/actors/aether_frames.h"   /* aether_context_lock */
+#define http_pool_enter(p) aether_context_lock(&(p)->flag)
+#define http_pool_leave(p) aether_context_unlock(&(p)->flag)
+#else
+#define http_pool_enter(p) pthread_mutex_lock(&(p)->mutex)
+#define http_pool_leave(p) pthread_mutex_unlock(&(p)->mutex)
+#endif
 
 static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
+
+static HttpClientPool* http_pool_make(int max_idle, int max_per_key, int64_t idle_ms) {
+    HttpClientPool* p = (HttpClientPool*)calloc(1, sizeof(HttpClientPool));
+    if (!p) return NULL;
+#if defined(AETHER_NO_THREADING)
+    atomic_flag_clear(&p->flag);
+#else
+    if (pthread_mutex_init(&p->mutex, NULL) != 0) { free(p); return NULL; }
+#endif
+    p->enabled = 1;
+    p->max_idle = max_idle;
+    p->max_per_key = max_per_key;
+    p->idle_ms = idle_ms;
+    p->next_expiry_ms = INT64_MAX;
+    atomic_init(&p->rx_fresh_allocs, 0);
+    atomic_init(&p->busy, 0);
+    return p;
+}
+
+/* A client's pool: up to 64 idle connections, 8 to one origin, each kept
+ * 15 s unused. */
+HttpClientPool* http_client_pool_new_raw(void) {
+    return http_pool_make(64, 8, 15000);
+}
+
+/* One connection, kept until it is used, cleared or freed. */
+HttpClientPool* http_client_pool_new_pinned_raw(void) {
+    HttpClientPool* p = http_pool_make(1, 1, 0);
+    if (p) p->pinned = 1;
+    return p;
+}
 
 /* Everything that makes two connections non-interchangeable: the origin, the
  * endpoint actually dialled (proxy or origin), TLS and which backend carries
@@ -894,57 +941,61 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
 /* Caller holds the lock. Drops every entry idle past the timeout.
  *
  * Returns immediately when the earliest deadline is still in the future, which
- * is the common case on a busy proxy -- see http_pool_next_expiry_ms. When it
- * does sweep, it recomputes that watermark from the survivors. */
-static void http_pool_expire_locked(int64_t now) {
-    if (now < http_pool_next_expiry_ms) return;
+ * is the common case on a busy proxy -- see next_expiry_ms. When it does
+ * sweep, it recomputes that watermark from the survivors. */
+static void http_pool_expire_locked(HttpClientPool* p, int64_t now) {
+    if (p->idle_ms <= 0 || now < p->next_expiry_ms) return;
 
     int64_t earliest = INT64_MAX;
-    HttpIdleConn** link = &http_pool_head;
+    HttpIdleConn** link = &p->head;
     while (*link) {
         HttpIdleConn* c = *link;
-        if (now - c->idle_since_ms >= http_pool_idle_ms) {
+        if (now - c->idle_since_ms >= p->idle_ms) {
             *link = c->next;
-            http_pool_count--;
+            p->count--;
             transport_close(&c->t);
             free(c);
             continue;
         }
-        int64_t due = c->idle_since_ms + http_pool_idle_ms;
+        int64_t due = c->idle_since_ms + p->idle_ms;
         if (due < earliest) earliest = due;
         link = &c->next;
     }
-    http_pool_next_expiry_ms = earliest;
+    p->next_expiry_ms = earliest;
 }
 
-/* Take an idle connection for `key`, newest first (the most recently used is
- * the one the peer is least likely to have closed). Returns 1 on a hit. */
-static int http_pool_take(const char* key, Transport* out) {
-    if (!http_pool_enabled) return 0;
+/* Take an idle connection for `key` from `p`, newest first (the most recently
+ * used is the one the peer is least likely to have closed). Returns 1 on a
+ * hit. No pool, no hit. */
+static int http_pool_take(HttpClientPool* p, const char* key, Transport* out) {
+    if (!p) return 0;
     int found = 0;
-    http_pool_enter();
-    http_pool_expire_locked(http_now_ms());
-    HttpIdleConn** link = &http_pool_head;
-    while (*link) {
-        HttpIdleConn* c = *link;
-        if (strcmp(c->key, key) == 0) {
-            *link = c->next;
-            http_pool_count--;
-            *out = c->t;
-            free(c);
-            found = 1;
-            break;
+    http_pool_enter(p);
+    if (p->enabled) {
+        http_pool_expire_locked(p, http_now_ms());
+        HttpIdleConn** link = &p->head;
+        while (*link) {
+            HttpIdleConn* c = *link;
+            if (strcmp(c->key, key) == 0) {
+                *link = c->next;
+                p->count--;
+                *out = c->t;
+                free(c);
+                found = 1;
+                break;
+            }
+            link = &c->next;
         }
-        link = &c->next;
     }
-    http_pool_leave();
+    http_pool_leave(p);
     return found;
 }
 
-/* Hand a still-usable connection back. Takes ownership either way: over the
- * caps it is closed here rather than returned to the caller to close. */
-static void http_pool_put(const char* key, Transport* t) {
-    if (!http_pool_enabled || t->sockfd < 0) {
+/* Hand a still-usable connection back to `p`. Takes ownership either way: with
+ * no pool, or over the caps, it is closed here rather than returned to the
+ * caller to close. */
+static void http_pool_put(HttpClientPool* p, const char* key, Transport* t) {
+    if (!p || t->sockfd < 0) {
         transport_close(t);
         return;
     }
@@ -954,53 +1005,51 @@ static void http_pool_put(const char* key, Transport* t) {
         return;
     }
     int64_t now = http_now_ms();
-    http_pool_enter();
-    http_pool_expire_locked(now);
+    http_pool_enter(p);
+    if (!p->enabled) {
+        http_pool_leave(p);
+        free(c);
+        transport_close(t);
+        return;
+    }
+    http_pool_expire_locked(p, now);
     /* Only whether the per-key cap is REACHED matters, not the exact count, so
      * stop at the cap instead of walking to the end -- and skip the walk
-     * entirely when the global cap already rejects this connection. */
+     * entirely when the global cap already rejects this connection. The
+     * per-key cap cannot bind when it is at or above the global cap: the
+     * entries sharing a key are a subset of the pool. Under a proxy the two
+     * caps are equal, and skipping the walk there is what keeps this loop
+     * from growing with the pool (strcmp was 1.9% of the proxy's profile). */
     int per_key = 0;
-    /* The per-key cap cannot bind when it is at or above the global cap: the
-     * entries sharing a key are a subset of the pool, so their count is below
-     * the global cap already, and the test below would always be false. Under
-     * a proxy the two caps are equal, and skipping the walk there is what
-     * keeps this loop from growing with the pool: it compares a key against
-     * every entry, and sizing the pool for a proxy made it the largest single
-     * userspace cost on the path (strcmp, 1.9% of the profile).
-     *
-     * A client keeps the two caps apart and still walks, breaking early at
-     * the cap as before. */
-    if (http_pool_count < http_pool_max_idle && http_pool_max_per_key < http_pool_max_idle) {
-        for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
-            if (strcmp(e->key, key) == 0 && ++per_key >= http_pool_max_per_key)
+    if (p->count < p->max_idle && p->max_per_key < p->max_idle) {
+        for (HttpIdleConn* e = p->head; e; e = e->next) {
+            if (strcmp(e->key, key) == 0 && ++per_key >= p->max_per_key)
                 break;
         }
     }
-    if (http_pool_count >= http_pool_max_idle || per_key >= http_pool_max_per_key) {
-        http_pool_leave();
+    if (p->count >= p->max_idle || per_key >= p->max_per_key) {
+        http_pool_leave(p);
         free(c);
         transport_close(t);
         return;
     }
     c->t = *t;
-    /* A bounded copy, not a formatted one. This runs every time a connection
-     * goes back to the pool, which is once per proxied request, and asking
-     * snprintf to move a string brings the whole formatting machinery with it:
-     * the profile put 15% of this path's last-level write misses in vfprintf,
-     * reached from here. Truncation behaves as the format did. */
+    /* A bounded copy, not a formatted one: this runs once per proxied
+     * request, and snprintf put 15% of this path's last-level write misses
+     * in vfprintf. Truncation behaves as the format did. */
     size_t kl = strlen(key);
     if (kl >= sizeof(c->key)) kl = sizeof(c->key) - 1;
     memcpy(c->key, key, kl);
     c->key[kl] = '\0';
     c->idle_since_ms = now;
-    c->next = http_pool_head;
-    http_pool_head = c;
-    http_pool_count++;
+    c->next = p->head;
+    p->head = c;
+    p->count++;
     /* On an empty pool the watermark is INT64_MAX, and this entry is now the
      * only deadline there is. Lowering it here is what re-arms the sweep. */
-    if (c->idle_since_ms + http_pool_idle_ms < http_pool_next_expiry_ms)
-        http_pool_next_expiry_ms = c->idle_since_ms + http_pool_idle_ms;
-    http_pool_leave();
+    if (p->idle_ms > 0 && c->idle_since_ms + p->idle_ms < p->next_expiry_ms)
+        p->next_expiry_ms = c->idle_since_ms + p->idle_ms;
+    http_pool_leave(p);
     /* The pool entry owns everything the Transport did now, so the
      * caller's copy must stop pointing at any of it: a later
      * transport_close on the caller's struct would otherwise close the
@@ -1016,14 +1065,15 @@ static void http_pool_put(const char* key, Transport* t) {
 #endif
 }
 
-/* Close and drop every idle connection. */
-void http_client_pool_clear_raw(void) {
-    http_pool_enter();
-    HttpIdleConn* c = http_pool_head;
-    http_pool_head = NULL;
-    http_pool_count = 0;
-    http_pool_next_expiry_ms = INT64_MAX;   /* nothing left to expire */
-    http_pool_leave();
+/* Close and drop every idle connection `pool` holds. Its settings stay. */
+void http_client_pool_clear_raw(HttpClientPool* pool) {
+    if (!pool) return;
+    http_pool_enter(pool);
+    HttpIdleConn* c = pool->head;
+    pool->head = NULL;
+    pool->count = 0;
+    pool->next_expiry_ms = INT64_MAX;   /* nothing left to expire */
+    http_pool_leave(pool);
     while (c) {
         HttpIdleConn* next = c->next;
         transport_close(&c->t);
@@ -1032,38 +1082,53 @@ void http_client_pool_clear_raw(void) {
     }
 }
 
-/* Size the pool for a reverse proxy rather than for a client.
+/* Close every connection `pool` holds and free it. A request still in flight
+ * through it must have returned first: its connection goes back to the pool
+ * it was sent through. */
+void http_client_pool_free_raw(HttpClientPool* pool) {
+    if (!pool) return;
+    http_client_pool_clear_raw(pool);
+#if !defined(AETHER_NO_THREADING)
+    pthread_mutex_destroy(&pool->mutex);
+#endif
+    free(pool);
+}
+
+/* The pool's current caps, for reporting and for tests that need to know
+ * whether mounting a proxy resized it. */
+void http_client_pool_caps_raw(HttpClientPool* pool, int* max_idle, int* max_per_host) {
+    if (!pool) {
+        if (max_idle) *max_idle = 0;
+        if (max_per_host) *max_per_host = 0;
+        return;
+    }
+    http_pool_enter(pool);
+    if (max_idle)     *max_idle = pool->max_idle;
+    if (max_per_host) *max_per_host = pool->max_per_key;
+    http_pool_leave(pool);
+}
+
+/* Size a pool for a reverse proxy rather than for a client.
  *
- * The caps below are a client library's: a program fetching pages keeps a few
- * connections per host and holding more would waste descriptors it will never
- * use. A reverse proxy is the opposite. Every request in flight holds one
- * upstream connection and returns it on completion, so a proxy serving N
- * concurrent requests needs about N of them; with the client default of 8 per
- * host, every connection past the eighth was closed on release and dialled
- * again for the next request.
+ * A client's caps suit a program fetching pages: a few connections per host,
+ * since holding more would waste descriptors it will never use. A reverse
+ * proxy is the opposite. Every request in flight holds one upstream
+ * connection and returns it on completion, so a proxy serving N concurrent
+ * requests needs about N of them; with the client default of 8 per host,
+ * every connection past the eighth was closed on release and dialled again.
  *
  * That churn was not visible as CPU in any profile. It showed up as TCP
  * segments: 5.61 per request against nginx's 4.02, with a TIME_WAIT socket
- * created every sixth request, because each replacement connection pays a
- * handshake and a shutdown that carry no HTTP at all.
+ * created every sixth request.
  *
  * The size comes from the descriptor budget rather than a constant, because
  * that is the resource being spent and it is what differs between a container
  * with 256 descriptors and a tuned host with a million. A quarter of the
  * budget leaves the rest for the connections being served. Caps are only ever
- * raised: a caller who has configured the pool deliberately keeps its
- * settings.
- */
-/* The pool's current caps, for reporting and for tests that need to know
- * whether mounting a proxy resized it. */
-void http_client_pool_caps_raw(int* max_idle, int* max_per_host) {
-    http_pool_enter();
-    if (max_idle)     *max_idle = http_pool_max_idle;
-    if (max_per_host) *max_per_host = http_pool_max_per_key;
-    http_pool_leave();
-}
-
-void http_client_pool_size_for_proxy(void) {
+ * raised: an owner who has configured the pool deliberately keeps its
+ * settings. */
+void http_client_pool_size_for_proxy(HttpClientPool* pool) {
+    if (!pool) return;
     int budget = 1024;
 #if !defined(_WIN32)
     struct rlimit rl;
@@ -1075,60 +1140,65 @@ void http_client_pool_size_for_proxy(void) {
     if (want < 64)   want = 64;
     if (want > 1024) want = 1024;
 
-    http_pool_enter();
-    if (http_pool_enabled) {
-        if (http_pool_max_idle < want)    http_pool_max_idle = want;
+    http_pool_enter(pool);
+    if (pool->enabled) {
+        if (pool->max_idle < want)    pool->max_idle = want;
         /* One backend may legitimately take the whole pool: a proxy with a
          * single upstream is the ordinary case, and a per-host cap below the
          * total would reintroduce exactly the churn this removes. */
-        if (http_pool_max_per_key < want) http_pool_max_per_key = want;
+        if (pool->max_per_key < want) pool->max_per_key = want;
     }
-    http_pool_leave();
+    http_pool_leave(pool);
 }
 
-/* Reconfigure the pool. `max_idle` 0 turns reuse off (and clears what is
- * held); negative values leave that setting untouched. */
-const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
-                                           int64_t idle_ns) {
-    http_pool_enter();
+/* Reconfigure `pool`. `max_idle` 0 turns reuse off (and clears what is held);
+ * `idle_ns` 0 keeps an unused connection until it is used or cleared;
+ * negative values leave that setting untouched. */
+const char* http_client_pool_configure_raw(HttpClientPool* pool, int max_idle,
+                                           int max_per_host, int64_t idle_ns) {
+    if (!pool) return "no pool";
+    http_pool_enter(pool);
     if (max_idle >= 0) {
-        http_pool_max_idle = max_idle;
-        http_pool_enabled = max_idle > 0;
+        pool->max_idle = max_idle;
+        pool->enabled = max_idle > 0;
     }
-    if (max_per_host >= 0) http_pool_max_per_key = max_per_host;
+    if (max_per_host >= 0) pool->max_per_key = max_per_host;
     if (idle_ns >= 0) {
         int64_t ms = idle_ns / 1000000LL;
-        http_pool_idle_ms = ms > 0 ? ms : 1;
+        pool->idle_ms = idle_ns == 0 ? 0 : (ms > 0 ? ms : 1);
         /* The expiry watermark was derived from the PREVIOUS window, so
          * shortening the window would leave a deadline further out than the new
          * setting allows and delay every eviction. Force the next pool
          * operation to sweep and recompute it. */
-        http_pool_next_expiry_ms = INT64_MIN;
+        pool->next_expiry_ms = INT64_MIN;
     }
-    http_pool_leave();
-    if (!http_pool_enabled) http_client_pool_clear_raw();
+    int enabled = pool->enabled;
+    http_pool_leave(pool);
+    if (!enabled) http_client_pool_clear_raw(pool);
     return "";
 }
 
-/* How many receive buffers the client has had to allocate from nothing
- * (#2160). A response read on a pooled connection that kept its buffer does
- * not count; one read on a fresh connection, or on one whose buffer was not
- * worth keeping, does. It is how the reuse is observed rather than assumed:
- * N requests over one pooled connection allocate once, and a regression that
- * drops the buffer again shows up as N. Monotonic for the process. */
-static atomic_llong http_rx_fresh_allocs = 0;
-
-long long http_client_rx_buffer_allocs_raw(void) {
-    return (long long)atomic_load(&http_rx_fresh_allocs);
+/* How many receive buffers requests through `pool` have had to allocate from
+ * nothing (#2160). A response read on a pooled connection that kept its
+ * buffer does not count; one read on a fresh connection, or on one whose
+ * buffer was not worth keeping, does. It is how the reuse is observed rather
+ * than assumed: N requests over one pooled connection allocate once, and a
+ * regression that drops the buffer again shows up as N. */
+long long http_client_pool_rx_buffer_allocs_raw(HttpClientPool* pool) {
+    return pool ? (long long)atomic_load(&pool->rx_fresh_allocs) : 0;
 }
 
-int http_client_pool_idle_count_raw(void) {
-    http_pool_enter();
-    int n = http_pool_count;
-    http_pool_leave();
+static void http_pool_note_rx_alloc(HttpClientPool* pool) {
+    if (pool) atomic_fetch_add(&pool->rx_fresh_allocs, 1);
+}
+
+int http_client_pool_idle_count_raw(HttpClientPool* pool) {
+    if (!pool) return 0;
+    http_pool_enter(pool);
+    int n = pool->count;
+    http_pool_leave(pool);
     return n;
 }
-
 
 static void http_stream_free(struct HttpStream* s) {
     if (!s) return;
@@ -1566,6 +1636,10 @@ struct HttpClientRequest {
     int   tls_backend;   /* HTTP_TLS_BACKEND_*: DEFAULT follows AETHER_PURE_TLS
                           * and the build; AETHER or OPENSSL is the program's
                           * choice for this request (set_tls_backend, #1298). */
+    HttpClientPool* pool; /* not owned, or NULL: the owner whose connections
+                          * this request may take and gives its own back to
+                          * (http_request_set_pool_raw). NULL: a connection of
+                          * its own, closed after the response. */
 };
 
 static int http_client_use_pure_tls(const HttpClientRequest* req) {
@@ -1923,6 +1997,16 @@ int http_request_set_unix_socket_raw(HttpClientRequest* req, const char* path) {
     }
     free(req->unix_socket);
     req->unix_socket = kept;
+    return 0;
+}
+
+/* Send this request through `pool`: take an idle connection from it when it
+ * holds one that fits, and give the connection back to it after a response
+ * that leaves it reusable. NULL: a connection of the request's own. The
+ * request does not own the pool; the pool must outlive the send. */
+int http_request_set_pool_raw(HttpClientRequest* req, HttpClientPool* pool) {
+    if (!req) return -1;
+    req->pool = pool;
     return 0;
 }
 
@@ -3563,6 +3647,10 @@ const char* http_request_body_of(const HttpClientRequest* req, int* out_len) {
     return req ? req->body : NULL;
 }
 
+HttpClientPool* http_request_pool_of(const HttpClientRequest* req) {
+    return req ? req->pool : NULL;
+}
+
 const char* http_request_content_type_of(const HttpClientRequest* req) {
     return req ? req->content_type : NULL;
 }
@@ -3600,8 +3688,9 @@ static void http_socket_set_nonblocking(int fd, int on) {
 #endif
 }
 
-int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
-    return http_upstream_acquire_ex(host, port, 1, out);
+int http_upstream_acquire(HttpClientPool* pool, const char* host, int port,
+                          HttpUpstreamConn* out) {
+    return http_upstream_acquire_ex(pool, host, port, 1, out);
 }
 
 /* A fresh transport on `out`, the pool key kept. No descriptor until one is
@@ -3739,9 +3828,13 @@ static int upstream_dial(const char* host, int port, HttpUpstreamConn* out) {
  * connection the upstream had closed. Taking another one from the same pool
  * could hand it a second corpse, and the retry after that is the one the
  * client never gets an answer from. */
-static int upstream_acquire(const char* host, int port, int allow_pool,
-                            HttpResolver* resolver, HttpUpstreamConn* out) {
+static int upstream_acquire(HttpClientPool* pool, const char* host, int port,
+                            int allow_pool, HttpResolver* resolver,
+                            HttpUpstreamConn* out) {
     if (!out || !host || port <= 0) return -1;
+    /* The owner it came from is the owner it goes back to
+     * (http_upstream_release), whichever way it was got. */
+    out->pool = pool;
     /* Field by field, not memset over the struct. Most of this object is a
      * 512 byte pool key, and blanking it wrote nine cache lines per request
      * that the very next line overwrites with about forty bytes. Those lines
@@ -3753,7 +3846,7 @@ static int upstream_acquire(const char* host, int port, int allow_pool,
 
     http_pool_key(out->pool_key, sizeof(out->pool_key), host, port, 0,
                   host, port, 0, NULL);
-    if (allow_pool && http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
+    if (allow_pool && http_pool_take(pool, out->pool_key, &out->t)) {
         out->reused = 1;
         out->connecting = 0;
         if (out->t.nonblocking != 1) {
@@ -3766,9 +3859,9 @@ static int upstream_acquire(const char* host, int port, int allow_pool,
     return upstream_dial(host, port, out);
 }
 
-int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
-                             HttpUpstreamConn* out) {
-    return upstream_acquire(host, port, allow_pool, NULL, out);
+int http_upstream_acquire_ex(HttpClientPool* pool, const char* host, int port,
+                             int allow_pool, HttpUpstreamConn* out) {
+    return upstream_acquire(pool, host, port, allow_pool, NULL, out);
 }
 
 int http_upstream_has_next(HttpUpstreamConn* c) {
@@ -3790,9 +3883,10 @@ int http_upstream_redial(const char* host, int port, HttpUpstreamConn* c) {
     return upstream_dial(host, port, c);
 }
 
-int http_upstream_acquire_nb(const char* host, int port, int allow_pool,
-                             HttpResolver* resolver, HttpUpstreamConn* out) {
-    return upstream_acquire(host, port, allow_pool, resolver, out);
+int http_upstream_acquire_nb(HttpClientPool* pool, const char* host, int port,
+                             int allow_pool, HttpResolver* resolver,
+                             HttpUpstreamConn* out) {
+    return upstream_acquire(pool, host, port, allow_pool, resolver, out);
 }
 
 int http_upstream_lookup(const HttpUpstreamConn* c) {
@@ -3862,15 +3956,16 @@ int http_response_head_keeps_conn(const char* head, size_t header_bytes) {
     return strncmp(head, "HTTP/1.0", 8) != 0;   /* 1.0 closes unless it says otherwise */
 }
 
-/* Hand the connection back to the idle pool, or close it. A connection is
- * only worth keeping when the response that came over it ended where its own
- * framing said it would, which is the caller's decision to make. */
+/* Hand the connection back to the pool it was acquired for, or close it. A
+ * connection is only worth keeping when the response that came over it ended
+ * where its own framing said it would, which is the caller's decision to
+ * make. Acquired with no pool, it is closed. */
 void http_upstream_release(HttpUpstreamConn* c, int keep) {
     if (!c || c->t.sockfd < 0) return;
-    if (keep && http_pool_enabled) {
+    if (keep && c->pool) {
         /* Left as it is: whoever takes it next sets what it needs, and in a
          * proxy that is this driver again. */
-        http_pool_put(c->pool_key, &c->t);
+        http_pool_put(c->pool, c->pool_key, &c->t);
     } else {
         transport_close(&c->t);
     }
@@ -3975,7 +4070,7 @@ int http_exchange_recv(HttpExchange* x) {
 
         if (x->len + (size_t)n + 1 > x->cap) {
             size_t new_cap = x->cap ? x->cap * 2 : 16384;
-            if (x->cap == 0) atomic_fetch_add(&http_rx_fresh_allocs, 1);
+            if (x->cap == 0) http_pool_note_rx_alloc(x->rx_pool);
             while (new_cap < x->len + (size_t)n + 1) new_cap *= 2;
             /* #461: the response body is attacker-controlled (a malicious
              * server can flood it), so the doubling buffer is gated through
@@ -4006,15 +4101,15 @@ int http_exchange_recv(HttpExchange* x) {
 /* Finish with a connection the blocking path used: back to the pool with its
  * receive buffer, or closed and the buffer freed. The one place a request's
  * connection is disposed of once its response has been read. */
-static void http_conn_finish(int keep, const char* key, Transport* t,
-                             char* buf, size_t cap) {
+static void http_conn_finish(HttpClientPool* pool, int keep, const char* key,
+                             Transport* t, char* buf, size_t cap) {
     if (keep && buf && cap <= HTTP_RX_KEEP_MAX && !t->rxbuf) {
         t->rxbuf = buf;
         t->rxcap = cap;
         buf = NULL;
     }
     if (buf) aether_caps_free(buf, cap);
-    if (keep) http_pool_put(key, t);
+    if (keep) http_pool_put(pool, key, t);
     else      transport_close(t);
 }
 
@@ -4153,10 +4248,10 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * it mid-body, so those connections are never pooled in either direction.
      * A caller who set their own Connection header gets exactly that, and a
      * connection the peer is about to close is not worth keeping. */
-    int pool_this = http_pool_enabled && !req->stream &&
+    int pool_this = req->pool && !req->stream &&
                     !header_already_set(req, "Connection");
     int reused = 0;
-    if (pool_this && http_pool_take(pool_key, &t)) {
+    if (pool_this && http_pool_take(req->pool, pool_key, &t)) {
         /* This path reads with a timeout on the socket and expects it to
          * block. A driver may have left this connection non-blocking, where
          * a read that would wait returns EAGAIN, which this path reads as a
@@ -4436,6 +4531,7 @@ send_request:
     {
         HttpExchange rx;
         http_exchange_init(&rx, &t, NULL, 0, NULL, 0, method);
+        rx.rx_pool = req->pool;   /* counts its fresh receive buffers */
         /* A connection from the pool may carry the buffer its last response
          * was read into (#2160). Hand it to the exchange empty, and let it
          * grow from there instead of from nothing. Ownership moves: the
@@ -4603,13 +4699,13 @@ send_request:
      * this it came back as a successful partial body with no error — the
      * silent truncation the deadline exists to make visible. */
     if (timed_out && !rx_complete_at_deadline) {
-        http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
+        http_conn_finish(req->pool, keep_conn, pool_key, &t, full_response, cap);
         response->error = string_new(
             "request timed out before the response ended");
         return response;
     }
     if (recv_err && !header_end) {
-        http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
+        http_conn_finish(req->pool, keep_conn, pool_key, &t, full_response, cap);
         response->error = string_new(
             timed_out ? "request timed out before the response arrived"
                       : "recv timeout or I/O error");
@@ -4620,7 +4716,7 @@ send_request:
      * case meant a read that died mid-body came back as a successful short
      * response, which a caller cannot tell from a complete one. */
     if (truncated) {
-        http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
+        http_conn_finish(req->pool, keep_conn, pool_key, &t, full_response, cap);
         response->error = string_new(
             timed_out ? "request timed out: the response stopped short of its declared body length"
             : recv_err ? "response truncated: read failed before the declared body length"
@@ -4640,7 +4736,7 @@ send_request:
 
     /* The body is a copy now, so the buffer is free to go back with the
      * connection for the next request on it. */
-    http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
+    http_conn_finish(req->pool, keep_conn, pool_key, &t, full_response, cap);
     return response;
 }
 
@@ -5055,9 +5151,26 @@ static void http_strip_cross_host_headers(HttpClientRequest* req) {
 /* v2 entry point. The v1 wrappers below build a throwaway request
  * and call this. Handles redirect-following when the request was
  * configured with max_redirects > 0 (issue #239). */
+static HttpResponse* http_send_chain(HttpClientRequest* req);
+
+/* Send `req`, following redirects if it asked to. A pinned pool lends its
+ * connection to one request at a time: a request sent through it while
+ * another is in flight goes out on a connection of its own, closed after its
+ * response, so the pinned connection stays the one the sequence began on. */
 HttpResponse* http_send_raw(HttpClientRequest* req) {
     if (!req) return NULL;
+    HttpClientPool* pool = req->pool;
+    if (!pool || !pool->pinned) return http_send_chain(req);
+    int expect = 0;
+    int claimed = atomic_compare_exchange_strong(&pool->busy, &expect, 1);
+    if (!claimed) req->pool = NULL;
+    HttpResponse* resp = http_send_chain(req);
+    if (claimed) atomic_store(&pool->busy, 0);
+    else req->pool = pool;
+    return resp;
+}
 
+static HttpResponse* http_send_chain(HttpClientRequest* req) {
     HttpResponse* resp = http_request_internal(req);
     if (!resp) return NULL;
 

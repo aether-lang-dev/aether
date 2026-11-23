@@ -1257,7 +1257,8 @@ static int ev_dial(EvDriver* d, EvConn* c, int next_addr) {
     int fresh = c->dial_fresh;
     c->dial_fresh = 0;
     int fd = next_addr ? http_upstream_redial(host, port, &c->up)
-                       : http_upstream_acquire_nb(host, port, !fresh, d->loop->resolver,
+                       : http_upstream_acquire_nb(http_request_pool_of(c->px.outbound),
+                                                  host, port, !fresh, d->loop->resolver,
                                                   &c->up);
     if (fd < 0) {
         free(path);

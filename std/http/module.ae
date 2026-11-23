@@ -34,10 +34,6 @@ exports(
     http_response_status, http_response_body, http_response_headers,
     http_response_error, http_response_ok,
     get, get_with_timeout, post, put, delete, status_text,
-    http_client_pool_configure_raw, http_client_pool_clear_raw,
-    http_client_pool_idle_count_raw, http_client_rx_buffer_allocs_raw,
-    client_pool_configure, client_pool_disable, client_pool_clear,
-    client_pool_idle_count, client_rx_buffer_allocs,
     http_server_create, http_server_bind_raw, http_server_error, http_server_port, http_server_start_raw,
     server_set_host,
     http_server_start_background_raw,
@@ -98,7 +94,8 @@ exports(
     serve_file, serve_static,
     request_method, request_path, request_body,
     request_body_length, request_body_bytes, request_query, query_param,
-    request_remote_addr, request_remote_port,
+    request_remote_addr, request_remote_port, request_conn_id,
+    server_on_conn_close,
     request_local_addr, request_local_port,
     request_scheme, request_is_tls, request_http_version,
     request_header_count, request_header_name, request_header_value,
@@ -110,19 +107,11 @@ exports(
 // underlying HttpResponse struct (e.g. to inspect headers and body
 // together, or to implement custom retry logic). Most callers should
 // use the Go-style wrappers below.
-// Idle connection pool. The client keeps a connection open after a response
-// whose length was definite and reuses it for the next request to the same
-// origin, which is what HTTP/1.1 is designed for: a proxy or a polling client
-// otherwise pays a TCP (and TLS) handshake per request.
 //
-// Reuse is on by default. Connections are keyed by origin, the proxy actually
-// dialled, TLS, and the verification the caller asked for, so a pinned-CA or
-// verification-off connection is never handed to a request that did not ask
-// for it.
-extern http_client_pool_configure_raw(max_idle: int, max_per_host: int, idle_ns: long) -> string
-extern http_client_pool_clear_raw()
-extern http_client_pool_idle_count_raw() -> int
-extern http_client_rx_buffer_allocs_raw() -> long
+// The one-line calls (get, post, put, delete) each open a connection of
+// their own and close it after the response. Connection reuse belongs to an
+// owner: std.http.client's pool_new, handed to each request that may share
+// its connections.
 
 extern http_get_raw(url: string) -> ptr
 // http.get with a per-call timeout. 0ns blocks forever
@@ -163,47 +152,6 @@ extern string_concat(a: string, b: string) -> string @heap
 // On failure, the value is a zero-value ("" or 0) and the error string
 // describes what went wrong: a transport failure (DNS, connect, send)
 // names its cause, and a status other than 2xx reads "HTTP 404 Not Found".
-
-// Resize the idle connection pool: how many idle connections to keep in
-// total, how many of those may be to one origin, and how long an unused one
-// is kept before it is closed. The defaults are the call below.
-//
-//     http.client_pool_configure(64, 8, 15s)
-//
-// Keep the idle time under the upstream's own keep-alive timeout, or the
-// server closes connections while they sit here and every reuse costs a
-// retry.
-client_pool_configure(max_idle: int, max_per_host: int, idle: Duration) -> string {
-    return http_client_pool_configure_raw(max_idle, max_per_host, idle)
-}
-
-// Turn connection reuse off and close what is held. Every request then opens
-// its own connection, which is what the client did before reuse existed.
-client_pool_disable() {
-    _ = http_client_pool_configure_raw(0, -1, -1)
-}
-
-// Close every idle connection. Useful before measuring, and after a change
-// that makes held connections invalid (a new CA, a rotated proxy).
-client_pool_clear() {
-    http_client_pool_clear_raw()
-}
-
-// How many idle connections are held right now.
-client_pool_idle_count() -> int {
-    return http_client_pool_idle_count_raw()
-}
-
-// How many response buffers the client has had to allocate from nothing,
-// over the life of the process. A pooled connection keeps the buffer its
-// last response was read into and lends it to the next, so a run of
-// requests over one kept connection allocates once, not once per request
-// -- which is what this lets a program, or a test, check rather than
-// assume. Responses whose buffer grew past 64 KiB are not kept, so the idle
-// pool cannot pin an outsized body.
-client_rx_buffer_allocs() -> long {
-    return http_client_rx_buffer_allocs_raw()
-}
 
 // The reason phrase registered for a status code ("Not Found" for 404), or
 // "" for a code nobody registered. Names a status a std.http.client
@@ -1181,6 +1129,8 @@ extern http_request_remote_addr(req: ptr) -> string
 
 // Companion port — 0 when the address is unavailable too.
 extern http_request_remote_port(req: ptr) -> int
+extern http_request_conn_id(req: ptr) -> long
+extern http_server_on_conn_close(server: ptr, cb: ptr, user_data: ptr)
 
 // Server-side socket name from `getsockname(2)`. Needed when the
 // listener binds 0.0.0.0 and the handler wants to know which NIC
@@ -1326,6 +1276,29 @@ query_param(req: ptr, name: string) -> (string, string) {
 
 request_remote_addr(req: ptr) -> string {
     return http_request_remote_addr(req)
+}
+
+// The connection that carried this request, as an id unique among the
+// server's connections for as long as it runs (1, 2, ... in accept order).
+// For per-connection state: a proxy that pairs each client connection with
+// an upstream connection of its own (std.http.client's pool_new_pinned), so a
+// server that authenticates the connection (NTLM, Negotiate) sees one client
+// per connection. Unlike request_remote_port, an id is never reused while
+// the server runs. 0 when the server cannot say: a request the proxy event
+// loop served itself.
+request_conn_id(req: ptr) -> long {
+    return http_request_conn_id(req)
+}
+
+// Call `cb(conn_id, user_data)` when a connection closes, with the id
+// request_conn_id gave its requests: where per-connection state is let go.
+// `cb` is a `@c_callback` taking (conn_id: long, user_data: ptr); it runs on
+// the thread that closed the connection, after its last response, and
+// several may run at once, so state it touches needs a lock. Set it before
+// the server starts; null turns it off. A connection a handler took over (a
+// WebSocket, a tunnel) is not reported.
+server_on_conn_close(server: ptr, cb: ptr, user_data: ptr) {
+    http_server_on_conn_close(server, cb, user_data)
 }
 
 request_remote_port(req: ptr) -> int {

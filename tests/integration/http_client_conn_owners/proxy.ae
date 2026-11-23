@@ -1,0 +1,171 @@
+// A forwarding proxy that keeps connection-bound authentication right: what
+// servirtium-vcr's recorder needs, in miniature.
+//
+// The proxy (std.http) forwards each request to the upstream
+// (conn_auth_upstream.c, which authenticates CONNECTIONS) through a pinned
+// pool of its own for each client connection: http.request_conn_id names the
+// client connection, and http.server_on_conn_close frees its pinned pool when
+// it closes. So a client that logs in through the proxy is the only one its
+// upstream connection serves, and its upstream connection closes with it.
+//
+//   - client A logs in and asks again on its one connection: 200, the same
+//     client connection id both times, and the same upstream connection
+//   - client B, a connection of its own, asks anonymously: 401, another
+//     upstream connection
+//   - A closes: the proxy hears it with A's id and the upstream sees A's
+//     upstream connection close
+
+import std.http
+import std.http.client
+import std.intmap
+import std.io
+import std.mem
+import std.string
+import std.sync
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+struct Proxy {
+    upstream: string
+    conns: ptr // intmap: client connection id -> its pinned pool
+    lock: ptr // a sync.atomic used as a spin lock over conns
+    closed: ptr // sync.atomic: the id the last close reported
+}
+
+take(l: ptr) {
+    while sync.atomic_cas(l, 0, 1) == 0 {}
+}
+
+give(l: ptr) { sync.atomic_store(l, 0) }
+
+// The pinned pool for this client connection, made on its first request.
+pinned_for(px: *Proxy, id: long) -> ptr {
+    take(px.lock)
+    pool = mem.long_to_ptr(intmap.get(px.conns, id, 0))
+    if pool == null {
+        pool, _ = client.pool_new_pinned()
+        intmap.put(px.conns, id, mem.ptr_to_long(pool))
+    }
+    give(px.lock)
+    return pool
+}
+
+forward(req: ptr, res: ptr, ud: ptr) {
+    px = ud as *Proxy
+    id = http.request_conn_id(req)
+    out = client.request("GET", "${px.upstream}${http.request_path(req)}")
+    defer client.request_free(out)
+    client.set_timeout(out, 10s)
+    client.set_pool(out, pinned_for(px, id))
+    login = http.get_header(req, "X-Login")
+    if string.length(login) > 0 { client.set_header(out, "X-Login", login) }
+    resp, err = client.send_request(out)
+    if err != "" {
+        http.response_set_status(res, 502)
+        http.response_set_body(res, err)
+        return
+    }
+    http.response_set_status(res, client.response_status(resp))
+    http.response_set_header(res, "X-Client-Conn", "${id}")
+    http.response_set_body(res, string.copy(client.response_body(resp)))
+    client.response_free(resp)
+}
+
+@c_callback on_close(id: long, ud: ptr) {
+    px = ud as *Proxy
+    take(px.lock)
+    pool = mem.long_to_ptr(intmap.get(px.conns, id, 0))
+    intmap.remove(px.conns, id)
+    give(px.lock)
+    client.pool_free(pool)
+    sync.atomic_store(px.closed, id)
+}
+
+// One GET through `pool`: (status, body, the proxy's client connection id).
+get(base: string, path: string, pool: ptr, login: string) -> (int, string, string) {
+    req = client.request("GET", "${base}${path}")
+    if req == null { fail("request() refused ${path}") }
+    defer client.request_free(req)
+    client.set_timeout(req, 10s)
+    client.set_pool(req, pool)
+    if string.length(login) > 0 { client.set_header(req, "X-Login", login) }
+    resp, err = client.send_request(req)
+    if err != "" { fail("${path}: ${err}") }
+    status = client.response_status(resp)
+    body = string.copy(client.response_body(resp))
+    cid = client.response_header(resp, "X-Client-Conn")
+    client.response_free(resp)
+    return status, body, cid
+}
+
+open_at_upstream(upstream: string) -> int {
+    req = client.request("GET", "${upstream}/stats")
+    defer client.request_free(req)
+    client.set_timeout(req, 10s)
+    resp, err = client.send_request(req)
+    if err != "" { fail("stats: ${err}") }
+    stats = string.copy(client.response_body(resp))
+    client.response_free(resp)
+    at = string.index_of(stats, "open=")
+    n, _ = string.to_int(string.substring(stats, at + 5, string.length(stats)))
+    return n
+}
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    if string.length(port) == 0 { fail("UPSTREAM_PORT not set") }
+    px = heap.new(Proxy)
+    px.upstream = "http://127.0.0.1:${port}"
+    px.conns = intmap.new(16)
+    px.lock = sync.atomic_new(0)
+    px.closed = sync.atomic_new(0)
+
+    server = http.server_create(0)
+    http.server_set_host(server, "127.0.0.1")
+    http.server_get(server, "/login", forward, px)
+    http.server_get(server, "/whoami", forward, px)
+    http.server_on_conn_close(server, on_close, px)
+    if http.server_bind(server, "127.0.0.1", 0) != "" { fail("bind") }
+    serr = http.server_start_background(server)
+    if serr != "" { fail(serr) }
+    base = "http://127.0.0.1:${http.server_port(server)}"
+
+    a, _ = client.pool_new_pinned()
+    b, _ = client.pool_new_pinned()
+    s1, b1, c1 = get(base, "/login", a, "alice")
+    s2, b2, c2 = get(base, "/whoami", a, "")
+    if s1 != 200 || s2 != 200 || b2 != b1 {
+        fail("client A through the proxy: login ${s1} '${b1}', then ${s2} '${b2}'")
+    }
+    if c1 != c2 || c1 == "0" { fail("client A's two requests had client connection ids ${c1} and ${c2}") }
+    s3, b3, c3 = get(base, "/whoami", b, "")
+    if s3 != 401 { fail("client B through the proxy was answered ${s3} '${b3}' after A logged in ('${b1}')") }
+    if c3 == c1 { fail("clients A and B had one client connection id, ${c1}") }
+    println("A on client connection ${c1}: ${b1}, then ${b2}; B on ${c3}: ${b3}")
+
+    if open_at_upstream(px.upstream) != 2 { fail("the upstream does not see two connections open (A's and B's)") }
+    client.pool_free(a)
+    tries = 0
+    while tries < 100 && "${sync.atomic_load(px.closed)}" != c1 {
+        sleep(20)
+        tries = tries + 1
+    }
+    if "${sync.atomic_load(px.closed)}" != c1 { fail("the proxy did not hear client connection ${c1} close") }
+    tries = 0
+    while tries < 100 && open_at_upstream(px.upstream) != 1 {
+        sleep(20)
+        tries = tries + 1
+    }
+    if open_at_upstream(px.upstream) != 1 { fail("A's upstream connection is still open after A closed") }
+    println("A closed: the proxy heard ${c1} close and freed its upstream connection; B's stays")
+
+    client.pool_free(b)
+    http.server_stop(server)
+    http.server_free(server)
+    println("PASS: one upstream connection per client connection, freed when it closes")
+}

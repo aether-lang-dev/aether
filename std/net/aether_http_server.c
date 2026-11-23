@@ -319,6 +319,8 @@ void http_release_request_body_read(void) {}
 const char* http_request_query(HttpRequest* r) { (void)r; return ""; }
 const char* http_request_remote_addr(HttpRequest* r) { (void)r; return ""; }
 int http_request_remote_port(HttpRequest* r) { (void)r; return 0; }
+int64_t http_request_conn_id(HttpRequest* r) { (void)r; return 0; }
+void http_server_on_conn_close(HttpServer* s, void (*cb)(int64_t, void*), void* ud) { (void)s; (void)cb; (void)ud; }
 const char* http_request_local_addr(HttpRequest* r) { (void)r; return ""; }
 int http_request_local_port(HttpRequest* r) { (void)r; return 0; }
 const char* http_request_scheme(HttpRequest* r) { (void)r; return "http"; }
@@ -763,6 +765,9 @@ typedef struct HttpConn {
      * done with the connection: closed, or its descriptor handed away. */
     HttpIpSlot          ip;
     struct HttpServer*  ip_server;
+    /* This connection's id on ip_server (http_request_conn_id), 0 for none;
+     * the server's on_conn_close hears it when the connection closes. */
+    int64_t             conn_id;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -1631,6 +1636,10 @@ static void conn_close(HttpConn* c) {
      * linger over: a client whose refusals linger holds that many
      * connections meanwhile, as it held them before (#3750). */
     if (c->ip_server) http_server_ip_release(c->ip_server, &c->ip);
+    /* The program hears that the connection is gone, once. */
+    if (c->ip_server && c->conn_id && c->ip_server->on_conn_close)
+        c->ip_server->on_conn_close(c->conn_id, c->ip_server->on_conn_close_ud);
+    c->conn_id = 0;
     if (c->buf) {
         /* Cap-aware (#343): the per-connection read buffer is grown
          * via conn_buf_ensure (caps_realloc) and freed only here; its
@@ -6888,6 +6897,7 @@ void http_request_set_conn_meta(HttpRequest* req, const HttpConnMeta* meta) {
     req->local_addr = meta->local_addr[0] ? strdup(meta->local_addr) : NULL;
     req->local_port = meta->local_addr[0] ? meta->local_port : 0;
     req->is_tls = meta->is_tls;
+    req->conn_id = 0;   /* the event loop's connections have none */
 }
 
 /* Connection-level metadata that handlers learn from the kernel rather
@@ -6929,6 +6939,7 @@ void http_request_copy_conn_meta(HttpRequest* req, HttpConn* conn) {
         req->local_port = conn->local_port;
     }
     req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
+    req->conn_id = conn->conn_id;
 }
 
 /* `line` (`line_len` bytes, no line ending) names header `name`
@@ -8538,6 +8549,7 @@ int http_server_adopt_connection(HttpServer* server, int client_fd,
 
 static HttpConn* adopt_conn_new(int client_fd, void* ssl,
                                 const char* prebuffered, int prebuffered_len);
+static int64_t server_next_conn_id(HttpServer* server);
 
 /* A connection the proxy event loop gives up goes to a pool worker, as an
  * accepted one does (#3230). conn_serve runs the route handler, every
@@ -8567,6 +8579,7 @@ int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ss
      * admitted it and gave its count back as it handed it over (#3750). */
     conn->ip_server = server;
     http_server_ip_acquire(server, client_fd, &conn->ip, 0);
+    conn->conn_id = server_next_conn_id(server);
     adopt_conn_serve(server, conn);
     return 0;
 }
@@ -8588,6 +8601,7 @@ int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
      * admitted it and gave its count back as it handed it over (#3750). */
     conn->ip_server = server;
     http_server_ip_acquire(server, client_fd, &conn->ip, 0);
+    conn->conn_id = server_next_conn_id(server);
     /* The responses already sent on the connection count against the
      * server's keep_alive_max wherever the next one is served (#3229). */
     conn->requests_served = requests_served;
@@ -8720,6 +8734,7 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
         free(conn);
         return;
     }
+    conn->conn_id = server_next_conn_id(server);
 
     if (server->tls_enabled) {
         /* The handshake is bounded as a request is (#3703): the receive and
@@ -10665,6 +10680,23 @@ const char* http_request_remote_addr(HttpRequest* req) {
 
 int http_request_remote_port(HttpRequest* req) {
     return req ? req->remote_port : 0;
+}
+
+int64_t http_request_conn_id(HttpRequest* req) {
+    return req ? req->conn_id : 0;
+}
+
+void http_server_on_conn_close(HttpServer* server,
+                               void (*cb)(int64_t conn_id, void* user_data),
+                               void* user_data) {
+    if (!server) return;
+    server->on_conn_close = cb;
+    server->on_conn_close_ud = user_data;
+}
+
+/* The next connection id on `server` (http_request_conn_id): 1, 2, ... */
+static int64_t server_next_conn_id(HttpServer* server) {
+    return atomic_fetch_add(&server->last_conn_id, 1) + 1;
 }
 
 const char* http_request_local_addr(HttpRequest* req) {

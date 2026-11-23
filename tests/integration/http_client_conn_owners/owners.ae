@@ -1,0 +1,180 @@
+// std.http.client connection owners against an upstream that authenticates
+// the CONNECTION (conn_auth_upstream.c: a login makes every later request on
+// that connection the user's; each answer names its connection's ordinal).
+//
+//   (a) two pools never share a connection
+//   (b) a pinned pool keeps a sequence on one connection, and two pinned
+//       pools interleaved each keep their own
+//   (c) a request with no pool never gets a connection an owner logged in
+//   (d) two owners in one program, interleaved, never see each other's user
+//   (e) freeing the owners closes their connections, seen by the server and
+//       by this process's descriptor count
+//   (f) reuse still happens within one owner: many requests, one connection,
+//       one receive buffer
+
+import std.http.client
+import std.fs
+import std.io
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+// One GET through `pool` (null: no owner), with an X-Login header when
+// `login` is not empty: (status, body).
+get(base: string, path: string, pool: ptr, login: string) -> (int, string) {
+    req = client.request("GET", "${base}${path}")
+    if req == null { fail("request() refused ${path}") }
+    defer client.request_free(req)
+    client.set_timeout(req, 10s)
+    if pool != null { client.set_pool(req, pool) }
+    if string.length(login) > 0 { client.set_header(req, "X-Login", login) }
+    resp, err = client.send_request(req)
+    if err != "" { fail("${path}: ${err}") }
+    status = client.response_status(resp)
+    body = string.copy(client.response_body(resp))
+    client.response_free(resp)
+    return status, body
+}
+
+// "conn=7 user=alice" -> "7"
+conn_of(body: string) -> string {
+    sp = string.index_of(body, " ")
+    if sp < 5 { fail("no connection in '${body}'") }
+    return string.substring(body, 5, sp)
+}
+
+// This process's open descriptors, or -1 where it cannot be counted.
+open_fds() -> int {
+    list, err = fs.list_dir("/dev/fd")
+    if err != "" { return -1 }
+    n = fs.dir_list_count(list)
+    fs.dir_list_free(list)
+    return n
+}
+
+// The server's count of open connections other than the one asking, once
+// it has seen the closes it is waiting for (at most two seconds).
+server_open(base: string, want: int) -> int {
+    tries = 0
+    got = -1
+    while tries < 40 {
+        _, stats = get(base, "/stats", null, "")
+        at = string.index_of(stats, "open=")
+        got, _ = string.to_int(string.substring(stats, at + 5, string.length(stats)))
+        if got == want { return got }
+        sleep(50)
+        tries = tries + 1
+    }
+    return got
+}
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    if string.length(port) == 0 { fail("UPSTREAM_PORT not set") }
+    base = "http://127.0.0.1:${port}"
+    fds_before = open_fds()
+
+    // (a) two pools never share a connection.
+    a, aerr = client.pool_new()
+    b, berr = client.pool_new()
+    if aerr != "" || berr != "" { fail("pool_new: ${aerr} ${berr}") }
+    s1, b1 = get(base, "/login", a, "alice")
+    if s1 != 200 { fail("alice's login: ${s1} ${b1}") }
+    s2, b2 = get(base, "/whoami", b, "")
+    if s2 != 401 { fail("(a) pool B was answered ${s2} '${b2}' after pool A logged in (${b1})") }
+    if conn_of(b1) == conn_of(b2) { fail("(a) pools A and B both used connection ${conn_of(b1)}") }
+    s3, b3 = get(base, "/whoami", a, "")
+    if s3 != 200 || conn_of(b3) != conn_of(b1) {
+        fail("(a) pool A lost its connection: ${s3} '${b3}' after '${b1}'")
+    }
+    println("(a) two pools, two connections: A ${b3}; B ${b2}")
+
+    // (b) a pinned pool keeps a sequence on one connection; two pinned
+    // pools interleaved each keep their own.
+    p, perr = client.pool_new_pinned()
+    q, qerr = client.pool_new_pinned()
+    if perr != "" || qerr != "" { fail("pool_new_pinned: ${perr} ${qerr}") }
+    sp, bp = get(base, "/login", p, "carol")
+    sq, bq = get(base, "/login", q, "dave")
+    if sp != 200 || sq != 200 { fail("(b) logins: ${bp}; ${bq}") }
+    i = 0
+    while i < 5 {
+        s, body = get(base, "/whoami", p, "")
+        if s != 200 || body != bp { fail("(b) pinned P, request ${i}: ${s} '${body}', want '${bp}'") }
+        s, body = get(base, "/whoami", q, "")
+        if s != 200 || body != bq { fail("(b) pinned Q, request ${i}: ${s} '${body}', want '${bq}'") }
+        i = i + 1
+    }
+    if client.pool_idle_count(p) != 1 { fail("(b) pinned P holds ${client.pool_idle_count(p)} connections, want 1") }
+    // Clearing a pinned pool drops its connection, and with it the login.
+    client.pool_clear(p)
+    sc, bc = get(base, "/whoami", p, "")
+    if sc != 401 || conn_of(bc) == conn_of(bp) {
+        fail("(b) after pool_clear, pinned P was answered ${sc} '${bc}' (it had ${bp})")
+    }
+    println("(b) pinned: P ${bp} x5, Q ${bq} x5; cleared P then ${bc}")
+
+    // (c) no pool: never another owner's connection, and none kept.
+    sn, bn = get(base, "/whoami", null, "")
+    if sn != 401 { fail("(c) a request with no pool was answered ${sn} '${bn}'") }
+    println("(c) no pool: ${bn}")
+
+    // (d) two owners in one program, interleaved: each only ever its own.
+    c, cerr = client.pool_new()
+    d, derr = client.pool_new()
+    if cerr != "" || derr != "" { fail("pool_new: ${cerr} ${derr}") }
+    _, bce = get(base, "/login", c, "erin")
+    _, bdf = get(base, "/login", d, "frank")
+    i = 0
+    while i < 10 {
+        s, body = get(base, "/whoami", c, "")
+        if s != 200 || string.contains(body, "user=erin") == 0 { fail("(d) owner C, request ${i}: ${s} '${body}'") }
+        s, body = get(base, "/whoami", d, "")
+        if s != 200 || string.contains(body, "user=frank") == 0 { fail("(d) owner D, request ${i}: ${s} '${body}'") }
+        i = i + 1
+    }
+    println("(d) two owners interleaved x10: ${bce}; ${bdf}")
+
+    // (f) reuse within one owner: 50 requests, one connection, one buffer.
+    r, rerr = client.pool_new()
+    if rerr != "" { fail("pool_new: ${rerr}") }
+    _, first = get(base, "/whoami", r, "")
+    i = 0
+    while i < 50 {
+        _, body = get(base, "/whoami", r, "")
+        if conn_of(body) != conn_of(first) { fail("(f) request ${i} used ${body}, not the first's ${first}") }
+        i = i + 1
+    }
+    if client.pool_idle_count(r) != 1 { fail("(f) the pool holds ${client.pool_idle_count(r)} connections, want 1") }
+    allocs = client.pool_rx_buffer_allocs(r)
+    if allocs != 1 { fail("(f) 51 requests over one connection allocated ${allocs} receive buffers, want 1") }
+    println("(f) 51 requests in one owner: one connection (${first}), ${allocs} receive buffer")
+
+    // (e) every owner freed: the server sees no connection left open, and
+    // this process holds no more descriptors than when it started.
+    open_now = server_open(base, 7)
+    if open_now != 7 { fail("(e) the server sees ${open_now} open connections before the frees, want 7 (A B P Q C D R)") }
+    client.pool_free(a)
+    client.pool_free(b)
+    client.pool_free(p)
+    client.pool_free(q)
+    client.pool_free(c)
+    client.pool_free(d)
+    client.pool_free(r)
+    left = server_open(base, 0)
+    if left != 0 { fail("(e) ${left} connections still open at the server after every owner was freed") }
+    fds_after = open_fds()
+    if fds_before >= 0 && fds_after != fds_before {
+        fail("(e) ${fds_after} descriptors open after the frees, ${fds_before} before")
+    }
+    fd_note = "not countable here"
+    if fds_before >= 0 { fd_note = "${fds_after}, as before" }
+    println("(e) after pool_free: 7 open at the server, then ${left}; descriptors ${fd_note}")
+
+    println("PASS: connections stayed with their owners")
+}

@@ -742,6 +742,8 @@ static int px_build(AetherProxyExchange* px) {
         http_response_set_body(res, "proxy request allocation failed\n");
         return 0;
     }
+    /* Upstream connections are the proxy pool's own (aether_proxy_pool.c). */
+    http_request_set_pool_raw(px->outbound, opts->pool->conns);
     if (opts->pool->request_timeout_sec > 0) {
         http_request_set_timeout_raw(px->outbound, opts->pool->request_timeout_sec);
     }

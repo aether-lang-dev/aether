@@ -6,7 +6,7 @@
 # std.http.server.lb's 3.7x deficit. The upstream here accepts exactly one
 # connection and then closes its listener, so requests two and three can only
 # be answered over the connection request one opened, and the request after
-# `client_pool_clear()` must fail. Nothing about this passes by accident.
+# `client.pool_clear(pool)` must fail. Nothing about this passes by accident.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

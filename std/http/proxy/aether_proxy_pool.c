@@ -143,6 +143,14 @@ AetherProxyPool* aether_proxy_pool_new(AetherProxyLbAlgo algo,
     atomic_init(&p->metric_cache_revalidations, 0);
     atomic_init(&p->metric_503_no_upstream, 0);
 
+    /* The upstream connections are this pool's, shared by every mount bound
+     * to it and by no one else in the program. Sized for a proxy: each
+     * request in flight holds one and hands it back, where a client keeps a
+     * few per host. Left at a client's caps, every connection past the
+     * eighth to a backend was closed on release and redialled. */
+    p->conns = http_client_pool_new_raw();
+    http_client_pool_size_for_proxy(p->conns);
+
     return p;
 }
 
@@ -182,6 +190,7 @@ void aether_proxy_pool_free(AetherProxyPool* pool) {
 
     free(pool->hc_probe_path);
     free(pool->cookie_name);
+    http_client_pool_free_raw(pool->conns);
     pthread_mutex_destroy(&pool->lock);
     pthread_mutex_destroy(&pool->hc_cv_lock);
     pthread_cond_destroy(&pool->hc_cv);
@@ -241,6 +250,10 @@ const char* aether_proxy_rate_limit_set(AetherProxyPool* pool, int max_rps, int 
     }
     pthread_mutex_unlock(&pool->lock);
     return "";
+}
+
+struct HttpClientPool* aether_proxy_pool_conns(AetherProxyPool* pool) {
+    return pool ? pool->conns : NULL;
 }
 
 const char* aether_proxy_pool_set_cookie_name(AetherProxyPool* pool,
