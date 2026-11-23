@@ -5,6 +5,7 @@
 #include "../../runtime/aether_sandbox.h"   /* a Unix-socket request's fs_write check */
 #include "../../runtime/utils/aether_thread.h"
 #include "../../runtime/utils/aether_compiler.h"
+#include <string.h>   /* strcmp: http_method_idempotent */
 
 /* The helpers below do no networking and other modules link against
  * them (the proxy times its upstreams with the clock and validates the
@@ -123,6 +124,15 @@ int http_header_value_ok(const char* value) {
         if (*c == '\r' || *c == '\n') return 0;
     }
     return 1;
+}
+
+/* RFC 9110 9.2.2. Method names are case-sensitive (9.1), so "get" is not
+ * GET and is not sent twice. */
+int http_method_idempotent(const char* method) {
+    if (!method) return 0;
+    return strcmp(method, "GET") == 0 || strcmp(method, "HEAD") == 0 ||
+           strcmp(method, "OPTIONS") == 0 || strcmp(method, "TRACE") == 0 ||
+           strcmp(method, "PUT") == 0 || strcmp(method, "DELETE") == 0;
 }
 
 /* The one reader for the numbers std.net takes off the wire or out of a URL
@@ -939,6 +949,55 @@ static int http_pool_take(const char* key, Transport* out) {
     }
     http_pool_leave();
     return found;
+}
+
+/* Has the peer closed this idle connection, or sent on it, while it sat in
+ * the pool (#3824)? An idle connection has nothing to say, so readable is
+ * the end, a reset, or bytes no request asked for; any of them makes it unfit
+ * to carry a request. Asked without waiting: a poll that finds it readable,
+ * then a one-byte peek, so a connection that is merely quiet costs one poll.
+ *
+ * This is how a request that may not be sent twice gets a pooled connection
+ * at all. Its failure at the read is not retried, because the upstream may
+ * have taken it whole before the connection ended; without the check, an
+ * upstream that closed an idle connection a while ago would turn the next
+ * POST into a 502 where a fresh dial answers it. Go's transport does the
+ * same with its reader on idle connections (errServerClosedIdle). A close
+ * between this check and the write still loses that request, and is the
+ * upstream's to answer: RFC 9110 9.2.2 leaves no other choice. */
+static int http_idle_conn_closed(const Transport* t) {
+    if (t->sockfd < 0) return 1;
+#ifdef _WIN32
+    /* One socket, so Winsock's fd_set (an array of handles, not a bitmap)
+     * has no FD_SETSIZE hazard. */
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET((SOCKET)t->sockfd, &rfds);
+    struct timeval tv = { 0, 0 };
+    if (select(t->sockfd + 1, &rfds, NULL, NULL, &tv) <= 0) return 0;
+    char b;
+    int n = recv((SOCKET)t->sockfd, &b, 1, MSG_PEEK);
+    if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK) return 0;
+#else
+    struct pollfd p = { .fd = t->sockfd, .events = POLLIN, .revents = 0 };
+    if (poll(&p, 1, 0) <= 0) return 0;
+    char b;
+    ssize_t n = recv(t->sockfd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
+#endif
+    return 1;
+}
+
+/* http_pool_take for a request that may not be sent twice: each connection
+ * taken is checked first (http_idle_conn_closed), and one the peer has closed
+ * is closed here and the next one taken, as it would have failed the same
+ * way. */
+static int http_pool_take_open(const char* key, Transport* out) {
+    while (http_pool_take(key, out)) {
+        if (!http_idle_conn_closed(out)) return 1;
+        transport_close(out);
+    }
+    return 0;
 }
 
 /* Hand a still-usable connection back. Takes ownership either way: over the
@@ -3753,7 +3812,9 @@ static int upstream_acquire(const char* host, int port, int allow_pool,
 
     http_pool_key(out->pool_key, sizeof(out->pool_key), host, port, 0,
                   host, port, 0, NULL);
-    if (allow_pool && http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
+    if (allow_pool && http_pool_enabled &&
+        (allow_pool == HTTP_POOL_TAKE_CHECKED ? http_pool_take_open(out->pool_key, &out->t)
+                                              : http_pool_take(out->pool_key, &out->t))) {
         out->reused = 1;
         out->connecting = 0;
         if (out->t.nonblocking != 1) {
@@ -4156,7 +4217,12 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     int pool_this = http_pool_enabled && !req->stream &&
                     !header_already_set(req, "Connection");
     int reused = 0;
-    if (pool_this && http_pool_take(pool_key, &t)) {
+    /* A request that may not be sent twice is not sent again after a failure
+     * at the read (below), so its pooled connection is checked first
+     * (http_pool_take_open, #3824). */
+    int idempotent = http_method_idempotent(method);
+    if (pool_this && (idempotent ? http_pool_take(pool_key, &t)
+                                 : http_pool_take_open(pool_key, &t))) {
         /* This path reads with a timeout on the socket and expects it to
          * block. A driver may have left this connection non-blocking, where
          * a read that would wait returns EAGAIN, which this path reads as a
@@ -4165,15 +4231,15 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
             http_socket_set_nonblocking(t.sockfd, 0);
             t.nonblocking = 0;
         }
-        /* Taken without probing it first (#1719).
+        /* An idempotent request takes it without probing it first (#1719).
          *
          * This used to poll the socket before reusing it, one syscall on
          * every request through the pool, to catch a peer that had closed
-         * during the idle window. The read path already handles that case and
-         * handles it better: nothing coming back on a pooled connection means
-         * the request went into the void, and it redials and resends. The
-         * poll only moved the discovery earlier at the cost of asking the
-         * kernel every time.
+         * during the idle window. For a request that may be sent again the
+         * read path handles that case better: nothing coming back on a pooled
+         * connection and it redials and resends. The poll only moved the
+         * discovery earlier at the cost of asking the kernel every time. A
+         * request that may not be sent again pays it (#3824).
          *
          * The other thing it caught — bytes waiting on a supposedly idle
          * connection, which would be read as the head of this response — is
@@ -4233,12 +4299,17 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     int    truncated = 0;
     HttpRespFraming framing = {0};
     /* A pooled connection the peer closed while it sat idle is
-     * indistinguishable from a live one until it is used: the liveness probe
-     * catches almost all of them, and the rest fail with nothing received.
-     * Measured against an upstream that closes after every response, 4% of
-     * requests landed in that window. One redial covers it. The retry is
-     * bounded to a connection that came from the pool and produced no
-     * response byte, so the server cannot have acted on the request. */
+     * indistinguishable from a live one until it is used. Measured against an
+     * upstream that closes after every response, 4% of requests landed in
+     * that window. One redial covers it, bounded to a connection that came
+     * from the pool. A failed write is retried whatever the method: the
+     * upstream never had the whole request. A failure at the read with no
+     * response byte is retried for an idempotent method only (#3824): the
+     * upstream may have read the request whole and acted on it before the
+     * connection ended, and RFC 9110 9.2.2 lets a client repeat only a
+     * request whose repeat does no more. A non-idempotent one took its
+     * connection checked (http_pool_take_open), so an idle close is found
+     * before the write. */
     int retried = 0;
     HttpExchange tx;
 
@@ -4504,10 +4575,13 @@ send_request:
         n = 0;
     }
     /* Nothing at all came back on a connection that came from the pool: the
-     * peer had closed it and our request went into the void. Redial once and
-     * send again; the server never saw this request, so repeating it is safe
-     * whatever the method. The desync case below is the same reasoning: what
-     * came back was not an answer to this request. */
+     * peer had closed it, most likely while it sat idle. Redial once and send
+     * again, for an idempotent method only (#3824): the peer may also have
+     * read the request whole and closed without answering, and then a
+     * second POST is a second order. A non-idempotent request gets the error,
+     * as the event loop gives it, and the proxy answers 502. The desync case
+     * below is the same reasoning: what came back was not an answer to this
+     * request. */
     /* A pooled connection that answers with something that is not a response
      * was carrying bytes nobody asked for, and reading them as this
      * response's head would desynchronise everything after it. Same treatment
@@ -4517,7 +4591,7 @@ send_request:
     int desynced = reused && total_len > 0
                 && (total_len < 5 || strncmp(full_response, "HTTP/", 5) != 0);
 
-    if ((total_len == 0 || desynced) && reused && !retried) {
+    if ((total_len == 0 || desynced) && reused && !retried && idempotent) {
         retried = 1;
         reused = 0;
         transport_close(&t);

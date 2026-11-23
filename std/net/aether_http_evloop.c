@@ -1256,8 +1256,14 @@ static int ev_dial(EvDriver* d, EvConn* c, int next_addr) {
 
     int fresh = c->dial_fresh;
     c->dial_fresh = 0;
+    /* A request that may not be sent twice takes only a pooled connection
+     * its upstream has not closed (#3824): a failure at its read is not
+     * retried (ev_finish_upstream). */
+    int pool = fresh ? 0
+             : http_method_idempotent(http_request_method_of(c->px.outbound)) ? 1
+             : HTTP_POOL_TAKE_CHECKED;
     int fd = next_addr ? http_upstream_redial(host, port, &c->up)
-                       : http_upstream_acquire_nb(host, port, !fresh, d->loop->resolver,
+                       : http_upstream_acquire_nb(host, port, pool, d->loop->resolver,
                                                   &c->up);
     if (fd < 0) {
         free(path);
@@ -1915,13 +1921,20 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
      * cannot have been acted on twice from here, so it goes again down a
      * fresh connection. The blocking client does exactly this; without it the
      * empty buffer is parsed as status 0 and the client is sent
-     * "HTTP/1.1 0 Unknown". */
-    if (got == 0 && was_reused && !c->up_stale_retried) {
+     * "HTTP/1.1 0 Unknown". For an idempotent method only (#3824): the
+     * upstream may have read the request whole and closed without an answer,
+     * and a second POST is a second order. A non-idempotent one is answered
+     * from the empty response below, an error, and the proxy answers 502. */
+    if (got == 0 && was_reused && !c->up_stale_retried &&
+        http_method_idempotent(http_request_method_of(c->px.outbound))) {
         c->up_stale_retried = 1;
         c->dial_fresh = 1;          /* #3260 */
         ev_reclaim_rxbuf(c);
         return ev_begin_retry(d, c);
     }
+    /* Not sent again: a failed call, in the words the blocking client's
+     * response gives it (http_response_fill_from_bytes). */
+    if (got == 0) return ev_upstream_failed(d, c, "the connection closed with no response", 0);
 
     /* Answer from the upstream's own bytes when nothing needs the response
      * object. Tried before it is built, because building it is the copy this
@@ -2063,7 +2076,8 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
             /* The third way a closed pooled connection announces itself: the
              * peer sent a reset rather than a clean end, so the read fails
              * instead of returning nothing. Same conclusion as the other two,
-             * since nothing had arrived: dial fresh and send once more. */
+             * since nothing had arrived: dial fresh and send once more, for
+             * an idempotent method only, as on the clean end (#3824). */
             if (r < 0 && c->x.too_large) {
                 /* Past the proxy's cap (#3750): the upstream answered, too
                  * much. In the blocking client's words, which the proxy
@@ -2075,7 +2089,8 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
                 if (r <= 0) return r;
                 continue;
             }
-            if (r < 0 && c->x.len == 0 && c->up.reused && !c->up_stale_retried) {
+            if (r < 0 && c->x.len == 0 && c->up.reused && !c->up_stale_retried &&
+                http_method_idempotent(http_request_method_of(c->px.outbound))) {
                 c->up_stale_retried = 1;
                 c->dial_fresh = 1;          /* #3260 */
                 ev_drop_upstream(d, c);
