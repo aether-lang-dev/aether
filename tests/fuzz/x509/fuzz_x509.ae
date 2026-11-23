@@ -142,7 +142,10 @@ fn pem_text(m: ptr, n: int) {
         return
     }
     if der == null || bytes.length(der) <= 0 { abort() }
-    if string.length(label) == 0 { abort() }
+    // The label may be empty: RFC 7468's is optional ("-----BEGIN -----"),
+    // and pem.encode("", ...) writes that form (#3822). What a parse that
+    // succeeded promises is DER, and a label of the text's own bytes.
+    if string.length(label) > string.length(text) { abort() }
     dn = bytes.length(der)
     // The block decodes to DER: read it, and as a certificate.
     walk(der, dn, 0)
