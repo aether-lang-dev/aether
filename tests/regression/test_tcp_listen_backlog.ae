@@ -60,5 +60,5 @@ main() {
     }
     list.free(clients)
     _ = tcp.server_close(srv)
-    println("PASS #3832: ${n} queued connects, the slowest ${slowest} ms, all accepted")
+    println("PASS #3832: ${n} queued connects, each under 500 ms, all accepted")
 }
