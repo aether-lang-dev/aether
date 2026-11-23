@@ -4019,7 +4019,7 @@ static void archive_crt_check(const char* cc) {
         if (text && cc_probe_takes(cc, "", "ae_crt_probe", text) == 0) {
             matches = 0;
             if (tc.verbose) {
-                char theirs[64];
+                char theirs[256]; /* a whole line of crt_name_of's read */
                 crt_name_of(cc, header, theirs, sizeof(theirs));
                 fprintf(stderr, "[toolchain] libaether.a is %s; %s targets %s: the runtime is "
                                 "compiled from source\n",
