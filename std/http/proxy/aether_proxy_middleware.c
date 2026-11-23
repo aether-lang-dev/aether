@@ -450,18 +450,6 @@ static void serve_from_cache(HttpServerResponse* res, const HttpRequest* req,
 
 /* ----- HTTP method classification + retry helpers ----- */
 
-/* Idempotent per HTTP semantics (RFC 7231 §4.2.2). POST/PATCH
- * are NOT idempotent — silent retry could create duplicate
- * resources or apply patches twice, so we never retry them. */
-static int method_is_idempotent(const char* method) {
-    if (!method) return 0;
-    return (strcmp(method, "GET")     == 0 ||
-            strcmp(method, "HEAD")    == 0 ||
-            strcmp(method, "PUT")     == 0 ||
-            strcmp(method, "DELETE")  == 0 ||
-            strcmp(method, "OPTIONS") == 0);
-}
-
 /* Sleep `ms` milliseconds. Used for retry backoff. */
 static void retry_sleep_ms(int ms) {
     if (ms <= 0) return;
@@ -707,7 +695,11 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
     px->u = u;
     px->forward_path = forward_path;
     px->attempt = 0;
-    px->max_attempts = method_is_idempotent(req->method)
+    /* Retried only when idempotent, by the one rule the client's own resend
+     * keeps (http_method_idempotent, RFC 9110 9.2.2): POST and PATCH are
+     * not, and a second one is a second order. The proxy kept a list of its
+     * own, which left TRACE out. */
+    px->max_attempts = http_method_idempotent(req->method)
                      ? (1 + opts->retry_max_retries) : 1;
     return px_build(px);
 }

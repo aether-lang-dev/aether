@@ -225,7 +225,8 @@ proxy.opts_set_retry_policy(opts, 3, 100)   // max_retries=3, backoff_base_ms=10
 ```
 
 When a 5xx or transport error comes back from an upstream and the
-request is **idempotent** (`GET / HEAD / PUT / DELETE / OPTIONS`),
+request is **idempotent** (`GET / HEAD / OPTIONS / TRACE / PUT / DELETE`,
+RFC 9110 9.2.2, the rule the HTTP client resends by),
 the middleware:
 
 1. Charges the failure against the failing upstream's circuit
