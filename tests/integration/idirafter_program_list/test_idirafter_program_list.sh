@@ -57,10 +57,19 @@ cd "$TMP" || exit 1
 full=$("$AE" cflags 2>/dev/null | tr ' ' '\n' | grep -c -x -- '-idirafter')
 [ "$full" -gt 3 ] || { echo "  [SKIP] $NAME: ae cflags names $full -idirafter directories"; exit 0; }
 
-# dirs <log>: the -idirafter count of the compile line in an `ae build -v` log.
+# The list's directories, one a line, as `ae cflags` names them.
+"$AE" cflags 2>/dev/null | tr ' ' '\n' | tr -d '"' |
+    awk 'prev == "-idirafter" { print } { prev = $0 }' > "$TMP/list_dirs"
+
+# dirs <log>: how many of the list's directories the compile line in an
+# `ae build -v` log names. Only the list's: on macOS and FreeBSD the line
+# also carries the Homebrew (LOCALBASE) include directory after it, which
+# is not the list's and would make a line naming all of the list read as
+# one more than it.
 dirs() {
     grep '^\[cmd\] .* -o ' "$1" | grep -v -- ' -c ' | grep -v 'ae_avx_probe\|--version' | tail -1 |
-        tr ' ' '\n' | grep -c -x -- '-idirafter'
+        tr ' ' '\n' | tr -d '"' | awk 'prev == "-idirafter" { print } { prev = $0 }' |
+        grep -c -x -F -f "$TMP/list_dirs"
 }
 
 if ! "$AE" build -v hello.ae -o hello > hello.log 2>&1; then
