@@ -522,7 +522,7 @@ int aether_sandbox_check_slow(const char* category, const char* resource) {
     if (resource && category[0] == 'f' && category[1] == 's' &&
         (category[2] == '\0' || category[2] == '_')) {
         if (r->levels(0) == 0 && t_sbx.depth == t_sbx.floor) return 1;
-        char resolved[PATH_MAX];
+        char resolved[AETHER_SANDBOX_PATH_MAX];
         if (!aether_sandbox_canon_path(resource, resolved, sizeof(resolved))) return 0;
         return decide(category, resolved) != 0;
     }
@@ -553,7 +553,7 @@ const char* aether_sandbox_shell_path(void) {
 char* aether_sandbox_grant_pattern(const char* category, const char* pattern) {
     if (!pattern) return NULL;
     if (category && category[0] == 'f' && category[1] == 's') {
-        char resolved[PATH_MAX];
+        char resolved[AETHER_SANDBOX_PATH_MAX];
         if (aether_sandbox_canon_pattern(pattern, resolved, sizeof(resolved))) return strdup(resolved);
     }
     return strdup(pattern);
@@ -600,7 +600,7 @@ static int fs_levels_here(void) {
 
 int aether_sandbox_check_entry(const char* category, const char* resource) {
     if (!fs_levels_here()) return 1;
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!resource || !aether_sandbox_canon_entry(resource, resolved, sizeof resolved)) return 0;
     return decide(category ? category : "", resolved) != 0;
 }
@@ -613,8 +613,8 @@ static int fs_access_allowed(const char* resolved, int access) {
 }
 
 /* The entry `path` names, checked for fs_write: 1 with it in `resolved`. */
-static int fs_entry_writable(const char* path, char resolved[PATH_MAX]) {
-    if (!path || !aether_sandbox_canon_entry(path, resolved, PATH_MAX) ||
+static int fs_entry_writable(const char* path, char resolved[AETHER_SANDBOX_PATH_MAX]) {
+    if (!path || !aether_sandbox_canon_entry(path, resolved, AETHER_SANDBOX_PATH_MAX) ||
         decide("fs_write", resolved) == 0) {
         fs_refused();
         return 0;
@@ -629,9 +629,9 @@ static int fs_entry_writable(const char* path, char resolved[PATH_MAX]) {
  * is made of the name `target` (linkat links a symlink itself), so that is
  * what is checked. 1 with both resolutions in `rt` and `rl`. */
 static int fs_link_allowed(const char* target, const char* linkpath,
-                           char rt[PATH_MAX], char rl[PATH_MAX]) {
+                           char rt[AETHER_SANDBOX_PATH_MAX], char rl[AETHER_SANDBOX_PATH_MAX]) {
     if (!fs_entry_writable(linkpath, rl)) return 0;
-    if (!target || !aether_sandbox_canon_entry(target, rt, PATH_MAX)) {
+    if (!target || !aether_sandbox_canon_entry(target, rt, AETHER_SANDBOX_PATH_MAX)) {
         fs_refused();
         return 0;
     }
@@ -647,13 +647,13 @@ static int fs_link_allowed(const char* target, const char* linkpath,
 
 int aether_sandbox_check_link(const char* target, const char* linkpath) {
     if (!fs_levels_here()) return 1;
-    char rt[PATH_MAX], rl[PATH_MAX];
+    char rt[AETHER_SANDBOX_PATH_MAX], rl[AETHER_SANDBOX_PATH_MAX];
     return fs_link_allowed(target, linkpath, rt, rl);
 }
 
 int aether_sandbox_granted(const char* category, const char* path) {
     if (!fs_levels_here()) return 1;
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!category || !path || !aether_sandbox_canon_path(path, resolved, sizeof resolved)) return 0;
     return decide_as(category, resolved, 0) != 0;
 }
@@ -735,9 +735,17 @@ static int win_fail_status(NTSTATUS st) {
     return win_fail(to_dos ? to_dos(st) : ERROR_GEN_FAILURE);
 }
 
-/* UTF-8 to UTF-16 into `out` (AETHER_SANDBOX_WPATH units): 1, or 0. */
+/* UTF-8 to UTF-16 into `out` (AETHER_SANDBOX_WPATH units): 1, or 0. For a
+ * name, made relative to a directory handle. */
 static int win_wide(const char* s, wchar_t* out) {
     return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, out, AETHER_SANDBOX_WPATH) > 0;
+}
+
+/* A path, as a Win32 call by name is given it (aether_win_path.h): past
+ * MAX_PATH in its long form, so a long path is opened as a short one is
+ * (#3850). 1, or 0. */
+static int win_wpath(const char* s, wchar_t* out) {
+    return aether_win_path_into(s, MB_ERR_INVALID_CHARS, out, AETHER_SANDBOX_WPATH);
 }
 
 /* Is what `h` is open on the file the check saw? Its final path is the
@@ -747,7 +755,7 @@ static int win_handle_is(HANDLE h, const char* resolved, int access) {
     /* A device ("\\.\NUL", aether_sandbox_wdevice) has no final path; its
      * name alone says what it is, with no directory or link to swap. */
     if (strncmp(resolved, "\\\\.\\", 4) == 0) return GetFileType(h) == FILE_TYPE_CHAR;
-    char fin[PATH_MAX];
+    char fin[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_final_of_handle(h, fin, sizeof fin)) return 0;
     if (strcmp(fin, resolved) == 0) return 1;
     return fs_access_allowed(fin, access);
@@ -772,12 +780,12 @@ static int win_delete_by_handle(HANDLE h) {
 
 /* `resolved` split at its last separator: its directory (a root keeps its
  * "\") into `dir` and its last name, as UTF-16, into `wname`. */
-static int win_split(const char* resolved, char dir[PATH_MAX], wchar_t* wname) {
+static int win_split(const char* resolved, char dir[AETHER_SANDBOX_PATH_MAX], wchar_t* wname) {
     const char* sep = strrchr(resolved, '\\');
     if (!sep || !sep[1]) return 0;
     size_t dl = (size_t)(sep - resolved);
     if (dl == 2 && resolved[1] == ':') dl = 3;   /* "C:\x" is in "C:\" */
-    if (dl >= PATH_MAX) return 0;
+    if (dl >= AETHER_SANDBOX_PATH_MAX) return 0;
     memcpy(dir, resolved, dl);
     dir[dl] = '\0';
     return win_wide(sep + 1, wname);
@@ -790,18 +798,18 @@ static int win_split(const char* resolved, char dir[PATH_MAX], wchar_t* wname) {
 static HANDLE win_open_dir_verified(const char* dir, const wchar_t* wname, const char* category) {
     /* `wname` NULL: the directory itself is what is checked. */
     wchar_t wdir[AETHER_SANDBOX_WPATH];
-    if (!win_wide(dir, wdir)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
+    if (!win_wpath(dir, wdir)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
     HANDLE h = CreateFileW(wdir, FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                            FILE_FLAG_BACKUP_SEMANTICS, NULL);
     if (h == INVALID_HANDLE_VALUE) { win_fail(GetLastError()); return h; }
-    char fin[PATH_MAX];
+    char fin[AETHER_SANDBOX_PATH_MAX];
     int ok = aether_sandbox_final_of_handle(h, fin, sizeof fin);
     if (ok && strcmp(fin, dir) != 0 && !wname) {
         ok = decide(category, fin) != 0;
     } else if (ok && strcmp(fin, dir) != 0) {
-        char name[PATH_MAX];
-        char entry[PATH_MAX];
+        char name[AETHER_SANDBOX_PATH_MAX];
+        char entry[AETHER_SANDBOX_PATH_MAX];
         size_t fl = strlen(fin);
         ok = WideCharToMultiByte(CP_UTF8, 0, wname, -1, name, (int)sizeof name, NULL, NULL) > 0 &&
              snprintf(entry, sizeof entry, "%s%s%s", fin, (fl && fin[fl - 1] == '\\') ? "" : "\\",
@@ -866,17 +874,17 @@ static int win_move_or_link(HANDLE h, HANDLE root, const wchar_t* wname, int lin
  * verified, with `access` (DELETE and the rest). `resolved` gets its
  * resolution. With no level in force on this thread it is opened as given,
  * nothing checked. */
-static HANDLE win_open_entry(const char* path, DWORD access, char resolved[PATH_MAX]) {
+static HANDLE win_open_entry(const char* path, DWORD access, char resolved[AETHER_SANDBOX_PATH_MAX]) {
     int levels = fs_levels_here();
     wchar_t wp[AETHER_SANDBOX_WPATH];
     if (levels) {
-        if (!aether_sandbox_canon_entry(path, resolved, PATH_MAX) || decide("fs_write", resolved) == 0) {
+        if (!aether_sandbox_canon_entry(path, resolved, AETHER_SANDBOX_PATH_MAX) || decide("fs_write", resolved) == 0) {
             fs_refused();
             return INVALID_HANDLE_VALUE;
         }
-        if (!win_wide(resolved, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
+        if (!win_wpath(resolved, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
     } else {
-        if (!win_wide(path, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
+        if (!win_wpath(path, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
         resolved[0] = '\0';
     }
     HANDLE h = CreateFileW(wp, access | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
@@ -910,7 +918,7 @@ static int win_entry_kind(HANDLE h) {
 
 static int win_remove(const char* path, int what) {
     if (!path) return win_fail(ERROR_INVALID_PARAMETER);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     HANDLE h = win_open_entry(path, DELETE, resolved);
     if (h == INVALID_HANDLE_VALUE) return -1;
     int kind = win_entry_kind(h);
@@ -936,7 +944,7 @@ int aether_sandbox_remove(const char* path) { fs_levels_here(); return win_remov
 int aether_sandbox_win_mkdir(const char* path, void* sd) {
     if (!path) return win_fail(ERROR_INVALID_PARAMETER);
     int levels = fs_levels_here();
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (levels) {
         if (!aether_sandbox_canon_entry(path, resolved, sizeof resolved) || decide("fs_write", resolved) == 0) {
             fs_refused();
@@ -944,11 +952,11 @@ int aether_sandbox_win_mkdir(const char* path, void* sd) {
         }
     } else {
         wchar_t wp[AETHER_SANDBOX_WPATH];
-        if (!win_wide(path, wp)) return win_fail(ERROR_INVALID_NAME);
+        if (!win_wpath(path, wp)) return win_fail(ERROR_INVALID_NAME);
         SECURITY_ATTRIBUTES sa = { sizeof sa, sd, FALSE };
         return CreateDirectoryW(wp, sd ? &sa : NULL) ? 0 : win_fail(GetLastError());
     }
-    char dir[PATH_MAX];
+    char dir[AETHER_SANDBOX_PATH_MAX];
     wchar_t wname[AETHER_SANDBOX_WPATH];
     if (!win_split(resolved, dir, wname)) return win_fail(ERROR_INVALID_NAME);
     HANDLE root = win_open_dir_verified(dir, wname, "fs_write");
@@ -973,7 +981,7 @@ int aether_sandbox_mkdir(const char* path, int mode) {
 int aether_sandbox_mkdir_p(const char* path, int mode) {
     (void)mode;
     if (!path || !*path) return win_fail(ERROR_INVALID_PARAMETER);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
         (fs_levels_here() && decide("fs_write", resolved) == 0)) {
         fs_refused();
@@ -1024,7 +1032,7 @@ int aether_sandbox_mkdir_p(const char* path, int mode) {
 int aether_sandbox_rename(const char* from, const char* to) {
     if (!from || !to) return win_fail(ERROR_INVALID_PARAMETER);
     int levels = fs_levels_here();
-    char rf[PATH_MAX], rt[PATH_MAX];
+    char rf[AETHER_SANDBOX_PATH_MAX], rt[AETHER_SANDBOX_PATH_MAX];
     if (levels && (!aether_sandbox_canon_entry(to, rt, sizeof rt) || decide("fs_write", rt) == 0)) {
         fs_refused();
         return -1;
@@ -1035,7 +1043,7 @@ int aether_sandbox_rename(const char* from, const char* to) {
         CloseHandle(h);
         return win_fail(ERROR_PATH_NOT_FOUND);
     }
-    char dir[PATH_MAX];
+    char dir[AETHER_SANDBOX_PATH_MAX];
     wchar_t wname[AETHER_SANDBOX_WPATH];
     int rc;
     if (!win_split(rt, dir, wname)) {
@@ -1063,20 +1071,20 @@ int aether_sandbox_rename(const char* from, const char* to) {
  * directory of `linkpath`. */
 int aether_sandbox_link(const char* target, const char* linkpath) {
     if (!target || !linkpath) return win_fail(ERROR_INVALID_PARAMETER);
-    char rt[PATH_MAX], rl[PATH_MAX];
+    char rt[AETHER_SANDBOX_PATH_MAX], rl[AETHER_SANDBOX_PATH_MAX];
     int levels = fs_levels_here();
     if (levels && !fs_link_allowed(target, linkpath, rt, rl)) return -1;
     if (!levels && (!aether_sandbox_canon_entry(target, rt, sizeof rt) ||
                     !aether_sandbox_canon_entry(linkpath, rl, sizeof rl)))
         return win_fail(ERROR_PATH_NOT_FOUND);
     wchar_t wt[AETHER_SANDBOX_WPATH];
-    if (!win_wide(rt, wt)) return win_fail(ERROR_INVALID_NAME);
+    if (!win_wpath(rt, wt)) return win_fail(ERROR_INVALID_NAME);
     HANDLE h = CreateFileW(wt, FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                            FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     if (h == INVALID_HANDLE_VALUE) return win_fail(GetLastError());
     int rc;
-    char dir[PATH_MAX];
+    char dir[AETHER_SANDBOX_PATH_MAX];
     wchar_t wname[AETHER_SANDBOX_WPATH];
     if (levels && !win_handle_is(h, rt, AETHER_ACCESS_READ | AETHER_ACCESS_WRITE)) {
         fs_refused();
@@ -1087,7 +1095,7 @@ int aether_sandbox_link(const char* target, const char* linkpath) {
         HANDLE root = levels ? win_open_dir_verified(dir, wname, "fs_write") : INVALID_HANDLE_VALUE;
         if (!levels) {
             wchar_t wd[AETHER_SANDBOX_WPATH];
-            if (win_wide(dir, wd))
+            if (win_wpath(dir, wd))
                 root = CreateFileW(wd, FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -1181,7 +1189,7 @@ static HANDLE win_drop_delete(HANDLE h, DWORD access, DWORD flags) {
  * saw, it never lands outside the grant, so there is nothing to remove. */
 static HANDLE win_create_in_verified(const char* resolved, const WinOpenMode* m, int* collided) {
     *collided = 0;
-    char dir[PATH_MAX];
+    char dir[AETHER_SANDBOX_PATH_MAX];
     wchar_t wname[AETHER_SANDBOX_WPATH];
     if (!win_split(resolved, dir, wname)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
     HANDLE root = win_open_dir_verified(dir, wname, "fs_write");
@@ -1214,7 +1222,7 @@ static HANDLE win_create_in_verified(const char* resolved, const WinOpenMode* m,
  * (win_drop_delete). Where DELETE cannot be had, the new file is made in
  * the verified directory instead. INVALID_HANDLE_VALUE with errno set. */
 static HANDLE win_open_checked(const char* path, const WinOpenMode* m, int access) {
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     int entry = m->disposition == CREATE_NEW;
     if (!(entry ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
                 : aether_sandbox_canon_path(path, resolved, sizeof resolved)) ||
@@ -1223,7 +1231,7 @@ static HANDLE win_open_checked(const char* path, const WinOpenMode* m, int acces
         return INVALID_HANDLE_VALUE;
     }
     wchar_t wp[AETHER_SANDBOX_WPATH];
-    if (!win_wide(path, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
+    if (!win_wpath(path, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
     DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
     DWORD want = m->access;
     HANDLE h = INVALID_HANDLE_VALUE;
@@ -1284,8 +1292,26 @@ static HANDLE win_open_checked(const char* path, const WinOpenMode* m, int acces
     return h;
 }
 
+/* The open as given, with no level in force: a path past MAX_PATH by the
+ * wide call on its long form (#3850), any other by the narrow call as it
+ * always was. */
+static FILE* win_fopen_plain(const char* path, const char* mode) {
+    wchar_t wp[AETHER_SANDBOX_WPATH];
+    wchar_t wm[16];
+    if (!path || !mode || !aether_win_long_into(path, wp, AETHER_SANDBOX_WPATH) ||
+        !MultiByteToWideChar(CP_UTF8, 0, mode, -1, wm, 16))
+        return fopen(path, mode);
+    return _wfopen(wp, wm);
+}
+
+static int win_open_plain(const char* path, int flags, int mode) {
+    wchar_t wp[AETHER_SANDBOX_WPATH];
+    if (!aether_win_long_into(path, wp, AETHER_SANDBOX_WPATH)) return _open(path, flags, mode);
+    return _wopen(wp, flags, mode);
+}
+
 void* aether_sandbox_fopen(const char* path, const char* mode) {
-    if (!path || !mode || !fs_levels_here()) return fopen(path, mode);
+    if (!path || !mode || !fs_levels_here()) return win_fopen_plain(path, mode);
     WinOpenMode m;
     if (!win_parse_mode(mode, &m)) { errno = EINVAL; return NULL; }
     HANDLE h = win_open_checked(path, &m, aether_fopen_access(mode));
@@ -1309,7 +1335,7 @@ void* aether_sandbox_fopen(const char* path, const char* mode) {
  * CRT's _S_IREAD/_S_IWRITE: a new file without _S_IWRITE is read-only. */
 int aether_sandbox_open(const char* path, int flags, int mode) {
     if (!path) { errno = EFAULT; return -1; }
-    if (!fs_levels_here()) return _open(path, flags, mode);
+    if (!fs_levels_here()) return win_open_plain(path, flags, mode);
     WinOpenMode m;
     memset(&m, 0, sizeof m);
     m.flags = FILE_ATTRIBUTE_NORMAL;
@@ -1338,7 +1364,7 @@ int aether_sandbox_stat(const char* path, int nofollow, AetherSandboxStat* out) 
     if (!path || !out) { errno = EINVAL; return -1; }
     memset(out, 0, sizeof *out);
     int levels = fs_levels_here();
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     wchar_t wp[AETHER_SANDBOX_WPATH];
     if (levels) {
         if (!(nofollow ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
@@ -1348,7 +1374,7 @@ int aether_sandbox_stat(const char* path, int nofollow, AetherSandboxStat* out) 
             return -1;
         }
     }
-    if (!win_wide(path, wp)) return win_fail(ERROR_INVALID_NAME);
+    if (!win_wpath(path, wp)) return win_fail(ERROR_INVALID_NAME);
     HANDLE h = CreateFileW(wp, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            NULL, OPEN_EXISTING,
                            FILE_FLAG_BACKUP_SEMANTICS | (nofollow ? FILE_FLAG_OPEN_REPARSE_POINT : 0), NULL);
@@ -1387,11 +1413,11 @@ int aether_sandbox_stat(const char* path, int nofollow, AetherSandboxStat* out) 
  * elsewhere is removed again through the handle. 0 kept, -1 refused. */
 int aether_sandbox_win_verify_entry(const char* path) {
     if (!path || !fs_levels_here()) return 0;
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_entry(path, resolved, sizeof resolved)) { fs_refused(); return -1; }
     /* The name as given: what CreateSymbolicLinkW made, wherever it went. */
     wchar_t wg[AETHER_SANDBOX_WPATH];
-    if (!win_wide(path, wg)) return win_fail(ERROR_INVALID_NAME);
+    if (!win_wpath(path, wg)) return win_fail(ERROR_INVALID_NAME);
     HANDLE h = CreateFileW(wg, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -1414,12 +1440,12 @@ int aether_sandbox_stage_begin(const char* path, AetherSandboxStaged* s) {
     if (!path || !s) { errno = EINVAL; return -1; }
     memset(s, 0, sizeof *s);
     if (!fs_levels_here()) return -2;
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_entry(path, resolved, sizeof resolved) || decide("fs_write", resolved) == 0) {
         fs_refused();
         return -1;
     }
-    char dir[PATH_MAX];
+    char dir[AETHER_SANDBOX_PATH_MAX];
     wchar_t wname[AETHER_SANDBOX_WPATH];
     if (!win_split(resolved, dir, wname)) return win_fail(ERROR_INVALID_NAME);
     if (!WideCharToMultiByte(CP_UTF8, 0, wname, -1, s->name, (int)sizeof s->name, NULL, NULL))
@@ -1502,7 +1528,7 @@ static volatile LONG g_win_temp_calls = 0;
 int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char* out, size_t cap) {
     if (!dir || !prefix || !out) { errno = EINVAL; return -1; }
     if (!fs_levels_here()) return -2;
-    char rdir[PATH_MAX];
+    char rdir[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_path(dir, rdir, sizeof rdir) || decide("fs_write", rdir) == 0) {
         fs_refused();
         return -1;
@@ -1544,7 +1570,7 @@ int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char
 void* aether_sandbox_win_open(const char* path, unsigned long desired, unsigned long flags,
                               int nofollow, int access) {
     if (!path) { errno = EINVAL; return INVALID_HANDLE_VALUE; }
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     int levels = fs_levels_here();
     if (levels && (!(nofollow ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
                               : aether_sandbox_canon_path(path, resolved, sizeof resolved)) ||
@@ -1553,7 +1579,7 @@ void* aether_sandbox_win_open(const char* path, unsigned long desired, unsigned 
         return INVALID_HANDLE_VALUE;
     }
     wchar_t wp[AETHER_SANDBOX_WPATH];
-    if (!win_wide(path, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
+    if (!win_wpath(path, wp)) { win_fail(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
     HANDLE h = CreateFileW(wp, (DWORD)desired | SYNCHRONIZE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                            (DWORD)flags | FILE_FLAG_BACKUP_SEMANTICS |
@@ -1712,7 +1738,7 @@ void aether_sandbox_win_closedir(void* dir) {
 
 int aether_sandbox_win_handle_ok(void* handle, const char* path, int nofollow, int access) {
     if (!handle || !path || !fs_levels_here()) return 1;
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!(nofollow ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
                    : aether_sandbox_canon_path(path, resolved, sizeof resolved)))
         return 0;
@@ -1724,19 +1750,19 @@ int aether_sandbox_win_handle_ok(void* handle, const char* path, int nofollow, i
 int aether_sandbox_realpath(const char* path, char* out, size_t cap) {
     if (!path || !out) { errno = EINVAL; return -1; }
     int levels = fs_levels_here();
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (levels && (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
                    decide("fs_read", resolved) == 0)) {
         fs_refused();
         return -1;
     }
     wchar_t wp[AETHER_SANDBOX_WPATH];
-    if (!win_wide(path, wp)) return win_fail(ERROR_INVALID_NAME);
+    if (!win_wpath(path, wp)) return win_fail(ERROR_INVALID_NAME);
     HANDLE h = CreateFileW(wp, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     if (h == INVALID_HANDLE_VALUE) return win_fail(GetLastError());
     int ok = !levels || win_handle_is(h, resolved, AETHER_ACCESS_READ);
-    char fin[PATH_MAX];
+    char fin[AETHER_SANDBOX_PATH_MAX];
     int named = ok && aether_sandbox_final_of_handle(h, fin, sizeof fin);
     CloseHandle(h);
     if (!ok) { fs_refused(); return -1; }
@@ -1797,7 +1823,7 @@ int aether_sandbox_open(const char* path, int flags, int mode) {
         entry = 0;
         flags |= O_DIRECTORY;
     }
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     int ok = entry ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
                    : aether_sandbox_canon_path(path, resolved, sizeof resolved);
     if (!ok || !fs_access_allowed(resolved, fs_open_access(flags))) {
@@ -1825,7 +1851,7 @@ void* aether_sandbox_fopen(const char* path, const char* mode) {
 
 void* aether_sandbox_opendir(const char* path) {
     if (!path || !fs_levels_here()) return opendir(path);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
         decide("fs_read", resolved) == 0) {
         fs_refused();
@@ -1847,7 +1873,7 @@ void* aether_sandbox_opendir(const char* path) {
  * last name, the anchor closed; fn's result and errno kept. */
 typedef int (*fs_at_fn)(int dirfd, const char* name, const void* arg);
 static int fs_at(const char* resolved, fs_at_fn fn, const void* arg) {
-    char name[PATH_MAX];
+    char name[AETHER_SANDBOX_PATH_MAX];
     int d = aether_sandbox_anchor(resolved, name, sizeof name, &g_libc_ops);
     if (d < 0) return -1;
     int r = fn(d, name, arg);
@@ -1887,7 +1913,7 @@ static int fs_slash(const char* path, const char* resolved, int op) {
 
 int aether_sandbox_unlink(const char* path) {
     if (!path || !fs_levels_here()) return unlink(path);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!fs_entry_writable(path, resolved)) return -1;
     if (fs_slash(path, resolved, AETHER_SLASH_UNLINK) != 0) return -1;
     if (fs_preload_here()) return unlink(resolved);
@@ -1896,7 +1922,7 @@ int aether_sandbox_unlink(const char* path) {
 
 int aether_sandbox_rmdir(const char* path) {
     if (!path || !fs_levels_here()) return rmdir(path);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!fs_entry_writable(path, resolved)) return -1;
     if (fs_slash(path, resolved, AETHER_SLASH_DIR) != 0) return -1;
     if (fs_preload_here()) return rmdir(resolved);
@@ -1905,7 +1931,7 @@ int aether_sandbox_rmdir(const char* path) {
 
 int aether_sandbox_remove(const char* path) {
     if (!path || !fs_levels_here()) return remove(path);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!fs_entry_writable(path, resolved)) return -1;
     if (fs_slash(path, resolved, AETHER_SLASH_DIR) != 0) return -1;
     if (fs_preload_here()) return remove(resolved);
@@ -1914,7 +1940,7 @@ int aether_sandbox_remove(const char* path) {
 
 int aether_sandbox_mkdir(const char* path, int mode) {
     if (!path || !fs_levels_here()) return mkdir(path, (mode_t)mode);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!fs_entry_writable(path, resolved)) return -1;
     if (fs_preload_here()) return mkdir(resolved, (mode_t)mode);
     return fs_at(resolved, at_mkdir, &mode);
@@ -1922,7 +1948,7 @@ int aether_sandbox_mkdir(const char* path, int mode) {
 
 /* mkdir of each prefix of `p` in turn, an existing directory taken as made. */
 static int fs_mkdir_each(const char* p, int mode) {
-    char buf[PATH_MAX];
+    char buf[AETHER_SANDBOX_PATH_MAX];
     size_t len = strlen(p);
     if (len >= sizeof buf) { errno = ENAMETOOLONG; return -1; }
     memcpy(buf, p, len + 1);
@@ -1946,7 +1972,7 @@ static int fs_mkdir_each(const char* p, int mode) {
 int aether_sandbox_mkdir_p(const char* path, int mode) {
     if (!path || !*path) { errno = EINVAL; return -1; }
     if (!fs_levels_here()) return fs_mkdir_each(path, mode);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
         decide("fs_write", resolved) == 0) {
         fs_refused();
@@ -1961,7 +1987,7 @@ int aether_sandbox_mkdir_p(const char* path, int mode) {
     int d = aether_sandbox_walk_start(resolved, &p, &owned, &g_libc_ops);
     if (d == -2) return fs_mkdir_each(resolved, mode);   /* no preopen holds it */
     if (d < 0) return -1;
-    char name[PATH_MAX];
+    char name[AETHER_SANDBOX_PATH_MAX];
     for (;;) {
         while (*p == '/') p++;
         if (!*p) break;
@@ -1998,7 +2024,7 @@ int aether_sandbox_mkdir_p(const char* path, int mode) {
 
 int aether_sandbox_rename(const char* from, const char* to) {
     if (!from || !to || !fs_levels_here()) return rename(from, to);
-    char rf[PATH_MAX], rt[PATH_MAX];
+    char rf[AETHER_SANDBOX_PATH_MAX], rt[AETHER_SANDBOX_PATH_MAX];
     if (!fs_entry_writable(from, rf) || !fs_entry_writable(to, rt)) return -1;
     if (aether_sandbox_dir_slash(from) || aether_sandbox_dir_slash(to)) {
         /* A directory only, onto a directory or nothing, as the kernel. */
@@ -2007,7 +2033,7 @@ int aether_sandbox_rename(const char* from, const char* to) {
         if (lstat(rt, &st) == 0 && !S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
     }
     if (fs_preload_here()) return rename(rf, rt);
-    char nf[PATH_MAX], nt[PATH_MAX];
+    char nf[AETHER_SANDBOX_PATH_MAX], nt[AETHER_SANDBOX_PATH_MAX];
     int df = aether_sandbox_anchor(rf, nf, sizeof nf, &g_libc_ops);
     if (df < 0) return -1;
     int dt = aether_sandbox_anchor(rt, nt, sizeof nt, &g_libc_ops);
@@ -2029,7 +2055,7 @@ int aether_sandbox_symlink(const char* target, const char* linkpath) {
     if (!target || !linkpath || !fs_levels_here()) return symlink(target, linkpath);
     /* The target is text the link holds; whatever opens the link later is
      * checked where it leads. */
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!fs_entry_writable(linkpath, resolved)) return -1;
     if (fs_slash(linkpath, resolved, AETHER_SLASH_NEW) != 0) return -1;
     if (fs_preload_here()) return symlink(target, resolved);
@@ -2038,7 +2064,7 @@ int aether_sandbox_symlink(const char* target, const char* linkpath) {
 
 int aether_sandbox_link(const char* target, const char* linkpath) {
     if (!target || !linkpath || !fs_levels_here()) return link(target, linkpath);
-    char rl[PATH_MAX], rt[PATH_MAX];
+    char rl[AETHER_SANDBOX_PATH_MAX], rt[AETHER_SANDBOX_PATH_MAX];
     if (!fs_link_allowed(target, linkpath, rt, rl)) return -1;
     if (fs_slash(linkpath, rl, AETHER_SLASH_NEW) != 0) return -1;
     if (aether_sandbox_dir_slash(target)) {
@@ -2049,7 +2075,7 @@ int aether_sandbox_link(const char* target, const char* linkpath) {
         return -1;
     }
     if (fs_preload_here()) return link(rt, rl);
-    char nt[PATH_MAX], nl[PATH_MAX];
+    char nt[AETHER_SANDBOX_PATH_MAX], nl[AETHER_SANDBOX_PATH_MAX];
     int dt = aether_sandbox_anchor(rt, nt, sizeof nt, &g_libc_ops);
     if (dt < 0) return -1;
     int dl = aether_sandbox_anchor(rl, nl, sizeof nl, &g_libc_ops);
@@ -2076,7 +2102,7 @@ static int at_utimens(int d, const char* n, const void* a) {
 int aether_sandbox_utimens(const char* path, const void* ts, int nofollow) {
     if (!path || !fs_levels_here())
         return utimensat(AT_FDCWD, path, (const struct timespec*)ts, nofollow ? AT_SYMLINK_NOFOLLOW : 0);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!(nofollow ? aether_sandbox_canon_entry(path, resolved, sizeof resolved)
                    : aether_sandbox_canon_path(path, resolved, sizeof resolved)) ||
         decide("fs_write", resolved) == 0) {
@@ -2095,7 +2121,7 @@ int aether_sandbox_chmod(const char* path, int mode) {
     if (!path || !fs_levels_here()) return chmod(path, (mode_t)mode);
 #endif
     /* chmod follows a symlink: the file it reaches is checked. */
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) ||
         decide("fs_write", resolved) == 0) {
         fs_refused();
@@ -2144,17 +2170,17 @@ static void fs_fill_stat(const struct stat* st, AetherSandboxStat* out) {
 /* The lookups: fs_read on the resolution (the name itself with
  * `nofollow`), then fstatat of the name from its anchor, not following it:
  * a resolution has no symlink at its end, so one there now is the race. */
-static int fs_lookup_at(const char* path, int nofollow, char resolved[PATH_MAX],
+static int fs_lookup_at(const char* path, int nofollow, char resolved[AETHER_SANDBOX_PATH_MAX],
                         int (*fn)(int dirfd, const char* name, void* arg), void* arg) {
-    if (!(nofollow ? aether_sandbox_canon_entry(path, resolved, PATH_MAX)
-                   : aether_sandbox_canon_path(path, resolved, PATH_MAX)) ||
+    if (!(nofollow ? aether_sandbox_canon_entry(path, resolved, AETHER_SANDBOX_PATH_MAX)
+                   : aether_sandbox_canon_path(path, resolved, AETHER_SANDBOX_PATH_MAX)) ||
         decide("fs_read", resolved) == 0) {
         fs_refused();
         return -1;
     }
     const AetherSandboxFsOps* ops = fs_lookup_ops();
     if (!ops || strcmp(resolved, "/") == 0) return fn(AT_FDCWD, resolved, arg);
-    char name[PATH_MAX];
+    char name[AETHER_SANDBOX_PATH_MAX];
     int d = aether_sandbox_anchor(resolved, name, sizeof name, ops);
     if (d < 0) return -1;
     int r = fn(d, name, arg);
@@ -2181,7 +2207,7 @@ int aether_sandbox_stat(const char* path, int nofollow, AetherSandboxStat* out) 
         fs_fill_stat(&a.st, out);
         return 0;
     }
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (fs_lookup_at(path, nofollow, resolved, at_stat, &a) != 0) return -1;
     fs_fill_stat(&a.st, out);
     return 0;
@@ -2198,7 +2224,7 @@ long aether_sandbox_readlink(const char* path, char* buf, size_t cap) {
     if (!path || !buf) { errno = EINVAL; return -1; }
     if (!fs_levels_here()) return (long)readlink(path, buf, cap);
     FsLinkArg l = { buf, cap, -1 };
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (fs_lookup_at(path, 1, resolved, at_readlink, &l) != 0) return -1;
     return (long)l.n;
 }
@@ -2218,7 +2244,7 @@ int aether_sandbox_realpath(const char* path, char* out, size_t cap) {
     }
     FsStatArg a;
     a.nofollow = 0;
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (fs_lookup_at(path, 0, resolved, at_stat, &a) != 0) return -1;
     size_t n = strlen(resolved);
     if (n + 1 > cap) { errno = ENAMETOOLONG; return -1; }
@@ -2237,7 +2263,7 @@ int aether_sandbox_open_lookup(const char* path) {
 #endif
     if (!path) { errno = EINVAL; return -1; }
     if (!fs_levels_here()) return open(path, flags);
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_path(path, resolved, sizeof resolved) || decide("fs_read", resolved) == 0) {
         fs_refused();
         return -1;
@@ -2265,7 +2291,7 @@ int aether_sandbox_stage_begin(const char* path, AetherSandboxStaged* s) {
     memset(s, 0, sizeof *s);
     s->anchor = -1;
     if (!fs_levels_here() || fs_preload_here()) return -2;
-    char resolved[PATH_MAX];
+    char resolved[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_entry(path, resolved, sizeof resolved) || decide("fs_write", resolved) == 0) {
         fs_refused();
         return -1;
@@ -2320,7 +2346,7 @@ void aether_sandbox_stage_abort(AetherSandboxStaged* s) {
 int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char* out, size_t cap) {
     if (!dir || !prefix || !out) { errno = EINVAL; return -1; }
     if (!fs_levels_here() || fs_preload_here()) return -2;
-    char rdir[PATH_MAX];
+    char rdir[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_path(dir, rdir, sizeof rdir) || decide("fs_write", rdir) == 0) {
         fs_refused();
         return -1;
@@ -2400,6 +2426,7 @@ const char* aether_sandbox_staged_for(const char* tmp) {
 #endif
 #include <windows.h>
 #include <stdlib.h>
+#include "aether_win_path.h"
 
 void* aether_sandbox_win_open(const char* path, unsigned long desired, unsigned long flags,
                               int nofollow, int access) {
@@ -2410,6 +2437,19 @@ void* aether_sandbox_win_open(const char* path, unsigned long desired, unsigned 
     wchar_t* w = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
     if (!w) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return INVALID_HANDLE_VALUE; }
     MultiByteToWideChar(CP_UTF8, 0, path, -1, w, wlen);
+    if (aether_win_path_is_long(w)) {
+        /* Past MAX_PATH: its long form (#3850). */
+        DWORD need = aether_win_long_form(w, NULL, 0);
+        wchar_t* lw = need ? (wchar_t*)malloc((size_t)need * sizeof(wchar_t)) : NULL;
+        if (!lw || !aether_win_long_form(w, lw, need)) {
+            free(lw);
+            free(w);
+            SetLastError(ERROR_FILENAME_EXCED_RANGE);
+            return INVALID_HANDLE_VALUE;
+        }
+        free(w);
+        w = lw;
+    }
     DWORD f = (DWORD)flags | FILE_FLAG_BACKUP_SEMANTICS;
     if (nofollow) f |= FILE_FLAG_OPEN_REPARSE_POINT;
     HANDLE h = CreateFileW(w, (DWORD)desired, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,

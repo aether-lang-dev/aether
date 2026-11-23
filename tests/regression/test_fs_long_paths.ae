@@ -1,0 +1,172 @@
+// std.fs on paths past Windows' MAX_PATH (#3850).
+//
+// A tree 80 directories deep has paths of 330 characters and more under the
+// temporary directory: past the 260 a Win32 call takes by default. std.zip
+// made such a tree from the fuzz seed `deep_path`, and std.fs could then not
+// stat, list, delete or remove_tree it. Each std.fs call now hands a Win32
+// call an absolute path at or past the limit with the \\?\ prefix, so every
+// call works on a long path as on a short one.
+//
+// The tree is made twice: by std.fs itself (mkdir_p, create_dir, write) and
+// by std.zip's extract of an archive holding one entry 80 directories deep.
+// Each is then statted and listed at its deepest level and removed with
+// remove_tree, and nothing may be left. Then once more inside an enforce
+// block with a grant on the tree's root: the calls work under the grant, and
+// a level that grants only a sibling directory refuses them, long paths
+// included. On POSIX nothing here is near a limit and every case passes as
+// it does on Windows.
+
+import std.fs
+import std.os
+import std.string
+import std.zip
+import std.sandbox
+
+extern exit(code: int)
+
+fn fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+// "d0/d1/.../d79", relative.
+fn deep_rel() -> string {
+    var rel: string = "d0"
+    var k: int = 1
+    while k < 80 {
+        rel = "${rel}/d${k}"
+        k = k + 1
+    }
+    return rel
+}
+
+// Stat, list and read the deepest level of `root`'s tree: `deep` is the
+// deepest directory and holds x.txt with `body` in it.
+fn check_tree(label: string, root: string, deep: string, body: string) {
+    if string.length(deep) < 300 { fail("${label}: the path is not past MAX_PATH (${string.length(deep)})") }
+    if fs.exists(deep) != 1 { fail("${label}: exists(deep) is not 1") }
+    if fs.fs_is_symlink(deep) != 0 { fail("${label}: is_symlink(deep) is not 0") }
+    k, _s, _m, serr = fs.file_stat(deep)
+    if serr != "" { fail("${label}: file_stat(deep): ${serr}") }
+    if k != fs.STAT_KIND_DIR { fail("${label}: file_stat(deep) kind ${k}, not a directory") }
+    leaf = "${deep}/x.txt"
+    fk, fsize, _fm, ferr = fs.file_stat(leaf)
+    if ferr != "" { fail("${label}: file_stat(leaf): ${ferr}") }
+    if fk != fs.STAT_KIND_FILE { fail("${label}: file_stat(leaf) kind ${fk}, not a file") }
+    if fsize != string.length(body) { fail("${label}: file_stat(leaf) size ${fsize}") }
+    got, rerr = fs.read(leaf)
+    if rerr != "" { fail("${label}: read(leaf): ${rerr}") }
+    if got != body { fail("${label}: read(leaf) gave '${got}'") }
+    lst, lerr = fs.list_dir(deep)
+    if lerr != "" { fail("${label}: list_dir(deep): ${lerr}") }
+    n = fs.dir_list_count(lst)
+    name = fs.dir_list_get(lst, 0)
+    fs.dir_list_free(lst)
+    if n != 1 { fail("${label}: list_dir(deep) has ${n} entries") }
+    if name != "x.txt" { fail("${label}: list_dir(deep) gave '${name}'") }
+    println("  PASS ${label}: ${string.length(leaf)}-character path statted, read and listed")
+}
+
+// remove_tree(root), and nothing may be left of it.
+fn remove_all(label: string, root: string) {
+    err = fs.remove_tree(root)
+    if err != "" { fail("${label}: remove_tree: ${err}") }
+    if fs.exists(root) != 0 { fail("${label}: remove_tree left the root") }
+    println("  PASS ${label}: remove_tree left nothing")
+}
+
+// The tree made by std.fs: mkdir_p of the deepest directory, then a file
+// written in it, and one more level made with create_dir and removed with
+// delete_dir, a file removed with delete.
+fn make_with_fs(label: string, root: string) -> string {
+    deep = "${root}/${deep_rel()}"
+    merr = fs.mkdir_p(deep)
+    if merr != "" { fail("${label}: mkdir_p: ${merr}") }
+    werr = fs.write("${deep}/x.txt", "deep")
+    if werr != "" { fail("${label}: write: ${werr}") }
+    cerr = fs.create_dir("${deep}/more")
+    if cerr != "" { fail("${label}: create_dir: ${cerr}") }
+    werr2 = fs.write("${deep}/more/y.txt", "y")
+    if werr2 != "" { fail("${label}: write more/y.txt: ${werr2}") }
+    derr = fs.delete("${deep}/more/y.txt")
+    if derr != "" { fail("${label}: delete: ${derr}") }
+    ddr = fs.delete_dir("${deep}/more")
+    if ddr != "" { fail("${label}: delete_dir: ${ddr}") }
+    return deep
+}
+
+// The tree made by std.zip: an archive with the one entry
+// d0/.../d79/x.txt (the zip fuzz seed `deep_path`), extracted into `root`.
+fn make_with_zip(label: string, root: string) -> string {
+    w = zip.writer_new()
+    aerr = zip.writer_add(w, "${deep_rel()}/x.txt", string.bytes("pwned!"), zip.METHOD_STORED, 6)
+    if aerr != "" { fail("${label}: writer_add: ${aerr}") }
+    archive, alen, ferr = zip.writer_finish(w)
+    if ferr != "" { fail("${label}: writer_finish: ${ferr}") }
+    xerr = zip.extract(string.bytes(archive)[0..alen], root, zip.default_extract_options())
+    zip.writer_free(w)
+    if xerr != "" { fail("${label}: extract: ${xerr}") }
+    return "${root}/${deep_rel()}"
+}
+
+main() {
+    println("=== std.fs on paths past MAX_PATH (#3850) ===")
+    raw, terr = fs.make_temp_dir("", "ae_fs_long")
+    if terr != "" { fail("make_temp_dir: ${terr}") }
+    // Resolved, so the grants below name the tree as the checks see it.
+    base, _rk, rerr = fs.realpath(raw)
+    if rerr != "" { fail("realpath: ${rerr}") }
+
+    // 1. Made by std.fs.
+    r1 = "${base}/fs"
+    d1 = make_with_fs("std.fs tree", r1)
+    check_tree("std.fs tree", r1, d1, "deep")
+    remove_all("std.fs tree", r1)
+
+    // 2. Made by std.zip's extract.
+    r2 = "${base}/zip"
+    d2 = make_with_zip("std.zip tree", r2)
+    check_tree("std.zip tree", r2, d2, "pwned!")
+    remove_all("std.zip tree", r2)
+
+    // 3. Inside an enforce block with a grant on the root: every call works.
+    r3 = "${base}/sbx"
+    granted = sandbox.new("the tree") { grant_fs("${r3}*") }
+    sandbox.enforce(granted) callback {
+        d3 = make_with_fs("granted, std.fs", r3)
+        check_tree("granted, std.fs", r3, d3, "deep")
+        remove_all("granted, std.fs", r3)
+        d4 = make_with_zip("granted, std.zip", r3)
+        check_tree("granted, std.zip", r3, d4, "pwned!")
+    }
+
+    // 4. A level granting only a sibling refuses every call on the long
+    // paths the tree from 3 still has, and leaves the tree as it is.
+    deep3 = "${r3}/${deep_rel()}"
+    other = sandbox.new("a sibling") { grant_fs("${base}/other*") }
+    sandbox.enforce(other) callback {
+        if fs.exists(deep3) != 0 { fail("refused: exists(deep) is not 0") }
+        _k, _s, _m, serr = fs.file_stat(deep3)
+        if serr == "" { fail("refused: file_stat(deep) worked") }
+        _l, lerr = fs.list_dir(deep3)
+        if lerr == "" { fail("refused: list_dir(deep) worked") }
+        if fs.delete("${deep3}/x.txt") == "" { fail("refused: delete(leaf) worked") }
+        if fs.mkdir_p("${deep3}/new") == "" { fail("refused: mkdir_p worked") }
+        if fs.write("${deep3}/new.txt", "n") == "" { fail("refused: write worked") }
+        _rd, rderr = fs.read("${deep3}/x.txt")
+        if rderr == "" { fail("refused: read(leaf) worked") }
+        // What it may not see it takes as missing, as on a short path:
+        // nothing is removed.
+        _rt = fs.remove_tree(r3)
+    }
+    if fs.exists("${deep3}/x.txt") != 1 { fail("refused: the leaf is gone") }
+    if fs.exists("${deep3}/new") != 0 { fail("refused: mkdir_p made a directory") }
+    if fs.exists("${deep3}/new.txt") != 0 { fail("refused: write made a file") }
+    println("  PASS refused: a level without the grant refuses the long paths")
+    remove_all("granted, std.zip", r3)
+
+    berr = fs.remove_tree(base)
+    if berr != "" { fail("remove_tree(base): ${berr}") }
+    if fs.exists(base) != 0 { fail("the temporary directory is left") }
+    println("PASS")
+}
