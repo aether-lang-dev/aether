@@ -335,14 +335,17 @@ So `ae` gives GCC `--param inline-unit-growth=100` on the optimising builds of
 generated C: `ae build` (the executable, `--emit=lib` and `--emit=obj`, `--profile`
 included) and `ae examples`. It does not on `-O0` builds (`ae run`, `ae test`,
 `--quick`, `--coverage`), which inline
-nothing, nor with `--size`, which asks for bytes. It goes ahead of the
-project's `[build] cflags` and `AETHER_CFLAGS_EXTRA`, so a
-`--param inline-unit-growth=` of the project's own is the one GCC uses. Clang
+nothing, nor with `--size`, which asks for bytes. When the project names a
+budget of its own, in `[build] cflags`, `AETHER_CFLAGS_EXTRA` or the
+`$AE_CC` / `$CC` command (`AE_CC="gcc --param inline-unit-growth=50"`), `ae`
+gives none, so that one is the one GCC uses. Clang
 has no such cap and gets nothing; neither does a cross build (`zig cc` and
 `xcrun clang` are Clang) or the wasm backend (emcc). Whether the compiler is
 GCC is asked once, by compiling a probe, and the answer is kept in the cache
-directory by the compiler's identity. The runtime, libaether and the std's C
-are built by the Makefile and keep its flags.
+directory by the compiler's identity. libaether.a and the std's C in it are
+built by the Makefile and keep its flags. A runtime `ae` compiles from source
+instead (a compiler on another C runtime, or `--trace`, see below) is compiled
+with the program's own flags, the budget among them.
 
 100 is measured. aephysics at `-O3 -ffp-contract=off`, its own budget
 parameters removed, MinGW GCC 16.2, least of 10 alternated runs:
@@ -837,10 +840,24 @@ first build in a fresh build cache except for the runtime:
 | GCC (MSYS2) `--trace`, runtime from source | 28.1 s | 0.37 s |
 
 Before the runtime was cached, every new program paid the first column. The
-WinLibs GCC that `ae` downloads on Windows when no gcc is on PATH is GCC 14.2.0
-on UCRT, while the Windows releases' archive is msvcrt (they are built in
-MSYS2 MINGW64), so it takes the source fallback; its zip is checked against a
-pinned SHA-256 before it is unpacked.
+cache does not make the fallback free: it is paid once for each compiler, set
+of flags and state of the sources. `ae run` (`-O0 -g`) and `ae build` (`-O2`)
+each build one, so do `--emit=lib`, `--trace` and every other set of `[build]
+cflags`; an edit to a runtime or std C source builds another (an edit to the
+program does not); and the cache's size cap can evict one, which the next
+build makes again. Editing and rebuilding a program is a hit after its first
+build.
+
+The compilers this reaches on Windows are any not on the archive's C runtime
+and mingw-w64: `zig cc`; MSYS2's UCRT64 GCC, MSYS2's default environment,
+against the MINGW64 (msvcrt) archive the releases ship; and the WinLibs GCC
+that `ae` downloads when no gcc is on PATH, GCC 14.2.0 on UCRT. Its zip is
+checked against a pinned SHA-256 before it is unpacked.
+
+`ae cflags --libs` names the archive as it is and asks no compiler anything: a
+build that links `libaether.a` with a compiler of its own reads
+`libaether.crt` and compares it with what that compiler targets
+(install-layout.md), as `ae` does.
 
 The same-OS, cross-arch cell is then a one-liner. On an x86_64 Linux host with
 a cross-gcc installed:

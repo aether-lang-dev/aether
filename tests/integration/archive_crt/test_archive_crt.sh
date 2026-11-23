@@ -94,11 +94,15 @@ if [ -n "$other_def" ] && [ -n "$REAL_CC" ]; then
     fi
     grep -q "^\[toolchain\] libaether.a is $crt[^;]*; .* targets $other[^:]*: the runtime is compiled from source" "$TMP/other.log" ||
         fail "-v does not say the runtime was compiled from source for a compiler on $other: $(grep '^\[toolchain\]' "$TMP/other.log" | tail -1 | cut -c1-160)"
-    # The compiler as it is: the archive, and no such line.
+    # The compiler as it is: asked, it says it targets the archive's runtime,
+    # and the archive is linked. A compiler that could not be asked links the
+    # archive too, with another line, so that line is not enough here.
     if ! (cd "$TMP" && "$AE" build -v hello.ae -o same) > "$TMP/same.log" 2>&1; then
         fail "the build with the archive's own compiler failed"
     elif grep -q "the runtime is compiled from source" "$TMP/same.log"; then
         fail "the archive's own compiler took the source fallback"
+    elif ! grep -q "^\[toolchain\] libaether.a is $crt[^;]*; .* targets the same: the archive is linked" "$TMP/same.log"; then
+        fail "-v does not say the archive's own compiler targets its C runtime: $(grep '^\[toolchain\] libaether.a' "$TMP/same.log" | tail -1 | cut -c1-160)"
     fi
     done_what="$done_what; a compiler on $other compiles the runtime from source and says so, the archive's own links it"
 fi
@@ -128,18 +132,42 @@ if [ -n "$mingw" ] && [ -n "$crt" ]; then
     done_what="$done_what; a compiler on another mingw-w64 compiles it from source too"
 fi
 
+# 2c. The project's own cflags can change the C runtime: with
+# `-mcrtdll=ucrt`, MinGW GCC builds against UCRT. The question is asked with
+# them, so an msvcrt archive is not linked into a UCRT program.
+if [ "$crt" = msvcrt ]; then
+    mkdir -p "$TMP/mcrt"
+    cp "$TMP/hello.ae" "$TMP/mcrt/"
+    printf '[build]\ncflags = "-mcrtdll=ucrt"\n' > "$TMP/mcrt/aether.toml"
+    if ! (cd "$TMP/mcrt" && "$AE" build -v hello.ae -o mcrt) > "$TMP/mcrt.log" 2>&1; then
+        grep -i "error" "$TMP/mcrt.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        fail "the build with cflags -mcrtdll=ucrt failed"
+    elif [ "$("$TMP/mcrt/mcrt" | tr -d '\r')" != "crt ok" ]; then
+        fail "the program built with -mcrtdll=ucrt did not print 'crt ok'"
+    fi
+    grep -q "^\[toolchain\] libaether.a is msvcrt[^;]*; .* targets ucrt[^:]*: the runtime is compiled from source" "$TMP/mcrt.log" ||
+        fail "with cflags -mcrtdll=ucrt, -v does not say the runtime was compiled from source for ucrt: $(grep '^\[toolchain\] libaether.a' "$TMP/mcrt.log" | tail -1 | cut -c1-160)"
+    done_what="$done_what; cflags naming another C runtime (-mcrtdll=ucrt) are asked about too"
+fi
+
 # 3. zig.
 . "$ROOT/tests/lib/find_zig.sh"
 zig="$(find_zig "$ROOT")"
 if [ -n "$zig" ]; then
     printf 'main() {\n    try {\n        panic("boom")\n    } catch e {\n        println("caught ${e}")\n    }\n}\n' > "$TMP/catch.ae"
-    if ! (cd "$TMP" && AE_CC="$zig cc" "$AE" build catch.ae -o catch) > "$TMP/zig.log" 2>&1; then
+    if ! (cd "$TMP" && AE_CC="$zig cc" "$AE" build -v catch.ae -o catch) > "$TMP/zig.log" 2>&1; then
         grep -i "error" "$TMP/zig.log" | head -3 | cut -c1-200 | sed 's/^/        /'
         fail "AE_CC=\"zig cc\" did not build a program that panics and catches it"
     elif [ "$("$TMP/catch" | tr -d '\r')" != "caught boom" ]; then
         fail "the program built with AE_CC=\"zig cc\" did not print 'caught boom'"
     fi
-    done_what="$done_what; AE_CC=\"zig cc\" builds and runs a panic and its catch"
+    if grep -q "the runtime is compiled from source" "$TMP/zig.log"; then
+        done_what="$done_what; AE_CC=\"zig cc\" builds and runs a panic and its catch"
+    else
+        echo "  [SKIP] $NAME: step 3 (zig): zig targets the archive's C runtime here ('${crt:-none}'), so the build linked the archive and the source fallback was not exercised"
+    fi
+else
+    echo "  [SKIP] $NAME: step 3 (zig): no zig on PATH or under build/scratch/.zig"
 fi
 
 [ "$fails" -eq 0 ] || exit 1

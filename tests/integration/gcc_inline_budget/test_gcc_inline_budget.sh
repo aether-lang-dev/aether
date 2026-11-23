@@ -9,8 +9,8 @@
 #     `--param inline-unit-growth=<N>` on the compile line;
 #   - an -O0 build (--quick) does not, nor a build with Clang, which has no
 #     such cap;
-#   - the user's own cflags come after it, so their own
-#     `--param inline-unit-growth=` is the one GCC uses.
+#   - a budget the user names, in the cflags or in the $AE_CC / $CC
+#     command, is the only one on the line: ae gives none of its own.
 #
 # What each build ran is read from its `-v` log, on the `[cmd]` line that
 # compiles the generated C (the only one carrying -Wformat).
@@ -79,16 +79,20 @@ if build "$TMP/proj" o2 p.ae -o p; then
         if build "$TMP/proj" lib p.ae --emit=lib -o plib; then
             [ -n "$(budgets lib)" ] || fail "an --emit=lib build with GCC has no --param inline-unit-growth"
         fi
-        # The user's budget is the last on the line, after ae's own.
+        # A budget the user names is the only one on the line: ae gives none
+        # of its own, wherever the user's sits (cflags come after ae's flags,
+        # the $CC command before them).
         if build "$TMP/withparam" user p.ae -o p; then
-            set -- $(budgets user)
-            if [ "$#" -lt 2 ]; then
-                fail "with cflags naming a budget, the line has '$*', not ae's and then the user's"
-            else
-                eval "last=\${$#}"
-                [ "$last" = 7 ] || fail "the user's --param inline-unit-growth=7 is not the last on the line ('$*')"
-            fi
+            b="$(budgets user)"
+            [ "$b" = "7 " ] || fail "with cflags naming inline-unit-growth=7, the line's budgets are '$b', not that one alone"
         fi
+        CC="$cc --param inline-unit-growth=50"
+        export CC
+        if build "$TMP/proj" ccparam p.ae -o pcc; then
+            b="$(budgets ccparam)"
+            [ "$b" = "50 " ] || fail "with CC naming inline-unit-growth=50, the line's budgets are '$b', not that one alone"
+        fi
+        unset CC
         gcc_seen=1
     else
         [ -z "$(budgets o2)" ] || fail "a build with a C compiler other than GCC got --param inline-unit-growth"
@@ -116,7 +120,7 @@ fi
 
 [ "$fails" -eq 0 ] || exit 1
 if [ -n "${gcc_seen:-}" ]; then
-    echo "  [PASS] $NAME: GCC's -O2 and --emit=lib builds get the inlining budget, the user's own comes last; -O0${clang_seen:-} get none"
+    echo "  [PASS] $NAME: GCC's -O2 and --emit=lib builds get the inlining budget, one the user names replaces it; -O0${clang_seen:-} get none"
 else
     echo "  [PASS] $NAME: the compiler here is not GCC and gets no budget; -O0${clang_seen:-} get none"
 fi

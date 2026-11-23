@@ -3907,9 +3907,9 @@ static const char* bracket_depth_flags(const char* cc) {
  * use. The compiler is asked once (and the answer kept by its identity, as
  * bracket_depth_flags keeps its own) whether it is GCC and takes the option.
  * Optimising builds only: -O0 inlines nothing, and --size asks for bytes,
- * which the default cap already weighs. The flag goes ahead of the user's
- * cflags, so a `--param inline-unit-growth=` of their own comes later on the
- * line and wins. It changes the binary, and the build cache key reads it
+ * which the default cap already weighs. A `--param inline-unit-growth=` the
+ * user names, in the cflags or in the $AE_CC / $CC command, means none from
+ * ae (see the check below). It changes the binary, and the build cache key reads it
  * through ae's own content hash: the number is compiled into ae. */
 #define AETHER_GCC_INLINE_UNIT_GROWTH 100
 #define AETHER_GCC_INLINE_CFLAGS " --param inline-unit-growth=" AE_DEPTH_TEXT(AETHER_GCC_INLINE_UNIT_GROWTH)
@@ -3917,6 +3917,12 @@ static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
     static char* asked = NULL;
     static const char* answer = "";
     if (!optimize || g_coverage || g_size || !cc || !*cc) return "";
+    /* A budget the user names wins, wherever it sits. In the cflags it would
+     * win anyway, coming after this one; in the $AE_CC / $CC command it sits
+     * ahead of every flag, and `AE_CC="gcc --param inline-unit-growth=50"`
+     * got 100. So when either names one, ae gives none. */
+    if (strstr(cc, "inline-unit-growth") || strstr(get_cflags(), "inline-unit-growth"))
+        return "";
     if (asked && strcmp(asked, cc) == 0) return answer;
     free(asked);
     asked = strdup(cc);
@@ -3939,7 +3945,8 @@ static char* ae_read_file(const char* path, long* out_len);
  * record spells it ("msvcrt mingw-w64 15", "glibc"), into `out`, by
  * preprocessing `header`; "" when it names none or the compiler cannot be
  * run. For the -v line only. */
-static void crt_name_of(const char* cc, const char* header, char* out, size_t outsz) {
+static void crt_name_of(const char* cc, const char* flags, const char* header, char* out,
+                        size_t outsz) {
     out[0] = '\0';
     char src[1100], got[1100];
     if (!ae_private_temp_path(src, sizeof(src), "ae_crt_name.c") ||
@@ -3950,7 +3957,7 @@ static void crt_name_of(const char* cc, const char* header, char* out, size_t ou
                "#ifdef AETHER_CRT_MINGW_MAJOR\nAETHER_CRT_MINGW AETHER_CRT_MINGW_MAJOR\n#endif\n",
             header);
     fclose(f);
-    char* cmd = ae_strdup_printf("%s -E -P \"%s\"", cc, src);
+    char* cmd = ae_strdup_printf("%s%s -E -P \"%s\"", cc, flags, src);
     if (cmd && run_cmd_capture_stdout(cmd, got) == 0) {
         FILE* g = fopen(got, "r");
         char line[256], name[64] = "", mingw[32] = "";
@@ -4041,20 +4048,36 @@ static void archive_crt_check(const char* cc) {
                                                "#endif\n%sint ae_crt_probe;\n",
                                                header, name, mingw_check)
                             : NULL;
-        if (text && cc_probe_takes(cc, "", "ae_crt_probe", text) == 0) {
+        /* With the build's own cflags: `-mcrtdll=ucrt`, `--target` or
+         * `--sysroot` in them change the C runtime the compiler builds
+         * against, so the question asked without them is about another one.
+         * They are part of the question, so of the remembered answer too. */
+        const char* user = get_cflags();
+        char* flags = user[0] ? ae_strdup_printf(" %s", user) : ae_strdup_printf("%s", "");
+        int told = text && flags ? cc_probe_takes(cc, flags, "ae_crt_probe", text) : -1;
+        char ours[100];
+        if (mingw >= 0) snprintf(ours, sizeof(ours), "%s mingw-w64 %d", name, mingw);
+        else snprintf(ours, sizeof(ours), "%s", name);
+        if (told == 0) {
             matches = 0;
             if (tc.verbose) {
-                /* theirs: a whole line of crt_name_of's read; ours: the
-                 * archive's 64-byte name and its mingw-w64 major. */
-                char theirs[256], ours[96];
-                crt_name_of(cc, header, theirs, sizeof(theirs));
-                if (mingw >= 0) snprintf(ours, sizeof(ours), "%s mingw-w64 %d", name, mingw);
-                else snprintf(ours, sizeof(ours), "%s", name);
+                char theirs[256]; /* a whole line of crt_name_of's read */
+                crt_name_of(cc, flags, header, theirs, sizeof(theirs));
                 fprintf(stderr, "[toolchain] libaether.a is %s; %s targets %s: the runtime is "
                                 "compiled from source\n",
                         ours, cc, theirs[0] ? theirs : "another C runtime");
             }
+        } else if (tc.verbose && text) {
+            /* Said either way, so a log tells a match from a compiler that
+             * could not be asked. */
+            if (told == 1)
+                fprintf(stderr, "[toolchain] libaether.a is %s; %s targets the same: the "
+                                "archive is linked\n", ours, cc);
+            else
+                fprintf(stderr, "[toolchain] libaether.a is %s; %s could not be asked which C "
+                                "runtime it targets: the archive is linked\n", ours, cc);
         }
+        free(flags);
         free(text);
         free(header);
     }
