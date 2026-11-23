@@ -40,29 +40,23 @@ fail() { echo "  [FAIL] $1"; exit 1; }
 cc -I"$ROOT/tests/lib" "$SCRIPT_DIR/conn_auth_upstream.c" -o "$TMPDIR/upstream" $RAW_SOCKET_LIBS 2>"$TMPDIR/cc.log" \
     || { cat "$TMPDIR/cc.log"; fail "could not compile conn_auth_upstream.c"; }
 
-# A fresh upstream per program, so connection ordinals start at 1 for each.
-start_upstream() {
-    # A port file of its own each time: reusing one, the previous upstream's
-    # port could be read before the new process truncated it.
-    PORT_FILE="$TMPDIR/port.$1.txt"
-    "$TMPDIR/upstream" > "$PORT_FILE" 2>/dev/null &
-    UP_PID=$!
-    PORT=""
-    i=0
-    while [ "$i" -lt 100 ]; do
-        PORT="$(head -n1 "$PORT_FILE" 2>/dev/null)"
-        [ -n "$PORT" ] && break
-        sleep 0.05
-        i=$((i + 1))
-    done
-    [ -n "$PORT" ] || fail "upstream did not report a port"
-}
+# One upstream for the three programs, started as the other client tests
+# start theirs. Each program's connections close when it exits, and the
+# upstream's /stats counts only open ones, so they do not see each other's.
+"$TMPDIR/upstream" > "$TMPDIR/port.txt" 2>/dev/null &
+UP_PID=$!
+PORT=""
+i=0
+while [ "$i" -lt 100 ]; do
+    PORT="$(head -n1 "$TMPDIR/port.txt" 2>/dev/null)"
+    [ -n "$PORT" ] && break
+    sleep 0.05
+    i=$((i + 1))
+done
+[ -n "$PORT" ] || fail "upstream did not report a port"
 
 for prog in anonymous owners proxy; do
-    start_upstream "$prog"
     OUT="$(UPSTREAM_PORT="$PORT" AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/$prog.ae" 2>&1)"
-    stop_server "$UP_PID"
-    UP_PID=""
     if ! echo "$OUT" | grep -q "^PASS"; then
         echo "$OUT"
         fail "$prog.ae"
