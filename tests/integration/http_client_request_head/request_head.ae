@@ -7,17 +7,12 @@ import std.string
 
 extern exit(code: int)
 
-main() {
-    up_port = io.getenv("UPSTREAM_PORT")
-    if up_port == 0 {
-        println("FAIL: UPSTREAM_PORT not set")
-        exit(1)
-    }
-    url = "http://127.0.0.1:${up_port}/echo/head"
-
+// The head the upstream saw for one GET, through `pool` (null: no owner).
+head_of(url: string, pool: ptr) -> string {
     req = client.request("GET", url)
     client.set_timeout(req, 5s)
     client.set_header(req, "X-Probe", "probe-value")
+    if pool != null { client.set_pool(req, pool) }
     resp, err = client.send_request(req)
     client.request_free(req)
     if err != "" {
@@ -26,7 +21,20 @@ main() {
     }
     head = string.concat(client.response_body(resp), "")
     client.response_free(resp)
+    return head
+}
 
+main() {
+    up_port = io.getenv("UPSTREAM_PORT")
+    if up_port == 0 {
+        println("FAIL: UPSTREAM_PORT not set")
+        exit(1)
+    }
+    url = "http://127.0.0.1:${up_port}/echo/head"
+
+    // No owner: the connection is the request's alone and is closed after
+    // the response, so the client says so.
+    head = head_of(url, null)
     if string.contains(head, "GET /echo/head HTTP/1.1") == 0 {
         println("FAIL: request line missing. Head was:")
         println(head)
@@ -37,8 +45,8 @@ main() {
         println(head)
         exit(1)
     }
-    if string.contains(head, "Connection: keep-alive") == 0 {
-        println("FAIL: the client did not ask to keep the connection. Head was:")
+    if string.contains(head, "Connection: close") == 0 {
+        println("FAIL: a request with no pool did not say it closes the connection. Head was:")
         println(head)
         exit(1)
     }
@@ -48,5 +56,19 @@ main() {
         exit(1)
     }
 
-    println("PASS: request line, Host, Connection and caller headers are on the wire")
+    // Through a pool: the connection may be kept for the pool's next request.
+    pool, perr = client.pool_new()
+    if perr != "" {
+        println("FAIL: ${perr}")
+        exit(1)
+    }
+    pooled = head_of(url, pool)
+    client.pool_free(pool)
+    if string.contains(pooled, "Connection: keep-alive") == 0 {
+        println("FAIL: a request through a pool did not ask to keep the connection. Head was:")
+        println(pooled)
+        exit(1)
+    }
+
+    println("PASS: request line, Host, Connection (close with no owner, keep-alive in a pool) and caller headers are on the wire")
 }
