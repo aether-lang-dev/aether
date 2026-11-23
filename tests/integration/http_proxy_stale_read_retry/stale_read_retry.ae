@@ -23,6 +23,7 @@
 // path). Every socket is on 127.0.0.1 and a port the kernel picks.
 
 import std.http
+import std.http.client
 import std.http.proxy
 import std.string
 import std.tcp
@@ -46,13 +47,13 @@ start(server: ptr) -> int {
     return http.server_port(server)
 }
 
-gateway(up_url: string, worker: int) -> ptr {
+gateway(pool: ptr, opts: ptr, worker: int) -> ptr {
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
     if worker == 1 {
         http.server_use_middleware(s, mw_pass, 0)
     }
-    merr = proxy.mount_simple(s, "/", up_url, 5)
+    merr = proxy.mount(s, "/", pool, opts)
     if merr != "" {
         println("FAIL: mount: ${merr}")
         exit(1)
@@ -117,10 +118,19 @@ main() {
     bad = 0
     g = 0
     while g < 2 {
-        s = gateway(up_url, g)
+        // The upstream connections are this pool's (#3851): a phase that
+        // must start on a fresh one clears them.
+        pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+        aerr = proxy.upstream_add(pool, up_url, 1)
+        if aerr != "" {
+            println("FAIL: upstream_add: ${aerr}")
+            exit(1)
+        }
+        opts = proxy.opts_new()
+        s = gateway(pool, opts, g)
         port = start(s)
         sleep(100)
-        http.client_pool_clear()
+        client.pool_clear(proxy.pool_conns(pool))
 
         k, kerr = tcp.connect("127.0.0.1", port)
         if kerr != "" {
@@ -175,6 +185,8 @@ main() {
         }
         http.server_stop(s)
         http.server_free(s)
+        proxy.opts_free(opts)
+        proxy.upstream_pool_free(pool)
         g = g + 1
     }
 
