@@ -64,9 +64,9 @@ gives such a path to Windows the way Rust's std does: made absolute, with its
 separators turned to `\` and its `.` and `..` resolved, then prefixed `\\?\`
 (`\\?\UNC\` for a UNC path), a form Windows takes literally and without the
 limit. A shorter path is given as it is. `make_temp_dir` and
-`make_temp_file` are the exception: outside an enforce block they take a
-directory of at most 246 characters, the most the Windows call that names
-the file takes.
+`make_temp_file` name the file themselves, in the shape GetTempFileName
+gives (three letters of the prefix, four hex digits, `.tmp`), as that call
+takes no directory of 247 characters or more.
 
 ## Private files on Windows
 

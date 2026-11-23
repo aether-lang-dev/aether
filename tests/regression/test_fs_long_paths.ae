@@ -67,6 +67,48 @@ fn check_tree(label: string, root: string, deep: string, body: string) {
     println("  PASS ${label}: ${string.length(leaf)}-character path statted, read and listed")
 }
 
+// The last name of `path`, after its last separator.
+fn last_name(path: string) -> string {
+    fwd = string.replace_all(path, "\\", "/")
+    var at: int = string.length(fwd) - 1
+    while at >= 0 {
+        if string.char_at(fwd, at) == 47 { return string.substring(fwd, at + 1, string.length(fwd)) }
+        at = at - 1
+    }
+    return fwd
+}
+
+// make_temp_file and make_temp_dir in `deep`, a directory past MAX_PATH,
+// outside an enforce block: each makes a fresh name there, a file comes back
+// empty and writable, and on Windows the name has GetTempFileName's shape
+// (three letters of the prefix, four hex digits, ".tmp").
+fn check_temp(label: string, deep: string) {
+    tf, terr = fs.make_temp_file(deep, "lpt")
+    if terr != "" { fail("${label}: make_temp_file: ${terr}") }
+    tf2, terr2 = fs.make_temp_file(deep, "lpt")
+    if terr2 != "" { fail("${label}: second make_temp_file: ${terr2}") }
+    if tf == tf2 { fail("${label}: make_temp_file gave '${tf}' twice") }
+    td, derr = fs.make_temp_dir(deep, "lpt")
+    if derr != "" { fail("${label}: make_temp_dir: ${derr}") }
+    if string.starts_with(tf, deep) != 1 { fail("${label}: '${tf}' is not in the directory") }
+    k, size, _m, serr = fs.file_stat(tf)
+    if serr != "" { fail("${label}: file_stat(temp file): ${serr}") }
+    if k != fs.STAT_KIND_FILE { fail("${label}: the temp file is kind ${k}") }
+    if size != 0 { fail("${label}: the temp file has ${size} bytes") }
+    werr = fs.write(tf, "t")
+    if werr != "" { fail("${label}: write(temp file): ${werr}") }
+    dk, _ds, _dm, dserr = fs.file_stat(td)
+    if dserr != "" { fail("${label}: file_stat(temp dir): ${dserr}") }
+    if dk != fs.STAT_KIND_DIR { fail("${label}: the temp dir is kind ${dk}") }
+    if os.platform() == "windows" {
+        n = last_name(tf)
+        if string.length(n) != 11 || string.starts_with(n, "lpt") != 1 || string.ends_with(n, ".tmp") != 1 {
+            fail("${label}: the temp name '${n}' is not lptXXXX.tmp")
+        }
+    }
+    println("  PASS ${label}: make_temp_file and make_temp_dir in a ${string.length(deep)}-character directory")
+}
+
 // remove_tree(root), and nothing may be left of it.
 fn remove_all(label: string, root: string) {
     err = fs.remove_tree(root)
@@ -121,6 +163,7 @@ main() {
     r1 = "${base}/fs"
     d1 = make_with_fs("std.fs tree", r1)
     check_tree("std.fs tree", r1, d1, "deep")
+    check_temp("std.fs tree", d1)
     remove_all("std.fs tree", r1)
 
     // 2. Made by std.zip's extract.

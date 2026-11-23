@@ -12,6 +12,8 @@
   path is passed exactly as before. Inside an enforce block a long path is
   resolved and matched against the grants as a short one is; the resolution
   kept 260 bytes, so a long path was refused whatever the grants said.
-  `make_temp_dir` and `make_temp_file` outside an enforce block still take a
-  directory of at most 246 characters: GetTempFileNameA, which names the
-  file, takes no longer one.
+  `make_temp_dir` and `make_temp_file` outside an enforce block name the
+  file themselves now, as they did inside one: GetTempFileNameA, which named
+  it, takes no directory past 246 characters. The names keep its shape
+  (three letters of the prefix, four hex digits, `.tmp`), and a directory is
+  made in one call, no longer as a file deleted and remade as a directory.

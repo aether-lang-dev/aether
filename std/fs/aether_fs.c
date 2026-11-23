@@ -1761,16 +1761,6 @@ char* fs_readlink_raw(const char* path) {
     return (char*)out;
 }
 
-/* Windows has no mkdtemp/mkstemp. GetTempFileNameA(dir, prefix, 0, out) is the
- * OS primitive: with uUnique=0 it derives a unique name in `dir` (using only
- * the first 3 chars of `prefix`) AND atomically CREATES that empty file, then
- * writes the full path into `out` (which must be >= MAX_PATH). It requires
- * `dir` to already exist and to be no longer than MAX_PATH-14. GetTempFileNameA
- * returns 0 on failure.
- *
- * These used to be NULL stubs — that is why make_temp_dir/make_temp_file failed
- * on every Windows target: the real bodies lived under `#ifndef _WIN32` and the
- * Windows build only ever saw "return NULL". */
 /* errno for a Win32 error, as the CRT's own calls set it: the reason
  * fs_error_message renders (#3817: the temp functions left errno 0, so
  * their error said no more than that they failed). */
@@ -1784,6 +1774,96 @@ static void fs_win_set_errno(DWORD err) {
         default: errno = EIO; break;
     }
 }
+#ifndef STATUS_DELETE_PENDING
+#define STATUS_DELETE_PENDING ((LONG)0xC0000056L)
+#endif
+
+/* The NTSTATUS the last failed call on this thread ended with: what a
+ * Win32 error folds away (ACCESS_DENIED is also a name deleted but still
+ * held open). 0 when ntdll has no RtlGetLastNtStatus. */
+static LONG fs_win_last_nt_status(void) {
+    typedef LONG (NTAPI* last_status_fn)(void);
+    HMODULE m = GetModuleHandleW(L"ntdll.dll");
+    FARPROC p = m ? GetProcAddress(m, "RtlGetLastNtStatus") : NULL;
+    last_status_fn f;
+    memcpy(&f, &p, sizeof f);
+    return f ? f() : 0;
+}
+
+/* Each call's names start from a place of their own: the process-wide count
+ * of calls, as aether_sandbox_temp_in mixes in its own (#3817). */
+static volatile LONG g_fs_win_temp_calls = 0;
+
+/* Windows has no mkdtemp/mkstemp. fs.make_temp_dir and fs.make_temp_file
+ * outside an enforce block make a fresh name in `dir` as the enforce block's
+ * aether_sandbox_temp_in does, named as GetTempFileNameA names one: up to
+ * three characters of the prefix, four hex digits and ".tmp". It is made
+ * with CreateFileW (CREATE_NEW: nothing that exists is opened) or
+ * CreateDirectoryW, past MAX_PATH on its long form (fs_win_wide, #3850);
+ * GetTempFileNameA, which this used, takes no directory past MAX_PATH less
+ * 14. A name in use, or one deleted but still held open (no create takes it
+ * until the last handle closes), is passed over for the next. The path
+ * returned is `dir` as given and the name; a file comes back closed and
+ * empty. NULL with errno set otherwise. */
+static char* fs_win_temp_in(const char* dir, const char* prefix, int is_dir) {
+    char pre[16];
+    size_t pl = 0;
+    for (int c = 0; c < 3 && prefix[pl]; c++) {   /* a UTF-8 sequence whole */
+        size_t n = 1;
+        while (prefix[pl + n] && ((unsigned char)prefix[pl + n] & 0xC0) == 0x80) n++;
+        if (pl + n >= sizeof pre) break;
+        memcpy(pre + pl, prefix + pl, n);
+        pl += n;
+    }
+    pre[pl] = '\0';
+    size_t dl = strlen(dir);
+    int sep = dl && dir[dl - 1] != '\\' && dir[dl - 1] != '/';
+    size_t cap = dl + (size_t)sep + pl + 9;   /* four hex digits, ".tmp", NUL */
+    char* out = (char*)aether_caps_malloc(cap);
+    if (!out) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    unsigned seed = (unsigned)GetTickCount() ^ ((unsigned)GetCurrentProcessId() << 16) ^
+                    ((unsigned)InterlockedIncrement(&g_fs_win_temp_calls) * 0x9E3779B9u);
+    DWORD err = ERROR_FILE_EXISTS;
+    for (int attempt = 0; attempt < 256; attempt++) {
+        seed = seed * 1103515245u + 12345u;
+        snprintf(out, cap, "%s%s%s%04X.tmp", dir, sep ? "\\" : "", pre, (seed >> 8) & 0xFFFF);
+        size_t wb = 0;
+        wchar_t* w = fs_win_wide(out, &wb);
+        if (!w) {
+            aether_caps_free(out, cap);
+            errno = ENOMEM;
+            return NULL;
+        }
+        BOOL ok;
+        if (is_dir) {
+            ok = CreateDirectoryW(w, NULL);
+        } else {
+            HANDLE h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                                   FILE_ATTRIBUTE_NORMAL, NULL);
+            ok = h != INVALID_HANDLE_VALUE;
+            if (ok) CloseHandle(h);
+        }
+        err = ok ? ERROR_SUCCESS : GetLastError();
+        LONG nt = ok ? 0 : fs_win_last_nt_status();
+        aether_caps_free(w, wb);
+        if (ok) {
+            char* made = (char*)string_new(out);
+            aether_caps_free(out, cap);
+            return made;
+        }
+        if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS ||
+            (err == ERROR_ACCESS_DENIED && nt == STATUS_DELETE_PENDING))
+            continue;
+        break;
+    }
+    aether_caps_free(out, cap);
+    fs_win_set_errno(err);
+    return NULL;
+}
+
 char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     errno = 0; /* fs.make_temp_*'s error reads errno: only this call's (#3817) */
     if (!dir) dir = ".";
@@ -1791,20 +1871,7 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     char* made_out = NULL;
     if (fs_temp_checked(dir, prefix, 1, &made_out)) return made_out;
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
-    /* GetTempFileNameA makes a FILE; we want a DIRECTORY. Take its unique name,
-     * delete the placeholder file, then _mkdir the same name (standard Windows
-     * file->dir idiom). Retry to close the tiny unlink/mkdir race. */
-    for (int attempt = 0; attempt < 64; attempt++) {
-        char out[MAX_PATH];
-        if (GetTempFileNameA(dir, prefix, 0, out) == 0) {
-            fs_win_set_errno(GetLastError());
-            return NULL;
-        }
-        DeleteFileA(out);
-        if (_mkdir(out) == 0) return (char*)string_new(out);
-        /* name got taken between delete and mkdir — try a fresh one */
-    }
-    return NULL;
+    return fs_win_temp_in(dir, prefix, 1);
 }
 char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     errno = 0; /* fs.make_temp_*'s error reads errno: only this call's (#3817) */
@@ -1813,13 +1880,7 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     char* made_out = NULL;
     if (fs_temp_checked(dir, prefix, 0, &made_out)) return made_out;
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
-    char out[MAX_PATH];
-    /* uUnique=0 => the file is created here, atomically; mktemp(1)'s contract. */
-    if (GetTempFileNameA(dir, prefix, 0, out) == 0) {
-        fs_win_set_errno(GetLastError());
-        return NULL;
-    }
-    return (char*)string_new(out);
+    return fs_win_temp_in(dir, prefix, 0);
 }
 /* 1 when `path` is a link itself, not what it points at: the directory
  * entry's reparse tag says so without opening anything. A link here is any
