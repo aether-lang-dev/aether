@@ -98,6 +98,60 @@ static inline int aether_win_path_into(const char* utf8, DWORD flags, wchar_t* o
     return n != 0;
 }
 
+// The final path of what `h` is open on, as GetFinalPathNameByHandleW gives
+// it with FILE_NAME_NORMALIZED | VOLUME_NAME_DOS (in the "\\?\" namespace):
+// its length, NUL not counted, in `out` (`cap` units); when `out` is too
+// small (or `cap` is 0), the units it needs, NUL counted; 0 on failure, with
+// the call's own error.
+//
+// Wine (10.0, dlls/kernelbase/file.c) asks NtQueryObject for the handle's
+// name into a buffer of MAX_PATH units, so for a file whose path is longer
+// GetFinalPathNameByHandleW fails (STATUS_BUFFER_OVERFLOW) where Windows
+// answers, and a sandbox check that verifies a handle by its final path
+// refused every long path there (#3850). Wine's NtQueryObject itself has no
+// such cap: it names a file "\??\D:\..." (or "\??\UNC\..."), and Wine's
+// final DOS path is that name with "\\?\" for "\??\". So when the call
+// fails, the name NtQueryObject gives with room for any length is taken the
+// way Wine takes it. Windows names a file "\Device\HarddiskVolumeN\...",
+// which no DOS path is made from here: there the call's failure stands.
+//
+// aether_win_nt_name_dos is that step alone: the final DOS path Wine makes
+// of an object name `name` (`units` long, no NUL needed), into `out` (`cap`
+// units), with aether_win_final_path's return. 0 for a name in no DOS
+// namespace (not "\??\...").
+static inline DWORD aether_win_nt_name_dos(const WCHAR* name, DWORD units, wchar_t* out, DWORD cap) {
+    if (!name || units < 4 || name[0] != L'\\' || name[1] != L'?' || name[2] != L'?' || name[3] != L'\\')
+        return 0;
+    DWORD rest = units - 4;
+    if (!out || cap < rest + 5) return rest + 5;
+    memcpy(out, L"\\\\?\\", 4 * sizeof(WCHAR));
+    memcpy(out + 4, name + 4, (size_t)rest * sizeof(WCHAR));
+    out[4 + rest] = L'\0';
+    return rest + 4;
+}
+
+static inline DWORD aether_win_final_path(HANDLE h, wchar_t* out, DWORD cap) {
+    DWORD n = GetFinalPathNameByHandleW(h, out, cap, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (n != 0) return n;
+    DWORD err = GetLastError();
+    typedef LONG (NTAPI * query_object_fn)(HANDLE, int, PVOID, ULONG, PULONG);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    FARPROC p = ntdll ? GetProcAddress(ntdll, "NtQueryObject") : NULL;
+    query_object_fn query;
+    memcpy(&query, &p, sizeof query);
+    // OBJECT_NAME_INFORMATION: a UNICODE_STRING, the name after it.
+    typedef struct { USHORT Length; USHORT MaximumLength; WCHAR* Buffer; } name_info;
+    ULONG size = (ULONG)sizeof(name_info) + 65536;   // any UNICODE_STRING fits
+    name_info* info = query ? (name_info*)malloc(size) : NULL;
+    ULONG used = 0;
+    DWORD result = 0;
+    if (info && query(h, 1 /* ObjectNameInformation */, info, size, &used) >= 0)
+        result = aether_win_nt_name_dos(info->Buffer, info->Length / sizeof(WCHAR), out, cap);
+    free(info);
+    if (result == 0) SetLastError(err);
+    return result;
+}
+
 // For a narrow call (fopen, _stat, FindFirstFileA) that has always been given
 // `utf8`: 1 with its long form in `out` (`cap` units) when it is at or past
 // the limit, for the wide call to be given instead; 0 otherwise, and the

@@ -1084,6 +1084,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_actor_rebirth.c \
            tests/runtime/test_mailbox_bound.c \
            tests/runtime/test_win_mutex_no_debug_info.c \
+           tests/runtime/test_win_long_path.c \
            tests/runtime/test_http_server.c \
            tests/runtime/test_http_resolver.c \
            tests/runtime/test_net_localhost.c \

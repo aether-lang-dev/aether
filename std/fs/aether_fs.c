@@ -3799,7 +3799,7 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         return aether_fs_sks_err(kind, msg);
     }
     /* GetFinalPathNameByHandleW: first call with cb=0 returns required size. */
-    DWORD need = GetFinalPathNameByHandleW(h, NULL, 0, FILE_NAME_NORMALIZED);
+    DWORD need = aether_win_final_path(h, NULL, 0);   /* past MAX_PATH on Wine too, #3850 */
     if (need == 0) {
         CloseHandle(h);
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "GetFinalPathNameByHandleW failed");
@@ -3812,7 +3812,7 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         CloseHandle(h);
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "allocation failed");
     }
-    DWORD got = GetFinalPathNameByHandleW(h, wresult, need, FILE_NAME_NORMALIZED);
+    DWORD got = aether_win_final_path(h, wresult, need);
     CloseHandle(h);
     if (got == 0 || got >= need) {
         aether_caps_free(wresult, wresult_bytes);

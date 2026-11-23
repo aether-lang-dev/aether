@@ -111,7 +111,7 @@ static int aether_sandbox_final_w(const wchar_t* p, wchar_t* out, DWORD cap) {
         return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_INVALID_NAME ||
                 e == ERROR_DIRECTORY || e == ERROR_BAD_PATHNAME) ? 0 : -1;
     }
-    DWORD n = GetFinalPathNameByHandleW(h, out, cap, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    DWORD n = aether_win_final_path(h, out, cap);   // past MAX_PATH on Wine too, #3850
     CloseHandle(h);
     return (n == 0 || n >= cap) ? -1 : 1;
 }
@@ -162,7 +162,7 @@ static wchar_t* aether_sandbox_wunprefix(wchar_t* fin) {
 // on: 1, or 0 when it has none.
 static int aether_sandbox_final_of_handle(HANDLE h, char* out, size_t out_size) {
     wchar_t fin[AETHER_SANDBOX_WPATH];
-    DWORD n = GetFinalPathNameByHandleW(h, fin, AETHER_SANDBOX_WPATH, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    DWORD n = aether_win_final_path(h, fin, AETHER_SANDBOX_WPATH);   // #3850
     if (n == 0 || n >= AETHER_SANDBOX_WPATH) return 0;
     return WideCharToMultiByte(CP_UTF8, 0, aether_sandbox_wunprefix(fin), -1, out, (int)out_size,
                                NULL, NULL) > 0;

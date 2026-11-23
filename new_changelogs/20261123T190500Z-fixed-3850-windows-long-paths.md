@@ -12,6 +12,11 @@
   path is passed exactly as before. Inside an enforce block a long path is
   resolved and matched against the grants as a short one is; the resolution
   kept 260 bytes, so a long path was refused whatever the grants said.
+  Under Wine the final path of a handle on such a path is read whole too:
+  Wine's GetFinalPathNameByHandleW reads the name into a buffer of MAX_PATH
+  characters and fails past it, so a check that verifies a handle by its
+  final path refused every long path there; the name NtQueryObject gives is
+  taken as Wine takes it instead (this is `fs.realpath` too).
   `make_temp_dir` and `make_temp_file` outside an enforce block name the
   file themselves now, as they did inside one: GetTempFileNameA, which named
   it, takes no directory past 246 characters. The names keep its shape

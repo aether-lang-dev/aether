@@ -21,11 +21,33 @@ import std.os
 import std.string
 import std.zip
 import std.sandbox
+import std.audit
 
 extern exit(code: int)
 
+// A failure says what the sandbox saw: its last denial in the audit, with
+// the path as the check resolved it, and its last check. A path that cannot
+// be resolved is refused before any grant is matched, and leaves no denial.
 fn fail(msg: string) {
     println("FAIL: ${msg}")
+    n = audit.count()
+    var i: int = n - 1
+    var shown: int = 0
+    while i >= 0 && shown == 0 {
+        cat, res, ok = audit.entry(i)
+        if ok == 0 {
+            println("  the sandbox's last denial: ${cat} ${res}")
+            shown = 1
+        }
+        i = i - 1
+    }
+    if shown == 0 {
+        println("  no denial in the sandbox audit (${n} checks): a refusal there was a path it could not resolve")
+    }
+    if n > 0 {
+        lcat, lres, lok = audit.entry(n - 1)
+        println("  its last check: ${lcat} ${lres} (allowed ${lok})")
+    }
     exit(1)
 }
 
