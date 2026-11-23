@@ -781,14 +781,20 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                     field->children[0]->type == AST_PATTERN_VARIABLE && field->children[0]->value) {
                                     var_name = field->children[0]->value;
                                 }
+                                /* A field the arm never reads is bound
+                                 * unread: -Wunused-variable under -Wall. */
+                                int field_read = arm_body &&
+                                                 codegen_tree_reads_name(arm_body, var_name);
                                 /* #3847: a box its send made in this `ptr`
-                                 * field is the handler's once bound, to give
-                                 * back with release_closure; the message's
-                                 * release gives back only one no handler
-                                 * took (message_box_slot). */
+                                 * field is the handler's once bound to a
+                                 * name the arm reads, to give back with
+                                 * release_closure; the message's release
+                                 * gives back one no handler took, bound to a
+                                 * name nothing reads among them
+                                 * (message_box_slot). */
                                 int box_slot = message_box_slot(
                                     find_message_definition(gen->program, pattern->value), field->value);
-                                if (box_slot >= 0)
+                                if (box_slot >= 0 && field_read)
                                     print_line(gen, "_pattern->_ae_boxed[%d] &= (unsigned char)~0x%xu;",
                                                box_slot / 8, 1u << (box_slot % 8));
                                 int promoted = 0;
@@ -820,10 +826,6 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                 }
                                 /* A binding a `try` body writes is volatile
                                  * (#2690). */
-                                /* A field the arm never reads is bound
-                                 * unread: -Wunused-variable under -Wall. */
-                                int field_read = arm_body &&
-                                                 codegen_tree_reads_name(arm_body, var_name);
                                 print_line(gen, field_read ? "%s %s = _pattern->%s;"
                                                            : "%s %s = _pattern->%s; (void)%s;",
                                            volatile_decl_type(try_volatile_qual_for(gen, var_name),

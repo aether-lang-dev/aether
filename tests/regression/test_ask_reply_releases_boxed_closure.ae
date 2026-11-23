@@ -1,0 +1,111 @@
+// Regression (#3847): an ask's request, a reply, and a handler that leaves a
+// field unread each give back the closure boxed into a `ptr` field.
+//
+// A closure stored into a `ptr` field is boxed and marked in the message
+// (#2890, #3847), the handler's binding takes the box, and the message's
+// release gives back a box still marked. Three paths kept it anyway:
+// - an ask to an actor that has ended was refused before its message was
+//   built, and the request, with its box, was released by no one;
+// - a reply's release was named only for a reply with a string or an `fn`
+//   field, so the box of a reply with `ptr` fields only was not given back
+//   when the asker read another field;
+// - a pattern that binds a `ptr` field the arm never reads took the box
+//   into a local nothing read or released.
+// The late reply to a timed-out ask is in
+// test_late_reply_releases_boxed_closure.ae.
+//
+// No handler here blocks, so the program runs on the cooperative scheduler
+// too (make ci-coop). The check runs where the heap count is exact
+// (mem.heap_in_use_exact): after a warm-up, some window of the same rounds
+// grows by exactly 0 (mem.steady_growth). Elsewhere the leak gates cover
+// this program.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Job { f: ptr, n: int }
+message Want { n: int }
+message Got { v: int, g: ptr }
+message WantOnly { n: int }
+message Only { g: ptr }
+message Unread { f: ptr, n: int }
+message Boom {}
+
+actor Worker {
+    state total = 0
+    receive {
+        Job(f, n) -> {
+            release_closure(f)
+            reply n
+        }
+        // The asker reads `v`: the reply's release gives back `g`.
+        Want(n) -> {
+            t = string.from_int(n)
+            reply Got { v: n, g: || { println(t) } }
+        }
+        // The asker takes `g`, the only field, and releases it.
+        WantOnly(n) -> {
+            t = string.from_int(n)
+            reply Only { g: || { println(t) } }
+        }
+        // `f` is bound and never read: the message's release gives it back.
+        Unread(f, n) -> { total = total + n }
+    }
+}
+
+// Ends on Boom: every ask after is to an actor that has ended.
+actor Fragile {
+    receive {
+        Boom() -> { panic("boom") }
+        Job(f, n) -> {
+            release_closure(f)
+            reply n
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3847: ${msg}")
+        exit(1)
+    }
+}
+
+// Each closure holds a string built at run time, so its environment is an
+// allocation of its own that the box keeps.
+fn round(w: actor_ref[Worker], dead: actor_ref[Fragile], p: string, n: int) {
+    i = 0
+    while i < n {
+        tag = string.concat(p, string.from_int(i))
+        v, err = dead ? Job { f: || { println(tag) }, n: i }
+        check(v == 0 && err != "", "an ask to an ended actor answered ${v}, \"${err}\"")
+        int got = w ? Want { n: i }
+        check(got == i, "the reply read in part gave ${got}, not ${i}")
+        g = w ? WantOnly { n: i }
+        check(g != null, "the reply with only a ptr field gave nothing")
+        release_closure(g)
+        int back = w ? Job { f: || { println(tag) }, n: i }
+        check(back == i, "the handled ask answered ${back}, not ${i}")
+        w ! Unread { f: || { println(tag) }, n: 1 }
+        i = i + 1
+    }
+    wait_for_idle()
+}
+
+main() {
+    w = spawn(Worker())
+    dead = spawn(Fragile())
+    dead ! Boom {}
+    wait_for_idle()
+    round(w, dead, "a", 20)
+    check(w.total == 20, "the unread field's handler ran ${w.total} times, not 20")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| { round(w, dead, "a", 20) }, 5)
+    check(grown == 0, "asks, replies and unread fields grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

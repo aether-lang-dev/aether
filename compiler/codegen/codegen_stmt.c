@@ -14313,15 +14313,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
                         /* Send reply back to the waiting asker via the
                          * scheduler reply slot. #2528: a reply that owns
-                         * strings or closures names its release, for the
-                         * case nobody takes it. */
-                        int reply_owns = 0;
-                        for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                            if (f->type_kind == TYPE_STRING ||
-                                (f->type_kind == TYPE_FUNCTION && f->c_type &&
-                                 strcmp(f->c_type, "_AeClosure") == 0)) { reply_owns = 1; break; }
-                        }
-                        if (reply_owns) {
+                         * anything names its release, for the case nobody
+                         * takes it; one rule with the asker's
+                         * (message_owns_fields), a box the reply made in a
+                         * `ptr` field among them (#3847). */
+                        if (message_owns_fields(gen, reply_expr->value)) {
                             fprintf(gen->output, "scheduler_reply_owned((ActorBase*)self, &_reply, sizeof(%s), (void (*)(void*))_aether_msg_release_%s); }\n",
                                     reply_expr->value, reply_expr->value);
                         } else {

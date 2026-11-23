@@ -221,10 +221,13 @@ is pinned and goes into either as it is.
 A closure goes into a `ptr` slot boxed (`box_closure(f)`, or the coercion a
 store into a `ptr` makes), the box holding a reference of its own, which
 `release_closure(p)` gives back. In a message's `ptr` field the box is the
-message's until a handler binds the field, and the handler's from then on.
-A message no handler binds it from (dropped at a dead or released actor or a
-full mailbox, refused by `try_send`, sent to a null reference, or handled
-by an arm that leaves the field unbound) gives the box back itself (#3847).
+message's until a handler binds the field to a name the arm reads, and the
+handler's from then on. A message no handler takes it from (dropped at a
+dead or released actor or a full mailbox, refused by `try_send`, an ask to
+an actor that has ended, sent to a null reference, a reply the asker reads
+another field of or that comes after its ask timed out, or handled by an arm
+that leaves the field unbound or never reads its binding) gives the box back
+itself (#3847).
 
 A function that keeps a `ptr` parameter (stores it where it outlives the
 call, returns it, or passes it to another keeping parameter) declares it

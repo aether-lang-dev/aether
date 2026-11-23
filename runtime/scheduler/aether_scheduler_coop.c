@@ -820,8 +820,12 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     if (!status) status = &why_dummy;
     *status = AETHER_ASK_DEAD;
     if (!target || !msg_data) return NULL;
-    /* A dead actor answers nothing: no message, no wait (#3151). */
-    if (atomic_load_explicit(&target->dead, memory_order_relaxed)) return NULL;
+    /* A dead actor answers nothing: no message, no wait (#3151). What the
+     * message holds is given back (#3847). */
+    if (atomic_load_explicit(&target->dead, memory_order_relaxed)) {
+        aether_ask_message_unsent(target, msg_data);
+        return NULL;
+    }
 
     // Allocate reply slot on stack (single-threaded, no race)
     ActorReplySlot slot = {0};

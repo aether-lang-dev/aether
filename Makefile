@@ -4027,6 +4027,7 @@ ci-coop: clean compiler ae
 	           tests/regression/test_owned_panic_unwind.ae \
 	           tests/regression/test_step_panic_drop.ae \
 	           tests/regression/test_step_drop_context.ae \
+	           tests/regression/test_ask_reply_releases_boxed_closure.ae \
 	           examples/01-language/01-hello.ae; do \
 		printf "  %-50s " "$$src"; \
 		if AETHER_HOME="" ./$(BUILD_DIR)/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \

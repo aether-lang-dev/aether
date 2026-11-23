@@ -5480,13 +5480,18 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     if (!status) status = &why_dummy;
     *status = AETHER_ASK_DEAD;
     if (!target || !msg_data) return NULL;
-    /* A dead actor answers nothing: no message, no wait (#3151). */
-    if (atomic_load_explicit(&target->dead, memory_order_acquire)) return NULL;
+    /* A dead actor answers nothing: no message, no wait (#3151). What the
+     * message holds is given back (#3847). */
+    if (atomic_load_explicit(&target->dead, memory_order_acquire)) {
+        aether_ask_message_unsent(target, msg_data);
+        return NULL;
+    }
 
     ActorReplySlot* slot = reply_slot_lend();
     if (!slot) {
         /* The script gets the error; a library call ends at its next safe
          * point with AETHER_OUT_OF_MEMORY (#2956). */
+        aether_ask_message_unsent(target, msg_data);
         aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         *status = AETHER_ASK_NO_MEMORY;
         return NULL;

@@ -14523,21 +14523,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int timeout_ms = ask_timeout_ms(expr);
 
                         /* #2528: the reply's release, one rule for both
-                         * paths: a reply message that owns strings or
-                         * closures releases what the asker does not take. */
+                         * paths and with the replier's (message_owns_fields):
+                         * a reply message that owns anything, a box it made
+                         * in a `ptr` field among them (#3847), releases what
+                         * the asker does not take. */
                         const char* reply_release = "NULL";
-                        if (reply_msg_name) {
-                            MessageDef* rdef = lookup_message(gen->message_registry, reply_msg_name);
-                            for (MessageFieldDef* f = rdef ? rdef->fields : NULL; f; f = f->next) {
-                                if (f->type_kind == TYPE_STRING ||
-                                    (f->type_kind == TYPE_FUNCTION && f->c_type &&
-                                     strcmp(f->c_type, "_AeClosure") == 0)) {
-                                    reply_release = cg_internf(
-                                        "(void (*)(void*))_aether_msg_release_%s", reply_msg_name);
-                                    break;
-                                }
-                            }
-                        }
+                        if (reply_msg_name && message_owns_fields(gen, reply_msg_name))
+                            reply_release = cg_internf("(void (*)(void*))_aether_msg_release_%s",
+                                                       reply_msg_name);
 
                         /* The target first, in source order, before the
                          * request takes anything, as a send reads it

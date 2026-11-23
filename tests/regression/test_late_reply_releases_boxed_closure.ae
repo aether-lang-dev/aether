@@ -1,0 +1,59 @@
+// Regression (#3847): a reply that comes after its ask timed out gives back
+// the closure it boxed into a `ptr` field.
+//
+// A closure stored into a `ptr` field of a reply is boxed and marked in the
+// reply (#2890, #3847), and a reply nobody takes is given back through its
+// release (#2528). That release was named only for a reply with a string or
+// an `fn` field, so a reply with `ptr` fields only, arriving after the
+// asker's timeout (5 s), was freed with its box still in it, and the box and
+// its reference to the closure's environment leaked.
+//
+// One late reply a round, so a round takes the timeout. The check runs where
+// the heap count is exact (mem.heap_in_use_exact): after a warm-up, some run
+// of the same round grows by exactly 0 (mem.steady_growth). Elsewhere the
+// leak gates cover this program.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Slow { n: int }
+message Only { g: ptr }
+
+actor Server {
+    receive {
+        // Replies after the asker's timeout.
+        Slow(n) -> {
+            t = string.from_int(n)
+            sleep(5300)
+            reply Only { g: || { println(t) } }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3847: ${msg}")
+        exit(1)
+    }
+}
+
+fn late(s: actor_ref[Server], n: int) {
+    g, err = s ? Slow { n: n }
+    check(g == null && err == "ask timed out after 5000 ms", "the slow ask said \"${err}\"")
+    // The late reply arrives meanwhile, and is given back.
+    wait_for_idle()
+}
+
+main() {
+    s = spawn(Server())
+    late(s, 1)
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| { late(s, 2) }, 3)
+    check(grown == 0, "late replies grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

@@ -9,7 +9,7 @@
 // to an actor that has ended (or the messages queued to it when it ended),
 // to one released with messages still queued, to one with no handler for
 // the type, into a full bounded mailbox (`!`, a refused try_send, a failed
-// ask), and a try_send to a dead actor. The send now marks each box it makes
+// ask), and a try_send or an ask to a dead actor. The send now marks each box it makes
 // in the message, and the message's release gives back what is still marked;
 // the handler's binding takes the box, so a handled one is given back once,
 // by the handler.
@@ -158,6 +158,9 @@ fn round(p: string) {
     wait_for_idle()
     closures(f, p, 3)
     refused(f, p, "the actor is dead")
+    dtag = string.concat(p, "-dead")
+    dv, derr = f ? Ask { f: || { println(dtag) }, n: 1 }
+    check(dv == 0 && derr != "", "an ask to the dead actor answered ${dv}, \"${derr}\"")
     wait_for_idle()
     let fp: ptr = f
     scheduler_release_actor(fp)
