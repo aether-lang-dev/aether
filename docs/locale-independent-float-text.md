@@ -226,11 +226,12 @@ The probe also demonstrated the bug live: with the ambient locale set to German,
 MINGW64's mingw-w64 15 links is its own, `(float)_strtod_l(...)`, which rounds twice: decimal text
 just above a float tie came out one ulp low, and the text just under `FLT_MAX` plus half an ulp
 overflowed. mingw-w64 12 (the msvcrt WinLibs GCC 14.2) has none, so a runtime built with it did not
-link (`undefined reference to __imp__strtof_l`). On msvcrt under mingw-w64 (`__MINGW32__` without
-`_UCRT`), `aether_c_strtof` now parses with mingw-w64's correctly rounded `__mingw_strtof`; that
-parser reads the ambient radix and msvcrt has no per-thread locale, so under a radix other than
-`.` it parses a copy of the C-locale text with the `.` spelt as that radix. UCRT and MSVC keep
-`_strtof_l`.
+link (`undefined reference to __imp__strtof_l`). msvcrt.dll's own `_strtod_l` misrounds doubles
+next to a tie as well. On msvcrt under mingw-w64 (`__MINGW32__` without `_UCRT`),
+`aether_c_strtof` and `aether_c_strtod` now parse with mingw-w64's correctly rounded
+`__mingw_strtof` and `__mingw_strtod`; those parsers read the ambient radix and msvcrt has no
+per-thread locale, so under a radix other than `.` they parse a copy of the C-locale text with the
+`.` spelt as that radix. UCRT and MSVC keep `_strtof_l` and `_strtod_l`.
 
 Windows locale-name detail for the §4.3 test's candidate list: `setlocale(LC_ALL, "de-DE")`
 succeeds on UCRT64 but fails on MINGW64 (msvcrt), which needs `"German_Germany.1252"`. Try
