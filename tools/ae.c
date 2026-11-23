@@ -4410,30 +4410,70 @@ static const char* bracket_depth_flags(const char* cc) {
  * through ae's own content hash: the number is compiled into ae. */
 #define AETHER_GCC_INLINE_UNIT_GROWTH 100
 #define AETHER_GCC_INLINE_CFLAGS " --param inline-unit-growth=" AE_DEPTH_TEXT(AETHER_GCC_INLINE_UNIT_GROWTH)
-static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
+/* #3848: GCC (12 and later, at -O1 and up) records the false edge of a float
+ * comparison `a > n` as the relation `a <= n`, which a NaN breaks, and
+ * chains such relations: from `a > n` and `n > b` both false, with n a NaN,
+ * it folds `a > b` to false for a = 1, b = 0. A program's float comparisons
+ * then answer wrong (std.lanes' pick_max returned the min). With no relation
+ * recorded in any block there is nothing to chain: the fold is gone at its
+ * source, for generated C and, through the Makefile, the runtime's own C.
+ * It cost nothing measurable on bench-core, where steering every float
+ * comparison through the quiet builtins cost 2x on a float-min chain. The
+ * parameter is GCC 12's; a GCC without it predates the optimiser it fixes. */
+#define AETHER_GCC_RELATION_CFLAGS " --param relation-block-limit=0"
+static const char* const k_gcc_flags_none = "";
+static const char* const k_gcc_flags_inline = AETHER_GCC_INLINE_CFLAGS;
+static const char* const k_gcc_flags_relation = AETHER_GCC_RELATION_CFLAGS;
+static const char* const k_gcc_flags_both = AETHER_GCC_INLINE_CFLAGS AETHER_GCC_RELATION_CFLAGS;
+
+/* What GCC `cc` takes, asked once and kept by its command: bit 1, the
+ * inlining budget (it is GCC); bit 2, the relation limit as well. One probe
+ * compile asks both, so a cold cache pays no more than it did for the budget
+ * alone; only a GCC older than the relation limit asks the budget again on
+ * its own. */
+static int gcc_tuning_support(const char* cc) {
     static char* asked = NULL;
-    static const char* answer = "";
-    if (!optimize || g_coverage || g_size || !cc || !*cc) return "";
+    static int answer = 0;
+    if (!cc || !*cc) return 0;
+    if (asked && strcmp(asked, cc) == 0) return answer;
+    free(asked);
+    asked = strdup(cc);
+    answer = 0;
+    /* Clang defines __GNUC__ too, and so does a compiler built on it (icx,
+     * zig cc): __clang__ tells them apart. The control compile defines
+     * AE_PROBE_ANY, so it passes on any compiler. */
+    static const char* const is_gcc =
+        "#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
+        "#error not GCC\n"
+        "#endif\n"
+        "extern int ae_inline_probe;\nint ae_inline_probe;\n";
+    if (cc_probe_takes(cc, "", k_gcc_flags_both, "ae_inline_probe", is_gcc) == 1)
+        answer = 3;
+    else if (cc_probe_takes(cc, "", AETHER_GCC_INLINE_CFLAGS, "ae_inline_probe", is_gcc) == 1)
+        answer = 1;
+    return answer;
+}
+
+/* The GCC flags a compile of generated C takes: the inlining budget (#3779)
+ * on an optimising build, unless --coverage or --size, and unless the user
+ * names a budget; the relation limit (#3848) on every build GCC optimises,
+ * whatever the user names, since without it the program's float comparisons
+ * can answer wrong. */
+static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
+    bool optimised = optimize || g_size;
+    if (!optimised || !cc || !*cc) return k_gcc_flags_none;
+    int support = gcc_tuning_support(cc);
     /* A budget the user names wins, wherever it sits. In the cflags it would
      * win anyway, coming after this one; in the $AE_CC / $CC command it sits
      * ahead of every flag, and `AE_CC="gcc --param inline-unit-growth=50"`
      * got 100. So when either names one, ae gives none. */
-    if (strstr(cc, "inline-unit-growth") || strstr(get_cflags(), "inline-unit-growth"))
-        return "";
-    if (asked && strcmp(asked, cc) == 0) return answer;
-    free(asked);
-    asked = strdup(cc);
-    answer = "";
-    /* Clang defines __GNUC__ too, and so does a compiler built on it (icx,
-     * zig cc): __clang__ tells them apart. The control compile defines
-     * AE_PROBE_ANY, so it passes on any compiler. */
-    if (cc_probe_takes(cc, "", AETHER_GCC_INLINE_CFLAGS, "ae_inline_probe",
-                       "#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
-                       "#error not GCC\n"
-                       "#endif\n"
-                       "extern int ae_inline_probe;\nint ae_inline_probe;\n") == 1)
-        answer = AETHER_GCC_INLINE_CFLAGS;
-    return answer;
+    bool budget = optimize && !g_coverage && !g_size && (support & 1) &&
+                  !strstr(cc, "inline-unit-growth") && !strstr(get_cflags(), "inline-unit-growth");
+    bool relation = (support & 2) != 0;
+    if (budget && relation) return k_gcc_flags_both;
+    if (budget) return k_gcc_flags_inline;
+    if (relation) return k_gcc_flags_relation;
+    return k_gcc_flags_none;
 }
 
 static char* ae_read_file(const char* path, long* out_len);

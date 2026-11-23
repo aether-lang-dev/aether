@@ -929,6 +929,18 @@ LDFLAGS =
 ifeq ($(HARDEN),1)
 CFLAGS += -fstack-protector-all -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security
 endif
+
+# #3848: GCC 12 and later record the false edge of a float comparison
+# `a > n` as the relation `a <= n`, which a NaN breaks, and fold later
+# comparisons from the chain: wrong answers at -O1 and up. ae passes
+# `--param relation-block-limit=0` to every optimising GCC compile of a
+# program (tools/ae.c, gcc_inline_budget_flags); the runtime and std C built
+# here take it too. Only where $(CC) is GCC and takes it: Clang folds no
+# such chain, and an older GCC predates the optimiser and the parameter.
+GCC_RELATION_LIMIT := $(shell if $(CC) -dM -E -x c /dev/null 2>/dev/null | grep -q __clang__; then :; \
+    elif echo 'int ae_relation_probe;' | $(CC) --param relation-block-limit=0 -Werror -x c -fsyntax-only - \
+    >/dev/null 2>&1; then echo '--param relation-block-limit=0'; fi)
+CFLAGS += $(GCC_RELATION_LIMIT)
 ifneq ($(FREEBSD),1)
 ifneq ($(WINDOWS),1)
 ifneq ($(PLATFORM),wasm)

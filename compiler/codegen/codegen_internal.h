@@ -534,11 +534,6 @@ int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNod
  * one in a floating type, NULL for any other type (codegen_expr.c). */
 int emit_float_rem(CodeGenerator* gen, ASTNode* l, const char* l_text, ASTNode* r, const Type* t);
 const char* float_rem_macro(const Type* t);
-/* #3848: a float `<`, `<=`, `>` or `>=` as its prelude macro (_AE_FLT),
- * which GCC does not chain into a wrong fold on a NaN (codegen_expr.c). */
-int emit_float_order(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
-                     const Type* l_type, ASTNode* r);
-const char* float_order_macro(const char* op);
 /* #3527: the conversion an interpolation, print or println writes a value
  * of a type with (codegen_expr.c); PF_NONE for a type none writes, which
  * print_fmt_refuse reports as a compile error naming it. */
