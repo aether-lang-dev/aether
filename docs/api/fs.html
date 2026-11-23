@@ -413,13 +413,13 @@
     </div>
     <div class="function" id="make_temp_dir" data-name="make_temp_dir">
       <h3 class="function-name">make_temp_dir <span class="kind">fn</span></h3>
-      <pre class="usage"><code>make_temp_dir(dir, prefix) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <pre class="usage"><code>make_temp_dir(dir, prefix) <span class="arrow">-&gt;</span> (string, _1, string)</code></pre>
       <p class="signature"><span class="sig-params">dir: string, prefix: string</span></p>
       <p class="doc">make_temp_dir(dir, prefix) — atomically create and return a uniquely-named temp DIRECTORY under `dir`, name starting `prefix` (mkdtemp — no race). The caller owns it: clean up with remove_tree(). Returns (path, &quot;&quot;) or (&quot;&quot;, err). Empty `dir` → the OS temp dir (os.temp_dir); empty `prefix` → &quot;ae&quot;.</p>
     </div>
     <div class="function" id="make_temp_file" data-name="make_temp_file">
       <h3 class="function-name">make_temp_file <span class="kind">fn</span></h3>
-      <pre class="usage"><code>make_temp_file(dir, prefix) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <pre class="usage"><code>make_temp_file(dir, prefix) <span class="arrow">-&gt;</span> (string, _1, string)</code></pre>
       <p class="signature"><span class="sig-params">dir: string, prefix: string</span></p>
       <p class="doc">make_temp_file(dir, prefix) — atomically create and return a uniquely-named temp FILE under `dir` (mkstemp — created O_EXCL, no race). The caller owns it: delete() when done. Returns (path, &quot;&quot;) or (&quot;&quot;, err).</p>
     </div>
