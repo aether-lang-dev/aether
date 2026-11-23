@@ -1,0 +1,9 @@
+// The program's only lane type is inside a function type: an extern taking a
+// `fn(f32x4) -> f32x4` callback. Its C names AeF32x4 in the extern's
+// prototype, so the lane block must be emitted though no value of the
+// program's own is a lane (#3839's review). Only compiled to C, not linked.
+extern apply_lanes(cb: fn(f32x4) -> f32x4) -> int
+
+main() {
+    println("fn type ok")
+}

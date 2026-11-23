@@ -29,6 +29,17 @@ main() {
         println("FAIL: .len of a view past 2^31 did not panic")
         exit(1)
     }
+    // A match on list patterns counts the length in 64 bits too (#3843's
+    // review): cut to an int it was negative, and neither arm matched.
+    // Only the head is read, which is one of the 16 real bytes.
+    which = match v {
+        [] -> "empty"
+        [h | t] -> "nonempty"
+    }
+    if which != "nonempty" {
+        println("FAIL: a match on a view past 2^31 took '${which}'")
+        exit(1)
+    }
     small = (p as byte[])[0..16]
     if small.len != 16 {
         println("FAIL: a small view's .len is ${small.len}")

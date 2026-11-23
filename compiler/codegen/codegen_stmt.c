@@ -12755,7 +12755,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "AetherSlice _match_subj = ");
                     generate_expression(gen, match_expr);
                     fprintf(gen->output, ";\n");
-                    print_line(gen, "int %s = (int)aether_slice_len(_match_subj);", len_name);
+                    print_line(gen, "int64_t %s = aether_slice_len(_match_subj);   /* #3843: no cut to int */", len_name);
                     ASTNode* subj = create_ast_node(AST_IDENTIFIER, "_match_subj", match_expr->line,
                                                     match_expr->column);
                     if (subj) {

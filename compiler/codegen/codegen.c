@@ -9083,6 +9083,12 @@ static int type_has_lane(const Type* t, int depth) {
     if (type_has_lane(t->element_type, depth + 1)) return 1;
     for (int i = 0; t->kind == TYPE_TUPLE && i < t->tuple_count; i++)
         if (type_has_lane(t->tuple_types[i], depth + 1)) return 1;
+    /* A function type's parameters and result (#3839's review): an extern
+     * taking a `fn(f32x4) -> f32x4` callback names AeF32x4 in its C, so its
+     * program needs the lane block though no value of its own is a lane. */
+    for (int i = 0; t->param_types && i < t->param_count; i++)
+        if (type_has_lane(t->param_types[i], depth + 1)) return 1;
+    if (type_has_lane(t->return_type, depth + 1)) return 1;
     return 0;
 }
 

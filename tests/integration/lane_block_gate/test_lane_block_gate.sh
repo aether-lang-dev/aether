@@ -46,7 +46,7 @@ elif has_block plain.c; then
     fail "plain.ae uses no lanes, but its C carries the lane block"
 fi
 
-for p in typed helper_only; do
+for p in typed helper_only fn_type_only; do
     if ! "$AETHERC" "$p.ae" "$p.c" > "$p.log" 2>&1; then
         sed 's/^/        /' "$p.log" | head -5
         fail "$p.ae did not compile"

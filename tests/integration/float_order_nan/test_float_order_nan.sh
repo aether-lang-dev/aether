@@ -6,8 +6,8 @@
 # `n > b` both false, with n a NaN, it folded `a > b` to false. The
 # lane_minmax test's pick_max(pa, pb), `value(pa) > value(pb)` over floats
 # read out of lanes, returned what pick_min returns for NaNs, the zeros
-# and +-1. The generated C now compares floats through the quiet builtins
-# (_AE_FLT and the rest), which GCC chains no relation for. This builds
+# and +-1. ae now gives GCC `--param relation-block-limit=0`, so it records
+# no relation to chain (gcc_relation_limit checks the flag). This builds
 # with `ae build` (-O2) and checks, against integer arithmetic on the bits:
 #
 #   1. lane_minmax's reductions loop as #3848 found it: pick_min / pick_max
