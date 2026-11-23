@@ -1,0 +1,123 @@
+// Regression (#3827): an ask whose target panics leaks nothing of the
+// request it was building.
+//
+// An ask built its request first (its strings copied, its shared fields
+// published) and only then read its target, so a target that panicked (an
+// index past a fixed array's end, a call that panics) left the copies to no
+// one, one leak per ask. An ask now reads its target first, before any field
+// is taken, as a send does (test_send_target_panic_releases_fields): its
+// panic finds nothing taken. A null target is found after the fields are
+// taken, and the request is released before that panic, as a send's is.
+//
+// Each ask carries a string built at run time, and one the handler received.
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same asks grows by exactly 0
+// (mem.steady_growth). Elsewhere the leak gates cover this program.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Query { text: string, kept: string, n: int }
+message Answer { v: int }
+message Peers { a: actor_ref, b: actor_ref }
+message Go { text: string, i: int }
+message Get {}
+message Seen { v: int }
+
+actor Echo {
+    receive {
+        Query(text, kept, n) -> {
+            reply Answer { v: n + string.length(text) + string.length(kept) }
+        }
+    }
+}
+
+// A target that is never reached: the call panics first.
+fn pick(i: int) -> actor_ref {
+    if i >= 0 {
+        panic("pick: no peer ${i}")
+    }
+    return null
+}
+
+actor Asker {
+    state peers: actor_ref[2]
+    state next: actor_ref = null
+    state caught = 0
+    state wrong = 0
+    receive {
+        Peers(a, b) -> {
+            peers[0] = a
+            peers[1] = b
+        }
+        Go(text, i) -> {
+            built = string.concat(string.from_int(i), "-q")
+            // An index past the end of the actor list panics in the target.
+            try {
+                int v = peers[2 + i % 3] ? Query { text: built, kept: text, n: i }
+                wrong = wrong + 1 + v
+            } catch e {
+                caught = caught + 1
+            }
+            // A call that panics as the target.
+            try {
+                int v = pick(i) ? Query { text: built, kept: text, n: i }
+                wrong = wrong + 1 + v
+            } catch e {
+                caught = caught + 1
+            }
+            // A null target: the fields are taken, then released.
+            try {
+                int v = next ? Query { text: built, kept: text, n: i }
+                wrong = wrong + 1 + v
+            } catch e {
+                caught = caught + 1
+            }
+            // One that reaches its target still answers.
+            int v = peers[i % 2] ? Query { text: built, kept: text, n: i }
+            if v != i + string.length(built) + string.length(text) { wrong = wrong + 1 }
+        }
+        Get() -> {
+            v = caught * 1000 + wrong
+            caught = 0
+            wrong = 0
+            reply Seen { v: v }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3827: ${msg}")
+        exit(1)
+    }
+}
+
+fn round(asker: actor_ref[Asker], n: int) -> int {
+    i = 0
+    while i < n {
+        asker ! Go { text: string.concat("t", string.from_int(i)), i: i }
+        i = i + 1
+    }
+    wait_for_idle()
+    int v = asker ? Get {}
+    return v
+}
+
+main() {
+    asker = spawn(Asker())
+    asker ! Peers { a: spawn(Echo()), b: spawn(Echo()) }
+    got = round(asker, 50)
+    check(got == 150000, "caught*1000 + wrong = ${got}, want 150000")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            round(asker, 50)
+        }, 5)
+    check(grown == 0, "asks whose target panicked grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

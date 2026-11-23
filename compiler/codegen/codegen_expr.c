@@ -6310,11 +6310,12 @@ static void emit_send_target_why(CodeGenerator* gen, ASTNode* target, const char
     fprintf(gen->output, " \":%d:%d\"", target->line, target->column);
 }
 
-static void emit_send_target(CodeGenerator* gen, ASTNode* target, const char* cast_type,
-                             const char* op) {
-    fprintf(gen->output, "(%s)_aether_send_target(", cast_type);
-    emit_send_target_value(gen, target);
-    fprintf(gen->output, ", ");
+/* The target a send or an ask (`op`) read into `var` (emit_send_target_value,
+ * before the message takes any field, #3827), as the actor it sends to: a
+ * null one panics here, by name and place (#3172). */
+static void emit_send_target_read(CodeGenerator* gen, const char* var, ASTNode* target,
+                                  const char* op) {
+    fprintf(gen->output, "(ActorBase*)_aether_send_target(%s, ", var);
     emit_send_target_why(gen, target, op);
     fprintf(gen->output, ")");
 }
@@ -14245,8 +14246,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * (its handler reads none). */
                         int no_fields = msg_def->fields == NULL;
                         if (single_int || no_fields) {
-                            // Single-field inline: value stored in payload_int (no malloc)
-                            fprintf(gen->output, "{ Message _imsg = {%d, 0, ", msg_def->message_id);
+                            /* Single-field inline: value stored in payload_int
+                             * (no malloc). The target is read first, as on the
+                             * heap path below (#3827): a closure boxed into a
+                             * `ptr` field is a take, and a target that panics
+                             * after it left the box to no one. */
+                            fprintf(gen->output, "{ void* _ae_to = ");
+                            emit_send_target_value(gen, target);
+                            fprintf(gen->output, "; Message _imsg = {%d, 0, ", msg_def->message_id);
                             if (no_fields) fprintf(gen->output, "0");
                             for (int i = 0; i < message->child_count; i++) {
                                 ASTNode* field_init = message->children[i];
@@ -14267,19 +14274,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
                             if (try_var) {
                                 fprintf(gen->output, "%s = scheduler_try_send(", try_var);
-                                emit_send_target(gen, target, "ActorBase*", "send");
+                                emit_send_target_read(gen, "_ae_to", target, "send");
                                 fprintf(gen->output, ", _imsg); }");
                             } else if (gen->in_main_loop) {
                                 fprintf(gen->output, "scheduler_send_batch_add(");
-                                emit_send_target(gen, target, "ActorBase*", "send");
+                                emit_send_target_read(gen, "_ae_to", target, "send");
                                 fprintf(gen->output, ", _imsg); }");
                             } else if (gen->current_actor == NULL) {
                                 fprintf(gen->output, "scheduler_send_remote(");
-                                emit_send_target(gen, target, "ActorBase*", "send");
+                                emit_send_target_read(gen, "_ae_to", target, "send");
                                 fprintf(gen->output, ", _imsg, aether_core_id_get()); }");
                             } else {
                                 fprintf(gen->output, "ActorBase* _send_target = ");
-                                emit_send_target(gen, target, "ActorBase*", "send");
+                                emit_send_target_read(gen, "_ae_to", target, "send");
                                 fprintf(gen->output, "; ");
                                 fprintf(gen->output, "{ int _cid = aether_core_id_get(); if (_cid >= 0 && _cid == _send_target->assigned_core) { ");
                                 fprintf(gen->output, "scheduler_send_local(_send_target, _imsg); } else { ");
@@ -14370,9 +14377,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             else
                                 fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
                                                                        : "aether_send_message(");
-                            fprintf(gen->output, "_aether_send_target(_ae_to, ");
-                            emit_send_target_why(gen, target, "send");
-                            fprintf(gen->output, "), &_msg, sizeof(%s)); }", message->value);
+                            emit_send_target_read(gen, "_ae_to", target, "send");
+                            fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
                         }
                     } else {
                         fprintf(gen->output, "/* ERROR: unknown message type %s */", message->value ? message->value : "<?>");
@@ -14468,10 +14474,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
 
+                        /* The target first, in source order, before the
+                         * request takes anything, as a send reads it
+                         * (#3827): a target can panic (an index past a
+                         * fixed array's end, a call), and a panic there
+                         * once found the request's strings copied and its
+                         * shared fields published, and left them to no
+                         * one. A null target is found once the fields are
+                         * taken, and the request is released before that
+                         * panic (#3847), on both paths. */
+                        int ask_owns = message_owns_fields(gen, message->value);
+
                         // Emit the ask expression with GCC/MSVC guards
                         fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
                         // GCC/Clang: statement expression
-                        fprintf(gen->output, "({ %s _msg = { ._message_id = %d",
+                        fprintf(gen->output, "({ void* _ask_to = ");
+                        emit_send_target_value(gen, target);
+                        fprintf(gen->output, "; %s _msg = { ._message_id = %d",
                                 message->value, msg_def->message_id);
 
                         emit_message_field_inits(gen, message, msg_def, 0);
@@ -14493,9 +14512,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
                         emit_message_publishes(gen, message, "_msg", NULL);
+                        if (ask_owns)
+                            fprintf(gen->output, "if (!_ask_to) _aether_msg_release_%s(&_msg); ",
+                                    message->value);
 
                         fprintf(gen->output, "void* _ask_r = scheduler_ask_message_status(");
-                        emit_send_target(gen, target, "ActorBase*", "ask");
+                        emit_send_target_read(gen, "_ask_to", target, "ask");
                         fprintf(gen->output, ", &_msg, sizeof(%s), %d, %s); ", message->value, timeout_ms,
                                 ask_status);
 
@@ -14533,29 +14555,43 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * zeroed compound literal of its type (block
                          * lifetime) and returns it, read here as that type:
                          * the same value and the same release as the GCC
-                         * path (#2528). */
+                         * path (#2528). The parts run in order, in a
+                         * sequence (the helper's arguments would run in any
+                         * order): the target, then the request, then the
+                         * request's release when the target is null. */
                         gen->ask_temp_counter++;
-                        fprintf(gen->output, "(*(%s*)_aether_ask_helper(", c_type);
-                        emit_send_target(gen, target, "ActorBase*", "ask");
+                        TempSeq s;
+                        seq_open_ordered(gen, &s, 1);
+                        const char* to = seq_let(gen, &s, "void*", "_ae_at");
+                        emit_send_target_value(gen, target);
                         /* Its strings are copies of its own, made in the
                          * literal (#466): no statement follows it here. */
-                        if (message_has_array_fields(gen, message) || message_needs_publish(gen, message)) {
+                        const char* mv = NULL;
+                        if (ask_owns || message_has_array_fields(gen, message) ||
+                            message_needs_publish(gen, message)) {
                             /* Its arrays are filled and its shared fields
-                             * published once it exists, so the message is a
-                             * temporary, not a literal. */
-                            TempSeq s;
-                            fprintf(gen->output, ", ");
-                            seq_open(gen, &s);
-                            const char* mv = seq_let(gen, &s, message->value, "_ae_am");
+                             * published once it exists, and a null target
+                             * releases it, so the message is a temporary,
+                             * not a literal. */
+                            seq_next(gen, &s);
+                            mv = seq_let(gen, &s, message->value, "_ae_am");
                             fprintf(gen->output, "(%s){ ._message_id = %d", message->value,
                                     msg_def->message_id);
                             emit_message_field_inits(gen, message, msg_def, 1);
                             fprintf(gen->output, " }");
                             emit_message_array_fills(gen, message, mv, &s);
                             emit_message_publishes(gen, message, mv, &s);
-                            seq_next(gen, &s);
-                            fprintf(gen->output, "&%s", mv);
-                            seq_close(gen, &s);
+                            if (ask_owns) {
+                                seq_next(gen, &s);
+                                fprintf(gen->output, "(%s ? (void)0 : _aether_msg_release_%s(&%s))", to,
+                                        message->value, mv);
+                            }
+                        }
+                        seq_next(gen, &s);
+                        fprintf(gen->output, "(*(%s*)_aether_ask_helper(", c_type);
+                        emit_send_target_read(gen, to, target, "ask");
+                        if (mv) {
+                            fprintf(gen->output, ", &%s", mv);
                         } else {
                             fprintf(gen->output, ", &(%s){ ._message_id = %d",
                                     message->value, msg_def->message_id);
@@ -14570,6 +14606,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "0, sizeof(%s), NULL, (void*)&(%s){0}, %s))", c_type, c_type,
                                     ask_status);
                         }
+                        seq_close(gen, &s);
                         fprintf(gen->output, "\n#endif\n");
                     } else {
                         fprintf(gen->output, "/* ERROR: unknown message type %s */", message->value ? message->value : "<?>");
