@@ -151,8 +151,7 @@ tests/integration/heap_tracker_return_escape_no_leak/
 tests/integration/http_actor_mode_release/
 tests/integration/http_tls_handshake_timeout/
 tests/integration/http_server_hook_state/
-tests/integration/idirafter_program_list/brew/
-tests/integration/idirafter_program_list/case/
+tests/integration/idirafter_program_list/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
 tests/integration/http_client_custom_ca/
