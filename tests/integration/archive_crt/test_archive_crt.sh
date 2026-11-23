@@ -92,24 +92,26 @@ else
     done_what="the record says '${crt:-none}'"
 fi
 
-# 1b. Relinking ae leaves the record as it is: make, told ae is new (-W,
-# which changes no file), does not run the record's recipe, whose last line
-# says "C runtime of libaether.a". First made up to date as it is (the
-# flags stamp's recipe runs every time and changes nothing when the flags
-# are the same).
-exe=""
-[ -f "$ROOT/build/ae.exe" ] && exe=".exe"
+# 1b. Relinking ae leaves the record as it is: in make's own reading of the
+# rule (-p prints it; -n -q run nothing), ae is an order-only prerequisite
+# of build/libaether.crt, after the `|`, so a newer ae does not remake the
+# record of an archive that was not rebuilt. Read, not run: this test runs
+# beside others that link against the tree's archive, and a make run here
+# under flags other than the tree's (a sanitizer sweep, CC=clang) would
+# rebuild the archive under them.
 MAKE_CMD="$(command -v gmake 2>/dev/null || command -v make 2>/dev/null)"
-if [ -n "$MAKE_CMD" ] && [ -f "$rec" ] &&
-   (cd "$ROOT" && "$MAKE_CMD" -s build/libaether.crt) > "$TMP/make0.log" 2>&1; then
-    (cd "$ROOT" && "$MAKE_CMD" -s -W "build/ae$exe" build/libaether.crt) > "$TMP/make1.log" 2>&1
-    if grep -q "C runtime of libaether.a" "$TMP/make1.log"; then
-        fail "a relink of ae rewrites build/libaether.crt, the record of an archive that is not rebuilt"
-    else
-        done_what="$done_what; relinking ae leaves it as it is"
-    fi
+crt_rule=""
+[ -n "$MAKE_CMD" ] &&
+    crt_rule="$(cd "$ROOT" && "$MAKE_CMD" -pnq build/libaether.crt 2>/dev/null |
+                grep -m1 '^build/libaether\.crt:')"
+if [ -z "$crt_rule" ]; then
+    echo "  [SKIP] $NAME: step 1b: no make, or make does not print the rule for build/libaether.crt"
+elif printf '%s\n' "${crt_rule%%|*}" | grep -q 'build/ae\(\.exe\)\{0,1\}\( \|$\)'; then
+    fail "build/libaether.crt depends on build/ae, so a relink of ae rewrites the record of an archive that is not rebuilt: $crt_rule"
+elif ! printf '%s\n' "$crt_rule" | grep -q '|.*build/ae'; then
+    fail "build/libaether.crt does not name build/ae at all, which writes its 'cc' line: $crt_rule"
 else
-    echo "  [SKIP] $NAME: step 1b: no make, or build/libaether.crt could not be brought up to date"
+    done_what="$done_what; relinking ae leaves it as it is"
 fi
 
 printf 'main() {\n    println("crt ok")\n}\n' > "$TMP/hello.ae"

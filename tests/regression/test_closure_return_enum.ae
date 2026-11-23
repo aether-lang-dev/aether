@@ -1,0 +1,32 @@
+// Regression (review of #3820): a closure that returns an enum compiles and
+// runs.
+//
+// The check that a closure's returns are one kind of value compared the
+// value against the closure's C return type, which for an enum is the
+// enum's own name ("Color"). Narrowed to fire on a number where the closure
+// returns something that is not one, it took an enum (a number) returned
+// from a closure spelled "Color" (not a C number) for that case and stopped
+// the build.
+
+extern exit(code: int)
+
+enum Color { Red, Green, Blue }
+
+main() {
+    f = |x: int| {
+        if x > 2 { return Color.Blue }
+        return Color.Red
+    }
+    a = call(f, 3)
+    b = call(f, 1)
+    if a != Color.Blue || b != Color.Red {
+        println("FAIL: the closure's enum returns are wrong")
+        exit(1)
+    }
+    g = || { return Color.Green }
+    if call(g) != Color.Green {
+        println("FAIL: a one-return enum closure is wrong")
+        exit(1)
+    }
+    println("PASS: a closure returns an enum")
+}

@@ -13479,22 +13479,29 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * two name different kinds of value, that choice would
                      * be made for the wrong one: a returned closure or
                      * struct the checker left typed `int` would cross
-                     * without its retain. That is the checker's gap, so it
-                     * is an error here, said, not a conversion (review of
-                     * #3807). It is that case only: a number where the
-                     * closure returns something else. A number becoming
-                     * another number is C's return conversion, and a
-                     * pointer the checker typed otherwise (`null`, a `ptr`,
-                     * against `const char*`) is C's too, its ownership
-                     * already the value's own (review of #3820: a closure
-                     * returning a string or `null` stopped the build). */
+                     * without its retain, and a pointer returned into a
+                     * closure resolved as `int` would be cut to an int.
+                     * That is the checker's gap, so it is an error here,
+                     * said, not a conversion (review of #3807). It is those
+                     * cases only: a number where the closure returns a
+                     * pointer, and something not a number where it returns
+                     * a number. The same spelling (an enum's own name, a
+                     * struct's) is no mismatch; a number becoming another
+                     * number is C's return conversion; and a pointer the
+                     * checker typed otherwise (`null`, a `ptr`, against
+                     * `const char*`) is C's too, its ownership already the
+                     * value's own (review of #3820: a string or `null`
+                     * closure, and an enum one, stopped the build). */
                     if (closure_ct && ret_type && ret_type->kind != TYPE_UNKNOWN &&
                         ret_type->kind != TYPE_VOID) {
                         const char* value_ct = c_result_type(ret_type);
                         int value_is_number =
                             ret_type->kind == TYPE_ENUM || (value_ct && c_type_is_number(value_ct));
-                        if (value_ct && value_is_number && !c_type_is_number(closure_ct) &&
-                            strcmp(closure_ct, "void") != 0) {
+                        int closure_is_number = c_type_is_number(closure_ct);
+                        int closure_is_pointer = strchr(closure_ct, '*') != NULL;
+                        if (value_ct && strcmp(value_ct, closure_ct) != 0 &&
+                            ((value_is_number && closure_is_pointer) ||
+                             (!value_is_number && closure_is_number))) {
                             const char* msg = aether_internf(
                                 "this return's value is %s, but the closure returns %s (the type "
                                 "of its first return); a closure returns one kind of value from "

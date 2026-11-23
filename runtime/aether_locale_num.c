@@ -555,7 +555,9 @@ static double aether_mingw_parse(const char* text, char** end, int single) {
 // On msvcrt, like the formatter's msvcrt path, this reads the radix of the
 // process global locale: a thread calling setlocale while another parses
 // races with it, as it does with every msvcrt locale call. On UCRT,
-// localeconv is the calling thread's locale.
+// localeconv is the calling thread's locale when that thread enabled
+// _ENABLE_PER_THREAD_LOCALE, the process's otherwise, and gdtoa reads the
+// same one, so the copy and the parse agree on the radix either way.
 static double aether_mingw_c_parse(const char* s, char** endptr, int single) {
     const char* p = s;
     while (aether_c_space(*p)) p++;
