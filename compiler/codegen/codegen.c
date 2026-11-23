@@ -9742,7 +9742,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_from_bits(AeI32x4 v) { return (AeF32x4)v; }");
     /* #2603: the smallest / largest lane, compared in one fixed order (lanes
        0 and 2, 1 and 3, then the two winners) with min4's rule, `a < b ? a :
-       b`, so a NaN or a tie gives the same lane on every instruction set. */
+       b`, so a NaN or a tie gives the same lane on every instruction set.
+       #3848: these keep C's `<` / `>`, not _AE_FLT. Each is a select whose
+       result is the compared value, which GCC turns into a branchless
+       COND_EXPR in its first phiopt; the relation chain of _AE_FLT's note
+       comes only from a branch on a comparison, and no arrangement of these
+       beside a caller's comparisons was found to reach one. */
     print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x4_reduce_min(AeF32x4 v) { float a = v[0] < v[2] ? v[0] : v[2]; float b = v[1] < v[3] ? v[1] : v[3]; return a < b ? a : b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x4_reduce_max(AeF32x4 v) { float a = v[0] > v[2] ? v[0] : v[2]; float b = v[1] > v[3] ? v[1] : v[3]; return a > b ? a : b; }");
     /* #2607: whether this CPU runs AVX2 code (and its OS saves the 256-bit
@@ -9899,6 +9904,28 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#  define _AE_FMOD(a, b) fmod((a), (b))");
     print_line(gen, "#  define _AE_FMODF(a, b) fmodf((a), (b))");
     print_line(gen, "#  define _AE_FMODL(a, b) fmodl((a), (b))");
+    print_line(gen, "#endif");
+    /* #3848: an ordered comparison of floats (`<`, `<=`, `>`, `>=`, scalar),
+       emit_float_order's macros. GCC (15.2 and 16.2 at -O1 and up) reads the
+       false edge of `a > n` as the relation `a <= n` and chains such
+       relations transitively, which a NaN breaks: from `a > n` and `n > b`
+       both false, with n a NaN, it folds `a > b` to false for a = 1, b = 0
+       (the pick_max of #3848 returned the min). The quiet comparison
+       builtins are the same values, false on a NaN, and GCC records no
+       relation for them, so it does not fold one. They do not raise
+       FE_INVALID on a quiet NaN, which Aether does not observe. Clang and
+       other compilers keep C's operators: Clang folds no such chain, and
+       its `a < b ? a : b` stays one minss. */
+    print_line(gen, "#if defined(__GNUC__) && !defined(__clang__)");
+    print_line(gen, "#  define _AE_FLT(a, b) __builtin_isless((a), (b))");
+    print_line(gen, "#  define _AE_FLE(a, b) __builtin_islessequal((a), (b))");
+    print_line(gen, "#  define _AE_FGT(a, b) __builtin_isgreater((a), (b))");
+    print_line(gen, "#  define _AE_FGE(a, b) __builtin_isgreaterequal((a), (b))");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_FLT(a, b) ((a) < (b))");
+    print_line(gen, "#  define _AE_FLE(a, b) ((a) <= (b))");
+    print_line(gen, "#  define _AE_FGT(a, b) ((a) > (b))");
+    print_line(gen, "#  define _AE_FGE(a, b) ((a) >= (b))");
     print_line(gen, "#endif");
     print_line(gen, "#if AETHER_GCC_COMPAT");
     print_line(gen, "#  define _AE_MEMCPY(d, s, n) __builtin_memcpy((d), (s), (n))");

@@ -1411,22 +1411,33 @@ static int try_emit_series_collapse(CodeGenerator* gen, ASTNode* while_node) {
 /* #1047: emit the boolean condition that a case selector matches `val_var`.
  * Handles a single value (== , or string_equals for strings), an inclusive
  * (`lo..=hi`) / half-open (`lo..<hi`) range, and a comma-list of these (OR).
- * Shared by match arms and the ranged-switch if-chain lowering. */
+ * Shared by match arms and the ranged-switch if-chain lowering. `val_type`
+ * is the scrutinee's type: a float range compares through _AE_FGE and the
+ * rest (#3848, emit_float_order). */
 static void emit_selector_condition(CodeGenerator* gen, ASTNode* sel,
-                                    const char* val_var, int is_string) {
+                                    const char* val_var, const Type* val_type) {
+    int is_string = val_type && val_type->kind == TYPE_STRING;
     if (!sel) { fprintf(gen->output, "0"); return; }
     if (sel->type == AST_MATCH_ALT) {
         fprintf(gen->output, "(");
         for (int i = 0; i < sel->child_count; i++) {
             if (i > 0) fprintf(gen->output, " || ");
-            emit_selector_condition(gen, sel->children[i], val_var, is_string);
+            emit_selector_condition(gen, sel->children[i], val_var, val_type);
         }
         fprintf(gen->output, ")");
         return;
     }
     if (sel->type == AST_MATCH_RANGE && sel->child_count >= 2) {
         int inclusive = sel->annotation && strcmp(sel->annotation, "inclusive") == 0;
-        fprintf(gen->output, "(%s >= ", val_var);
+        fprintf(gen->output, "(");
+        if (emit_float_order(gen, ">=", NULL, val_var, val_type, sel->children[0])) {
+            fprintf(gen->output, " && ");
+            emit_float_order(gen, inclusive ? "<=" : "<", NULL, val_var, val_type,
+                             sel->children[1]);
+            fprintf(gen->output, ")");
+            return;
+        }
+        fprintf(gen->output, "%s >= ", val_var);
         generate_expression(gen, sel->children[0]);
         fprintf(gen->output, " && %s %s ", val_var, inclusive ? "<=" : "<");
         generate_expression(gen, sel->children[1]);
@@ -12907,8 +12918,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // header; the NULL guard makes a NULL scrutinee match no
                         // pattern).
                         Type* mexpr_type = match_expr->node_type;
-                        int mexpr_is_string = mexpr_type && mexpr_type->kind == TYPE_STRING;
-                        emit_selector_condition(gen, pattern, "_match_val", mexpr_is_string);
+                        emit_selector_condition(gen, pattern, "_match_val", mexpr_type);
                         fprintf(gen->output, ") {\n");
                     }
 
@@ -13074,7 +13084,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 if (is_default) { default_case = c; continue; }
                 print_indent(gen);
                 fprintf(gen->output, emitted ? "else if (" : "if (");
-                emit_selector_condition(gen, c->children[0], "_switch_val", is_str);
+                emit_selector_condition(gen, c->children[0], "_switch_val", sexpr ? sexpr->node_type : NULL);
                 fprintf(gen->output, ") {\n");
                 indent(gen);
                 emit_case_body(gen, c, 1);

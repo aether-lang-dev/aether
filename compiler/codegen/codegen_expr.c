@@ -8853,6 +8853,46 @@ int emit_float_rem(CodeGenerator* gen, ASTNode* l, const char* l_text, ASTNode* 
     return 1;
 }
 
+/* The macro of an ordered comparison `op` (codegen.c's prelude, _AE_FLT),
+ * NULL for `==`, `!=` and any other operator: an equality is no ordering
+ * and leaves GCC no relation to chain. */
+const char* float_order_macro(const char* op) {
+    if (!op) return NULL;
+    if (strcmp(op, "<") == 0) return "_AE_FLT";
+    if (strcmp(op, "<=") == 0) return "_AE_FLE";
+    if (strcmp(op, ">") == 0) return "_AE_FGT";
+    if (strcmp(op, ">=") == 0) return "_AE_FGE";
+    return NULL;
+}
+
+static int is_scalar_float_kind(const Type* t) {
+    return t && (t->kind == TYPE_FLOAT || t->kind == TYPE_FLOAT32 ||
+                 t->kind == TYPE_LONGDOUBLE);
+}
+
+/* #3848: `l op r`, an ordered comparison with a scalar float operand, as
+ * its _AE_FLT / _AE_FLE / _AE_FGT / _AE_FGE macro. GCC miscompiled C's
+ * operator: a comparison false because of a NaN became a relation it
+ * chained into a wrong fold of another comparison (the note at the macros).
+ * Each operand is bracketed, as a macro argument: a compound literal's
+ * commas are not. `l_text` is the left operand's C when it has no node (a
+ * match's scrutinee), and `l_type` its type. Returns 0, having emitted
+ * nothing, when neither operand is a float or `op` is no ordering. */
+int emit_float_order(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                     const Type* l_type, ASTNode* r) {
+    const char* m = float_order_macro(op);
+    if (!m || !r || (!l && !l_text)) return 0;
+    if (l) l_type = l->node_type;
+    if (!is_scalar_float_kind(l_type) && !is_scalar_float_kind(r->node_type)) return 0;
+    fprintf(gen->output, "%s((", m);
+    if (l_text) fputs(l_text, gen->output);
+    else generate_expression(gen, l);
+    fprintf(gen->output, "), (");
+    generate_expression(gen, r);
+    fprintf(gen->output, "))");
+    return 1;
+}
+
 /* #3527: how a value of type `t` is written by an interpolation, print or
  * println. Each kind names its conversion, and the int ones are int on
  * purpose: `int` itself, the types narrower than it (`byte`, `uint8`,
@@ -11508,6 +11548,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                            emit_float_rem(gen, expr->children[0], NULL, expr->children[1],
                                           expr->node_type)) {
                     /* #3577: a float `%`, which C has no operator for. */
+                } else if (!is_assignment &&
+                           emit_float_order(gen, expr->value, expr->children[0], NULL, NULL,
+                                            expr->children[1])) {
+                    /* #3848: a float `<`, `<=`, `>` or `>=`, GCC-safe. */
                 } else {
                     if (!skip_parens) fprintf(gen->output, "(");
 
