@@ -268,12 +268,12 @@ if [ -n "$crt" ] && [ -n "$REAL_CC" ]; then
         chmod +x "$TMP/mute/gcc"
         MUTE="$TMP/mute/gcc"
     fi
-    if ! (cd "$TMP" && CC="$MUTE" AETHER_CACHE_DIR="$TMP/cache_mute" "$AE" build -v hello.ae -o mute) > "$TMP/mute1.log" 2>&1; then
+    if ! (cd "$TMP" && CC="$MUTE" AETHER_CACHE_DIR="$TMP/cache_mute" "$AE" build -v hello.ae -o mute_hello) > "$TMP/mute1.log" 2>&1; then
         tail -15 "$TMP/mute1.log" | cut -c1-200 | sed 's/^/        /'
         fail "the build with a compiler that cannot be asked failed"
     elif ! grep -q "could not be asked which C runtime it targets: the archive is linked" "$TMP/mute1.log"; then
         fail "-v does not say the compiler could not be asked: $(decided mute1.log)"
-    elif ! (cd "$TMP" && CC="$MUTE" AETHER_CACHE_DIR="$TMP/cache_mute" "$AE" build -v hello.ae -o mute) > "$TMP/mute2.log" 2>&1; then
+    elif ! (cd "$TMP" && CC="$MUTE" AETHER_CACHE_DIR="$TMP/cache_mute" "$AE" build -v hello.ae -o mute_hello) > "$TMP/mute2.log" 2>&1; then
         fail "the second build with a compiler that cannot be asked failed"
     elif ! grep -q '^\[cache\] hit: ' "$TMP/mute2.log"; then
         fail "the second build with a compiler that cannot be asked was not a cache hit"
