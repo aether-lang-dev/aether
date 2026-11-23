@@ -4584,8 +4584,9 @@ static const char* gcc_relation_flags(const char* cc) {
  * on an optimising build, unless --coverage or --size, and unless the user
  * names a budget; the relation limit (#3848) on every build, -O0 included,
  * whatever the user names, since without it the program's float comparisons
- * can answer wrong at any -O level the user's own flags ask for. */
-static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
+ * can answer wrong at any -O level the user's own flags ask for. A cross
+ * build asks it of its own compiler (ae_cross.c). */
+const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
     if (!cc || !*cc) return k_gcc_flags_none;
     int support = gcc_tuning_support(cc);
     /* A budget the user names wins, wherever it sits. In the cflags it would
@@ -14803,15 +14804,25 @@ static int cmd_cache(int argc, char** argv) {
 // --------------------------------------------------------------------------
 
 static void cflags_usage(void) {
-    printf("Usage: ae cflags [--cflags|--libs]\n");
+    printf("Usage: ae cflags [--cflags|--libs] [--cc <compiler>]\n");
     printf("  Print the include and link flags so external builds can:\n");
     printf("      gcc your.c $(ae cflags) -o your\n");
     printf("  Without arguments, prints both. Pass --cflags or --libs to subset.\n");
+    printf("  The flags one compiler needs and another refuses (Clang's bracket\n");
+    printf("  depth, GCC's relation limit) are those of the compiler ae drives:\n");
+    printf("  $AE_CC, then $CC, else gcc, else cc. --cc names the compiler, as a\n");
+    printf("  command, that the build will use instead, and it is asked:\n");
+    printf("      clang your.c $(ae cflags --cc clang) -o your\n");
 }
 
 static int cmd_cflags(int argc, char** argv) {
     bool want_cflags = true;
     bool want_libs   = true;
+    /* The compiler the compiler-specific flags are asked of (--cc): the
+     * one `ae` drives unless the caller names the one its build uses. A
+     * build that drives Clang by its own means (a Makefile's CC) got GCC's
+     * relation limit from `ae cflags`, asked of the gcc on PATH (#3848). */
+    const char* cc = NULL;
 
     // Optional refinement: callers that only need one half (compile- or
     // link-side) can pass --cflags / --libs to subset the output. With
@@ -14821,6 +14832,12 @@ static int cmd_cflags(int argc, char** argv) {
             want_libs = false;
         } else if (strcmp(argv[i], "--libs") == 0) {
             want_cflags = false;
+        } else if (strcmp(argv[i], "--cc") == 0 || strncmp(argv[i], "--cc=", 5) == 0) {
+            cc = argv[i][4] == '=' ? argv[i] + 5 : (i + 1 < argc ? argv[++i] : NULL);
+            if (!cc || !*cc) {
+                fprintf(stderr, "ae cflags: --cc needs a compiler command\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             cflags_usage();
             return 0;
@@ -14863,24 +14880,25 @@ static int cmd_cflags(int argc, char** argv) {
          * one. */
         if (find_gcc_windows(false)) fputs(win_avx_stack_flags(get_cflags()), stdout);
 #endif
+        /* The compiler the flags below are for: --cc's, else the one `ae`
+         * would drive. */
+        if (!cc) {
+#if defined(_WIN32)
+            cc = find_gcc_windows(false) ? s_gcc_cmd : NULL;
+#else
+            cc = posix_driven_cc();
+#endif
+        }
         /* #3574: the bracket depth every `ae` build gives a Clang
          * (bracket_depth_flags), for a build that compiles aetherc output
-         * itself with the compiler `ae` would drive: Clang refuses the C of
-         * blocks nested past 256 brackets otherwise. */
-#if defined(_WIN32)
-        if (find_gcc_windows(false)) fputs(bracket_depth_flags(s_gcc_cmd), stdout);
-#else
-        fputs(bracket_depth_flags(posix_driven_cc()), stdout);
-#endif
+         * itself: Clang refuses the C of blocks nested past 256 brackets
+         * otherwise. */
+        fputs(bracket_depth_flags(cc), stdout);
         /* #3848: GCC's float relations off, as on every `ae` compile, for C
          * built by hand from generated C (aeb, --emit=csrc): without it a
          * float comparison beside a NaN can answer wrong from -O1 up. When
-         * the driven compiler is a GCC that takes it. */
-#if defined(_WIN32)
-        if (find_gcc_windows(false)) fputs(gcc_relation_flags(s_gcc_cmd), stdout);
-#else
-        fputs(gcc_relation_flags(posix_driven_cc()), stdout);
-#endif
+         * the compiler is a GCC that takes it. */
+        fputs(gcc_relation_flags(cc), stdout);
     }
 
     if (want_libs) {

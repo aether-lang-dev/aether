@@ -308,6 +308,12 @@ int cache_file_beside_program(const char* prog, const char* name, char* out, siz
 /* $AE_CC, else $CC, else NULL: the C-backend compiler the user picked (ae.c).
  * The cache key folds in the compiler it names (#2477). */
 const char* c_backend_env_override(void);
+/* The GCC flags a compile of generated C with compiler `cc` takes (ae.c):
+ * the relation limit (#3848) on every build and the inlining budget (#3779)
+ * on an optimising one, when `cc` is a GCC that takes them, else "". `cc`
+ * is asked once and the answer kept by its identity. The native build and
+ * the cross build (ae_cross.c) both ask this. */
+const char* gcc_inline_budget_flags(const char* cc, bool optimize);
 /* The extra C sources of a build (--extra, [[bin]] extra_sources) travel as
  * ONE space-separated string that goes onto the compiler command as-is. A
  * path with a space is stored double-quoted, so the shell sees one argument;

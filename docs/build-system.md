@@ -312,11 +312,13 @@ three brackets a level, and the parser takes them up to 512 levels deep
 
 `ae cflags` prints the option too when the compiler `ae` drives (`$AE_CC`,
 `$CC`, else `gcc`, else `cc`) takes it, so a build that compiles `aetherc`
-output itself with that compiler gets it with the include flags:
+output itself with that compiler gets it with the include flags. A build that
+uses another compiler names it with `--cc`, and that one is asked instead:
 
 ```bash
 aetherc app.ae app.c
-cc app.c $(ae cflags) -o app        # -fbracket-depth=2048 where cc is Clang
+cc app.c $(ae cflags) -o app                  # -fbracket-depth=2048 where cc is Clang
+clang app.c $(ae cflags --cc clang) -o app    # asked of clang, whatever ae drives
 ```
 
 ## The inlining budget and GCC
@@ -339,8 +341,9 @@ nothing, nor with `--size`, which asks for bytes. When the project names a
 budget of its own, in `[build] cflags`, `AETHER_CFLAGS_EXTRA` or the
 `$AE_CC` / `$CC` command (`AE_CC="gcc --param inline-unit-growth=50"`), `ae`
 gives none, so that one is the one GCC uses. Clang
-has no such cap and gets nothing; neither does a cross build (`zig cc` and
-`xcrun clang` are Clang) or the wasm backend (emcc). Whether the compiler is
+has no such cap and gets nothing; neither does the wasm backend (emcc). A
+cross build asks its own compiler the same question (`zig cc` and
+`xcrun clang` are Clang, so they get nothing). Whether the compiler is
 GCC is asked once, by compiling a probe, and the answer is kept in the cache
 directory by the compiler's identity. libaether.a and the std's C in it are
 built by the Makefile and keep its flags. A runtime `ae` compiles from source
@@ -373,14 +376,19 @@ answer wrong; std.lanes' `pick_max` returned the min.
 nothing to chain. `ae` gives it to every GCC compile it makes: the program at
 every `-O` level, `-O0` included (where it changes nothing, but a project's
 `[build] cflags`, `AETHER_CFLAGS_EXTRA` or the `$AE_CC` / `$CC` command can say
-`-O2` on a `--quick` build or `ae run`), a runtime compiled from source, and
-the vendored SQLite. The Makefile builds libaether.a with it. `ae cflags`
+`-O2` on a `--quick` build or `ae run`), a runtime compiled from source, the
+vendored SQLite, and every compile of a cross build whose compiler is a GCC
+that takes it (`ae build --target=<triple>` asks its compiler as the native
+build asks its own). The Makefile builds libaether.a with it. `ae cflags`
 prints it when the compiler `ae` drives is a GCC that takes it, so C built by
-hand from generated C gets it too:
+hand from generated C gets it too; `ae cflags --cc <compiler>` asks the
+compiler the build uses instead, for a build that drives another one (a
+Makefile's own `CC`, say):
 
 ```bash
 aetherc app.ae app.c
-gcc -O2 app.c $(ae cflags) -o app   # --param relation-block-limit=0 arrives with the -I flags
+gcc -O2 app.c $(ae cflags) -o app                 # --param relation-block-limit=0 arrives with the -I flags
+clang -O2 app.c $(ae cflags --cc clang) -o app     # asked of clang, which gets no GCC parameter
 ```
 
 It measured within noise on bench-core. The backward jump threader records

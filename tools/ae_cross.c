@@ -737,6 +737,19 @@ static char* wasm_export_flags(const char* c_file, const char* explicit_list) {
     return out;
 }
 
+/* The optimisation and semantics flags of a cross compile: `base` (the -O
+ * level, AETHER_WRAP_CFLAGS, AETHER_CLANG_DEPTH_CFLAGS), then the GCC flags
+ * the native build gives a GCC (gcc_inline_budget_flags): the relation
+ * limit (#3848), without which a float comparison beside a NaN can answer
+ * wrong from -O1 up on a GCC cross compiler as on a native one, and the
+ * inlining budget (#3779) on an optimising build. The cross compiler is
+ * asked as the native one is, once, the answer kept by its identity; zig cc
+ * and xcrun clang are Clang and take neither. */
+static void cross_opt_flags(char* out, size_t outsz, const char* base, const char* cc_cmd,
+                            bool optimize) {
+    snprintf(out, outsz, "%s%s", base, gcc_inline_budget_flags(cc_cmd, optimize));
+}
+
 int run_cross_compile_obj(const char* c_file, const char* obj_file,
                           bool optimize, const char* ztriple) {
     const char* user_cflags = get_cflags();
@@ -751,9 +764,9 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
      * than of the host (#1957). AETHER_CLANG_DEPTH_CFLAGS too: zig cc and
      * xcrun clang are Clang, which refuses C nested past 256 brackets
      * unless told otherwise (#3574). */
-    const char* opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
-                    : (optimize ? "-O2" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
-                                : "-O0 -g" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS);
+    const char* base_opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
+                         : (optimize ? "-O2" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
+                                     : "-O0 -g" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS);
 
     /* Same macos workaround as the link path: zig's bundled macOS SDK stubs
      * do not ship the Apple-licensed CoreAudio framework headers, so
@@ -805,6 +818,8 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
 
     char cc_cmd[3072];
     if (!cross_toolchain(ztriple, cc_cmd, sizeof(cc_cmd), NULL, 0)) return 1;
+    char opt[256];
+    cross_opt_flags(opt, sizeof(opt), base_opt, cc_cmd, optimize);
 
     char* cmd = NULL;
     size_t cmd_cap = 0;
@@ -1178,9 +1193,11 @@ int run_cross_build(const char* c_file, const char* out_file,
      * than of the host (#1957). AETHER_CLANG_DEPTH_CFLAGS too: zig cc and
      * xcrun clang are Clang, which refuses C nested past 256 brackets
      * unless told otherwise (#3574). */
-    const char* opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
-                    : (optimize ? "-O2" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
-                                : "-O0 -g" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS);
+    const char* base_opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
+                         : (optimize ? "-O2" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
+                                     : "-O0 -g" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS);
+    char opt[256];
+    cross_opt_flags(opt, sizeof(opt), base_opt, cc_cmd, optimize);
     /* For --emit=lib / --emit=staticlib the runtime+stdlib objects that go into
      * libaether.a are linked into a SHARED object, so every one must be built
      * -fPIC — `-shared -fPIC` on the final link cannot retroactively fix an
