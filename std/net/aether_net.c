@@ -24,6 +24,7 @@ int tcp_send_bytes_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (
 int tcp_send_all_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return 0; }
 int tcp_receive_into_raw(TcpSocket* s, void* b, int c) { (void)s; (void)b; (void)c; return TCP_RECV_CLOSED; }
 int tcp_reset_raw(TcpSocket* s) { (void)s; return 0; }
+int tcp_send_timed_out_raw(TcpSocket* s) { (void)s; return 0; }
 int tcp_close(TcpSocket* s) { (void)s; return 0; }
 TcpOpenResult tcp_connect_unix_raw(const char* p) {
     (void)p;
@@ -169,6 +170,10 @@ struct TcpSocket {
     /* 1 when the last receive failed because the peer reset or aborted the
      * connection (net_note_recv, tcp_reset_raw). */
     int reset;
+    /* 1 when the last send that waits for room (tcp_send_all_raw, or any
+     * send on a bound socket) ended because the socket's send timeout
+     * passed with nothing taken (tcp_send_timed_out_raw). */
+    int send_timed_out;
 };
 
 /* After a receive on `sock` that returned `received`: whether it failed
@@ -216,6 +221,7 @@ static TcpSocket* net_sock_new(int fd) {
     sock->cancel = NULL;
     sock->stop = TCP_STOP_NONE;
     sock->reset = 0;
+    sock->send_timed_out = 0;
     return sock;
 }
 
@@ -951,6 +957,7 @@ static void net_nonblock_end(int fd, int saved) {
  * nothing was sent and the send failed or stopped. Do not send on the
  * socket from another thread at the same time. */
 static int net_send_bound(TcpSocket* sock, const char* p, int length, int all) {
+    sock->send_timed_out = 0;
     if (sock->cancel && atomic_load(&sock->cancel->tripped)) { sock->stop = TCP_STOP_CANCELLED; return -1; }
     if (sock->due_ms > 0 && net_mono_ms() >= sock->due_ms) { sock->stop = TCP_STOP_DEADLINE; return -1; }
     long long period = net_sock_timeout_ms(sock->fd, SO_SNDTIMEO);
@@ -972,7 +979,10 @@ static int net_send_bound(TcpSocket* sock, const char* p, int length, int all) {
                 long long now = net_mono_ms();
                 if (!period_due) period_due = now + period;
                 if (period_due - now <= 0) {
-                    if (!progressed) break;      /* a whole period, nothing went */
+                    if (!progressed) {           /* a whole period, nothing went */
+                        sock->send_timed_out = 1;
+                        break;
+                    }
                     progressed = 0;
                     period_due = now + period;
                 }
@@ -1019,6 +1029,12 @@ int tcp_stop_raw(TcpSocket* sock) {
  * aborted the connection (net_note_recv). */
 int tcp_reset_raw(TcpSocket* sock) {
     return sock ? sock->reset : 0;
+}
+
+/* Whether the last send on `sock` that waits for room ended because the
+ * socket's send timeout passed with nothing taken. */
+int tcp_send_timed_out_raw(TcpSocket* sock) {
+    return sock ? sock->send_timed_out : 0;
 }
 
 /* tcp_connect_raw held to the absolute deadline `due_ms` (aether_now_ns's
@@ -1255,6 +1271,7 @@ static int net_wait_writable(int fd, NetSendWait* w) {
  * that time. The pure-Aether TLS server writes through here. */
 int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
     if (!sock || !sock->connected || length <= 0 || !data) return 0;
+    sock->send_timed_out = 0;
     if (net_bound(sock)) {
         int n = net_send_bound(sock, (const char*)data, length, 1);
         return n < 0 ? 0 : n;
@@ -1289,6 +1306,8 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
             continue;
         }
         if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
+        /* A blocking send that waited out SO_SNDTIMEO. */
+        if (n < 0 && WSAGetLastError() == WSAETIMEDOUT) sock->send_timed_out = 1;
 #else
         int n = (int)send(sock->fd, p + sent, (size_t)(length - sent), MSG_DONTWAIT | AE_NET_NOSIGNAL);
         if (n > 0) {
@@ -1297,9 +1316,11 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
-            net_wait_writable(sock->fd, &wait))
-            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (net_wait_writable(sock->fd, &wait)) continue;
+            /* No room within a period of the send timeout the socket has. */
+            if (wait.timeout_ms > 0) sock->send_timed_out = 1;
+        }
 #endif
         break;
     }

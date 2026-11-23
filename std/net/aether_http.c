@@ -335,11 +335,13 @@ AETHER_WEAK void* aether_pure_tls_client_connect(int fd, const char* host,
     (void)fd; (void)host; (void)verify_mode; (void)cafile;
     return NULL;
 }
+/* `len` once every byte is out, HTTP_PT_TIMED_OUT (-2) for a write that
+ * waited out the socket's send timeout, -1 for any other failure. */
 AETHER_WEAK int aether_pure_tls_client_send(void* conn, const void* buf, int len) {
     (void)conn; (void)buf; (void)len;
     return -1;
 }
-/* The bytes read, 0 at the server's close, HTTP_PT_RECV_TIMED_OUT (-2) for
+/* The bytes read, 0 at the server's close, HTTP_PT_TIMED_OUT (-2) for
  * a read that waited out the socket's timeout, HTTP_PT_RECV_RESET (-3) for
  * one the peer's reset ended, -1 for any other failure. */
 AETHER_WEAK int aether_pure_tls_client_recv(void* conn, void* buf, int len) {
@@ -4016,8 +4018,9 @@ static int http_io_would_block(void) {
  * request from going again. OpenSSL's WANT_READ or WANT_WRITE is the
  * timeout, its SSL_ERROR_SYSCALL a failed system call whose error is this
  * call's, and anything else an I/O error; the pure-TLS client says a
- * timeout by HTTP_PT_RECV_TIMED_OUT and a reset by HTTP_PT_RECV_RESET, as
- * its socket recorded them, and any other failure is an I/O error. */
+ * timeout of a read or a write by HTTP_PT_TIMED_OUT and a reset by
+ * HTTP_PT_RECV_RESET, as its socket recorded them, and any other failure is
+ * an I/O error. */
 static int http_os_failure_kind(int blocking);
 int http_io_failure_kind(const Transport* t, int n) {
     /* -1 is a pure-TLS transport, which this client reads blocking. */
@@ -4032,7 +4035,7 @@ int http_io_failure_kind(const Transport* t, int n) {
     }
 #endif
     if (t->pure_tls) {
-        if (n == HTTP_PT_RECV_TIMED_OUT)
+        if (n == HTTP_PT_TIMED_OUT)
             return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
         if (n == HTTP_PT_RECV_RESET) return HTTP_IO_RESET;
         return HTTP_IO_OTHER;

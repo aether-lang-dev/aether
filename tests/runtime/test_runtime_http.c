@@ -21,6 +21,7 @@
 #include "../../std/net/aether_http.h"
 #include "../../std/net/aether_net.h"
 #include "../../std/string/aether_string.h"
+#include "../../runtime/aether_callbacks.h"
 /* The URL resolver and the proxy URL parser (#3552), on every platform. */
 #include "../../std/net/aether_http_internal.h"
 /* The connect-completion contract below is exercised only where the driver
@@ -1208,7 +1209,7 @@ static void stale_would_block(void) {
 }
 
 TEST_CATEGORY(http_tls_read_failure_kind_ignores_stale_errno, TEST_CATEGORY_NETWORK) {
-    /* The pure-TLS client: HTTP_PT_RECV_TIMED_OUT is its timeout, -1 any
+    /* The pure-TLS client: HTTP_PT_TIMED_OUT is its timeout, -1 any
      * other failure. */
     int conn = 0;
     Transport t;
@@ -1219,7 +1220,7 @@ TEST_CATEGORY(http_tls_read_failure_kind_ignores_stale_errno, TEST_CATEGORY_NETW
     stale_would_block();
     ASSERT_EQ(HTTP_IO_OTHER, http_io_failure_kind(&t, -1));
     stale_would_block();
-    ASSERT_EQ(HTTP_IO_TIMED_OUT, http_io_failure_kind(&t, HTTP_PT_RECV_TIMED_OUT));
+    ASSERT_EQ(HTTP_IO_TIMED_OUT, http_io_failure_kind(&t, HTTP_PT_TIMED_OUT));
 
 #ifdef AETHER_HAS_OPENSSL
     SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
@@ -1373,6 +1374,58 @@ TEST_CATEGORY(http_send_timeout_is_not_written_again, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(HTTP_IO_TIMED_OUT, x.send_failure);
     ASSERT_EQ(0, http_exchange_send_retryable(&x, r));
     T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+}
+
+/* The pure-TLS client's send as it is made (aether_pure_tls_client_send,
+ * std.cryptography.tls13_client): every byte through tcp_send_all_raw on
+ * its socket (tcp.write_all), and on a short send the timeout its socket
+ * recorded, else -1. Registered as the program's callback, as the module
+ * registers its own. */
+static TcpSocket* t_pt_sock;
+static int t_pt_send(void* conn, const void* buf, int len) {
+    (void)conn;
+    if (tcp_send_all_raw(t_pt_sock, buf, len) == len) return len;
+    return tcp_send_timed_out_raw(t_pt_sock) ? HTTP_PT_TIMED_OUT : -1;
+}
+
+/* A pure-TLS write that waits out the socket's send timeout is a timeout
+ * too (#3824): the pure client said -1 for it, an I/O error, so a POST
+ * whose head timed out with nothing counted as sent was written again. */
+TEST_CATEGORY(http_pure_tls_send_timeout_is_not_written_again, TEST_CATEGORY_NETWORK) {
+    static const char head[] = "POST /order HTTP/1.1\r\nHost: up\r\nContent-Length: 0\r\n\r\n";
+    int fds[2];
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+#ifdef _WIN32
+    DWORD tv = 100;
+#else
+    struct timeval tv = { 0, 100000 };
+#endif
+    ASSERT_EQ(0, setsockopt(fds[0], SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv));
+    t_pt_sock = tcp_socket_adopt_fd(fds[0]);
+    ASSERT_NOT_NULL(t_pt_sock);
+    int conn = 0;
+    Transport t;
+    memset(&t, 0, sizeof t);
+    t.sockfd = -1;
+    t.nonblocking = -1;
+    t.pure_tls = &conn;
+    aether_callback_register("aether_pure_tls_client_send", (void*)t_pt_send);
+    HttpExchange x;
+    int r = AE_X_DONE;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (t_fill_send_buffer(fds[0]) != 0) break;
+        http_exchange_init(&x, &t, head, sizeof head - 1, NULL, 0, "POST");
+        r = http_exchange_send(&x);
+        if (r != AE_X_DONE && x.head_sent == 0) break;
+    }
+    aether_callback_register("aether_pure_tls_client_send", NULL);
+    ASSERT_TRUE(r != AE_X_DONE);
+    ASSERT_EQ(0, (int)x.head_sent);
+    ASSERT_EQ(1, tcp_send_timed_out_raw(t_pt_sock));
+    ASSERT_EQ(HTTP_IO_TIMED_OUT, x.send_failure);
+    ASSERT_EQ(0, http_exchange_send_retryable(&x, r));
+    tcp_close(t_pt_sock);
     T_CLOSE(fds[1]);
 }
 

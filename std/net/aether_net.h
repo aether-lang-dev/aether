@@ -72,6 +72,12 @@ int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap);
 //   a layer over the socket (the pure-Aether TLS client) can tell a reset
 //   from its own failures without an errno something later may have set.
 int tcp_reset_raw(TcpSocket* sock);
+// tcp_send_timed_out_raw: 1 when the last send on `sock` that waits for
+//   room (tcp_send_all_raw, or any send on a socket with a deadline or a
+//   cancel bound) ended because the socket's send timeout passed with
+//   nothing taken, else 0, a null handle included. Kept on the socket, as
+//   tcp_reset_raw is, for the pure-Aether TLS client's send.
+int tcp_send_timed_out_raw(TcpSocket* sock);
 int tcp_close(TcpSocket* sock);
 
 // Unix-domain stream sockets, as the same TcpSocket / TcpServer handles, so
