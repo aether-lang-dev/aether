@@ -319,6 +319,9 @@ const char* merge_source_lists(const char* extra, const char* module_sources);
  * Kept for the process and valid until the next call; NULL when out of
  * memory, after saying so. */
 const char* get_aether_include_flags(const char* c_file);
+/* The toolchain's runtime and std include flags (tc.include_flags), built
+ * on first use (#3834). Never NULL. */
+const char* tc_include_flags(void);
 /* #1882: the stable depfile slot for an entry source, under the cache dir.
  * ae asks aetherc to write it (--emit-deps) on a cached build; compute_cache_key
  * folds it on the next run for exact, tree-walk-free invalidation. */

@@ -2203,7 +2203,13 @@ static bool ae_home_has(const char* home, const char* share, const char* lib) {
     return found;
 }
 
+/* Whether tc.include_flags holds the list for the toolchain found last: a
+ * later discover_toolchain may find another root, and its list is built
+ * again on first use. */
+static int s_include_flags_built = 0;
+
 void discover_toolchain(void) {
+    s_include_flags_built = 0;
     char exe_dir[1024] = {0};
     bool found_exe_dir = get_exe_dir(exe_dir, sizeof(exe_dir));
 
@@ -2534,25 +2540,48 @@ found_root:
         }
     }
 
-    // Build include flags and source file lists.
-    //
-    // Dynamic walk over the runtime/ and std/ subtrees rather than the
-    // hardcoded list this used to hold — the hardcoded version silently
-    // dropped new modules as they landed (`std/bytes`, `std/cryptography`,
-    // `std/zlib`, `std/dl`, `std/config`, `std/actors`, all of `std/http*`
-    // were missing on `main` until #329 surfaced it). The walker can't
-    // miss anything; new modules are picked up the next build.
+    /* The include list is built where a command first asks for it
+     * (tc_include_flags, #3834). */
+}
+
+/* The toolchain's include flags.
+ *
+ * Dynamic walk over the runtime/ and std/ subtrees rather than the
+ * hardcoded list this used to hold: the hardcoded version silently
+ * dropped new modules as they landed (`std/bytes`, `std/cryptography`,
+ * `std/zlib`, `std/dl`, `std/config`, `std/actors`, all of `std/http*`
+ * were missing on `main` until #329 surfaced it). The walker can't
+ * miss anything; new modules are picked up the next build.
+ *
+ * Built on first use (#3834), not by discover_toolchain: only a compile or
+ * link line and `ae cflags` read it, and the walk lists about 220
+ * directories (11 ms of a 50 ms `ae run` cache hit on Windows), which every
+ * other command, a cache hit included, paid for nothing. The string is the
+ * one discover_toolchain built: the same directories, in the same order.
+ * Never NULL; empty only when memory ran out before the first flag. */
+static void tc_build_include_flags(void);
+
+const char* tc_include_flags(void) {
+    if (!s_include_flags_built) {
+        s_include_flags_built = 1;
+        tc_build_include_flags();
+    }
+    return tc.include_flags ? tc.include_flags : "";
+}
+
+static void tc_build_include_flags(void) {
     if (tc.dev_mode) {
         size_t pos = 0;
         if (!tc.include_flags && str_buf_grow(&tc.include_flags, &tc.include_flags_cap, 0)) { /* first use */ }
         if (tc.include_flags) tc.include_flags[0] = '\0';
-        char rt[1024], stdroot[1024];
+        /* Sized to hold the longest root and what is added to it, whole. */
+        char rt[sizeof(tc.root) + sizeof("/runtime")], stdroot[sizeof(tc.root) + sizeof("/std")];
         snprintf(rt, sizeof(rt), "%s/runtime", tc.root);
         snprintf(stdroot, sizeof(stdroot), "%s/std", tc.root);
         /* #1420: the public embedder header (include/libaether.h) is not
          * under runtime/ or std/, so nothing put its directory on the include
          * path. runtime/libaether_caps.c includes it by name. */
-        char pubinc[1024];
+        char pubinc[sizeof(tc.root) + sizeof("/include")];
         snprintf(pubinc, sizeof(pubinc), "%s/include", tc.root);
         if (!append_include_one_dir(&tc.include_flags, &tc.include_flags_cap, &pos, pubinc) ||
             !walk_dirs_emit_includes(rt, &tc.include_flags, &tc.include_flags_cap, &pos) ||
@@ -2576,7 +2605,10 @@ found_root:
         size_t pos = 0;
         if (!tc.include_flags && str_buf_grow(&tc.include_flags, &tc.include_flags_cap, 0)) { /* first use */ }
         if (tc.include_flags) tc.include_flags[0] = '\0';
-        char inc_rt[1024], inc_std[1024], shr_rt[1024], shr_std[1024];
+        char inc_rt[sizeof(tc.root) + sizeof("/include/aether/runtime")];
+        char inc_std[sizeof(tc.root) + sizeof("/include/aether/std")];
+        char shr_rt[sizeof(tc.root) + sizeof("/share/aether/runtime")];
+        char shr_std[sizeof(tc.root) + sizeof("/share/aether/std")];
         snprintf(inc_rt,  sizeof(inc_rt),  "%s/include/aether/runtime", tc.root);
         snprintf(inc_std, sizeof(inc_std), "%s/include/aether/std",     tc.root);
         snprintf(shr_rt,  sizeof(shr_rt),  "%s/share/aether/runtime",   tc.root);
@@ -2584,7 +2616,7 @@ found_root:
         /* #1420: include/aether/ itself holds the public embedder header
          * (libaether.h); the walks below only cover its runtime/ and std/
          * subtrees. */
-        char inc_root[1024];
+        char inc_root[sizeof(tc.root) + sizeof("/include/aether")];
         snprintf(inc_root, sizeof(inc_root), "%s/include/aether", tc.root);
         int ok =
             append_include_one_dir(&tc.include_flags, &tc.include_flags_cap, &pos, inc_root) &&
@@ -6290,7 +6322,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, binimport_link(), rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            s_gcc_cmd, opt, tc_include_flags(), ae_includes, c_file, config_c, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, binimport_link(), rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -6304,7 +6336,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             /* The vendored defines first: their -I has to come ahead of
              * any other include directory (see ae_vendored_src_defs). */
             char* rt_cflags = ae_strdup_printf("%s %s %s %s", vendored_src_defs, opt,
-                                               tc.include_flags, ae_includes);
+                                               tc_include_flags(), ae_includes);
             if (rt_cflags) rt_objs = ae_cached_runtime(s_gcc_cmd, rt_cflags);
             free(rt_cflags);
         }
@@ -6313,7 +6345,7 @@ void build_gcc_cmd(char* cmd, size_t size,
          * come BEFORE that source list on the command line. */
         int w = snprintf(cmd, size,
             "%s %s%s %s %s \"%s\"%s %s %s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_cmd, vendored_src_defs, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            s_gcc_cmd, vendored_src_defs, opt, tc_include_flags(), ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         free(rt_objs);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
@@ -6575,7 +6607,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
+            cc, opt, tc_include_flags(), ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
@@ -6590,7 +6622,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             /* The vendored defines first: their -I has to come ahead of
              * any other include directory (see ae_vendored_src_defs). */
             char* rt_cflags = ae_strdup_printf("%s %s %s %s %s", vendored_src_defs, opt,
-                                               tc.include_flags, ae_includes,
+                                               tc_include_flags(), ae_includes,
                                                macos_homebrew_flags(0));
             if (rt_cflags) rt_objs = ae_cached_runtime(cc, rt_cflags);
             free(rt_cflags);
@@ -6600,7 +6632,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
             "%s %s%s %s %s \"%s\"%s %s %s %s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, vendored_src_defs, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
+            cc, vendored_src_defs, opt, tc_include_flags(), ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         free(rt_objs);
         if (w >= (int)size) {
@@ -6637,7 +6669,7 @@ void build_syntax_check_cmd(char* cmd, size_t size, const char* c_file, const ch
     }
     int w = snprintf(cmd, size, "%s -fsyntax-only%s%s %s %s %s %s \"%s\"%s", cc, AETHER_WRAP_CFLAGS,
                      bracket_depth_flags(cc), AETHER_REQUIRED_DEFINES, get_cflags(),
-                     tc.include_flags, ae_includes, c_file, extra ? extra : "");
+                     tc_include_flags(), ae_includes, c_file, extra ? extra : "");
     if (w >= (int)size) cmd_too_long(cmd, size, w);
 }
 
@@ -6666,7 +6698,7 @@ static int build_obj_compile_cmd(char* cmd, size_t size, const char* c_file,
         return 0;
     }
     int w = snprintf(cmd, size, "%s -c %s %s %s \"%s\" -o \"%s\"", cc, flags,
-                     tc.include_flags ? tc.include_flags : "", includes, c_file, obj_file);
+                     tc_include_flags(), includes, c_file, obj_file);
     free(flags);
     if (w >= (int)size) {
         /* The include list has no length limit (#2536); a cut command would
@@ -6723,8 +6755,8 @@ static int build_wasm_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file) {
     // Build include paths from toolchain root
     char includes[8192];
-    if (tc.include_flags[0]) {
-        strncpy(includes, tc.include_flags, sizeof(includes) - 1);
+    if (tc_include_flags()[0]) {
+        strncpy(includes, tc_include_flags(), sizeof(includes) - 1);
         includes[sizeof(includes) - 1] = '\0';
     } else {
         static const char* include_dirs[] = {
@@ -14188,9 +14220,9 @@ static int cmd_cflags(int argc, char** argv) {
          * runtime or std sources beside it (AETHER_REQUIRED_DEFINES). */
         fputs(" " AETHER_REQUIRED_DEFINES, stdout);
         wrote_anything = 1;
-        if (tc.include_flags[0]) {
+        if (tc_include_flags()[0]) {
             fputc(' ', stdout);
-            fputs(tc.include_flags, stdout);
+            fputs(tc_include_flags(), stdout);
         }
 #if defined(_WIN32)
         /* #3023: the assembler flag every `ae` build on Windows passes
