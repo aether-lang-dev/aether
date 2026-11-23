@@ -167,5 +167,15 @@ main() {
     client.pool_free(b)
     http.server_stop(server)
     http.server_free(server)
+    // The server is gone, so no callback can run: free what is left.
+    slot = intmap.next(px.conns, 0)
+    while slot >= 0 {
+        client.pool_free(mem.long_to_ptr(intmap.value_at(px.conns, slot)))
+        slot = intmap.next(px.conns, slot + 1)
+    }
+    intmap.free(px.conns)
+    sync.atomic_free(px.lock)
+    sync.atomic_free(px.closed)
+    heap.free(px)
     println("PASS: one upstream connection per client connection, freed when it closes")
 }
