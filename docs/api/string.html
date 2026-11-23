@@ -286,6 +286,7 @@
       <h3 class="function-name">char_at <span class="kind">extern</span></h3>
       <pre class="usage"><code>char_at(str, index) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">str: string, index: int</span></p>
+      <p class="doc">The byte at `index`, 0 to 255; 0 when `str` is null or `index` is out of range.</p>
     </div>
     <div class="function" id="equals" data-name="equals">
       <h3 class="function-name">equals <span class="kind">extern</span></h3>
@@ -426,8 +427,10 @@
       <p class="doc">Cons-cell construction + destructuring. Names mirror the C runtime symbols; users call them via dot-notation `string.seq_X(...)` (the qualified-name resolver joins `string` + `seq_X` → `string_seq_X`). A `@heap` result hands the caller a reference of its own; `seq_tail` lends the sequence's own tail.</p>
     </div>
     <div class="function" id="seq_cons" data-name="seq_cons">
-      <h3 class="function-name">seq_cons <span class="kind">fn</span></h3>
-      <pre class="usage"><code>seq_cons()</code></pre>
+      <h3 class="function-name">seq_cons <span class="kind">extern</span></h3>
+      <pre class="usage"><code>seq_cons(head, tail) <span class="arrow">-&gt;</span> *StringSeq</code></pre>
+      <p class="signature"><span class="sig-params">head: string, tail: *StringSeq</span></p>
+      <p class="doc">The cell keeps its head and its tail (#3086), so both are `@retain`: the call hands it a reference to each, which string_seq_cons_adopt takes over.</p>
     </div>
     <div class="function" id="seq_head" data-name="seq_head">
       <h3 class="function-name">seq_head <span class="kind">extern</span></h3>

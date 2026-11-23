@@ -1,0 +1,208 @@
+// Regression (#3826, #3117): a panic out of a loop whose sends are batched
+// sends what the loop sent before it, in order, and closes the batch.
+//
+// Outside an actor, a `while` or `for` loop that only sends, counts and
+// branches keeps its sends in the thread's batch, which the loop's end
+// sends. A panic in the loop jumped past that end: its messages stayed in
+// the buffer, sent only by the thread's next send or wait, so a sender that
+// had nothing more to send never sent them, and a worker thread's stayed
+// there for good. The batch is now in the panic's journal (aether_unwind):
+// the unwind to the `try` sends it, and the batch is closed.
+//
+// Each shape sends 0 to 9 and panics after 5. The sink must get exactly 0
+// to 5, in order:
+//   - in main, before main sends or waits again (a read of the sink's
+//     state, polled), and after a wait_for_idle;
+//   - on a worker's thread, which sends nothing after the panic.
+// The nested shapes (an inner loop, plain or in a `try` of its own, with the
+// panic in a later pass of the outer loop) send 0 to 5 as well: the inner
+// loop joins the outer loop's batch, and that batch stays in the journal
+// until the outer loop ends (the runtime's nested starts are
+// test_scheduler_nested_batches_stay_journaled).
+
+import std.worker
+
+extern exit(code: int)
+
+message M { n: int }
+message P { n: int, tag: string }
+message Get {}
+message Seen { v: int }
+
+// Counts what it gets, and every number out of order.
+actor Sink {
+    state got = 0
+    state next = 0
+    state bad = 0
+    receive {
+        M(n) -> {
+            if n != next { bad = bad + 1 }
+            next = n + 1
+            got = got + 1
+        }
+        P(n, tag) -> {
+            if n != next || tag != "p" { bad = bad + 1 }
+            next = n + 1
+            got = got + 1
+        }
+        Get() -> {
+            v = got * 1000 + bad
+            got = 0
+            next = 0
+            bad = 0
+            reply Seen { v: v }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3826: ${msg}")
+        exit(1)
+    }
+}
+
+// The sink's count, polled for up to five seconds without a send or a wait.
+fn arrived(s: actor_ref[Sink], want: int) -> int {
+    tries = 0
+    while s.got < want && tries < 500 {
+        sleep(10)
+        tries = tries + 1
+    }
+    return s.got
+}
+
+fn delivered(s: actor_ref[Sink], what: string) {
+    check(arrived(s, 6) == 6, "${what}: ${s.got} of the 6 messages sent before the panic arrived")
+    wait_for_idle()
+    int v = s ? Get {}
+    check(v == 6000, "${what}: got*1000 + out of order = ${v}, want 6000")
+}
+
+fn while_panics(s: actor_ref[Sink]) {
+    try {
+        i = 0
+        while i < 10 {
+            s ! M { n: i }
+            if i == 5 { panic("in a batched while loop") }
+            i = i + 1
+        }
+    } catch e {
+    }
+}
+
+fn for_panics(s: actor_ref[Sink]) {
+    try {
+        for i in 0..10 {
+            s ! P { n: i, tag: "p" }
+            if i == 5 { panic("in a batched for loop") }
+        }
+    } catch e {
+    }
+}
+
+// Nested loops: the inner loop sends 3i and 3i+1, the outer loop 3i+2 after
+// it, and the panic comes in the outer loop's second pass, after its inner
+// loop closed.
+fn nested_panics(s: actor_ref[Sink]) {
+    try {
+        i = 0
+        while i < 10 {
+            j = 0
+            while j < 2 {
+                s ! M { n: 3 * i + j }
+                j = j + 1
+            }
+            s ! M { n: 3 * i + 2 }
+            if i == 1 { panic("in the outer loop, after the inner one") }
+            i = i + 1
+        }
+    } catch e {
+    }
+}
+
+// The inner loop in a `try` of its own, left by a panic that `try` catches
+// in the first pass; the outer loop goes on and panics in its second pass.
+fn nested_in_try_panics(s: actor_ref[Sink]) {
+    try {
+        for i in 0..10 {
+            try {
+                for j in 0..2 {
+                    s ! M { n: 3 * i + j }
+                    if i == 0 && j == 1 { panic("in the inner loop, in its own try") }
+                }
+            } catch e {
+            }
+            s ! M { n: 3 * i + 2 }
+            if i == 1 { panic("in the outer loop, after the inner one's panic") }
+        }
+    } catch e {
+    }
+}
+
+main() {
+    s = spawn(Sink())
+
+    try {
+        i = 0
+        while i < 10 {
+            s ! M { n: i }
+            if i == 5 { panic("in main's while loop") }
+            i = i + 1
+        }
+    } catch e {
+    }
+    delivered(s, "main, while")
+
+    try {
+        for i in 0..10 {
+            s ! M { n: i }
+            if i == 5 { panic("in main's for loop") }
+        }
+    } catch e {
+    }
+    delivered(s, "main, for")
+
+    // A worker's thread sends nothing after its panic.
+    worker.run(|| {
+            while_panics(s)
+            return 0
+        }, | r: ptr | {})
+    worker.wait()
+    delivered(s, "worker, while")
+    worker.run(|| {
+            for_panics(s)
+            return 0
+        }, | r: ptr | {})
+    worker.wait()
+    delivered(s, "worker, for")
+
+    // Nested loops, the inner one plain and in a `try` of its own: the
+    // outer loop's sends after the inner loop are sent by the later panic.
+    nested_panics(s)
+    delivered(s, "main, nested")
+    nested_in_try_panics(s)
+    delivered(s, "main, nested in a try")
+    worker.run(|| {
+            nested_panics(s)
+            return 0
+        }, | r: ptr | {})
+    worker.wait()
+    delivered(s, "worker, nested")
+    worker.run(|| {
+            nested_in_try_panics(s)
+            return 0
+        }, | r: ptr | {})
+    worker.wait()
+    delivered(s, "worker, nested in a try")
+
+    // Twice in a row on one thread: the second batch is the second loop's
+    // alone.
+    while_panics(s)
+    while_panics(s)
+    check(arrived(s, 12) == 12, "two panics: ${s.got} of 12 arrived")
+    wait_for_idle()
+    int v = s ? Get {}
+    check(v == 12001, "two panics: got*1000 + out of order = ${v}, want 12001 (the restart at 0)")
+    println("OK")
+}

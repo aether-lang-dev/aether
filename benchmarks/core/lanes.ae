@@ -1,0 +1,125 @@
+// std.lanes min and max (#3815): a running minimum, where each min is on the
+// loop's dependency chain (a support search), the same with four chains at
+// once (throughput), and the horizontal minimum of four and eight lanes, on
+// a chain (each reduction waits for the last) and as throughput.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+import std.lanes
+
+per_op(t0: long, t1: long, ops: int) -> float {
+    return (t1 - t0) as float / ops as float
+}
+
+main() {
+    n = 4096
+    buf = malloc(n * 4)
+    s = buf as f32[]
+    i = 0
+    while i < n {
+        s[i] = ((i * 7919) % 1000) as f32 - 500.0
+        i = i + 1
+    }
+    reps = 4000
+    keep = 0.0
+
+    acc = lanes.splat4(1000.0)
+    t0 = os.now_monotonic_ns()
+    r = 0
+    while r < reps {
+        j = 0
+        while j < n {
+            acc = lanes.min4(acc, lanes.load4(buf, j))
+            j = j + 4
+        }
+        r = r + 1
+    }
+    println("row lanes_min4_chain ${per_op(t0, os.now_monotonic_ns(), reps * (n / 4))} ns/op")
+    keep = keep + lanes.sum4(acc)
+
+    acc8 = lanes.splat8(1000.0)
+    t0 = os.now_monotonic_ns()
+    r = 0
+    while r < reps {
+        j = 0
+        while j < n {
+            acc8 = lanes.min8(acc8, lanes.load8(buf, j))
+            j = j + 8
+        }
+        r = r + 1
+    }
+    println("row lanes_min8_chain ${per_op(t0, os.now_monotonic_ns(), reps * (n / 8))} ns/op")
+    keep = keep + lanes.sum8(acc8)
+
+    a0 = lanes.splat4(1000.0)
+    a1 = a0
+    a2 = a0
+    a3 = a0
+    t0 = os.now_monotonic_ns()
+    r = 0
+    while r < reps {
+        j = 0
+        while j < n {
+            a0 = lanes.max4(a0, lanes.load4(buf, j))
+            a1 = lanes.max4(a1, lanes.load4(buf, j + 4))
+            a2 = lanes.max4(a2, lanes.load4(buf, j + 8))
+            a3 = lanes.max4(a3, lanes.load4(buf, j + 12))
+            j = j + 16
+        }
+        r = r + 1
+    }
+    println("row lanes_max4_throughput ${per_op(t0, os.now_monotonic_ns(), reps * (n / 4))} ns/op")
+    keep = keep + lanes.sum4(a0 + a1 + a2 + a3)
+
+    m = 0.0 as f32
+    t0 = os.now_monotonic_ns()
+    r = 0
+    while r < reps {
+        j = 0
+        while j < n {
+            m = lanes.reduce_min4(lanes.load4(buf, j) + lanes.splat4(m))
+            j = j + 4
+        }
+        r = r + 1
+    }
+    println("row lanes_reduce_min4_chain ${per_op(t0, os.now_monotonic_ns(), reps * (n / 4))} ns/op")
+    keep = keep + m
+
+    m8 = 0.0 as f32
+    t0 = os.now_monotonic_ns()
+    r = 0
+    while r < reps {
+        j = 0
+        while j < n {
+            m8 = lanes.reduce_min8(lanes.load8(buf, j) + lanes.splat8(m8))
+            j = j + 8
+        }
+        r = r + 1
+    }
+    println("row lanes_reduce_min8_chain ${per_op(t0, os.now_monotonic_ns(), reps * (n / 8))} ns/op")
+    keep = keep + m8
+
+    s0 = 0.0 as f32
+    s1 = s0
+    s2 = s0
+    s3 = s0
+    t0 = os.now_monotonic_ns()
+    r = 0
+    while r < reps {
+        j = 0
+        while j < n {
+            s0 = s0 + lanes.reduce_min4(lanes.load4(buf, j))
+            s1 = s1 + lanes.reduce_min4(lanes.load4(buf, j + 4))
+            s2 = s2 + lanes.reduce_min4(lanes.load4(buf, j + 8))
+            s3 = s3 + lanes.reduce_min4(lanes.load4(buf, j + 12))
+            j = j + 16
+        }
+        r = r + 1
+    }
+    println("row lanes_reduce_min4_throughput ${per_op(t0, os.now_monotonic_ns(), reps * (n / 4))} ns/op")
+    keep = keep + s0 + s1 + s2 + s3
+
+    if keep == 12345.0 { println("unlikely") }
+    free(buf)
+}

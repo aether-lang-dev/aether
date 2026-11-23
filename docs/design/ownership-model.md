@@ -234,8 +234,19 @@ optional took its strings plain). A message does not share: a send
 deep-copies its strings (#466), so it needs no publish, except a temporary
 held by nothing else (an owned call or interpolation result whose count is
 1, not pinned), which the message takes as it is: a dying temporary moves
-(#3535, `_aether_msg_str`). A value read from a published place carries the
-bit with it.
+(#3535, `_aether_msg_str`). So does a received string a handler forwards on
+its last use (#3827): the arm's binding views the message's field, and a send
+whose field is that binding's one read in the arm, under no loop, closure or
+`defer`, with nothing in the arm binding the name
+(binding_read_is_last_use), takes the reference out of the place and leaves
+it empty, so the message's release after the arm releases nothing of it. A
+send or an ask reads its target before it takes any field, so a target that
+panics (an index, a call) finds every place still full and nothing copied; a
+null target, found after the takes, gives back what the message took before
+its panic (#3847): the fields it owns, by its release, and each closure the
+send boxed into a `ptr` field, which a `ptr` does not own. Any
+other forward copies, one count operation too many at worst (R5). A value
+read from a published place carries the bit with it.
 
 **A module string `var` is locked (#3522).** Atomic counts make two
 threads' retains and releases of one string safe, not the place that holds
@@ -712,6 +723,11 @@ value and the frame's own body:
   place's entry calls `aether_unwind_forget` only on 1. A slice token of -1
   records a refusal for want of a frame: the depth a local's stores run at
   is its declaration's, so it is not asked again.
+- *A held argument's track says so too* (runtime ABI revision 8, #3840).
+  A string argument held for a call (and a closure argument) is journaled
+  by `aether_unwind_track_place` / `aether_unwind_track`, which return
+  whether they wrote the entry, and the forget after the call runs only on
+  1. The hold, its take and its release are unchanged.
 
 Store, leave, pass and return keep their meaning (R2, R3): every place
 releases what it holds on every exit exactly as before, and only journal

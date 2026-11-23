@@ -1388,6 +1388,68 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
     }
     return ret;
 }
+
+/* #3842: see the POSIX twin above run_cmd_capture_stdout_wait. A command
+ * line long enough to need ae_spawn's response file is run whole. */
+int run_cmd_capture_stdout_start(const char* cmd, const char* path, AeChild* child) {
+    child->running = 0;
+    if (!path || !path[0]) return 0;
+    char** argv = ae_split_command(cmd, NULL);
+    if (!argv || !argv[0]) {
+        free(argv);
+        return 0;
+    }
+    int n = 0;
+    size_t room = 0;
+    for (; argv[n]; n++) room += 2 * strlen(argv[n]) + 3;
+    size_t vec = ((size_t)n + 1) * sizeof(char*);
+    char** list = malloc(vec + room);
+    if (!list) {
+        free(argv);
+        return 0;
+    }
+    char* w = (char*)list + vec;
+    size_t line = 0;
+    for (int i = 0; i < n; i++) {
+        list[i] = w;
+        w = win_quote_arg(argv[i], w);
+        line += (size_t)(w - list[i]) + 1;
+        *w++ = '\0';
+    }
+    list[n] = NULL;
+    intptr_t h = -1;
+    if (line <= WIN_CMD_LINE_MAX) {
+        if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
+        fflush(stdout);
+        int saved_stdout = _dup(1);
+        int fd = _open(path, _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE);
+        if (saved_stdout >= 0 && fd >= 0) {
+            _dup2(fd, 1);
+            h = _spawnvp(_P_NOWAIT, argv[0], (const char* const*)list);
+            _dup2(saved_stdout, 1);
+        }
+        if (fd >= 0) _close(fd);
+        if (saved_stdout >= 0) _close(saved_stdout);
+    }
+    free(list);
+    free(argv);
+    if (h == -1) return 0;
+    child->handle = (long long)h;
+    child->running = 1;
+    return 1;
+}
+
+int run_cmd_capture_stdout_wait(AeChild* child) {
+    if (!child->running) return AE_SPAWN_FAILED;
+    child->running = 0;
+    HANDLE p = (HANDLE)(intptr_t)child->handle;
+    DWORD code = (DWORD)-1;
+    /* A wait or an exit code that cannot be had is no answer: the probe
+     * asks again, as on POSIX. */
+    int ok = WaitForSingleObject(p, INFINITE) == WAIT_OBJECT_0 && GetExitCodeProcess(p, &code);
+    CloseHandle(p);
+    return ok ? (int)code : AE_SPAWN_FAILED;
+}
 #endif
 
 int run_cmd(const char* cmd) {
@@ -1500,6 +1562,80 @@ int run_cmd_capture_all(const char* cmd, const char* path) {
     if (!path || !path[0]) return run_command(cmd, 0, NULL);
     return run_command(cmd, 4, path);
 }
+
+/* #3842: run_cmd_capture_stdout without the wait, and the wait. The child
+ * is spawned exactly as ae_spawn spawns it (quiet 3), only not waited for:
+ * ae goes on with other work, and the status comes from _wait. A command
+ * that cannot be started this way is reported as not started, and the
+ * caller runs it whole, which says why it failed if it does. */
+#ifndef _WIN32
+int run_cmd_capture_stdout_start(const char* cmd, const char* path, AeChild* child) {
+    child->running = 0;
+    if (!path || !path[0]) return 0;
+    char** argv = ae_split_command(cmd, NULL);
+    if (!argv || !argv[0]) {
+        free(argv);
+        return 0;
+    }
+    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    pid_t pid;
+    int ret = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    free(argv);
+    if (ret != 0) return 0;
+    child->handle = (long long)pid;
+    child->running = 1;
+    return 1;
+}
+
+/* A child another wait reaped before its own wait came (ae_run_parallel's
+ * waitpid(-1) can reap the overlapped `--version` run, #3842): its status,
+ * kept for that wait. One such child at a time is all ae starts; a full
+ * table leaves the child's own wait to fail, which is safe. */
+static struct { pid_t pid; int status; } s_reaped_early[4];
+static int s_reaped_early_n;
+
+static void child_reaped_early(pid_t pid, int status) {
+    if (s_reaped_early_n < (int)(sizeof(s_reaped_early) / sizeof(s_reaped_early[0]))) {
+        s_reaped_early[s_reaped_early_n].pid = pid;
+        s_reaped_early[s_reaped_early_n].status = status;
+        s_reaped_early_n++;
+    }
+}
+
+static int child_take_reaped(pid_t pid, int* status) {
+    for (int i = 0; i < s_reaped_early_n; i++) {
+        if (s_reaped_early[i].pid != pid) continue;
+        *status = s_reaped_early[i].status;
+        s_reaped_early[i] = s_reaped_early[--s_reaped_early_n];
+        return 1;
+    }
+    return 0;
+}
+
+/* A wait that fails (ECHILD: the child was reaped elsewhere and its status
+ * is gone) is AE_SPAWN_FAILED, never an answer: status 0 would read as an
+ * exit 0, and the `--version` probe would take whatever its output file
+ * holds for the compiler's answer. As AE_SPAWN_FAILED, the probe asks the
+ * compiler again (#3707). */
+int run_cmd_capture_stdout_wait(AeChild* child) {
+    if (!child->running) return AE_SPAWN_FAILED;
+    child->running = 0;
+    pid_t pid = (pid_t)child->handle;
+    int status = 0;
+    if (!child_take_reaped(pid, &status)) {
+        pid_t got;
+        while ((got = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
+        if (got != pid) return AE_SPAWN_FAILED;
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    return -1;
+}
+#endif
 
 /* Print a captured stdout log to stderr, so it interleaves with the
  * diagnostics that streamed through live. Silent when there is nothing. */
@@ -2049,9 +2185,56 @@ static int append_include_one_dir(char** out, size_t* out_size, size_t* pos, con
     return append_include_flag(out, out_size, pos, "-I", path);
 }
 
+/* #3841: the headers of the toolchain's -idirafter directories, recorded
+ * while tc_build_include_flags lists them: each name with the position of
+ * its directory in the list, and the directories in that order. A name is
+ * resolved to the first directory that has it, as the compiler searches
+ * them. `s_hdr_ok` is 0 when a listing could not be recorded whole; the
+ * compile line then names every directory. */
+typedef struct { char* name; int dir; } HdrName;
+static HdrName* s_hdr_names = NULL;
+static int s_hdr_name_count = 0, s_hdr_name_cap = 0;
+static char** s_hdr_dirs = NULL;
+static int s_hdr_dir_count = 0, s_hdr_dir_cap = 0;
+static int s_hdr_ok = 1;
+static int s_hdr_recording = 0;
+
+static void hdr_record_name(const char* name, size_t len) {
+    if (!s_hdr_recording || !s_hdr_ok) return;
+    if (s_hdr_name_count == s_hdr_name_cap) {
+        int cap = s_hdr_name_cap ? s_hdr_name_cap * 2 : 256;
+        HdrName* grown = realloc(s_hdr_names, sizeof(HdrName) * (size_t)cap);
+        if (!grown) { s_hdr_ok = 0; return; }
+        s_hdr_names = grown;
+        s_hdr_name_cap = cap;
+    }
+    char* copy = malloc(len + 1);
+    if (!copy) { s_hdr_ok = 0; return; }
+    memcpy(copy, name, len);
+    copy[len] = '\0';
+    s_hdr_names[s_hdr_name_count].name = copy;
+    s_hdr_names[s_hdr_name_count].dir = s_hdr_dir_count;   /* the one appended next */
+    s_hdr_name_count++;
+}
+
+static void hdr_record_dir(const char* dir) {
+    if (!s_hdr_recording || !s_hdr_ok) return;
+    if (s_hdr_dir_count == s_hdr_dir_cap) {
+        int cap = s_hdr_dir_cap ? s_hdr_dir_cap * 2 : 128;
+        char** grown = realloc(s_hdr_dirs, sizeof(char*) * (size_t)cap);
+        if (!grown) { s_hdr_ok = 0; return; }
+        s_hdr_dirs = grown;
+        s_hdr_dir_cap = cap;
+    }
+    s_hdr_dirs[s_hdr_dir_count] = strdup(dir);
+    if (!s_hdr_dirs[s_hdr_dir_count]) { s_hdr_ok = 0; return; }
+    s_hdr_dir_count++;
+}
+
 /* Does `dir` hold a C header? Only such a directory can resolve an include:
  * one without (a module of .ae and .c files, a directory of directories)
- * would only be one more place the compiler looks in vain. */
+ * would only be one more place the compiler looks in vain. While the list
+ * is being built (#3841) every header's name is recorded too. */
 static int dir_has_header(const char* dir) {
 #ifdef _WIN32
     char pattern[1024];
@@ -2061,7 +2244,13 @@ static int dir_has_header(const char* dir) {
     if (h == INVALID_HANDLE_VALUE) return 0;
     int found = 0;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { found = 1; break; }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        found = 1;
+        if (!s_hdr_recording) break;
+        /* The pattern can match by a short name too: only a real `.h` is
+         * recorded. */
+        size_t n = strlen(fd.cFileName);
+        if (n > 2 && strcmp(fd.cFileName + n - 2, ".h") == 0) hdr_record_name(fd.cFileName, n);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return found;
@@ -2070,9 +2259,12 @@ static int dir_has_header(const char* dir) {
     if (!d) return 0;
     int found = 0;
     struct dirent* ent;
-    while (!found && (ent = readdir(d)) != NULL) {
+    while ((!found || s_hdr_recording) && (ent = readdir(d)) != NULL) {
         size_t n = strlen(ent->d_name);
-        found = n > 2 && strcmp(ent->d_name + n - 2, ".h") == 0;
+        if (n > 2 && strcmp(ent->d_name + n - 2, ".h") == 0) {
+            found = 1;
+            hdr_record_name(ent->d_name, n);
+        }
     }
     closedir(d);
     return found;
@@ -2115,8 +2307,10 @@ static int walk_dirs_emit_includes(const char* root, char** out, size_t* out_siz
     if (!root || !*root) return 1;
     if (walk_skips_dir(root)) return 1;
     // The root itself first.
-    if (dir_has_header(root) &&
-        !append_include_flag(out, out_size, pos, "-idirafter ", root)) return 0;
+    if (dir_has_header(root)) {
+        if (!append_include_flag(out, out_size, pos, "-idirafter ", root)) return 0;
+        hdr_record_dir(root);   /* #3841 */
+    }
 
 #ifdef _WIN32
     char pattern[1024];
@@ -2203,7 +2397,13 @@ static bool ae_home_has(const char* home, const char* share, const char* lib) {
     return found;
 }
 
+/* Whether tc.include_flags holds the list for the toolchain found last: a
+ * later discover_toolchain may find another root, and its list is built
+ * again on first use. */
+static int s_include_flags_built = 0;
+
 void discover_toolchain(void) {
+    s_include_flags_built = 0;
     char exe_dir[1024] = {0};
     bool found_exe_dir = get_exe_dir(exe_dir, sizeof(exe_dir));
 
@@ -2534,25 +2734,494 @@ found_root:
         }
     }
 
-    // Build include flags and source file lists.
-    //
-    // Dynamic walk over the runtime/ and std/ subtrees rather than the
-    // hardcoded list this used to hold — the hardcoded version silently
-    // dropped new modules as they landed (`std/bytes`, `std/cryptography`,
-    // `std/zlib`, `std/dl`, `std/config`, `std/actors`, all of `std/http*`
-    // were missing on `main` until #329 surfaced it). The walker can't
-    // miss anything; new modules are picked up the next build.
+    /* The include list is built where a command first asks for it
+     * (tc_include_flags, #3834). */
+}
+
+/* The toolchain's include flags.
+ *
+ * Dynamic walk over the runtime/ and std/ subtrees rather than the
+ * hardcoded list this used to hold: the hardcoded version silently
+ * dropped new modules as they landed (`std/bytes`, `std/cryptography`,
+ * `std/zlib`, `std/dl`, `std/config`, `std/actors`, all of `std/http*`
+ * were missing on `main` until #329 surfaced it). The walker can't
+ * miss anything; new modules are picked up the next build.
+ *
+ * Built on first use (#3834), not by discover_toolchain: only a compile or
+ * link line and `ae cflags` read it, and the walk lists about 220
+ * directories (11 ms of a 50 ms `ae run` cache hit on Windows), which every
+ * other command, a cache hit included, paid for nothing. The string is the
+ * one discover_toolchain built: the same directories, in the same order.
+ * Never NULL; empty only when memory ran out before the first flag. */
+static void tc_build_include_flags(void);
+
+static int hdr_name_cmp(const void* a, const void* b);
+
+const char* tc_include_flags(void) {
+    if (!s_include_flags_built) {
+        s_include_flags_built = 1;
+        /* #3841: the headers each directory holds, recorded as it is listed. */
+        for (int i = 0; i < s_hdr_name_count; i++) free(s_hdr_names[i].name);
+        for (int i = 0; i < s_hdr_dir_count; i++) free(s_hdr_dirs[i]);
+        s_hdr_name_count = s_hdr_dir_count = 0;
+        s_hdr_ok = 1;
+        s_hdr_recording = 1;
+        tc_build_include_flags();
+        s_hdr_recording = 0;
+        if (s_hdr_ok && s_hdr_name_count > 1)
+            qsort(s_hdr_names, (size_t)s_hdr_name_count, sizeof(HdrName), hdr_name_cmp);
+    }
+    return tc.include_flags ? tc.include_flags : "";
+}
+
+/* ---- The -idirafter directories one program needs (#3841) ----------------
+ *
+ * The toolchain list names every runtime and std directory that holds a
+ * header, 53 in a source tree, and the compiler searches them for every
+ * header a program includes that is not its own or the system's: hello's
+ * preprocessing went from 73 to 62 ms with the 5 it needs. The directories
+ * a compile needs are the ones its C files' includes resolve in, and the
+ * includes of what those resolve to, in turn: a text scan of every
+ * `#include` and `__has_include`, under an `#if` or not, which can only
+ * keep a directory too many. A name resolves where the compiler would find
+ * it: a quoted one beside the file that includes it first, then in the -I
+ * directories ahead of the list (include/ and each module's @c_include
+ * directory), then in the list's first directory that has it, then in the
+ * Homebrew (LOCALBASE) include directory a macOS or FreeBSD line carries
+ * after the list, whose headers are followed, though that directory is not
+ * the list's to keep. The directories it keeps go on the line in the
+ * list's order, as -idirafter (#2552: a user's or the system's header of
+ * the same name still wins).
+ *
+ * Anything the scan cannot follow gives the whole list, as before: an
+ * include through a macro, an `#include_next` (or `__has_include_next`),
+ * a file it cannot read, more files than it holds, flags that move the
+ * search (-I, -isystem, -iquote, -idirafter, -include, -imacros,
+ * -iwithprefix, -nostdinc) or an @file response file, which may hold any
+ * of them, in the user's cflags or in the $AE_CC / $CC
+ * command itself, CPATH, C_INCLUDE_PATH or OBJC_INCLUDE_PATH set (each a
+ * search list of the compiler's own), a header listing that was not
+ * recorded whole, or memory running out.
+ *
+ * Header names are matched with case folded as well as exactly
+ * (hdr_first_entries), so on a case-insensitive file system an include
+ * spelled in another case still keeps its directory. */
+#define PROGRAM_INCLUDE_SCAN_MAX 512
+
+typedef struct {
+    char** files;            /* found, scanned or waiting */
+    int count, cap, next;
+    unsigned char* need;     /* per s_hdr_dirs */
+    const char** idirs;      /* -I directories, in order */
+    int nidirs;
+    /* Directories the compile searches after the list, none of them the
+     * list's: the Homebrew (LOCALBASE) include directory. */
+    const char* after[1];
+    int nafter;
+    int failed;
+} IncludeScan;
+
+#if defined(__APPLE__) || defined(__FreeBSD__)
+/* The prefix Homebrew (macOS) or the ports (FreeBSD) install under:
+ * HOMEBREW_PREFIX, else /opt/homebrew; LOCALBASE, else /usr/local
+ * (macos_homebrew_flags says why). */
+static const char* homebrew_prefix(void) {
+#if defined(__APPLE__)
+    const char* prefix = getenv("HOMEBREW_PREFIX");
+    if (!prefix || !*prefix) prefix = "/opt/homebrew";
+#else
+    const char* prefix = getenv("LOCALBASE");
+    if (!prefix || !*prefix) prefix = "/usr/local";
+#endif
+    return prefix;
+}
+#endif
+
+/* The include directory of homebrew_prefix, when it exists and can be
+ * quoted on a command line, which macos_homebrew_flags puts on a native
+ * compile line after the list; NULL for none, and on every other platform.
+ * Kept for the run. */
+static const char* homebrew_include_dir(void) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    static int asked = 0;
+    static char* dir = NULL;
+    if (!asked) {
+        asked = 1;
+        const char* prefix = homebrew_prefix();
+        char* inc = ae_path_printf("%s/include", prefix);
+        if (inc && strchr(prefix, '"') == NULL && dir_exists(inc)) dir = inc;
+        else free(inc);
+    }
+    return dir;
+#else
+    return NULL;
+#endif
+}
+
+/* Header names compared with ASCII case folded: on a case-insensitive file
+ * system (Windows, macOS by default) `#include "Aether_Foo.h"` opens
+ * aether_foo.h, and a scan that compared exactly took it for a system
+ * header and left its directory off the line. */
+static int hdr_fold_cmp(const char* a, const char* b) {
+    for (;; a++, b++) {
+        int x = (unsigned char)*a, y = (unsigned char)*b;
+        if (x >= 'A' && x <= 'Z') x += 'a' - 'A';
+        if (y >= 'A' && y <= 'Z') y += 'a' - 'A';
+        if (x != y || !x) return x - y;
+    }
+}
+
+static int hdr_name_cmp(const void* a, const void* b) {
+    const HdrName* x = (const HdrName*)a;
+    const HdrName* y = (const HdrName*)b;
+    int c = hdr_fold_cmp(x->name, y->name);
+    return c ? c : x->dir - y->dir;
+}
+
+/* Where a header `name` (no directory part) can resolve in the list, as
+ * entries of s_hdr_names: *any, in the first directory holding it in any
+ * case (what a case-insensitive file system opens), and *exact, in the
+ * first holding it spelled exactly (what a case-sensitive one opens); -1 for
+ * none. Both are kept, so the scan is right on either kind of file system,
+ * at worst one directory too many. */
+static void hdr_first_entries(const char* name, int* any, int* exact) {
+    *any = *exact = -1;
+    int lo = 0, hi = s_hdr_name_count - 1, at = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = hdr_fold_cmp(s_hdr_names[mid].name, name);
+        if (c == 0) { at = mid; hi = mid - 1; }
+        else if (c < 0) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    if (at < 0) return;
+    /* The names equal but for case sit together, each run by directory. */
+    for (int i = at; i < s_hdr_name_count && hdr_fold_cmp(s_hdr_names[i].name, name) == 0; i++) {
+        int d = s_hdr_names[i].dir;
+        if (*any < 0 || d < s_hdr_names[*any].dir) *any = i;
+        if (strcmp(s_hdr_names[i].name, name) == 0 &&
+            (*exact < 0 || d < s_hdr_names[*exact].dir)) *exact = i;
+    }
+}
+
+/* `dir` and `name` joined, in a buffer the caller frees; NULL out of memory. */
+static char* scan_join(const char* dir, size_t dlen, const char* name, size_t nlen) {
+    char* p = malloc(dlen + 1 + nlen + 1);
+    if (!p) return NULL;
+    memcpy(p, dir, dlen);
+    p[dlen] = '/';
+    memcpy(p + dlen + 1, name, nlen);
+    p[dlen + 1 + nlen] = '\0';
+    return p;
+}
+
+/* `path` onto the scan, once (taken over; freed when already there). */
+static void scan_push(IncludeScan* s, char* path) {
+    if (!path) { s->failed = 1; return; }
+    for (int i = 0; i < s->count; i++) {
+        if (strcmp(s->files[i], path) == 0) { free(path); return; }
+    }
+    if (s->count >= PROGRAM_INCLUDE_SCAN_MAX) { free(path); s->failed = 1; return; }
+    if (s->count == s->cap) {
+        int cap = s->cap ? s->cap * 2 : 64;
+        char** grown = realloc(s->files, sizeof(char*) * (size_t)cap);
+        if (!grown) { free(path); s->failed = 1; return; }
+        s->files = grown;
+        s->cap = cap;
+    }
+    s->files[s->count++] = path;
+}
+
+static int scan_is_absolute(const char* p) {
+    return p[0] == '/' || p[0] == '\\' || (p[0] && p[1] == ':');
+}
+
+/* A name the list does not hold, asked of the directories searched after it
+ * (IncludeScan.after): the file found there is followed, so a header of its
+ * that includes one only the list has keeps that directory. None of them is
+ * the list's, so none is marked. */
+static void scan_after(IncludeScan* s, const char* nm, size_t nlen) {
+    for (int i = 0; i < s->nafter; i++) {
+        char* p = scan_join(s->after[i], strlen(s->after[i]), nm, nlen);
+        if (!p) { s->failed = 1; return; }
+        if (path_exists(p)) { scan_push(s, p); return; }
+        free(p);
+    }
+}
+
+/* Where the include `name` of `file` resolves, onto the scan, its list
+ * directory marked. A name in none of the places the scan knows is the
+ * system's, and not followed. */
+static void scan_resolve(IncludeScan* s, const char* file, const char* name, size_t nlen,
+                         int quoted) {
+    if (nlen == 0) { s->failed = 1; return; }
+    char* nm = malloc(nlen + 1);
+    if (!nm) { s->failed = 1; return; }
+    memcpy(nm, name, nlen);
+    nm[nlen] = '\0';
+    if (scan_is_absolute(nm)) {
+        if (path_exists(nm)) scan_push(s, nm);
+        else free(nm);
+        return;
+    }
+    if (quoted) {
+        const char* cut = NULL;
+        for (const char* q = file; *q; q++) if (*q == '/' || *q == '\\') cut = q;
+        char* beside = cut ? scan_join(file, (size_t)(cut - file), nm, nlen)
+                           : scan_join(".", 1, nm, nlen);
+        if (!beside) { free(nm); s->failed = 1; return; }
+        if (path_exists(beside)) { free(nm); scan_push(s, beside); return; }
+        free(beside);
+    }
+    for (int i = 0; i < s->nidirs; i++) {
+        char* p = scan_join(s->idirs[i], strlen(s->idirs[i]), nm, nlen);
+        if (!p) { free(nm); s->failed = 1; return; }
+        if (path_exists(p)) { free(nm); scan_push(s, p); return; }
+        free(p);
+    }
+    if (!strchr(nm, '/') && !strchr(nm, '\\')) {
+        /* The file pushed is the one the listing recorded, in its own case. */
+        int found[2];
+        hdr_first_entries(nm, &found[0], &found[1]);
+        for (int k = 0; k < 2; k++) {
+            if (found[k] < 0 || (k == 1 && found[1] == found[0])) continue;
+            const HdrName* h = &s_hdr_names[found[k]];
+            s->need[h->dir] = 1;
+            scan_push(s, scan_join(s_hdr_dirs[h->dir], strlen(s_hdr_dirs[h->dir]), h->name,
+                                   strlen(h->name)));
+        }
+        if (found[0] < 0) scan_after(s, nm, nlen);
+        free(nm);
+        return;
+    }
+    /* A name with a directory part: asked of each list directory (the file
+     * system answers in its own case rules). */
+    int d = -1;
+    for (int i = 0; d < 0 && i < s_hdr_dir_count; i++) {
+        char* p = scan_join(s_hdr_dirs[i], strlen(s_hdr_dirs[i]), nm, nlen);
+        if (!p) { free(nm); s->failed = 1; return; }
+        if (path_exists(p)) d = i;
+        free(p);
+    }
+    if (d >= 0) {
+        s->need[d] = 1;
+        scan_push(s, scan_join(s_hdr_dirs[d], strlen(s_hdr_dirs[d]), nm, nlen));
+    } else {
+        scan_after(s, nm, nlen);
+    }
+    free(nm);
+}
+
+/* The name a `"..."` or `<...>` at `p` spells, its length in *len; NULL when
+ * `p` is neither (a macro). */
+static const char* scan_spelled(const char* p, size_t* len, int* quoted) {
+    while (*p == ' ' || *p == '\t') p++;
+    char close = *p == '"' ? '"' : *p == '<' ? '>' : 0;
+    if (!close) return NULL;
+    const char* end = strchr(p + 1, close);
+    if (!end) return NULL;
+    *quoted = close == '"';
+    *len = (size_t)(end - p - 1);
+    return p + 1;
+}
+
+/* Every `#include` and `__has_include` of `file`, resolved. */
+static void scan_file(IncludeScan* s, const char* file) {
+    FILE* f = fopen(file, "r");
+    if (!f) { s->failed = 1; return; }
+    char* line = NULL;
+    size_t cap = 0;
+    int got;
+    while (!s->failed && (got = ae_read_line(f, &line, &cap)) > 0) {
+        const char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (strncmp(p, "include", 7) == 0 || strncmp(p, "import", 6) == 0) {
+                p += strncmp(p, "include", 7) == 0 ? 7 : 6;
+                /* #include_next resumes the search after the directory its
+                 * file was found in, which the scan does not track: every
+                 * directory. */
+                if (strncmp(p, "_next", 5) == 0) { s->failed = 1; break; }
+                size_t len;
+                int quoted;
+                const char* nm = scan_spelled(p, &len, &quoted);
+                if (!nm) { s->failed = 1; break; }   /* an include through a macro */
+                scan_resolve(s, file, nm, len, quoted);
+            }
+        }
+        for (const char* h = strstr(line, "__has_include"); h && !s->failed;
+             h = strstr(h + 1, "__has_include")) {
+            const char* q = h + strlen("__has_include");
+            int next = strncmp(q, "_next", 5) == 0;
+            if (next) q += 5;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '(') continue;   /* `defined(__has_include)` and the like */
+            if (next) { s->failed = 1; break; }   /* searched as #include_next is */
+            size_t len;
+            int quoted;
+            const char* nm = scan_spelled(q + 1, &len, &quoted);
+            if (!nm) { s->failed = 1; break; }
+            scan_resolve(s, file, nm, len, quoted);
+        }
+    }
+    if (got < 0) s->failed = 1;
+    free(line);
+    fclose(f);
+}
+
+/* Whether `args` (a command's arguments, or NULL) names an @file response
+ * file: an `@` that starts a word, quoted or not, or an item of a comma
+ * list (-Wp,@file). Read as text, as the flags above are: at worst a
+ * needless fallback. */
+static int args_name_response_file(const char* args) {
+    if (!args) return 0;
+    for (const char* p = args; *p; p++) {
+        if (*p != '@') continue;
+        char before = p == args ? ' ' : p[-1];
+        if (before == ' ' || before == '\t' || before == '"' || before == '\'' || before == ',')
+            return 1;
+    }
+    return 0;
+}
+
+/* The include flags of the compile of `c_file` (and the C files `extra`
+ * and `config_c` list, compiled on the same line): the toolchain list's -I
+ * and the -idirafter directories the compile needs, or the whole list. */
+static const char* program_include_flags(const char* cc, const char* c_file,
+                                         const char* extra, const char* config_c,
+                                         const char* user_cflags, const char* ae_includes) {
+    const char* full = tc_include_flags();
+    /* Read as text, so they are found inside -Wp, and -Xpreprocessor too:
+     * at worst a needless fallback. -iwithprefix covers -iwithprefixbefore,
+     * --include the long forms (--include-directory and the rest). */
+    static const char* const moves[] = { "-I", "-isystem", "-iquote", "-include", "-imacros",
+                                         "-idirafter", "-iwithprefix", "-nostdinc", "--include",
+                                         NULL };
+    /* The arguments of the compiler command: what follows its program,
+     * quoted or not (a path may hold any of the above). */
+    const char* cc_args = "";
+    if (cc) {
+        while (*cc == ' ' || *cc == '\t') cc++;
+        if (*cc == '"' || *cc == '\'') {
+            const char* close = strchr(cc + 1, *cc);
+            cc_args = close ? close + 1 : "";
+        } else {
+            cc_args = cc + strcspn(cc, " \t");
+        }
+    }
+    for (int i = 0; moves[i]; i++) {
+        if (user_cflags && strstr(user_cflags, moves[i])) return full;
+        if (strstr(cc_args, moves[i])) return full;
+    }
+    /* An @file argument: a response file, whose flags the compiler reads
+     * and the scan does not, so any of the above may be in it. */
+    if (args_name_response_file(user_cflags) || args_name_response_file(cc_args)) return full;
+    /* The compiler's own search lists from the environment: CPATH is
+     * searched as -I is, ahead of the list, and the others as -isystem;
+     * a header there can include one only the list has. */
+    static const char* const env_lists[] = { "CPATH", "C_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+                                             NULL };
+    for (int i = 0; env_lists[i]; i++)
+        if (getenv(env_lists[i])) return full;
+    if (!s_hdr_ok || s_hdr_dir_count == 0) return full;
+    /* The list's own -I comes first: everything up to its first -idirafter. */
+    const char* first = strstr(full, " -idirafter ");
+    size_t head = first ? (size_t)(first - full) : strlen(full);
+
+    IncludeScan s;
+    memset(&s, 0, sizeof(s));
+    if (homebrew_include_dir()) s.after[s.nafter++] = homebrew_include_dir();
+    s.need = calloc((size_t)s_hdr_dir_count, 1);
+    /* The -I directories: the list's own, then each @c_include one. */
+    size_t ae_len = ae_includes ? strlen(ae_includes) : 0;
+    char* idir_text = malloc(head + ae_len + 2);
+    s.idirs = malloc(sizeof(char*) * (head + ae_len + 2));
+    if (!s.need || !idir_text || !s.idirs) s.failed = 1;
+    if (!s.failed) {
+        char* w = idir_text;
+        const char* srcs[2] = { full, ae_includes ? ae_includes : "" };
+        size_t lens[2] = { head, ae_len };
+        for (int k = 0; k < 2; k++) {
+            const char* p = srcs[k];
+            const char* end = p + lens[k];
+            while (p < end) {
+                while (p < end && *p == ' ') p++;
+                if (p + 2 > end || p[0] != '-' || p[1] != 'I') break;
+                p += 2;
+                int q = p < end && *p == '"';
+                if (q) p++;
+                const char* stop = p;
+                while (stop < end && (q ? *stop != '"' : *stop != ' ')) stop++;
+                s.idirs[s.nidirs++] = w;
+                memcpy(w, p, (size_t)(stop - p));
+                w += stop - p;
+                *w++ = '\0';
+                p = stop + (q && stop < end ? 1 : 0);
+            }
+        }
+    }
+    if (!s.failed) scan_push(&s, strdup(c_file));
+    const char* lists[2] = { extra, config_c };
+    for (int k = 0; k < 2 && !s.failed; k++) {
+        const char* cursor = lists[k] ? lists[k] : "";
+        size_t lcap = strlen(cursor) + 1;
+        char* tok = malloc(lcap);
+        if (!tok) { s.failed = 1; break; }
+        while (!s.failed && extras_next(&cursor, tok, lcap)) {
+            size_t n = strlen(tok);
+            if (n > 2 && strcmp(tok + n - 2, ".c") == 0) scan_push(&s, strdup(tok));
+        }
+        free(tok);
+    }
+    while (!s.failed && s.next < s.count) scan_file(&s, s.files[s.next++]);
+
+    static char* out = NULL;
+    static size_t out_cap = 0;
+    const char* result = full;
+    if (!s.failed) {
+        size_t pos = head;
+        if (str_buf_grow(&out, &out_cap, head + 1)) {
+            memcpy(out, full, head);
+            out[head] = '\0';
+            int ok = 1, kept = 0;
+            for (int d = 0; ok && d < s_hdr_dir_count; d++) {
+                if (!s.need[d]) continue;
+                ok = append_include_flag(&out, &out_cap, &pos, "-idirafter ", s_hdr_dirs[d]);
+                kept++;
+            }
+            if (ok) {
+                result = out;
+                if (tc.verbose)
+                    fprintf(stderr, "[include] %d of %d header directories, from %d files\n",
+                            kept, s_hdr_dir_count, s.count);
+            }
+        }
+    }
+    if (result == full && tc.verbose)
+        fprintf(stderr, "[include] every header directory (the includes could not all be followed)\n");
+    for (int i = 0; i < s.count; i++) free(s.files[i]);
+    free(s.files);
+    free(s.need);
+    free(idir_text);
+    free(s.idirs);
+    return result;
+}
+
+static void tc_build_include_flags(void) {
     if (tc.dev_mode) {
         size_t pos = 0;
         if (!tc.include_flags && str_buf_grow(&tc.include_flags, &tc.include_flags_cap, 0)) { /* first use */ }
         if (tc.include_flags) tc.include_flags[0] = '\0';
-        char rt[1024], stdroot[1024];
+        /* Sized to hold the longest root and what is added to it, whole. */
+        char rt[sizeof(tc.root) + sizeof("/runtime")], stdroot[sizeof(tc.root) + sizeof("/std")];
         snprintf(rt, sizeof(rt), "%s/runtime", tc.root);
         snprintf(stdroot, sizeof(stdroot), "%s/std", tc.root);
         /* #1420: the public embedder header (include/libaether.h) is not
          * under runtime/ or std/, so nothing put its directory on the include
          * path. runtime/libaether_caps.c includes it by name. */
-        char pubinc[1024];
+        char pubinc[sizeof(tc.root) + sizeof("/include")];
         snprintf(pubinc, sizeof(pubinc), "%s/include", tc.root);
         if (!append_include_one_dir(&tc.include_flags, &tc.include_flags_cap, &pos, pubinc) ||
             !walk_dirs_emit_includes(rt, &tc.include_flags, &tc.include_flags_cap, &pos) ||
@@ -2576,7 +3245,10 @@ found_root:
         size_t pos = 0;
         if (!tc.include_flags && str_buf_grow(&tc.include_flags, &tc.include_flags_cap, 0)) { /* first use */ }
         if (tc.include_flags) tc.include_flags[0] = '\0';
-        char inc_rt[1024], inc_std[1024], shr_rt[1024], shr_std[1024];
+        char inc_rt[sizeof(tc.root) + sizeof("/include/aether/runtime")];
+        char inc_std[sizeof(tc.root) + sizeof("/include/aether/std")];
+        char shr_rt[sizeof(tc.root) + sizeof("/share/aether/runtime")];
+        char shr_std[sizeof(tc.root) + sizeof("/share/aether/std")];
         snprintf(inc_rt,  sizeof(inc_rt),  "%s/include/aether/runtime", tc.root);
         snprintf(inc_std, sizeof(inc_std), "%s/include/aether/std",     tc.root);
         snprintf(shr_rt,  sizeof(shr_rt),  "%s/share/aether/runtime",   tc.root);
@@ -2584,7 +3256,7 @@ found_root:
         /* #1420: include/aether/ itself holds the public embedder header
          * (libaether.h); the walks below only cover its runtime/ and std/
          * subtrees. */
-        char inc_root[1024];
+        char inc_root[sizeof(tc.root) + sizeof("/include/aether")];
         snprintf(inc_root, sizeof(inc_root), "%s/include/aether", tc.root);
         int ok =
             append_include_one_dir(&tc.include_flags, &tc.include_flags_cap, &pos, inc_root) &&
@@ -3927,30 +4599,87 @@ static const char* bracket_depth_flags(const char* cc) {
  * through ae's own content hash: the number is compiled into ae. */
 #define AETHER_GCC_INLINE_UNIT_GROWTH 100
 #define AETHER_GCC_INLINE_CFLAGS " --param inline-unit-growth=" AE_DEPTH_TEXT(AETHER_GCC_INLINE_UNIT_GROWTH)
-static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
+/* #3848: GCC (12 and later, at -O1 and up) records the false edge of a float
+ * comparison `a > n` as the relation `a <= n`, which a NaN breaks, and
+ * chains such relations: from `a > n` and `n > b` both false, with n a NaN,
+ * it folds `a > b` to false for a = 1, b = 0. A program's float comparisons
+ * then answer wrong (std.lanes' pick_max returned the min). With no relation
+ * recorded in any block there is nothing to chain: the fold is gone at its
+ * source, for generated C and, through the Makefile, the runtime's own C.
+ * It cost nothing measurable on bench-core, where steering every float
+ * comparison through the quiet builtins cost 2x on a float-min chain. The
+ * parameter is GCC 12's; a GCC without it predates the optimiser it fixes.
+ *
+ * It goes on every GCC compile ae makes, -O0 included, where it changes
+ * nothing: the -O level ae picks is not the only one, as `[build] cflags`,
+ * AETHER_CFLAGS_EXTRA and the $AE_CC / $CC command can each say -O2 on a
+ * --quick or `ae run` build. `ae cflags` prints it too, for C built by hand
+ * from generated C. The backward threader's path oracle records relations
+ * along a path whatever the limit says, but it chains none (only the
+ * dominator oracle does), and GCC folds a single relation only with NaN
+ * ruled out: the reduction and a variant whose comparisons meet only along a
+ * threaded path answer right at -O3 with the limit (gcc_relation_limit). */
+#define AETHER_GCC_RELATION_CFLAGS " --param relation-block-limit=0"
+static const char* const k_gcc_flags_none = "";
+static const char* const k_gcc_flags_inline = AETHER_GCC_INLINE_CFLAGS;
+static const char* const k_gcc_flags_relation = AETHER_GCC_RELATION_CFLAGS;
+static const char* const k_gcc_flags_both = AETHER_GCC_INLINE_CFLAGS AETHER_GCC_RELATION_CFLAGS;
+
+/* What GCC `cc` takes, asked once and kept by its command: bit 1, the
+ * inlining budget (it is GCC); bit 2, the relation limit as well. One probe
+ * compile asks both, so a cold cache pays no more than it did for the budget
+ * alone; only a GCC older than the relation limit asks the budget again on
+ * its own. */
+static int gcc_tuning_support(const char* cc) {
     static char* asked = NULL;
-    static const char* answer = "";
-    if (!optimize || g_coverage || g_size || !cc || !*cc) return "";
+    static int answer = 0;
+    if (!cc || !*cc) return 0;
+    if (asked && strcmp(asked, cc) == 0) return answer;
+    free(asked);
+    asked = strdup(cc);
+    answer = 0;
+    /* Clang defines __GNUC__ too, and so does a compiler built on it (icx,
+     * zig cc): __clang__ tells them apart. The control compile defines
+     * AE_PROBE_ANY, so it passes on any compiler. */
+    static const char* const is_gcc =
+        "#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
+        "#error not GCC\n"
+        "#endif\n"
+        "extern int ae_inline_probe;\nint ae_inline_probe;\n";
+    if (cc_probe_takes(cc, "", k_gcc_flags_both, "ae_inline_probe", is_gcc) == 1)
+        answer = 3;
+    else if (cc_probe_takes(cc, "", AETHER_GCC_INLINE_CFLAGS, "ae_inline_probe", is_gcc) == 1)
+        answer = 1;
+    return answer;
+}
+
+/* The relation limit (#3848) when compiler `cc` is a GCC that takes it,
+ * else "". */
+static const char* gcc_relation_flags(const char* cc) {
+    if (!cc || !*cc) return k_gcc_flags_none;
+    return (gcc_tuning_support(cc) & 2) ? k_gcc_flags_relation : k_gcc_flags_none;
+}
+
+/* The GCC flags a compile of generated C takes: the inlining budget (#3779)
+ * on an optimising build, unless --coverage or --size, and unless the user
+ * names a budget; the relation limit (#3848) on every build, -O0 included,
+ * whatever the user names, since without it the program's float comparisons
+ * can answer wrong at any -O level the user's own flags ask for. A cross
+ * build asks it of its own compiler (ae_cross.c). */
+const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
+    if (!cc || !*cc) return k_gcc_flags_none;
+    int support = gcc_tuning_support(cc);
     /* A budget the user names wins, wherever it sits. In the cflags it would
      * win anyway, coming after this one; in the $AE_CC / $CC command it sits
      * ahead of every flag, and `AE_CC="gcc --param inline-unit-growth=50"`
      * got 100. So when either names one, ae gives none. */
-    if (strstr(cc, "inline-unit-growth") || strstr(get_cflags(), "inline-unit-growth"))
-        return "";
-    if (asked && strcmp(asked, cc) == 0) return answer;
-    free(asked);
-    asked = strdup(cc);
-    answer = "";
-    /* Clang defines __GNUC__ too, and so does a compiler built on it (icx,
-     * zig cc): __clang__ tells them apart. The control compile defines
-     * AE_PROBE_ANY, so it passes on any compiler. */
-    if (cc_probe_takes(cc, "", AETHER_GCC_INLINE_CFLAGS, "ae_inline_probe",
-                       "#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
-                       "#error not GCC\n"
-                       "#endif\n"
-                       "extern int ae_inline_probe;\nint ae_inline_probe;\n") == 1)
-        answer = AETHER_GCC_INLINE_CFLAGS;
-    return answer;
+    bool budget = optimize && !g_coverage && !g_size && (support & 1) &&
+                  !strstr(cc, "inline-unit-growth") && !strstr(get_cflags(), "inline-unit-growth");
+    bool relation = (support & 2) != 0;
+    if (budget && relation) return k_gcc_flags_both;
+    if (budget) return k_gcc_flags_inline;
+    if (relation) return k_gcc_flags_relation;
+    return k_gcc_flags_none;
 }
 
 static char* ae_read_file(const char* path, long* out_len);
@@ -5130,26 +5859,20 @@ static const char* macos_homebrew_flags(int linking) {
 #if defined(__APPLE__) || defined(__FreeBSD__)
     static char* flags[2] = { NULL, NULL };
     if (!flags[0]) {
-#if defined(__APPLE__)
-        const char* prefix = getenv("HOMEBREW_PREFIX");
-        if (!prefix || !*prefix) prefix = "/opt/homebrew";
-#else
-        const char* prefix = getenv("LOCALBASE");
-        if (!prefix || !*prefix) prefix = "/usr/local";
-#endif
-        char* inc = ae_path_printf("%s/include", prefix);
-        char* lib = ae_path_printf("%s/lib", prefix);
-        if (strchr(prefix, '"') == NULL && dir_exists(inc)) {
+        /* The directory the include-list scan follows headers into too
+         * (homebrew_include_dir, #3841). */
+        const char* inc = homebrew_include_dir();
+        if (inc) {
+            char* lib = ae_path_printf("%s/lib", homebrew_prefix());
             flags[0] = ae_path_printf(" -idirafter \"%s\"", inc);
-            flags[1] = dir_exists(lib)
+            flags[1] = lib && dir_exists(lib)
                 ? ae_path_printf(" -idirafter \"%s\" -L\"%s\"", inc, lib)
                 : ae_path_printf("%s", flags[0]);
+            free(lib);
         } else {
             flags[0] = ae_path_printf("%s", "");
             flags[1] = ae_path_printf("%s", "");
         }
-        free(inc);
-        free(lib);
     }
     return flags[linking ? 1 : 0];
 #else
@@ -5215,7 +5938,9 @@ static const char* vendored_sqlite_link(const char* cc, const char* ae_link,
 #else
     const char* pic = " -fPIC";
 #endif
-    char* flags = ae_strdup_printf("-O2%s%s%s", pic, user_cflags[0] ? " " : "", user_cflags);
+    /* The relation limit too (#3848): SQLite's C compares doubles. */
+    char* flags = ae_strdup_printf("-O2%s%s%s%s", pic, gcc_relation_flags(cc),
+                                   user_cflags[0] ? " " : "", user_cflags);
     if (!flags) {
         fprintf(stderr, "Error: out of memory building the contrib.sqlite compile command.\n");
         return NULL;
@@ -5380,14 +6105,19 @@ static int ae_run_parallel(char* const* cmds, char* const* logs, int n, int jobs
             if (errno == EINTR) continue;
             break;   /* ECHILD: none of ours is left */
         }
+        int ours = 0;
         for (int i = 0; i < next; i++) {
             if (pids[i] != p) continue;
+            ours = 1;
             pids[i] = 0;
             running--;
             int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
             if (!ok && failed < 0) failed = i;
             break;
         }
+        /* Another child of ae's, such as the `--version` run started beside
+         * the key's walks (#3842): its status goes to its own wait. */
+        if (!ours) child_reaped_early(p, status);
     }
     free(pids);
 #endif
@@ -6010,19 +6740,21 @@ static void freebsd_casper_libs(char* out, size_t size) {
  * here; the object was compiled with none of them, so signed overflow was
  * undefined in the object and defined in the executable.
  *
- * The POSIX line carries -pipe, and must carry -Wformat as opt_flags does:
- * the -pipe path once hardcoded its own string and dropped it, so the C
+ * The line carries -pipe, and must carry -Wformat as opt_flags does: the
+ * -pipe path once hardcoded its own string and dropped it, so the C
  * compiler's printf-family checks never ran on a normal build (#1252).
- * Coverage, profile and size builds take opt_flags' string as it is. */
+ * Coverage, profile and size builds take opt_flags' string as it is.
+ * Windows has it too (#3837): GCC, Clang and zig cc all take it, the
+ * tree's own Windows make passes it, and without it each stage of a
+ * compile went through a temporary file (5 to 20 ms of a hello build). */
 static char* generated_c_compile_flags(const char* cc, bool optimize, const char* user_cflags) {
-#ifdef _WIN32
-    const char* base_opt = opt_flags(optimize);
-    const char* avx = win_avx_stack_flags(user_cflags);
-#else
     const char* base_opt = (g_coverage || g_profile || g_size)
                           ? opt_flags(optimize)
                           : (optimize ? "-O2 -pipe -Wformat" AETHER_WRAP_CFLAGS
                                       : "-O0 -g -pipe -Wformat" AETHER_WRAP_CFLAGS);
+#ifdef _WIN32
+    const char* avx = win_avx_stack_flags(user_cflags);
+#else
     const char* avx = "";
 #endif
     return ae_strdup_printf("%s%s%s%s%s%s%s%s", base_opt, gcc_inline_budget_flags(cc, optimize),
@@ -6290,7 +7022,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s %s-L\"%s\" %s%s%s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, binimport_link(), rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            s_gcc_cmd, opt, program_include_flags(s_gcc_cmd, c_file, extra, config_c, user_cflags, ae_includes), ae_includes, c_file, config_c, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, binimport_link(), rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -6304,7 +7036,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             /* The vendored defines first: their -I has to come ahead of
              * any other include directory (see ae_vendored_src_defs). */
             char* rt_cflags = ae_strdup_printf("%s %s %s %s", vendored_src_defs, opt,
-                                               tc.include_flags, ae_includes);
+                                               tc_include_flags(), ae_includes);
             if (rt_cflags) rt_objs = ae_cached_runtime(s_gcc_cmd, rt_cflags);
             free(rt_cflags);
         }
@@ -6313,7 +7045,7 @@ void build_gcc_cmd(char* cmd, size_t size,
          * come BEFORE that source list on the command line. */
         int w = snprintf(cmd, size,
             "%s %s%s %s %s \"%s\"%s %s %s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_cmd, vendored_src_defs, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            s_gcc_cmd, vendored_src_defs, opt, tc_include_flags(), ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         free(rt_objs);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
@@ -6575,7 +7307,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s %s -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
+            cc, opt, program_include_flags(cc, c_file, extra, config_c, user_cflags, ae_includes), ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, rt_arg, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
@@ -6590,7 +7322,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             /* The vendored defines first: their -I has to come ahead of
              * any other include directory (see ae_vendored_src_defs). */
             char* rt_cflags = ae_strdup_printf("%s %s %s %s %s", vendored_src_defs, opt,
-                                               tc.include_flags, ae_includes,
+                                               tc_include_flags(), ae_includes,
                                                macos_homebrew_flags(0));
             if (rt_cflags) rt_objs = ae_cached_runtime(cc, rt_cflags);
             free(rt_cflags);
@@ -6600,7 +7332,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
             "%s %s%s %s %s \"%s\"%s %s %s %s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, vendored_src_defs, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
+            cc, vendored_src_defs, opt, tc_include_flags(), ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         free(rt_objs);
         if (w >= (int)size) {
@@ -6637,7 +7369,7 @@ void build_syntax_check_cmd(char* cmd, size_t size, const char* c_file, const ch
     }
     int w = snprintf(cmd, size, "%s -fsyntax-only%s%s %s %s %s %s \"%s\"%s", cc, AETHER_WRAP_CFLAGS,
                      bracket_depth_flags(cc), AETHER_REQUIRED_DEFINES, get_cflags(),
-                     tc.include_flags, ae_includes, c_file, extra ? extra : "");
+                     tc_include_flags(), ae_includes, c_file, extra ? extra : "");
     if (w >= (int)size) cmd_too_long(cmd, size, w);
 }
 
@@ -6666,7 +7398,7 @@ static int build_obj_compile_cmd(char* cmd, size_t size, const char* c_file,
         return 0;
     }
     int w = snprintf(cmd, size, "%s -c %s %s %s \"%s\" -o \"%s\"", cc, flags,
-                     tc.include_flags ? tc.include_flags : "", includes, c_file, obj_file);
+                     tc_include_flags(), includes, c_file, obj_file);
     free(flags);
     if (w >= (int)size) {
         /* The include list has no length limit (#2536); a cut command would
@@ -6723,8 +7455,8 @@ static int build_wasm_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file) {
     // Build include paths from toolchain root
     char includes[8192];
-    if (tc.include_flags[0]) {
-        strncpy(includes, tc.include_flags, sizeof(includes) - 1);
+    if (tc_include_flags()[0]) {
+        strncpy(includes, tc_include_flags(), sizeof(includes) - 1);
         includes[sizeof(includes) - 1] = '\0';
     } else {
         static const char* include_dirs[] = {
@@ -8625,6 +9357,9 @@ static int cmd_run(int argc, char** argv) {
      * root, entered above. */
     if (ae_resolve_dependencies() < 0) return 1;
     load_defines_from_toml();
+    /* #3842: the C compiler's `--version`, part of the cache key, runs from
+     * here while ae resolves the program and walks its trees. */
+    cache_ccid_start();
 
     // Project mode: no file argument, the project's src/main.ae
     if (!file && path_exists("aether.toml")) {
@@ -11268,6 +12003,9 @@ static int cmd_build(int argc, char** argv) {
      * walk-up they were found only from the project root, so the same
      * `ae build src/app.ae` compiled a different program from `src/`. */
     load_defines_from_toml();
+    /* #3842: the C compiler's `--version`, part of the cache key, runs from
+     * here while ae resolves the program and walks its trees. */
+    cache_ccid_start();
 
     // Read target from aether.toml if not specified on CLI
     if (!target && path_exists("aether.toml")) {
@@ -14140,15 +14878,25 @@ static int cmd_cache(int argc, char** argv) {
 // --------------------------------------------------------------------------
 
 static void cflags_usage(void) {
-    printf("Usage: ae cflags [--cflags|--libs]\n");
+    printf("Usage: ae cflags [--cflags|--libs] [--cc <compiler>]\n");
     printf("  Print the include and link flags so external builds can:\n");
     printf("      gcc your.c $(ae cflags) -o your\n");
     printf("  Without arguments, prints both. Pass --cflags or --libs to subset.\n");
+    printf("  The flags one compiler needs and another refuses (Clang's bracket\n");
+    printf("  depth, GCC's relation limit) are those of the compiler ae drives:\n");
+    printf("  $AE_CC, then $CC, else gcc, else cc. --cc names the compiler, as a\n");
+    printf("  command, that the build will use instead, and it is asked:\n");
+    printf("      clang your.c $(ae cflags --cc clang) -o your\n");
 }
 
 static int cmd_cflags(int argc, char** argv) {
     bool want_cflags = true;
     bool want_libs   = true;
+    /* The compiler the compiler-specific flags are asked of (--cc): the
+     * one `ae` drives unless the caller names the one its build uses. A
+     * build that drives Clang by its own means (a Makefile's CC) got GCC's
+     * relation limit from `ae cflags`, asked of the gcc on PATH (#3848). */
+    const char* cc = NULL;
 
     // Optional refinement: callers that only need one half (compile- or
     // link-side) can pass --cflags / --libs to subset the output. With
@@ -14158,6 +14906,12 @@ static int cmd_cflags(int argc, char** argv) {
             want_libs = false;
         } else if (strcmp(argv[i], "--libs") == 0) {
             want_cflags = false;
+        } else if (strcmp(argv[i], "--cc") == 0 || strncmp(argv[i], "--cc=", 5) == 0) {
+            cc = argv[i][4] == '=' ? argv[i] + 5 : (i + 1 < argc ? argv[++i] : NULL);
+            if (!cc || !*cc) {
+                fprintf(stderr, "ae cflags: --cc needs a compiler command\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             cflags_usage();
             return 0;
@@ -14188,9 +14942,9 @@ static int cmd_cflags(int argc, char** argv) {
          * runtime or std sources beside it (AETHER_REQUIRED_DEFINES). */
         fputs(" " AETHER_REQUIRED_DEFINES, stdout);
         wrote_anything = 1;
-        if (tc.include_flags[0]) {
+        if (tc_include_flags()[0]) {
             fputc(' ', stdout);
-            fputs(tc.include_flags, stdout);
+            fputs(tc_include_flags(), stdout);
         }
 #if defined(_WIN32)
         /* #3023: the assembler flag every `ae` build on Windows passes
@@ -14200,15 +14954,25 @@ static int cmd_cflags(int argc, char** argv) {
          * one. */
         if (find_gcc_windows(false)) fputs(win_avx_stack_flags(get_cflags()), stdout);
 #endif
+        /* The compiler the flags below are for: --cc's, else the one `ae`
+         * would drive. */
+        if (!cc) {
+#if defined(_WIN32)
+            cc = find_gcc_windows(false) ? s_gcc_cmd : NULL;
+#else
+            cc = posix_driven_cc();
+#endif
+        }
         /* #3574: the bracket depth every `ae` build gives a Clang
          * (bracket_depth_flags), for a build that compiles aetherc output
-         * itself with the compiler `ae` would drive: Clang refuses the C of
-         * blocks nested past 256 brackets otherwise. */
-#if defined(_WIN32)
-        if (find_gcc_windows(false)) fputs(bracket_depth_flags(s_gcc_cmd), stdout);
-#else
-        fputs(bracket_depth_flags(posix_driven_cc()), stdout);
-#endif
+         * itself: Clang refuses the C of blocks nested past 256 brackets
+         * otherwise. */
+        fputs(bracket_depth_flags(cc), stdout);
+        /* #3848: GCC's float relations off, as on every `ae` compile, for C
+         * built by hand from generated C (aeb, --emit=csrc): without it a
+         * float comparison beside a NaN can answer wrong from -O1 up. When
+         * the compiler is a GCC that takes it. */
+        fputs(gcc_relation_flags(cc), stdout);
     }
 
     if (want_libs) {

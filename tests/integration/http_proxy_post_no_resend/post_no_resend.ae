@@ -1,0 +1,293 @@
+// A POST the upstream read before its connection ended is not sent again;
+// a POST on a pooled connection the upstream closed while it sat idle goes
+// down a fresh one (#3824).
+//
+// RFC 9110 9.2.2 lets a client repeat by itself only a request whose repeat
+// does no more than the first. A reused connection that ends with no byte of
+// an answer can mean the upstream closed it while it sat idle, or that it
+// read the request whole and closed without answering. Both the event loop
+// and the worker path's client sent any request again in either case, so an
+// upstream had the same POST twice. Now a request that is not idempotent is
+// not sent again after a failure at the read, and the proxy answers 502; its
+// pooled connection is checked before the write instead, so one the upstream
+// closed while it sat idle is dropped for a fresh dial and the POST is still
+// answered. The same holds at the write: an upstream may read a POST's head,
+// act on it and close without reading the body, which ends the proxy's write
+// partway. A failed write was sent again whatever the method; now a request
+// that is not idempotent goes again only when none of it went out.
+//
+// This program is the upstream, so no case depends on timing. On a kept
+// client connection a GET leaves an upstream connection in the proxy's pool.
+// Then a POST: in the first case the upstream reads it whole on that
+// connection and closes it unanswered, and the client must get 502 with no
+// new connection reaching the upstream; in the second the upstream has
+// closed that connection before the POST, and the POST must arrive on a new
+// one and be answered 200; in the third the POST's body is more than the
+// socket buffers hold, and the upstream reads only its head before closing,
+// so the proxy's write fails partway and the client must get 502 with no new
+// connection reaching the upstream. Winsock takes the whole body into its
+// buffer at once, so on Windows the third case's failure shows at the read
+// instead, under the first case's rule. Through a bare proxy (the event loop
+// on Linux and macOS) and through one behind a program's middleware (the
+// worker path). Every socket is on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.client
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(pool: ptr, opts: ptr, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    merr = proxy.mount(s, "/", pool, opts)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// What `sock` sends until `marker` has arrived, it closes, or `ms` pass.
+read_until(sock: ptr, marker: string, ms: int) -> string {
+    wire = ""
+    waited = 0
+    while waited < ms {
+        ready, _perr = tcp.poll(sock, 50)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                return wire
+            }
+            wire = string.concat(wire, chunk)
+            if string.index_of(wire, marker) >= 0 {
+                return wire
+            }
+        } else {
+            waited = waited + 50
+        }
+    }
+    return wire
+}
+
+// The next connection to `listener` within `ms`, or null.
+accept_within(listener: ptr, ms: int) -> ptr {
+    if tcp.server_poll(listener, ms) != 1 {
+        return null
+    }
+    sock, aerr = tcp.accept(listener)
+    if aerr != "" {
+        return null
+    }
+    return sock
+}
+
+status(wire: string) -> string {
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+const ANSWER = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\np"
+const GET = "GET /p HTTP/1.1\r\nHost: x\r\n\r\n"
+const POST = "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc"
+
+// New connections to the upstream while a client waited for its answer.
+var arrivals: int = 0
+
+// The client's answer on `k` within `ms`, accepting (and closing) every
+// connection that reaches `listener` meanwhile.
+answer_watching(k: ptr, listener: ptr, ms: int) -> string {
+    wire = ""
+    waited = 0
+    while waited < ms {
+        extra = accept_within(listener, 0)
+        if extra != null {
+            arrivals = arrivals + 1
+            tcp.close(extra)
+        }
+        ready, _perr = tcp.poll(k, 50)
+        if ready {
+            chunk, rerr = tcp.read(k, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                return wire
+            }
+            wire = string.concat(wire, chunk)
+            if string.index_of(wire, "\r\n\r\n") >= 0 {
+                return wire
+            }
+        } else {
+            waited = waited + 50
+        }
+    }
+    return wire
+}
+
+// A kept client connection to the gateway on `port`, and the upstream
+// connection a first GET on it left in the proxy's pool.
+struct Kept {
+    client: ptr
+    up: ptr
+    first: string
+}
+
+kept(port: int, listener: ptr) -> Kept {
+    k, kerr = tcp.connect("127.0.0.1", port)
+    if kerr != "" {
+        println("FAIL: connect")
+        exit(1)
+    }
+    tcp.write(k, GET)
+    up = accept_within(listener, 3000)
+    if up == null {
+        println("FAIL: the first request reached no upstream connection")
+        exit(1)
+    }
+    _head = read_until(up, "\r\n\r\n", 3000)
+    tcp.write(up, ANSWER)
+    first = status(read_until(k, "\r\n\r\n", 3000))
+    return Kept { client: k, up: up, first: first }
+}
+
+main() {
+    println("=== a POST is not sent twice, and an idle close does not cost it (#3824) ===")
+    listener, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: listen: ${lerr}")
+        exit(1)
+    }
+    up_url = "http://127.0.0.1:${tcp.server_port(listener)}"
+    // 6 MiB: more than the loopback buffers take for a reader that stopped,
+    // and under the proxy's 8 MiB body cap.
+    big_post = string.concat("POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 6291456\r\n\r\n",
+        string.pad_end("", 6291456, 120))
+
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        // The upstream connections are this pool's (#3851): a phase that
+        // must start on a fresh one clears them.
+        pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+        aerr = proxy.upstream_add(pool, up_url, 1)
+        if aerr != "" {
+            println("FAIL: upstream_add: ${aerr}")
+            exit(1)
+        }
+        opts = proxy.opts_new()
+        s = gateway(pool, opts, g)
+        port = start(s)
+        sleep(100)
+
+        // The upstream reads the POST whole on the pooled connection and
+        // closes it without an answer.
+        client.pool_clear(proxy.pool_conns(pool))
+        kc = kept(port, listener)
+        tcp.write(kc.client, POST)
+        got = read_until(kc.up, "\r\n\r\nabc", 3000)
+        tcp.close(kc.up)
+        arrivals = 0
+        answer = status(answer_watching(kc.client, listener, 3000))
+        tcp.close(kc.client)
+        seen = 0
+        if string.index_of(got, "\r\n\r\nabc") >= 0 {
+            seen = 1
+        }
+        result = "${kc.first} then ${answer}, the POST reached the upstream ${seen + arrivals} time(s)"
+        want = "200 then 502, the POST reached the upstream 1 time(s)"
+        if result != want {
+            println("  FAIL a POST read whole and unanswered (${names[g]}): got '${result}', expected '${want}'")
+            bad = bad + 1
+        } else {
+            println("  PASS a POST read whole and unanswered (${names[g]})")
+        }
+
+        // The upstream closed the pooled connection before the POST.
+        client.pool_clear(proxy.pool_conns(pool))
+        kd = kept(port, listener)
+        tcp.close(kd.up)
+        sleep(200)
+        tcp.write(kd.client, POST)
+        fresh = accept_within(listener, 3000)
+        posted = "no new connection"
+        answer2 = "none"
+        if fresh != null {
+            body = read_until(fresh, "\r\n\r\nabc", 3000)
+            posted = "a new connection"
+            if string.index_of(body, "\r\n\r\nabc") < 0 {
+                posted = "a new connection without the POST"
+            }
+            tcp.write(fresh, ANSWER)
+            answer2 = status(read_until(kd.client, "\r\n\r\n", 3000))
+            tcp.close(fresh)
+        }
+        tcp.close(kd.client)
+        result2 = "${kd.first} then ${answer2} on ${posted}"
+        want2 = "200 then 200 on a new connection"
+        if result2 != want2 {
+            println("  FAIL a POST after an idle close (${names[g]}): got '${result2}', expected '${want2}'")
+            bad = bad + 1
+        } else {
+            println("  PASS a POST after an idle close (${names[g]})")
+        }
+
+        // The upstream reads the head of a POST too large for the socket
+        // buffers on the pooled connection, and closes it with the body
+        // unread: the proxy's write fails partway.
+        client.pool_clear(proxy.pool_conns(pool))
+        kb = kept(port, listener)
+        _wn, _werr = tcp.write_all(kb.client, string.bytes(big_post))
+        head = read_until(kb.up, "\r\n\r\n", 3000)
+        tcp.close(kb.up)
+        arrivals = 0
+        answer3 = status(answer_watching(kb.client, listener, 3000))
+        tcp.close(kb.client)
+        seen3 = 0
+        if string.index_of(head, "POST /p ") >= 0 {
+            seen3 = 1
+        }
+        result3 = "${kb.first} then ${answer3}, the POST reached the upstream ${seen3 + arrivals} time(s)"
+        if result3 != want {
+            println("  FAIL a POST whose body was not read (${names[g]}): got '${result3}', expected '${want}'")
+            bad = bad + 1
+        } else {
+            println("  PASS a POST whose body was not read (${names[g]})")
+        }
+
+        http.server_stop(s)
+        http.server_free(s)
+        proxy.opts_free(opts)
+        proxy.upstream_pool_free(pool)
+        g = g + 1
+    }
+
+    tcp.server_close(listener)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

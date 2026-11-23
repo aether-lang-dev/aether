@@ -5,6 +5,7 @@
 #include "../../runtime/aether_sandbox.h"   /* a Unix-socket request's fs_write check */
 #include "../../runtime/utils/aether_thread.h"
 #include "../../runtime/utils/aether_compiler.h"
+#include <string.h>   /* strcmp: http_method_idempotent */
 
 /* The helpers below do no networking and other modules link against
  * them (the proxy times its upstreams with the clock and validates the
@@ -123,6 +124,15 @@ int http_header_value_ok(const char* value) {
         if (*c == '\r' || *c == '\n') return 0;
     }
     return 1;
+}
+
+/* RFC 9110 9.2.2. Method names are case-sensitive (9.1), so "get" is not
+ * GET and is not sent twice. */
+int http_method_idempotent(const char* method) {
+    if (!method) return 0;
+    return strcmp(method, "GET") == 0 || strcmp(method, "HEAD") == 0 ||
+           strcmp(method, "OPTIONS") == 0 || strcmp(method, "TRACE") == 0 ||
+           strcmp(method, "PUT") == 0 || strcmp(method, "DELETE") == 0;
 }
 
 /* The one reader for the numbers std.net takes off the wire or out of a URL
@@ -334,10 +344,15 @@ AETHER_WEAK void* aether_pure_tls_client_connect(int fd, const char* host,
     (void)fd; (void)host; (void)verify_mode; (void)cafile;
     return NULL;
 }
+/* `len` once every byte is out, HTTP_PT_TIMED_OUT (-2) for a write that
+ * waited out the socket's send timeout, -1 for any other failure. */
 AETHER_WEAK int aether_pure_tls_client_send(void* conn, const void* buf, int len) {
     (void)conn; (void)buf; (void)len;
     return -1;
 }
+/* The bytes read, 0 at the server's close, HTTP_PT_TIMED_OUT (-2) for
+ * a read that waited out the socket's timeout, HTTP_PT_RECV_RESET (-3) for
+ * one the peer's reset ended, -1 for any other failure. */
 AETHER_WEAK int aether_pure_tls_client_recv(void* conn, void* buf, int len) {
     (void)conn; (void)buf; (void)len;
     return -1;
@@ -682,7 +697,12 @@ static char* ssl_err_string(const char* prefix) {
 
 static int transport_send(Transport* t, const void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
-    if (t->ssl) return SSL_write(t->ssl, buf, len);
+    if (t->ssl) {
+        /* An empty error queue, as transport_recv leaves it: a failed write
+         * is classified by SSL_get_error too (http_io_failure_kind). */
+        ERR_clear_error();
+        return SSL_write(t->ssl, buf, len);
+    }
 #endif
     if (t->pure_tls) return pt_client_send(t->pure_tls, buf, len);
     /* EPIPE, not SIGPIPE, for a peer that has gone (a pooled connection
@@ -697,7 +717,13 @@ static int transport_send(Transport* t, const void* buf, int len) {
 
 static int transport_recv(Transport* t, void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
-    if (t->ssl) return SSL_read(t->ssl, buf, len);
+    if (t->ssl) {
+        /* SSL_get_error answers by this thread's error queue, which must be
+         * empty before the call it is asked about (http_io_failure_kind,
+         * #3846): an entry left by anything earlier reads as this read's. */
+        ERR_clear_error();
+        return SSL_read(t->ssl, buf, len);
+    }
 #endif
     if (t->pure_tls) return pt_client_recv(t->pure_tls, buf, len);
     return (int)recv(t->sockfd, buf, len, 0);
@@ -989,6 +1015,55 @@ static int http_pool_take(HttpClientPool* p, const char* key, Transport* out) {
     }
     http_pool_leave(p);
     return found;
+}
+
+/* Has the peer closed this idle connection, or sent on it, while it sat in
+ * the pool (#3824)? An idle connection has nothing to say, so readable is
+ * the end, a reset, or bytes no request asked for; any of them makes it unfit
+ * to carry a request. Asked without waiting: a poll that finds it readable,
+ * then a one-byte peek, so a connection that is merely quiet costs one poll.
+ *
+ * This is how a request that may not be sent twice gets a pooled connection
+ * at all. Its failure at the read is not retried, because the upstream may
+ * have taken it whole before the connection ended; without the check, an
+ * upstream that closed an idle connection a while ago would turn the next
+ * POST into a 502 where a fresh dial answers it. Go's transport does the
+ * same with its reader on idle connections (errServerClosedIdle). A close
+ * between this check and the write still loses that request, and is the
+ * upstream's to answer: RFC 9110 9.2.2 leaves no other choice. */
+static int http_idle_conn_closed(const Transport* t) {
+    if (t->sockfd < 0) return 1;
+#ifdef _WIN32
+    /* One socket, so Winsock's fd_set (an array of handles, not a bitmap)
+     * has no FD_SETSIZE hazard. */
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET((SOCKET)t->sockfd, &rfds);
+    struct timeval tv = { 0, 0 };
+    if (select(t->sockfd + 1, &rfds, NULL, NULL, &tv) <= 0) return 0;
+    char b;
+    int n = recv((SOCKET)t->sockfd, &b, 1, MSG_PEEK);
+    if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK) return 0;
+#else
+    struct pollfd p = { .fd = t->sockfd, .events = POLLIN, .revents = 0 };
+    if (poll(&p, 1, 0) <= 0) return 0;
+    char b;
+    ssize_t n = recv(t->sockfd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
+#endif
+    return 1;
+}
+
+/* http_pool_take for a request that may not be sent twice: each connection
+ * taken is checked first (http_idle_conn_closed), and one the peer has closed
+ * is closed here and the next one taken, as it would have failed the same
+ * way. */
+static int http_pool_take_open(HttpClientPool* p, const char* key, Transport* out) {
+    while (http_pool_take(p, key, out)) {
+        if (!http_idle_conn_closed(out)) return 1;
+        transport_close(out);
+    }
+    return 0;
 }
 
 /* Hand a still-usable connection back to `p`. Takes ownership either way: with
@@ -3846,7 +3921,9 @@ static int upstream_acquire(HttpClientPool* pool, const char* host, int port,
 
     http_pool_key(out->pool_key, sizeof(out->pool_key), host, port, 0,
                   host, port, 0, NULL);
-    if (allow_pool && http_pool_take(pool, out->pool_key, &out->t)) {
+    if (allow_pool &&
+        (allow_pool == HTTP_POOL_TAKE_CHECKED ? http_pool_take_open(pool, out->pool_key, &out->t)
+                                              : http_pool_take(pool, out->pool_key, &out->t))) {
         out->reused = 1;
         out->connecting = 0;
         if (out->t.nonblocking != 1) {
@@ -4018,6 +4095,94 @@ static int http_io_would_block(void) {
 #endif
 }
 
+/* Why a read or a write on `t` just failed, by kind, read from the error
+ * the failing call left (#3846): HTTP_IO_TIMED_OUT when it waited out the
+ * socket's receive or send timeout (a would-block on a transport this
+ * driver uses blocking, which is how POSIX reports SO_RCVTIMEO and
+ * SO_SNDTIMEO, or Winsock's WSAETIMEDOUT), HTTP_IO_WOULD_BLOCK for a
+ * non-blocking transport that cannot go on yet, HTTP_IO_RESET when the peer
+ * reset or aborted the connection, and HTTP_IO_OTHER for anything else. A
+ * timeout and a reset were one "recv timeout or I/O error", which the proxy
+ * answers 504 for both. The kinds are in aether_http_internal.h.
+ *
+ * `n` is what the read or the write returned. A TLS read or write is
+ * classified by the TLS layer's own answer, not by errno or
+ * WSAGetLastError: a TLS failure that made no failing system call (a
+ * protocol error, a bad record) leaves whatever an earlier call set there,
+ * and a stale EAGAIN read as a timeout answered 504 and kept an idempotent
+ * request from going again. OpenSSL's WANT_READ or WANT_WRITE is the
+ * timeout, its SSL_ERROR_SYSCALL a failed system call whose error is this
+ * call's, and anything else an I/O error; the pure-TLS client says a
+ * timeout of a read or a write by HTTP_PT_TIMED_OUT and a reset by
+ * HTTP_PT_RECV_RESET, as its socket recorded them, and any other failure is
+ * an I/O error. */
+static int http_os_failure_kind(int blocking);
+int http_io_failure_kind(const Transport* t, int n) {
+    /* -1 is a pure-TLS transport, which this client reads blocking. */
+    int blocking = t->nonblocking != 1;
+#ifdef AETHER_HAS_OPENSSL
+    if (t->ssl) {
+        int e = SSL_get_error(t->ssl, n);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE)
+            return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
+        if (e == SSL_ERROR_SYSCALL && n < 0) return http_os_failure_kind(blocking);
+        return HTTP_IO_OTHER;
+    }
+#endif
+    if (t->pure_tls) {
+        if (n == HTTP_PT_TIMED_OUT)
+            return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
+        if (n == HTTP_PT_RECV_RESET) return HTTP_IO_RESET;
+        return HTTP_IO_OTHER;
+    }
+    return http_os_failure_kind(blocking);
+}
+
+/* The kind of the error a failed system call left (http_io_failure_kind). */
+static int http_os_failure_kind(int blocking) {
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    if (e == WSAEWOULDBLOCK) return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
+    if (e == WSAETIMEDOUT) return HTTP_IO_TIMED_OUT;
+    if (e == WSAECONNRESET || e == WSAECONNABORTED) return HTTP_IO_RESET;
+#else
+    int e = errno;
+    if (e == EAGAIN || e == EWOULDBLOCK) return blocking ? HTTP_IO_TIMED_OUT : HTTP_IO_WOULD_BLOCK;
+    if (e == ETIMEDOUT) return HTTP_IO_TIMED_OUT;
+    if (e == ECONNRESET || e == ECONNABORTED || e == EPIPE) return HTTP_IO_RESET;
+#endif
+    return HTTP_IO_OTHER;
+}
+
+/* What a read that failed before a response, or its head, arrived says, by
+ * the kind of failure: the proxy answers 504 for a timeout ("timed out")
+ * and 502 for the others (#3846). */
+static const char* http_recv_failure_text(int kind, int head_only) {
+    if (kind == HTTP_IO_TIMED_OUT)
+        return head_only ? "request timed out before the response headers arrived"
+                         : "request timed out before the response arrived";
+    if (kind == HTTP_IO_RESET)
+        return head_only ? "connection reset by the peer before the response headers arrived"
+                         : "connection reset by the peer before the response arrived";
+    return head_only ? "I/O error before the response headers arrived"
+                     : "I/O error before the response arrived";
+}
+
+/* What a write that returned `n` (not a byte taken) means for the
+ * exchange: a non-blocking transport that cannot go on yet waits for the
+ * descriptor (WANT_WRITE); any other failure ends the write, its kind in
+ * send_failure. Classified as a failed read is (http_io_failure_kind), by
+ * the TLS layer's own answer on a TLS transport: a write on a connection a
+ * protocol error ended makes no system call, and a stale EAGAIN read as
+ * "not writable yet" kept the event loop waiting for writability until the
+ * deadline. */
+static int http_exchange_send_failed(HttpExchange* x, int n) {
+    int kind = http_io_failure_kind(x->t, n);
+    if (kind == HTTP_IO_WOULD_BLOCK) return AE_X_WANT_WRITE;
+    x->send_failure = kind;
+    return AE_X_ERROR;
+}
+
 /* Write the request head, then the body. Bodies are written raw so embedded
  * NULs survive. */
 int http_exchange_send(HttpExchange* x) {
@@ -4025,15 +4190,33 @@ int http_exchange_send(HttpExchange* x) {
         int n = transport_send(x->t, x->head + x->head_sent,
                                (int)(x->head_len - x->head_sent));
         if (n > 0) { x->head_sent += (size_t)n; continue; }
-        return http_io_would_block() ? AE_X_WANT_WRITE : AE_X_ERROR;
+        return http_exchange_send_failed(x, n);
     }
     while (x->body && x->body_sent < x->body_len) {
         int n = transport_send(x->t, x->body + x->body_sent,
                                x->body_len - x->body_sent);
         if (n > 0) { x->body_sent += n; continue; }
-        return http_io_would_block() ? AE_X_WANT_WRITE : AE_X_ERROR;
+        return http_exchange_send_failed(x, n);
     }
     return AE_X_DONE;
+}
+
+/* Whether a request whose write ended in `r` (http_exchange_send's result,
+ * not DONE) may be written again on a fresh connection (#3824). An
+ * idempotent one may. Another may only when none of it went out: an
+ * upstream that acts on the head and closes without reading the body ends
+ * the write partway, after it has the request, and a second POST is a
+ * second order. A write that waited out the socket's send timeout
+ * (send_failure HTTP_IO_TIMED_OUT, on every platform) is not written again
+ * either: the upstream is alive, only slow, and on Winsock a send that
+ * timed out leaves the socket undefined, what it sent included, so a head
+ * counted as unsent may have gone. A TLS write counts what the TLS layer
+ * accepted, and a record it did not finish is one the upstream cannot
+ * decrypt, so cannot act on. */
+int http_exchange_send_retryable(const HttpExchange* x, int r) {
+    if (http_method_idempotent(x->method)) return 1;
+    return r == AE_X_ERROR && x->send_failure != HTTP_IO_TIMED_OUT &&
+           x->head_sent == 0 && x->body_sent == 0;
 }
 
 /* Read until this response ends where its own framing says it does, or until
@@ -4049,7 +4232,18 @@ int http_exchange_recv(HttpExchange* x) {
         }
         int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
         if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
-        if (n < 0)  return http_io_would_block() ? AE_X_WANT_READ : AE_X_ERROR;
+        if (n < 0) {
+            int kind = http_io_failure_kind(x->t, n);
+            if (kind == HTTP_IO_WOULD_BLOCK) return AE_X_WANT_READ;
+            x->recv_failure = kind;
+            if (kind == HTTP_IO_TIMED_OUT) {
+                x->recv_timed_out = 1;
+                /* A blocking transport's WANT is its receive timeout, which
+                 * the blocking client has always read as a failed read. */
+                if (http_io_would_block()) return AE_X_WANT_READ;
+            }
+            return AE_X_ERROR;
+        }
         /* Past the response limit, the read ends there (#3750): a server
          * could make the client grow this buffer for as long as it kept
          * sending. The limit is on the head and the body's payload: a
@@ -4251,7 +4445,12 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     int pool_this = req->pool && !req->stream &&
                     !header_already_set(req, "Connection");
     int reused = 0;
-    if (pool_this && http_pool_take(req->pool, pool_key, &t)) {
+    /* A request that may not be sent twice is not sent again after a failure
+     * at the read (below), so its pooled connection is checked first
+     * (http_pool_take_open, #3824). */
+    int idempotent = http_method_idempotent(method);
+    if (pool_this && (idempotent ? http_pool_take(req->pool, pool_key, &t)
+                                 : http_pool_take_open(req->pool, pool_key, &t))) {
         /* This path reads with a timeout on the socket and expects it to
          * block. A driver may have left this connection non-blocking, where
          * a read that would wait returns EAGAIN, which this path reads as a
@@ -4260,15 +4459,15 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
             http_socket_set_nonblocking(t.sockfd, 0);
             t.nonblocking = 0;
         }
-        /* Taken without probing it first (#1719).
+        /* An idempotent request takes it without probing it first (#1719).
          *
          * This used to poll the socket before reusing it, one syscall on
          * every request through the pool, to catch a peer that had closed
-         * during the idle window. The read path already handles that case and
-         * handles it better: nothing coming back on a pooled connection means
-         * the request went into the void, and it redials and resends. The
-         * poll only moved the discovery earlier at the cost of asking the
-         * kernel every time.
+         * during the idle window. For a request that may be sent again the
+         * read path handles that case better: nothing coming back on a pooled
+         * connection and it redials and resends. The poll only moved the
+         * discovery earlier at the cost of asking the kernel every time. A
+         * request that may not be sent again pays it (#3824).
          *
          * The other thing it caught — bytes waiting on a supposedly idle
          * connection, which would be read as the head of this response — is
@@ -4324,25 +4523,37 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     int    n = 0;
     int    recv_err = 0;
     int    timed_out = 0;   /* the whole-request budget ran out mid-response */
+    int    waited_out = 0;  /* ... or a read waited its whole timeout (#3825) */
+    int    recv_kind = HTTP_IO_OTHER;   /* why a failed read failed (#3846) */
     int    rx_complete_at_deadline = 0;  /* ... but the response had already ended */
     int    truncated = 0;
     HttpRespFraming framing = {0};
     /* A pooled connection the peer closed while it sat idle is
-     * indistinguishable from a live one until it is used: the liveness probe
-     * catches almost all of them, and the rest fail with nothing received.
-     * Measured against an upstream that closes after every response, 4% of
-     * requests landed in that window. One redial covers it. The retry is
-     * bounded to a connection that came from the pool and produced no
-     * response byte, so the server cannot have acted on the request. */
+     * indistinguishable from a live one until it is used. Measured against an
+     * upstream that closes after every response, 4% of requests landed in
+     * that window. One redial covers it, bounded to a connection that came
+     * from the pool. A failed write is retried for an idempotent method, and
+     * for another only when none of the request went out
+     * (http_exchange_send_retryable): an upstream may act on the head and
+     * close without reading the body. A failure at the read with no
+     * response byte is retried for an idempotent method only (#3824): the
+     * upstream may have read the request whole and acted on it before the
+     * connection ended, and RFC 9110 9.2.2 lets a client repeat only a
+     * request whose repeat does no more. A non-idempotent one took its
+     * connection checked (http_pool_take_open), so an idle close is found
+     * before the write. */
     int retried = 0;
     HttpExchange tx;
+    int send_r;
 
 send_request:
     http_exchange_init(&tx, &t, hdr, hdr_len, body, body_len, method);
-    /* A WANT here is SO_SNDTIMEO firing on a transport this driver owns
-     * outright, which is a failed write like any other. */
-    if (http_exchange_send(&tx) != AE_X_DONE) {
-        if (reused && !retried) {
+    /* A write that waited out SO_SNDTIMEO on this blocking transport is a
+     * failed write of the timeout kind, which only an idempotent request
+     * writes again (http_exchange_send_retryable). */
+    send_r = http_exchange_send(&tx);
+    if (send_r != AE_X_DONE) {
+        if (reused && !retried && http_exchange_send_retryable(&tx, send_r)) {
             retried = 1;
             reused = 0;
             transport_close(&t);
@@ -4427,12 +4638,15 @@ send_request:
             hend = (char*)http_find_header_end(hb, hlen);
             if (hend) break;
         }
+        /* Read from the error the failed read left, before anything else
+         * can change it: a timeout and a reset are told apart (#3846). */
+        int skind = sn < 0 ? http_io_failure_kind(&t, sn) : HTTP_IO_OTHER;
         if (sn < 0) serr = 1;
         if (!hend) {
             free(hb);
             transport_close(&t);
             response->error = string_new(
-                serr ? "recv timeout or I/O error"
+                serr ? http_recv_failure_text(skind, 1)
                      : "connection closed before response headers");
             return response;
         }
@@ -4551,6 +4765,11 @@ send_request:
         rx.max_len = max_response > 0 ? (size_t)max_response : 0;
         int rc = http_exchange_recv(&rx);
         timed_out = rx.timed_out;
+        /* The budget ran out, or the socket's receive timeout (the same
+         * length, SO_RCVTIMEO) fired first (recv_timed_out, on every
+         * platform): the upstream held the connection silent. */
+        waited_out = rx.timed_out || rx.recv_timed_out;
+        recv_kind = waited_out ? HTTP_IO_TIMED_OUT : rx.recv_failure;
         rx_complete_at_deadline = rx.complete || rx.peer_closed;
         full_response = rx.buf;
         total_len     = rx.len;
@@ -4600,20 +4819,28 @@ send_request:
         n = 0;
     }
     /* Nothing at all came back on a connection that came from the pool: the
-     * peer had closed it and our request went into the void. Redial once and
-     * send again; the server never saw this request, so repeating it is safe
-     * whatever the method. The desync case below is the same reasoning: what
-     * came back was not an answer to this request. */
+     * peer had closed it, most likely while it sat idle. Redial once and send
+     * again, for an idempotent method only (#3824): the peer may also have
+     * read the request whole and closed without answering, and then a
+     * second POST is a second order. A non-idempotent request gets the error,
+     * as the event loop gives it, and the proxy answers 502. The desync case
+     * below is the same reasoning: what came back was not an answer to this
+     * request. */
     /* A pooled connection that answers with something that is not a response
      * was carrying bytes nobody asked for, and reading them as this
      * response's head would desynchronise everything after it. Same treatment
      * as no answer at all: retire the connection and ask again on a fresh
      * one. Only for a connection that came from the pool — a freshly dialled
      * one returning nonsense is the upstream's answer, not a stale socket. */
+    /* Not after the request's timeout (#3825): an upstream that held the
+     * connection silent for all of it did not close it, and it may be
+     * working on the request. Sent again, the request cost a second whole
+     * timeout before the proxy answered 504, and the upstream had it twice;
+     * the event loop answers 504 at the first (ev_expire). */
     int desynced = reused && total_len > 0
                 && (total_len < 5 || strncmp(full_response, "HTTP/", 5) != 0);
 
-    if ((total_len == 0 || desynced) && reused && !retried) {
+    if ((total_len == 0 || desynced) && reused && !retried && idempotent && !waited_out) {
         retried = 1;
         reused = 0;
         transport_close(&t);
@@ -4706,9 +4933,10 @@ send_request:
     }
     if (recv_err && !header_end) {
         http_conn_finish(req->pool, keep_conn, pool_key, &t, full_response, cap);
-        response->error = string_new(
-            timed_out ? "request timed out before the response arrived"
-                      : "recv timeout or I/O error");
+        /* By kind (#3846): a timeout, which the proxy answers 504, and a
+         * reset or another I/O error, 502, were one "recv timeout or I/O
+         * error" and all answered 504. */
+        response->error = string_new(http_recv_failure_text(recv_kind, 0));
         return response;
     }
     /* A response that stopped short of the length it declared is an error

@@ -700,7 +700,8 @@ run_supervised(prog: string, argv: ptr, env: ptr,
 // Length of a (length-aware) Aether string, used to feed stdin to a
 // child binary-safely. Declared here so run_full needn't take a
 // separate length argument from callers.
-extern string_length(str: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(str: string) -> int @c_import
 
 // Full three-way child stdio — the gap os.run_capture leaves open.
 // Feeds `stdin_data` to the child's stdin (binary-safe: exactly its

@@ -345,6 +345,19 @@ static inline int64_t aether_slice_len(AetherSlice s) {
     return s.len == AETHER_SLICE_UNBOUNDED ? -1 : (int64_t)s.len;
 }
 
+/* `.len` as the int the language gives it (#1286): a count past INT_MAX
+ * panics, as string.length does (#3523), where `(int)aether_slice_len`
+ * wrapped it and a loop to it ran the wrong number of times (#3843). A
+ * `for x in xs` loop counts with aether_slice_len itself, so it covers every
+ * element of any slice. */
+static inline int aether_slice_len_int(AetherSlice s) {
+    int64_t n = aether_slice_len(s);
+    if (n > (int64_t)2147483647)
+        aether_panic("slice: a length past 2^31 elements does not fit .len's int; "
+                     "iterate it with `for x in xs`");
+    return (int)n;
+}
+
 /* #2932: a failed check panics with its message built whole, a long source
  * path in it included, as a counted string the catch that receives it owns.
  * Declared as the generated program declares them; std/string defines both. */

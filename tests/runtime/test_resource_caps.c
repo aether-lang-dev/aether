@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdint.h>
+#include <stdatomic.h>
 
 /* Reset to a known baseline between tests by lifting the cap and
  * draining whatever the prior test accumulated. The counter doesn't
@@ -118,6 +120,191 @@ TEST_CATEGORY(caps_split_count_across_threads, TEST_CATEGORY_STDLIB) {
     for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
         for (int j = CAPS_SPLIT_BLOCKS / 2; j < CAPS_SPLIT_BLOCKS; j++)
             aether_caps_free(caps_split_blocks[i][j], 64);
+    ASSERT_TRUE(aether_caps_used_bytes() == before);
+}
+
+/* #3829: a thread's own slot is counted with a plain load and store, and a
+ * fold no longer empties it but records how much of it is folded. Many
+ * threads (more than there are owned slots, so the last ones share one)
+ * allocate and free while another thread sets and lifts a cap over and
+ * over, each time folding every slot into the capped counter as the
+ * owners write to them. Nothing is lost or counted twice: the total is
+ * exactly what the threads still hold, and nothing once they free it. */
+#define CAPS_MANY_THREADS 96
+#define CAPS_MANY_ROUNDS  20000
+#define CAPS_MANY_KEPT    8
+static void* caps_many_kept[CAPS_MANY_THREADS][CAPS_MANY_KEPT];
+static size_t caps_many_size[CAPS_MANY_THREADS][CAPS_MANY_KEPT];
+static _Atomic int caps_many_running;
+static void* caps_many_worker(void* arg) {
+    int t = (int)(intptr_t)arg;
+    void* ring[CAPS_MANY_KEPT] = {0};
+    size_t sizes[CAPS_MANY_KEPT] = {0};
+    for (int r = 0; r < CAPS_MANY_ROUNDS; r++) {
+        int k = r % CAPS_MANY_KEPT;
+        if (ring[k]) aether_caps_free(ring[k], sizes[k]);
+        sizes[k] = (size_t)(16 * (1 + (r + t) % 7));
+        ring[k] = aether_caps_malloc(sizes[k]);
+    }
+    for (int k = 0; k < CAPS_MANY_KEPT; k++) {
+        caps_many_kept[t][k] = ring[k];
+        caps_many_size[t][k] = sizes[k];
+    }
+    return NULL;
+}
+static void* caps_many_folder(void* arg) {
+    (void)arg;
+    while (atomic_load(&caps_many_running)) {
+        aether_caps_set_memory_cap((uint64_t)1 << 60);
+        aether_caps_set_memory_cap(0);
+    }
+    return NULL;
+}
+
+TEST_CATEGORY(caps_owned_slots_exact_under_folds, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    /* A megabyte held throughout, so the capped counter never nears zero:
+     * a fold forgets a total below zero, and a block made on a slot and
+     * freed under the cap takes the counter that far below the slots. */
+    void* floor_block = aether_caps_malloc(1 << 20);
+    ASSERT_NOT_NULL(floor_block);
+    uint64_t before = aether_caps_used_bytes();
+    atomic_store(&caps_many_running, 1);
+    pthread_t folder;
+    ASSERT_EQ(0, pthread_create(&folder, NULL, caps_many_folder, NULL));
+    pthread_t t[CAPS_MANY_THREADS];
+    for (int i = 0; i < CAPS_MANY_THREADS; i++)
+        ASSERT_EQ(0, pthread_create(&t[i], NULL, caps_many_worker, (void*)(intptr_t)i));
+    for (int i = 0; i < CAPS_MANY_THREADS; i++) pthread_join(t[i], NULL);
+    atomic_store(&caps_many_running, 0);
+    pthread_join(folder, NULL);
+
+    uint64_t held = 0;
+    int nulls = 0;
+    for (int i = 0; i < CAPS_MANY_THREADS; i++)
+        for (int k = 0; k < CAPS_MANY_KEPT; k++) {
+            nulls += caps_many_kept[i][k] == NULL;
+            held += caps_many_size[i][k];
+        }
+    ASSERT_EQ(0, nulls);
+    ASSERT_TRUE(aether_caps_used_bytes() == before + held);
+    /* And a fold now moves exactly that into the capped counter. */
+    aether_caps_set_memory_cap(before + held + 64);
+    ASSERT_TRUE(aether_caps_used_bytes() == before + held);
+    void* refused = aether_caps_malloc(128);
+    ASSERT_TRUE(refused == NULL);
+    aether_caps_set_memory_cap(0);
+
+    for (int i = 0; i < CAPS_MANY_THREADS; i++)
+        for (int k = 0; k < CAPS_MANY_KEPT; k++)
+            aether_caps_free(caps_many_kept[i][k], caps_many_size[i][k]);
+    ASSERT_TRUE(aether_caps_used_bytes() == before);
+    aether_caps_free(floor_block, 1 << 20);
+}
+
+/* #3829: a thread gives its owned slot back when it ends, its count folded
+ * into the exact total first, and a later thread takes it. Slots were never
+ * given back: after 63 threads had ever counted, every later one shared the
+ * last slot through a locked add, so a thread per connection, or a worker
+ * pool made again and again, contended on one line. 500 short-lived threads,
+ * 8 at a time, each allocate and free and keep one block it made, freed
+ * later on this thread: no count is lost with the threads, and a thread made
+ * after them all owns a slot. */
+#define CAPS_CHURN_THREADS 500
+#define CAPS_CHURN_AT_ONCE 8
+static void* caps_churn_kept[CAPS_CHURN_THREADS];
+static void* caps_churn_worker(void* arg) {
+    int t = (int)(intptr_t)arg;
+    for (int r = 0; r < 16; r++) {
+        void* p = aether_caps_malloc((size_t)(24 + r));
+        if (p) aether_caps_free(p, (size_t)(24 + r));
+    }
+    caps_churn_kept[t] = aether_caps_malloc((size_t)(40 + t % 9));
+    return NULL;
+}
+static void* caps_owns_probe(void* arg) {
+    *(int*)arg = aether_caps_thread_owns_slot();
+    return NULL;
+}
+
+TEST_CATEGORY(caps_slots_given_back_at_thread_exit, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    uint64_t before = aether_caps_used_bytes();
+    uint64_t kept = 0;
+    for (int i = 0; i < CAPS_CHURN_THREADS; i += CAPS_CHURN_AT_ONCE) {
+        pthread_t t[CAPS_CHURN_AT_ONCE];
+        int n = CAPS_CHURN_THREADS - i < CAPS_CHURN_AT_ONCE ? CAPS_CHURN_THREADS - i
+                                                             : CAPS_CHURN_AT_ONCE;
+        for (int k = 0; k < n; k++)
+            ASSERT_EQ(0, pthread_create(&t[k], NULL, caps_churn_worker, (void*)(intptr_t)(i + k)));
+        for (int k = 0; k < n; k++) pthread_join(t[k], NULL);
+    }
+    int nulls = 0;
+    for (int i = 0; i < CAPS_CHURN_THREADS; i++) {
+        nulls += caps_churn_kept[i] == NULL;
+        kept += (uint64_t)(40 + i % 9);
+    }
+    ASSERT_EQ(0, nulls);
+    ASSERT_TRUE(aether_caps_used_bytes() == before + kept);
+
+    pthread_t probe;
+    int owns = -1;
+    ASSERT_EQ(0, pthread_create(&probe, NULL, caps_owns_probe, &owns));
+    pthread_join(probe, NULL);
+    ASSERT_EQ(1, owns);
+
+    /* A cap set now sees exactly what the ended threads left. */
+    aether_caps_set_memory_cap(before + kept + 64);
+    ASSERT_TRUE(aether_caps_used_bytes() == before + kept);
+    aether_caps_set_memory_cap(0);
+    for (int i = 0; i < CAPS_CHURN_THREADS; i++)
+        aether_caps_free(caps_churn_kept[i], (size_t)(40 + i % 9));
+    ASSERT_TRUE(aether_caps_used_bytes() == before);
+}
+
+/* #3829: a thread ending gives its slot back without waiting for a fold.
+ * The give-back folded the slot under the folds' spin lock, so a thread
+ * that ended while another set and lifted a cap over and over (as
+ * caps_owned_slots_exact_under_folds does) could wait on that lock for as
+ * long as the folds went on: under ThreadSanitizer the workers never ended
+ * and their join hung. The slot's count needs no fold to be kept: it stays
+ * in the slot, which every total still sums, for the next thread that
+ * takes it. Here the lock is held while a thread that owns a slot ends;
+ * a second thread joins it and says so. The join must end with the lock
+ * still held (it is let go after five seconds either way, so a regression
+ * fails here and does not hang). */
+static _Atomic int caps_exit_joined;
+static void* caps_exit_worker(void* arg) {
+    (void)arg;
+    void* p = aether_caps_malloc(48);
+    aether_caps_free(p, 48);
+    return NULL;
+}
+static void* caps_exit_joiner(void* arg) {
+    pthread_join(*(pthread_t*)arg, NULL);
+    atomic_store(&caps_exit_joined, 1);
+    return NULL;
+}
+
+TEST_CATEGORY(caps_thread_exit_waits_for_no_fold, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    uint64_t before = aether_caps_used_bytes();
+    atomic_store(&caps_exit_joined, 0);
+    aether_caps_test_hold_folds(1);
+    pthread_t worker, joiner;
+    ASSERT_EQ(0, pthread_create(&worker, NULL, caps_exit_worker, NULL));
+    ASSERT_EQ(0, pthread_create(&joiner, NULL, caps_exit_joiner, &worker));
+    int joined_while_held = 0;
+    for (int i = 0; i < 500 && !joined_while_held; i++) {
+        joined_while_held = atomic_load(&caps_exit_joined);
+        if (!joined_while_held) {
+            struct timespec ten_ms = {0, 10 * 1000 * 1000};
+            nanosleep(&ten_ms, NULL);
+        }
+    }
+    aether_caps_test_hold_folds(0);
+    pthread_join(joiner, NULL);
+    ASSERT_EQ(1, joined_while_held);
     ASSERT_TRUE(aether_caps_used_bytes() == before);
 }
 

@@ -63,6 +63,8 @@ struct TcpSocket {
     long long due_ms;
     void* cancel;
     int stop;
+    int reset;
+    int send_timed_out;
 };
 
 TEST_CATEGORY(tcp_binary_nul_roundtrip, TEST_CATEGORY_NETWORK) {

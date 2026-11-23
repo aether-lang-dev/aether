@@ -279,7 +279,7 @@ TEST(slices_codegen_lowers_to_fat_pointer_helpers) {
     ASSERT_NOT_NULL(strstr(c, "#include \"aether_slice.h\""));
     ASSERT_NOT_NULL(strstr(c, "int sum(AetherSlice xs)"));
     ASSERT_NOT_NULL(strstr(c, "aether_slice_at(xs, (int64_t)(0), sizeof(int)"));
-    ASSERT_NOT_NULL(strstr(c, "aether_slice_len(xs)"));
+    ASSERT_NOT_NULL(strstr(c, "aether_slice_len_int(xs)"));
     /* #3072: a view of an array owns nothing, and carries the borrowed
      * mark that makes a `free` of it a named panic. */
     ASSERT_NOT_NULL(strstr(c, "sum(aether_slice_borrowed(aether_slice_make((void*)(arr), 3)))"));

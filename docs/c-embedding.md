@@ -458,7 +458,7 @@ static inline void Counter_Label(Counter* actor, int tag, const char* text, doub
 #endif
 ```
 
-Include the header in your C host application and send through the helpers, or build a struct by field name and pass it to `aether_send_message(actor, &msg, sizeof msg)`. A `string` field takes a `const char*` the host keeps alive until the message has been handled; the actor does not free it.
+Include the header in your C host application and send through the helpers, or build a struct by field name and pass it to `aether_send_message(actor, &msg, sizeof msg)`. A `string` field takes a `const char*` the host keeps alive until the message has been handled; the actor does not free it. A message with a `ptr` field also has `unsigned char _ae_boxed[n]` right after `_message_id`: one bit per `ptr` field, set by an Aether send that boxed a closure there, so the message gives the box back if no handler takes it (#3847). A host builds the struct zero-initialised, with a designated initializer (`Label msg = { ._message_id = MSG_Label, .tag = 1 }`, as the helpers do) or after a `memset(&msg, 0, sizeof msg)`: the marks are then 0 and a host's pointer is never released. A struct left uninitialised can carry a set mark, and the message's release then unboxes the host's pointer as a closure and panics. The member changes the layout of every message with a `ptr` field, so a host built against a header from before it must be rebuilt against the new one.
 
 ---
 

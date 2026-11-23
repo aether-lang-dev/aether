@@ -135,6 +135,17 @@ extern char s_cache_dir[512];   /* resolved once by init_cache_dir (ae_cache.c) 
 int  run_cmd_show_warnings(const char* cmd);
 int  run_cmd_capture_stdout(const char* cmd, const char* path);
 int  run_cmd_capture_all(const char* cmd, const char* path);   /* stdout and stderr (#3806) */
+/* #3842: run_cmd_capture_stdout in two halves, so a probe runs while ae does
+ * other work: _start spawns `cmd` with its stdout into `path` and does not
+ * wait; _wait waits and returns what run_cmd_capture_stdout would have.
+ * _start returns 0, with nothing started, where it cannot spawn this way
+ * (the caller runs the command whole instead). */
+typedef struct {
+    long long handle;   /* the process (a HANDLE on Windows, a pid elsewhere) */
+    int running;
+} AeChild;
+int  run_cmd_capture_stdout_start(const char* cmd, const char* path, AeChild* child);
+int  run_cmd_capture_stdout_wait(AeChild* child);
 void dump_captured_stdout(const char* path);
 bool path_exists(const char* path);
 void mkdirs(const char* path);
@@ -239,6 +250,10 @@ void tc_lib_dir_append(const char* spec);
 void tc_lib_dirs_seed_from_env(void);
 /* #3504: lib/ then tc.lib_dirs, into `out` (AETHER_LIB_DIRS_MAX + 1); the count. */
 int  tc_lib_chain(const char** out);
+/* #3842: start the C compiler's `--version` run (part of every cache key)
+ * now, to be waited for when a key is put together; a command that will
+ * make a key calls this where it begins. */
+void cache_ccid_start(void);
 /* 0 means do not cache this build: the source cannot be read, memory ran
  * out (a NULL `extra_salt` included, #2546), or a source tree walk could not
  * see every file (#2538). */
@@ -293,6 +308,12 @@ int cache_file_beside_program(const char* prog, const char* name, char* out, siz
 /* $AE_CC, else $CC, else NULL: the C-backend compiler the user picked (ae.c).
  * The cache key folds in the compiler it names (#2477). */
 const char* c_backend_env_override(void);
+/* The GCC flags a compile of generated C with compiler `cc` takes (ae.c):
+ * the relation limit (#3848) on every build and the inlining budget (#3779)
+ * on an optimising one, when `cc` is a GCC that takes them, else "". `cc`
+ * is asked once and the answer kept by its identity. The native build and
+ * the cross build (ae_cross.c) both ask this. */
+const char* gcc_inline_budget_flags(const char* cc, bool optimize);
 /* The extra C sources of a build (--extra, [[bin]] extra_sources) travel as
  * ONE space-separated string that goes onto the compiler command as-is. A
  * path with a space is stored double-quoted, so the shell sees one argument;
@@ -319,6 +340,9 @@ const char* merge_source_lists(const char* extra, const char* module_sources);
  * Kept for the process and valid until the next call; NULL when out of
  * memory, after saying so. */
 const char* get_aether_include_flags(const char* c_file);
+/* The toolchain's runtime and std include flags (tc.include_flags), built
+ * on first use (#3834). Never NULL. */
+const char* tc_include_flags(void);
 /* #1882: the stable depfile slot for an entry source, under the cache dir.
  * ae asks aetherc to write it (--emit-deps) on a cached build; compute_cache_key
  * folds it on the next run for exact, tree-walk-free invalidation. */

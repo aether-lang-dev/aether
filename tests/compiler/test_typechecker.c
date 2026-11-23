@@ -2,6 +2,7 @@
 #include "../../compiler/parser/lexer.h"
 #include "../../compiler/parser/parser.h"
 #include "../../compiler/analysis/typechecker.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -169,5 +170,85 @@ TEST(typechecker_type_alias_and_cfn_spellings_interoperate) {
     ASTNode* alias = find_first_node(ast, AST_CFN_TYPE_DEF, "MakeVec");
     ASSERT_NOT_NULL(alias);
     ASSERT_EQ(TYPE_STRUCT, alias->node_type->return_type->kind);
+    free_ast_node(ast);
+}
+
+/* #3835: the program's name index answers as the walk of its children did
+ * (the first declaration of each kind), and stays so after an insertion:
+ * one at the end is taken in, one anywhere else rebuilds it, and a child
+ * count it did not see change rebuilds it too. */
+static ASTNode* names_const_node(const char* name, int value) {
+    ASTNode* c = create_ast_node(AST_CONST_DECLARATION, name, 0, 0);
+    char text[16];
+    snprintf(text, sizeof(text), "%d", value);
+    ASTNode* lit = create_ast_node(AST_LITERAL, text, 0, 0);
+    lit->node_type = create_type(TYPE_INT);
+    add_child(c, lit);
+    return c;
+}
+
+TEST(typechecker_name_index_after_insertion) {
+    ASTNode* ast = parse_source(
+        "const A = 1\n"
+        "const B = 2\n"
+        "enum E { X, Y }\n"
+        "main() { }");
+    ASSERT_NOT_NULL(ast);
+    ASTNode* a = find_first_node(ast, AST_CONST_DECLARATION, "A");
+    ASTNode* e = find_first_node(ast, AST_ENUM_DEFINITION, "E");
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(e);
+    int e_at = -1;
+    for (int i = 0; i < ast->child_count; i++) if (ast->children[i] == e) e_at = i;
+    tc_names_begin(ast);
+
+    ASTNode* got = NULL;
+    int at = -2;
+    ASSERT_EQ(1, tc_program_names_valued(ast, "A", &got));
+    ASSERT_TRUE(got == a);
+    ASSERT_EQ(1, tc_program_names_valued(ast, "Z", &got));
+    ASSERT_NULL(got);
+    ASSERT_EQ(1, tc_program_names_enum_at(ast, "E_Y", &at));
+    ASSERT_EQ(e_at, at);
+
+    /* At the end, said: taken in where nothing of its name came first. */
+    ASTNode* c = names_const_node("C", 3);
+    add_child(ast, c);
+    tc_names_inserted(ast, c, ast->child_count - 1);
+    ASSERT_EQ(1, tc_program_names_valued(ast, "C", &got));
+    ASSERT_TRUE(got == c);
+
+    /* At the front, said: a second `A` that is now the first one. */
+    ASTNode* a2 = names_const_node("A", 9);
+    add_child(ast, a2);
+    memmove(&ast->children[1], &ast->children[0],
+            (size_t)(ast->child_count - 1) * sizeof(ASTNode*));
+    ast->children[0] = a2;
+    tc_names_inserted(ast, a2, 0);
+    ASSERT_EQ(1, tc_program_names_valued(ast, "A", &got));
+    ASSERT_TRUE(got == a2);
+    ASSERT_EQ(1, tc_program_names_enum_at(ast, "E_Y", &at));
+    ASSERT_EQ(e_at + 1, at);
+
+    /* A reorder, said (the child count does not move): the first `A` is
+     * the one written first again. */
+    int a_at = -1;
+    for (int i = 0; i < ast->child_count; i++) if (ast->children[i] == a) a_at = i;
+    ASSERT_TRUE(a_at > 0);
+    ast->children[0] = a;
+    ast->children[a_at] = a2;
+    tc_names_reordered(ast);
+    ASSERT_EQ(1, tc_program_names_valued(ast, "A", &got));
+    ASSERT_TRUE(got == a);
+
+    /* At the end, unsaid: the child count gives it away. */
+    ASTNode* d = names_const_node("D", 4);
+    add_child(ast, d);
+    ASSERT_EQ(1, tc_program_names_valued(ast, "D", &got));
+    ASSERT_TRUE(got == d);
+
+    /* Off: no answer, the caller walks. */
+    tc_names_end();
+    ASSERT_EQ(0, tc_program_names_valued(ast, "A", &got));
     free_ast_node(ast);
 }

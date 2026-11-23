@@ -11,6 +11,7 @@
 #include "../../runtime/scheduler/multicore_scheduler.h"
 #include "../../runtime/actors/aether_actor_thread.h"
 #include "../../runtime/actors/aether_send_message.h"
+#include "../../runtime/actors/aether_panic.h"   /* the frames of #3826's nested batches */
 #include "../../runtime/aether_process_mem.h"
 #include "../../runtime/utils/aether_cpu_detect.h"
 #include <stdatomic.h>
@@ -1519,6 +1520,85 @@ void test_scheduler_batch_wakes_parked_cores(void) {
     ASSERT_TRUE(parked);
     ASSERT_EQ(-1, unstepped);   // no actor waited on a core left asleep
     ASSERT_EQ(3, rounds_done);
+}
+
+// #3826: nested batches stay in the unwind journal. The open batch is
+// journaled so that a panic out of its loop sends it; an inner batch opened
+// inside it (a nested start) once re-tracked the one entry the thread has and
+// its end forgot it, so the outer batch's later sends were journaled by
+// nothing, and a panic there left them in the buffer until this thread's next
+// send or wait. Opened inside a `try` of its own, the inner batch moved the
+// entry to that frame, whose drain took it. Each round adds 0, 1 and 2, the
+// panic comes after 2, and the actor must step all three with no other send
+// or wait from this thread.
+void test_scheduler_nested_batches_stay_journaled(void) {
+    scheduler_init(1);
+    CounterActor* a = (CounterActor*)scheduler_spawn_actor(0, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    atomic_store(&a->count, 0);
+    scheduler_start();
+    int journal = aether_unwind_journal_size();
+
+    // Plain nesting: the inner batch opens and closes, the outer goes on.
+    AetherJmpFrame* f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        scheduler_send_batch_start();
+        scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 0));
+        scheduler_send_batch_start();
+        scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 1));
+        scheduler_send_batch_flush();
+        scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 2));
+        aether_panic("after the inner batch closed");
+    }
+    aether_try_pop();
+    int plain = wait_count(&a->count, 3);
+    int plain_journal = aether_unwind_journal_size();
+
+    // The inner batch in a `try` of its own, left by a panic its `try`
+    // catches; the outer batch goes on and panics later.
+    atomic_store(&a->count, 0);
+    f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        scheduler_send_batch_start();
+        scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 0));
+        AetherJmpFrame* g = aether_try_push();
+        if (AETHER_SIGSETJMP(g->buf, 1) == 0) {
+            scheduler_send_batch_start();
+            scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 1));
+            aether_panic("in the inner batch");
+        }
+        aether_try_pop();
+        scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 2));
+        aether_panic("in the outer batch, after the inner one's panic");
+    }
+    aether_try_pop();
+    int in_try = wait_count(&a->count, 3);
+    int in_try_journal = aether_unwind_journal_size();
+
+    // The next batch after both is journaled as the first one was: nothing
+    // the panics left behind keeps it out.
+    atomic_store(&a->count, 0);
+    f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        scheduler_send_batch_start();
+        scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 0));
+        scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 1));
+        scheduler_send_batch_add((ActorBase*)a, message_create_simple(1, 0, 2));
+        aether_panic("in a batch after the nested ones");
+    }
+    aether_try_pop();
+    int after = wait_count(&a->count, 3);
+    int after_journal = aether_unwind_journal_size();
+
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_EQ(3, plain);
+    ASSERT_EQ(journal, plain_journal);
+    ASSERT_EQ(3, in_try);
+    ASSERT_EQ(journal, in_try_journal);
+    ASSERT_EQ(3, after);
+    ASSERT_EQ(journal, after_journal);
 }
 
 // #3611: a core with messages of its own still to deliver does not park. A
@@ -3271,6 +3351,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler counts and places its threads by the process's CPUs", test_scheduler_places_threads_among_process_cpus, TEST_CATEGORY_RUNTIME);
 #endif
     register_test_with_category("Scheduler batch send wakes parked cores", test_scheduler_batch_wakes_parked_cores, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler nested batches stay journaled", test_scheduler_nested_batches_stay_journaled, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler core with messages to deliver does not park", test_scheduler_core_with_overflow_does_not_park, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread inbox keeps every sender's order", test_scheduler_actor_thread_inbox_keeps_order, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);

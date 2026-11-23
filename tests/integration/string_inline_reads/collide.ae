@@ -1,0 +1,11 @@
+// A program's own function named like the exported string_length, with no
+// import of std.string: libaether still defines string_length for C, so
+// codegen renames the program's function (#1366), whose table now finds
+// the name in std.string's @c_import binding (#3836).
+string_length(s: string) -> int {
+    return 7
+}
+
+main() {
+    println("${string_length("abc")}")
+}

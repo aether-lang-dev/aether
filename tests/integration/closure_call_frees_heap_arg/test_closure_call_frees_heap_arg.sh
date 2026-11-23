@@ -77,6 +77,6 @@ got="$(tr -d '\r' < "$tmp/out.log")"
 
 "$AETHERC" "$tmp/main.ae" "$tmp/main.c" >"$tmp/gen.log" 2>&1 || fail "aetherc failed" "$tmp/gen.log"
 # Both spellings of the read-only call free their temp.
-n="$(grep -c '_ad_[0-9]* = (char\*)(mk(((const char\*)&_ae_slit_[0-9]*))), aether_unwind_track_str_place((const void\*)\&_ad_[0-9]*, NULL), _closure_fn_0(.*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free(_ad_' "$tmp/main.c")"
+n="$(grep -c '_ad_[0-9]* = (char\*)(mk(((const char\*)&_ae_slit_[0-9]*))), _ad_[0-9]*_j = aether_unwind_track_str_place((const void\*)\&_ad_[0-9]*, NULL), _closure_fn_0(.*), aether_unwind_forget_tok(_ad_[0-9]*_j, (const void\*)\&_ad_[0-9]*), aether_heap_str_free(_ad_' "$tmp/main.c")"
 [ "$n" = "2" ] || fail "a read-only closure argument is not freed after the call ($n of 2)" "$tmp/main.c"
 echo "  [PASS] closure_call_frees_heap_arg: closure calls free their heap arguments; a kept one stays good"

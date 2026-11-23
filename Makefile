@@ -169,6 +169,9 @@ gen-version-header: $(VERSION_HEADER)
 # #1366: the bare C symbols the stdlib exposes. Codegen renames a user function
 # that would collide with one, so this must track std/ automatically: a
 # hand-kept list is what let string_replace_all reach a release.
+# A name bound to a header's inline form (`@extern("sym") name(...) @c_import`,
+# std.string's length and char_at, #3836) counts too: libaether still exports
+# the function under that name, for C.
 # GENERATED, do not commit or edit by hand (gitignored).
 STDLIB_SYMS_HEADER := compiler/codegen/aether_stdlib_symbols.h
 STDLIB_MODULE_AE := $(wildcard std/*/module.ae) $(wildcard std/*/*/module.ae)
@@ -180,8 +183,11 @@ $(STDLIB_SYMS_HEADER): $(STDLIB_MODULE_AE) Makefile
 	  echo "#define AETHER_STDLIB_SYMBOLS_H"; \
 	  echo "/* Sorted for bsearch. */"; \
 	  echo "static const char* const AETHER_STDLIB_SYMBOLS[] = {"; \
-	  grep -rhoE '^extern[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' $(STDLIB_MODULE_AE) 2>/dev/null \
-	    | awk '{print $$2}' | LC_ALL=C sort -u | sed 's/.*/    "&",/'; \
+	  { grep -rhoE '^extern[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' $(STDLIB_MODULE_AE) 2>/dev/null \
+	      | awk '{print $$2}'; \
+	    grep -rhE '^@extern\("[^"]*"\)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*\(.*@c_import' $(STDLIB_MODULE_AE) 2>/dev/null \
+	      | sed -E 's/^@extern\("[^"]*"\)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\1/'; \
+	  } | LC_ALL=C sort -u | sed 's/.*/    "&",/'; \
 	  echo "};"; \
 	  echo "#define AETHER_STDLIB_SYMBOL_COUNT \\"; \
 	  echo "    (sizeof(AETHER_STDLIB_SYMBOLS) / sizeof(AETHER_STDLIB_SYMBOLS[0]))"; \
@@ -923,6 +929,18 @@ LDFLAGS =
 ifeq ($(HARDEN),1)
 CFLAGS += -fstack-protector-all -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security
 endif
+
+# #3848: GCC 12 and later record the false edge of a float comparison
+# `a > n` as the relation `a <= n`, which a NaN breaks, and fold later
+# comparisons from the chain: wrong answers at -O1 and up. ae passes
+# `--param relation-block-limit=0` to every optimising GCC compile of a
+# program (tools/ae.c, gcc_inline_budget_flags); the runtime and std C built
+# here take it too. Only where $(CC) is GCC and takes it: Clang folds no
+# such chain, and an older GCC predates the optimiser and the parameter.
+GCC_RELATION_LIMIT := $(shell if $(CC) -dM -E -x c /dev/null 2>/dev/null | grep -q __clang__; then :; \
+    elif echo 'int ae_relation_probe;' | $(CC) --param relation-block-limit=0 -Werror -x c -fsyntax-only - \
+    >/dev/null 2>&1; then echo '--param relation-block-limit=0'; fi)
+CFLAGS += $(GCC_RELATION_LIMIT)
 ifneq ($(FREEBSD),1)
 ifneq ($(WINDOWS),1)
 ifneq ($(PLATFORM),wasm)
@@ -1035,6 +1053,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_runtime_http.c \
            tests/runtime/test_runtime_net.c \
            tests/runtime/test_runtime_udp.c \
+           tests/runtime/test_sandbox_temp_names.c \
            tests/runtime/test_io_poller.c \
            tests/runtime/test_runtime_observe.c \
            tests/runtime/test_runtime_process_mem.c \
@@ -1065,6 +1084,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_actor_rebirth.c \
            tests/runtime/test_mailbox_bound.c \
            tests/runtime/test_win_mutex_no_debug_info.c \
+           tests/runtime/test_win_long_path.c \
            tests/runtime/test_http_server.c \
            tests/runtime/test_http_resolver.c \
            tests/runtime/test_net_localhost.c \
@@ -4007,6 +4027,7 @@ ci-coop: clean compiler ae
 	           tests/regression/test_owned_panic_unwind.ae \
 	           tests/regression/test_step_panic_drop.ae \
 	           tests/regression/test_step_drop_context.ae \
+	           tests/regression/test_ask_reply_releases_boxed_closure.ae \
 	           examples/01-language/01-hello.ae; do \
 		printf "  %-50s " "$$src"; \
 		if AETHER_HOME="" ./$(BUILD_DIR)/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \

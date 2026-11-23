@@ -22,27 +22,33 @@
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
 #endif
 
-// Helper: get data pointer and length from either AetherString* or plain char*
+// Helper: get data pointer and length from either AetherString* or plain
+// char* (aether_string_inline.h, the reads std.string's programs inline).
 static inline const char* str_data(const void* s) {
-    if (!s) return "";
-    if (is_aether_string(s)) return ((const AetherString*)s)->data;
-    return (const char*)s;
+    return aether_string_bytes(s);
 }
 
 static inline size_t str_len(const void* s) {
-    if (!s) return 0;
-    if (is_aether_string(s)) return ((const AetherString*)s)->length;
-    return strlen((const char*)s);
+    return aether_string_byte_count(s);
 }
 
 // A length or position as the int the string API returns (#3523). One past
 // INT_MAX has no right int answer: cast, a string over 2 GiB read as a
 // negative length, and a loop over it did nothing and said nothing. Cut to
 // INT_MAX it would be a wrong length or a wrong position just as quietly, so
-// it panics.
+// it panics. This file's own; the inline reads programs compile
+// (aether_string_inline.h) panic through aether_panic itself, so a library
+// built from them names no runtime function an older runtime lacks.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((cold, noinline))
+#endif
+static int aether_string_int_overflow(void) {
+    aether_panic("string: a length or position past 2 GiB does not fit an int");
+    return 0;
+}
+
 static inline int str_int(size_t v) {
-    if (v > (size_t)INT_MAX)
-        aether_panic("string: a length or position past 2 GiB does not fit an int");
+    if (v > (size_t)INT_MAX) return aether_string_int_overflow();
     return (int)v;
 }
 
@@ -284,22 +290,16 @@ AetherString* string_concat_wrapped(const void* a, const void* b) {
     return wrapped;
 }
 
+/* The exported forms of the reads std.string's programs inline (#3836):
+ * the same bodies, for C and for the modules that declare these names
+ * themselves. Returning int matches what codegen emits for the prototype
+ * and what the stdlib externs declare. */
 int string_length(const void* str) {
-    return str_int(str_len(str));
+    return aether_string_length_inline(str);
 }
 
 int string_char_at(const void* str, int index) {
-    size_t len = str_len(str);
-    /* Compared as a size_t (#3523): `(int)len` of a string over 2 GiB is
-     * negative, and every index read as out of range. The index is the
-     * caller's int, so it always fits; the length is never cut. */
-    if (!str || index < 0 || (size_t)index >= len) return 0;
-    /* Unsigned: a byte >= 0x80 used to come back sign-extended, so 0x85 read
-     * as -123 and every binary parser written against this silently broke on
-     * high bytes (#1516 found it through WebSocket framing). Returning int
-     * also matches what codegen emits for the prototype and what the stdlib
-     * extern declares; the old `char` return disagreed with both. */
-    return (int)(unsigned char)str_data(str)[index];
+    return aether_string_char_at_inline(str, index);
 }
 
 /* By length and bytes, embedded NULs included. `==` and `!=` on strings
@@ -949,16 +949,23 @@ typedef struct {
 
 static void interp_put(InterpSink* k, const char* p, size_t n);
 
+/* The decimal digits of `magnitude`, written backwards so they end at
+ * `end`; returns where they start. At most 20 digits. */
+static inline char* decimal_digits(char* end, unsigned long long magnitude) {
+    char* p = end;
+    do {
+        *--p = (char)('0' + (int)(magnitude % 10));
+        magnitude /= 10;
+    } while (magnitude);
+    return p;
+}
+
 /* A plain %d / %u conversion (codegen writes no flags, width or precision)
  * in decimal, as printf would, without a call into snprintf: interpolation
  * is a hot path and most of its segments are integers. */
 static void interp_put_decimal(InterpSink* k, unsigned long long magnitude, int negative) {
     char buf[24];
-    char* p = buf + sizeof(buf);
-    do {
-        *--p = (char)('0' + (int)(magnitude % 10));
-        magnitude /= 10;
-    } while (magnitude);
+    char* p = decimal_digits(buf + sizeof(buf), magnitude);
     if (negative) *--p = '-';
     interp_put(k, p, (size_t)(buf + sizeof(buf) - p));
 }
@@ -1010,8 +1017,9 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
 /* Formats one numeric argument of type T with the conversion `sub`, through
  * PRINT (snprintf's arguments), and offers it to the sink: on the stack when
  * it fits, else on the heap, so no conversion is ever cut short. */
-#define INTERP_CONV(T, PRINT) do {                                          \
-        T v_ = va_arg(ap, T);                                               \
+#define INTERP_CONV(T, PRINT) INTERP_CONV_VALUE(T, PRINT, va_arg(ap, T))
+#define INTERP_CONV_VALUE(T, PRINT, VALUE) do {                             \
+        T v_ = (VALUE);                                                     \
         char small_[64];                                                    \
         int n_ = PRINT(small_, sizeof(small_), sub, v_);                    \
         if (n_ < 0) break;                                                  \
@@ -1042,7 +1050,19 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
  * the locale, so in a host that called setlocale(LC_ALL, "de_DE.UTF-8")
  * "${0.5}" was "0,5" and print(0.5) "0,500000", while string.from_float(0.5)
  * was "0.5" (docs/locale-independent-float-text.md). A long double the same. */
-#define INTERP_DOUBLE() INTERP_CONV(double, aether_c_snprintf_double)
+/* #3828: a plain %g (what codegen writes for a float) of an integral value
+ * below 1e6 is its digits (aether_integral_double_text): no snprintf. */
+#define INTERP_DOUBLE() do {                                                \
+        double d_ = va_arg(ap, double);                                     \
+        char digits_[24];                                                   \
+        int dn_;                                                            \
+        if (sl == 2 && conv == 'g' &&                                       \
+            (dn_ = aether_integral_double_text(digits_, d_, 1e6)) > 0) {    \
+            interp_put(&k, digits_, (size_t)dn_);                           \
+            break;                                                          \
+        }                                                                   \
+        INTERP_CONV_VALUE(double, aether_c_snprintf_double, d_);            \
+    } while (0)
 #define INTERP_LONG_DOUBLE() INTERP_CONV(long double, aether_c_snprintf_long_double)
 
 size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap) {
@@ -1134,6 +1154,7 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
 #undef INTERP_DOUBLE
 #undef INTERP_LONG_DOUBLE
 #undef INTERP_CONV
+#undef INTERP_CONV_VALUE
 
 void* aether_interp_string(const char* fmt, va_list ap) {
     /* Most interpolations are short: format once into the stack and copy,
@@ -1504,10 +1525,24 @@ int aether_string_is_string(const void* p) {
     return is_aether_string(p);
 }
 
+/* #3830: a signed integer's decimal text, as snprintf's "%lld" writes it,
+ * written straight into a string of its length: no format parsing, no
+ * strlen and no header check. The digits are interp_put_decimal's. */
+static AetherString* string_from_signed(long long value) {
+    char buf[24];
+    char* end = buf + sizeof(buf);
+    /* The magnitude in unsigned arithmetic, so LLONG_MIN is exact. */
+    char* p = decimal_digits(end, value < 0 ? 0ULL - (unsigned long long)value
+                                            : (unsigned long long)value);
+    if (value < 0) *--p = '-';
+    size_t n = (size_t)(end - p);
+    AetherString* s = string_alloc_inline(n);
+    if (s) memcpy(s->data, p, n);
+    return s;
+}
+
 AetherString* string_from_int(int value) {
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%d", value);
-    return string_new(buffer);
+    return string_from_signed(value);
 }
 
 // Sibling of string_from_int that preserves the full 64-bit range.
@@ -1516,9 +1551,7 @@ AetherString* string_from_int(int value) {
 // exceed INT_MAX reach for this instead of truncating through
 // `string_from_int`.
 AetherString* string_from_long(long long value) {
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%lld", value);
-    return string_new(buffer);
+    return string_from_signed(value);
 }
 
 // Aether's `float` lowers to C `double` (8 bytes), so the parameter
@@ -1535,6 +1568,9 @@ AetherString* string_from_long(long long value) {
 // floating-point promotion in varargs), so the format string stays.
 AetherString* string_from_float(double value) {
     char buffer[64];
+    /* #3828: an integral value below 1e6 is its digits, as %g writes it. */
+    int n = aether_integral_double_text(buffer, value, 1e6);
+    if (n > 0) return string_new_with_length(buffer, (size_t)n);
     aether_c_snprintf_double(buffer, sizeof(buffer), "%g", value);
     return string_new(buffer);
 }

@@ -249,297 +249,387 @@
   </div>
   <div class="functions" id="functions">
     <div class="function" id="f32x4" data-name="f32x4">
-      <h3 class="function-name">f32x4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>f32x4()</code></pre>
+      <h3 class="function-name">f32x4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>f32x4(a, b, c, d) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32, b: f32, c: f32, d: f32</span></p>
+      <p class="doc">The four lanes, in order.</p>
     </div>
     <div class="function" id="splat4" data-name="splat4">
-      <h3 class="function-name">splat4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>splat4()</code></pre>
+      <h3 class="function-name">splat4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>splat4(v) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">v: f32</span></p>
+      <p class="doc">One value in every lane.</p>
     </div>
     <div class="function" id="load4" data-name="load4">
-      <h3 class="function-name">load4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>load4()</code></pre>
+      <h3 class="function-name">load4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>load4(buf, index) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long</span></p>
+      <p class="doc">Four consecutive floats starting at element `index` of `buf`.</p>
     </div>
     <div class="function" id="store4" data-name="store4">
-      <h3 class="function-name">store4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>store4(buf as ptr, index, v)</code></pre>
-      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+      <h3 class="function-name">store4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>store4(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long, v: f32x4</span></p>
+      <p class="doc">Write the four lanes back at element `index`.</p>
     </div>
     <div class="function" id="lane4" data-name="lane4">
-      <h3 class="function-name">lane4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>lane4()</code></pre>
+      <h3 class="function-name">lane4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>lane4(v, index) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x4, index: long</span></p>
+      <p class="doc">Lane `index` (0-3) as an f32.</p>
     </div>
     <div class="function" id="sum4" data-name="sum4">
-      <h3 class="function-name">sum4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sum4()</code></pre>
+      <h3 class="function-name">sum4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>sum4(v) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x4</span></p>
+      <p class="doc">The four lanes added together.</p>
     </div>
     <div class="function" id="min4" data-name="min4">
-      <h3 class="function-name">min4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>min4()</code></pre>
+      <h3 class="function-name">min4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>min4(a, b) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
+      <p class="doc">Lane-wise minimum / maximum.</p>
     </div>
     <div class="function" id="max4" data-name="max4">
-      <h3 class="function-name">max4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>max4()</code></pre>
+      <h3 class="function-name">max4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>max4(a, b) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
     </div>
     <div class="function" id="select4" data-name="select4">
-      <h3 class="function-name">select4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>select4()</code></pre>
+      <h3 class="function-name">select4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>select4(mask, a, b) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">mask: i32x4, a: f32x4, b: f32x4</span></p>
+      <p class="doc">`a` where the mask lane is set, `b` where it is not.</p>
     </div>
     <div class="function" id="sqrt4" data-name="sqrt4">
-      <h3 class="function-name">sqrt4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sqrt4()</code></pre>
+      <h3 class="function-name">sqrt4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>sqrt4(v) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x4</span></p>
+      <p class="doc">Lane-wise square root and absolute value. Both are EXACT — an IEEE square root is correctly rounded and clearing the sign bit is not an approximation — so these give the same lanes as calling the scalar form four times, in one instruction instead of four extracts, four calls and a rebuild. A negative lane yields NaN, as `sqrt` does. (The transcendentals are a different matter: `sin`/`exp` per lane are approximations with a choice to make, so they are not here.)</p>
     </div>
     <div class="function" id="abs4" data-name="abs4">
-      <h3 class="function-name">abs4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>abs4()</code></pre>
+      <h3 class="function-name">abs4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>abs4(v) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x4</span></p>
     </div>
     <div class="function" id="lt4" data-name="lt4">
-      <h3 class="function-name">lt4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>lt4()</code></pre>
+      <h3 class="function-name">lt4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>lt4(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
+      <p class="doc">Comparisons as functions, for the spelling a solver written against the C intrinsics expects. `a &lt; b` on two f32x4 values is the same mask.</p>
     </div>
     <div class="function" id="le4" data-name="le4">
-      <h3 class="function-name">le4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>le4()</code></pre>
+      <h3 class="function-name">le4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>le4(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
     </div>
     <div class="function" id="gt4" data-name="gt4">
-      <h3 class="function-name">gt4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>gt4()</code></pre>
+      <h3 class="function-name">gt4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>gt4(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
     </div>
     <div class="function" id="ge4" data-name="ge4">
-      <h3 class="function-name">ge4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>ge4()</code></pre>
+      <h3 class="function-name">ge4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>ge4(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
     </div>
     <div class="function" id="eq4" data-name="eq4">
-      <h3 class="function-name">eq4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>eq4()</code></pre>
+      <h3 class="function-name">eq4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>eq4(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
     </div>
     <div class="function" id="mask_and" data-name="mask_and">
-      <h3 class="function-name">mask_and <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask_and()</code></pre>
+      <h3 class="function-name">mask_and <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask_and(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, b: i32x4</span></p>
     </div>
     <div class="function" id="mask_or" data-name="mask_or">
-      <h3 class="function-name">mask_or <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask_or()</code></pre>
+      <h3 class="function-name">mask_or <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask_or(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, b: i32x4</span></p>
     </div>
     <div class="function" id="mask_not" data-name="mask_not">
-      <h3 class="function-name">mask_not <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask_not()</code></pre>
+      <h3 class="function-name">mask_not <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask_not(a) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4</span></p>
     </div>
     <div class="function" id="any4" data-name="any4">
-      <h3 class="function-name">any4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>any4()</code></pre>
+      <h3 class="function-name">any4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>any4(mask) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">mask: i32x4</span></p>
+      <p class="doc">Is any lane set / is every lane set — the bool a branch needs.</p>
     </div>
     <div class="function" id="all4" data-name="all4">
-      <h3 class="function-name">all4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>all4()</code></pre>
+      <h3 class="function-name">all4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>all4(mask) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">mask: i32x4</span></p>
     </div>
     <div class="function" id="mask_lane" data-name="mask_lane">
-      <h3 class="function-name">mask_lane <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask_lane()</code></pre>
+      <h3 class="function-name">mask_lane <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask_lane(v, index) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">v: i32x4, index: long</span></p>
+      <p class="doc">Lane `index` of a mask (or of any i32x4): 0 or -1 for a comparison result.</p>
     </div>
     <div class="function" id="f64x2" data-name="f64x2">
-      <h3 class="function-name">f64x2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>f64x2()</code></pre>
+      <h3 class="function-name">f64x2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>f64x2(a, b) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: float, b: float</span></p>
     </div>
     <div class="function" id="splat2" data-name="splat2">
-      <h3 class="function-name">splat2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>splat2()</code></pre>
+      <h3 class="function-name">splat2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>splat2(v) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">v: float</span></p>
     </div>
     <div class="function" id="load2" data-name="load2">
-      <h3 class="function-name">load2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>load2()</code></pre>
+      <h3 class="function-name">load2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>load2(buf, index) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long</span></p>
     </div>
     <div class="function" id="store2" data-name="store2">
-      <h3 class="function-name">store2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>store2(buf as ptr, index, v)</code></pre>
-      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+      <h3 class="function-name">store2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>store2(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long, v: f64x2</span></p>
     </div>
     <div class="function" id="lane2" data-name="lane2">
-      <h3 class="function-name">lane2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>lane2()</code></pre>
+      <h3 class="function-name">lane2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>lane2(v, index) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">v: f64x2, index: long</span></p>
     </div>
     <div class="function" id="sum2" data-name="sum2">
-      <h3 class="function-name">sum2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sum2()</code></pre>
+      <h3 class="function-name">sum2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>sum2(v) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">v: f64x2</span></p>
     </div>
     <div class="function" id="min2" data-name="min2">
-      <h3 class="function-name">min2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>min2()</code></pre>
+      <h3 class="function-name">min2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>min2(a, b) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: f64x2, b: f64x2</span></p>
     </div>
     <div class="function" id="max2" data-name="max2">
-      <h3 class="function-name">max2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>max2()</code></pre>
+      <h3 class="function-name">max2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>max2(a, b) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: f64x2, b: f64x2</span></p>
     </div>
     <div class="function" id="sqrt2" data-name="sqrt2">
-      <h3 class="function-name">sqrt2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sqrt2()</code></pre>
+      <h3 class="function-name">sqrt2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>sqrt2(v) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">v: f64x2</span></p>
+      <p class="doc">Lane-wise square root and absolute value, the f64x2 twins of sqrt4/abs4.</p>
     </div>
     <div class="function" id="abs2" data-name="abs2">
-      <h3 class="function-name">abs2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>abs2()</code></pre>
+      <h3 class="function-name">abs2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>abs2(v) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">v: f64x2</span></p>
     </div>
     <div class="function" id="select2" data-name="select2">
-      <h3 class="function-name">select2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>select2()</code></pre>
+      <h3 class="function-name">select2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>select2(mask, a, b) <span class="arrow">-&gt;</span> f64x2</code></pre>
+      <p class="signature"><span class="sig-params">mask: i64x2, a: f64x2, b: f64x2</span></p>
+      <p class="doc">An f64x2 comparison yields an `i64x2` — two 64-bit lanes, the width its operands have. (An i32x4 there would reinterpret the same register as four 32-bit lanes and scramble the answer, which is why the two mask types are distinct.) Everything below is that mask's surface, mirroring the f32x4 one.</p>
     </div>
     <div class="function" id="lt2" data-name="lt2">
-      <h3 class="function-name">lt2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>lt2()</code></pre>
+      <h3 class="function-name">lt2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>lt2(a, b) <span class="arrow">-&gt;</span> i64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: f64x2, b: f64x2</span></p>
     </div>
     <div class="function" id="le2" data-name="le2">
-      <h3 class="function-name">le2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>le2()</code></pre>
+      <h3 class="function-name">le2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>le2(a, b) <span class="arrow">-&gt;</span> i64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: f64x2, b: f64x2</span></p>
     </div>
     <div class="function" id="gt2" data-name="gt2">
-      <h3 class="function-name">gt2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>gt2()</code></pre>
+      <h3 class="function-name">gt2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>gt2(a, b) <span class="arrow">-&gt;</span> i64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: f64x2, b: f64x2</span></p>
     </div>
     <div class="function" id="ge2" data-name="ge2">
-      <h3 class="function-name">ge2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>ge2()</code></pre>
+      <h3 class="function-name">ge2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>ge2(a, b) <span class="arrow">-&gt;</span> i64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: f64x2, b: f64x2</span></p>
     </div>
     <div class="function" id="eq2" data-name="eq2">
-      <h3 class="function-name">eq2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>eq2()</code></pre>
+      <h3 class="function-name">eq2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>eq2(a, b) <span class="arrow">-&gt;</span> i64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: f64x2, b: f64x2</span></p>
     </div>
     <div class="function" id="mask2_and" data-name="mask2_and">
-      <h3 class="function-name">mask2_and <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask2_and()</code></pre>
+      <h3 class="function-name">mask2_and <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask2_and(a, b) <span class="arrow">-&gt;</span> i64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: i64x2, b: i64x2</span></p>
     </div>
     <div class="function" id="mask2_or" data-name="mask2_or">
-      <h3 class="function-name">mask2_or <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask2_or()</code></pre>
+      <h3 class="function-name">mask2_or <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask2_or(a, b) <span class="arrow">-&gt;</span> i64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: i64x2, b: i64x2</span></p>
     </div>
     <div class="function" id="mask2_not" data-name="mask2_not">
-      <h3 class="function-name">mask2_not <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask2_not()</code></pre>
+      <h3 class="function-name">mask2_not <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask2_not(a) <span class="arrow">-&gt;</span> i64x2</code></pre>
+      <p class="signature"><span class="sig-params">a: i64x2</span></p>
     </div>
     <div class="function" id="any2" data-name="any2">
-      <h3 class="function-name">any2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>any2()</code></pre>
+      <h3 class="function-name">any2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>any2(mask) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">mask: i64x2</span></p>
     </div>
     <div class="function" id="all2" data-name="all2">
-      <h3 class="function-name">all2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>all2()</code></pre>
+      <h3 class="function-name">all2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>all2(mask) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">mask: i64x2</span></p>
     </div>
     <div class="function" id="mask2_lane" data-name="mask2_lane">
-      <h3 class="function-name">mask2_lane <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask2_lane()</code></pre>
+      <h3 class="function-name">mask2_lane <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask2_lane(v, index) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">v: i64x2, index: long</span></p>
     </div>
     <div class="function" id="i32x4" data-name="i32x4">
-      <h3 class="function-name">i32x4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32x4()</code></pre>
+      <h3 class="function-name">i32x4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32x4(a, b, c, d) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: int, b: int, c: int, d: int</span></p>
+      <p class="doc">Build / broadcast.</p>
     </div>
     <div class="function" id="i32splat" data-name="i32splat">
-      <h3 class="function-name">i32splat <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32splat()</code></pre>
+      <h3 class="function-name">i32splat <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32splat(v) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">v: int</span></p>
     </div>
     <div class="function" id="i32load" data-name="i32load">
-      <h3 class="function-name">i32load <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32load()</code></pre>
+      <h3 class="function-name">i32load <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32load(buf, index) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long</span></p>
+      <p class="doc">Four consecutive 32-bit ints at element `index` of `buf`; store writes back.</p>
     </div>
     <div class="function" id="i32store" data-name="i32store">
-      <h3 class="function-name">i32store <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32store(buf as ptr, index, v)</code></pre>
-      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+      <h3 class="function-name">i32store <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32store(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long, v: i32x4</span></p>
     </div>
     <div class="function" id="i32lane" data-name="i32lane">
-      <h3 class="function-name">i32lane <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32lane()</code></pre>
+      <h3 class="function-name">i32lane <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32lane(v, index) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">v: i32x4, index: long</span></p>
+      <p class="doc">Lane `index` (0-3), sign-extended to int; sum of all four (as long, no overflow).</p>
     </div>
     <div class="function" id="i32sum" data-name="i32sum">
-      <h3 class="function-name">i32sum <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32sum()</code></pre>
+      <h3 class="function-name">i32sum <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32sum(v) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">v: i32x4</span></p>
     </div>
     <div class="function" id="i32add" data-name="i32add">
-      <h3 class="function-name">i32add <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32add()</code></pre>
+      <h3 class="function-name">i32add <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32add(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, b: i32x4</span></p>
+      <p class="doc">Lane-wise add / sub / mul (mul keeps the low 32 bits of each product).</p>
     </div>
     <div class="function" id="i32sub" data-name="i32sub">
-      <h3 class="function-name">i32sub <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32sub()</code></pre>
+      <h3 class="function-name">i32sub <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32sub(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, b: i32x4</span></p>
     </div>
     <div class="function" id="i32mul" data-name="i32mul">
-      <h3 class="function-name">i32mul <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32mul()</code></pre>
+      <h3 class="function-name">i32mul <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32mul(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, b: i32x4</span></p>
     </div>
     <div class="function" id="i32shl" data-name="i32shl">
-      <h3 class="function-name">i32shl <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32shl()</code></pre>
+      <h3 class="function-name">i32shl <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32shl(a, n) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, n: long</span></p>
+      <p class="doc">Shift every lane by the same count `n`: shl (logical left), shr (ARITHMETIC right, sign-preserving), shr_u (LOGICAL right, zero-filling). The count is masked to the lane width, as a scalar shift's is: `n &amp; 31` (#3524).</p>
     </div>
     <div class="function" id="i32shr" data-name="i32shr">
-      <h3 class="function-name">i32shr <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32shr()</code></pre>
+      <h3 class="function-name">i32shr <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32shr(a, n) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, n: long</span></p>
     </div>
     <div class="function" id="i32shr_u" data-name="i32shr_u">
-      <h3 class="function-name">i32shr_u <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32shr_u()</code></pre>
+      <h3 class="function-name">i32shr_u <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32shr_u(a, n) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, n: long</span></p>
     </div>
     <div class="function" id="i32min" data-name="i32min">
-      <h3 class="function-name">i32min <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32min()</code></pre>
+      <h3 class="function-name">i32min <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32min(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, b: i32x4</span></p>
+      <p class="doc">Lane-wise signed minimum / maximum.</p>
     </div>
     <div class="function" id="i32max" data-name="i32max">
-      <h3 class="function-name">i32max <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32max()</code></pre>
+      <h3 class="function-name">i32max <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32max(a, b) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, b: i32x4</span></p>
     </div>
     <div class="function" id="i16x8" data-name="i16x8">
-      <h3 class="function-name">i16x8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16x8()</code></pre>
+      <h3 class="function-name">i16x8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16x8(a, b, c, d, e, f, g, h) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int</span></p>
     </div>
     <div class="function" id="i16splat" data-name="i16splat">
-      <h3 class="function-name">i16splat <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16splat()</code></pre>
+      <h3 class="function-name">i16splat <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16splat(v) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">v: int</span></p>
     </div>
     <div class="function" id="i16load" data-name="i16load">
-      <h3 class="function-name">i16load <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16load()</code></pre>
+      <h3 class="function-name">i16load <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16load(buf, index) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long</span></p>
     </div>
     <div class="function" id="i16store" data-name="i16store">
-      <h3 class="function-name">i16store <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16store(buf as ptr, index, v)</code></pre>
-      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+      <h3 class="function-name">i16store <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16store(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long, v: i16x8</span></p>
     </div>
     <div class="function" id="i16lane" data-name="i16lane">
-      <h3 class="function-name">i16lane <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16lane()</code></pre>
+      <h3 class="function-name">i16lane <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16lane(v, index) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">v: i16x8, index: long</span></p>
     </div>
     <div class="function" id="i16add" data-name="i16add">
-      <h3 class="function-name">i16add <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16add()</code></pre>
+      <h3 class="function-name">i16add <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16add(a, b) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, b: i16x8</span></p>
     </div>
     <div class="function" id="i16sub" data-name="i16sub">
-      <h3 class="function-name">i16sub <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16sub()</code></pre>
+      <h3 class="function-name">i16sub <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16sub(a, b) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, b: i16x8</span></p>
     </div>
     <div class="function" id="i16mul" data-name="i16mul">
-      <h3 class="function-name">i16mul <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16mul()</code></pre>
+      <h3 class="function-name">i16mul <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16mul(a, b) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, b: i16x8</span></p>
     </div>
     <div class="function" id="i16shl" data-name="i16shl">
-      <h3 class="function-name">i16shl <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16shl()</code></pre>
+      <h3 class="function-name">i16shl <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16shl(a, n) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, n: long</span></p>
+      <p class="doc">The count is masked to the lane width: `n &amp; 15` (#3524).</p>
     </div>
     <div class="function" id="i16shr" data-name="i16shr">
-      <h3 class="function-name">i16shr <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16shr()</code></pre>
+      <h3 class="function-name">i16shr <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16shr(a, n) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, n: long</span></p>
     </div>
     <div class="function" id="i16min" data-name="i16min">
-      <h3 class="function-name">i16min <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16min()</code></pre>
+      <h3 class="function-name">i16min <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16min(a, b) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, b: i16x8</span></p>
     </div>
     <div class="function" id="i16max" data-name="i16max">
-      <h3 class="function-name">i16max <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i16max()</code></pre>
+      <h3 class="function-name">i16max <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i16max(a, b) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, b: i16x8</span></p>
     </div>
     <div class="function" id="pack_i32_i16" data-name="pack_i32_i16">
-      <h3 class="function-name">pack_i32_i16 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>pack_i32_i16()</code></pre>
+      <h3 class="function-name">pack_i32_i16 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>pack_i32_i16(a, b) <span class="arrow">-&gt;</span> i16x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x4, b: i32x4</span></p>
+      <p class="doc">Two i32x4 -&gt; one i16x8, signed-saturated: `a` fills lanes 0-3, `b` lanes 4-7. A lane outside [-32768, 32767] clamps to the nearest end.</p>
     </div>
     <div class="function" id="pack_i16_u8" data-name="pack_i16_u8">
-      <h3 class="function-name">pack_i16_u8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>pack_i16_u8(a, b, out as ptr)</code></pre>
-      <p class="signature"><span class="sig-params">a, b, out as ptr</span></p>
+      <h3 class="function-name">pack_i16_u8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>pack_i16_u8(a, b, out)</code></pre>
+      <p class="signature"><span class="sig-params">a: i16x8, b: i16x8, out: ptr</span></p>
+      <p class="doc">Two i16x8 -&gt; sixteen u8 written to `out`, unsigned-saturated: `a` fills bytes 0-7, `b` bytes 8-15. A lane below 0 clamps to 0, above 255 to 255. `out` must have room for 16 bytes.</p>
     </div>
     <div class="function" id="load4_slice" data-name="load4_slice">
       <h3 class="function-name">load4_slice <span class="kind">fn</span></h3>
@@ -589,93 +679,118 @@
       <p class="doc">`out` must have room for all 16 output bytes.</p>
     </div>
     <div class="function" id="f32x8" data-name="f32x8">
-      <h3 class="function-name">f32x8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>f32x8()</code></pre>
+      <h3 class="function-name">f32x8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>f32x8(a, b, c, d, e, f, g, h) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, g: f32, h: f32</span></p>
     </div>
     <div class="function" id="splat8" data-name="splat8">
-      <h3 class="function-name">splat8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>splat8()</code></pre>
+      <h3 class="function-name">splat8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>splat8(v) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">v: f32</span></p>
     </div>
     <div class="function" id="load8" data-name="load8">
-      <h3 class="function-name">load8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>load8()</code></pre>
+      <h3 class="function-name">load8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>load8(buf, index) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long</span></p>
     </div>
     <div class="function" id="store8" data-name="store8">
-      <h3 class="function-name">store8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>store8(buf as ptr, index, v)</code></pre>
-      <p class="signature"><span class="sig-params">buf as ptr, index, v</span></p>
+      <h3 class="function-name">store8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>store8(buf, index, v)</code></pre>
+      <p class="signature"><span class="sig-params">buf: ptr, index: long, v: f32x8</span></p>
     </div>
     <div class="function" id="lane8" data-name="lane8">
-      <h3 class="function-name">lane8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>lane8()</code></pre>
+      <h3 class="function-name">lane8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>lane8(v, index) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x8, index: long</span></p>
+      <p class="doc">Lane `index` (0-7) as an f32.</p>
     </div>
     <div class="function" id="sum8" data-name="sum8">
-      <h3 class="function-name">sum8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sum8()</code></pre>
+      <h3 class="function-name">sum8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>sum8(v) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x8</span></p>
+      <p class="doc">Lanes 0..7 added in order, as a scalar loop would, so the sum is the same bits on every instruction set.</p>
     </div>
     <div class="function" id="min8" data-name="min8">
-      <h3 class="function-name">min8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>min8()</code></pre>
+      <h3 class="function-name">min8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>min8(a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="max8" data-name="max8">
-      <h3 class="function-name">max8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>max8()</code></pre>
+      <h3 class="function-name">max8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>max8(a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="select8" data-name="select8">
-      <h3 class="function-name">select8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>select8()</code></pre>
+      <h3 class="function-name">select8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>select8(mask, a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">mask: i32x8, a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="sqrt8" data-name="sqrt8">
-      <h3 class="function-name">sqrt8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>sqrt8()</code></pre>
+      <h3 class="function-name">sqrt8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>sqrt8(v) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x8</span></p>
+      <p class="doc">Exact, like sqrt4 / abs4.</p>
     </div>
     <div class="function" id="abs8" data-name="abs8">
-      <h3 class="function-name">abs8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>abs8()</code></pre>
+      <h3 class="function-name">abs8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>abs8(v) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x8</span></p>
     </div>
     <div class="function" id="lt8" data-name="lt8">
-      <h3 class="function-name">lt8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>lt8()</code></pre>
+      <h3 class="function-name">lt8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>lt8(a, b) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="le8" data-name="le8">
-      <h3 class="function-name">le8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>le8()</code></pre>
+      <h3 class="function-name">le8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>le8(a, b) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="gt8" data-name="gt8">
-      <h3 class="function-name">gt8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>gt8()</code></pre>
+      <h3 class="function-name">gt8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>gt8(a, b) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="ge8" data-name="ge8">
-      <h3 class="function-name">ge8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>ge8()</code></pre>
+      <h3 class="function-name">ge8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>ge8(a, b) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="eq8" data-name="eq8">
-      <h3 class="function-name">eq8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>eq8()</code></pre>
+      <h3 class="function-name">eq8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>eq8(a, b) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="mask8_and" data-name="mask8_and">
-      <h3 class="function-name">mask8_and <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask8_and()</code></pre>
+      <h3 class="function-name">mask8_and <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask8_and(a, b) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x8, b: i32x8</span></p>
     </div>
     <div class="function" id="mask8_or" data-name="mask8_or">
-      <h3 class="function-name">mask8_or <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask8_or()</code></pre>
+      <h3 class="function-name">mask8_or <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask8_or(a, b) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x8, b: i32x8</span></p>
     </div>
     <div class="function" id="mask8_not" data-name="mask8_not">
-      <h3 class="function-name">mask8_not <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask8_not()</code></pre>
+      <h3 class="function-name">mask8_not <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask8_not(a) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: i32x8</span></p>
     </div>
     <div class="function" id="any8" data-name="any8">
-      <h3 class="function-name">any8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>any8()</code></pre>
+      <h3 class="function-name">any8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>any8(mask) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">mask: i32x8</span></p>
     </div>
     <div class="function" id="all8" data-name="all8">
-      <h3 class="function-name">all8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>all8()</code></pre>
+      <h3 class="function-name">all8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>all8(mask) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">mask: i32x8</span></p>
     </div>
     <div class="function" id="mask8_lane" data-name="mask8_lane">
-      <h3 class="function-name">mask8_lane <span class="kind">fn</span></h3>
-      <pre class="usage"><code>mask8_lane()</code></pre>
+      <h3 class="function-name">mask8_lane <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mask8_lane(v, index) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">v: i32x8, index: long</span></p>
+      <p class="doc">Lane `index` of a mask: 0 or -1 for a comparison result.</p>
     </div>
     <div class="function" id="load8_slice" data-name="load8_slice">
       <h3 class="function-name">load8_slice <span class="kind">fn</span></h3>
@@ -688,92 +803,121 @@
       <p class="signature"><span class="sig-params">buf: f32[], index: long, v: f32x8</span></p>
     </div>
     <div class="function" id="unpacklo4" data-name="unpacklo4">
-      <h3 class="function-name">unpacklo4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>unpacklo4()</code></pre>
+      <h3 class="function-name">unpacklo4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>unpacklo4(a, b) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
+      <p class="doc">[a0 b0 a1 b1] and [a2 b2 a3 b3]: the two vectors' lanes interleaved.</p>
     </div>
     <div class="function" id="unpackhi4" data-name="unpackhi4">
-      <h3 class="function-name">unpackhi4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>unpackhi4()</code></pre>
+      <h3 class="function-name">unpackhi4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>unpackhi4(a, b) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
     </div>
     <div class="function" id="pairs_lo4" data-name="pairs_lo4">
-      <h3 class="function-name">pairs_lo4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>pairs_lo4()</code></pre>
+      <h3 class="function-name">pairs_lo4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>pairs_lo4(a, b) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
+      <p class="doc">[a0 a1 b0 b1] and [a2 a3 b2 b3]: a pair from each.</p>
     </div>
     <div class="function" id="pairs_hi4" data-name="pairs_hi4">
-      <h3 class="function-name">pairs_hi4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>pairs_hi4()</code></pre>
+      <h3 class="function-name">pairs_hi4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>pairs_hi4(a, b) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x4, b: f32x4</span></p>
     </div>
     <div class="function" id="unpacklo8" data-name="unpacklo8">
-      <h3 class="function-name">unpacklo8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>unpacklo8()</code></pre>
+      <h3 class="function-name">unpacklo8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>unpacklo8(a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
+      <p class="doc">The four-lane patterns applied to lanes 0-3 and to lanes 4-7 of each, as AVX's own work within each 128-bit half: unpacklo8 is [a0 b0 a1 b1 a4 b4 a5 b5], unpackhi8 [a2 b2 a3 b3 a6 b6 a7 b7], pairs_lo8 [a0 a1 b0 b1 a4 a5 b4 b5], pairs_hi8 [a2 a3 b2 b3 a6 a7 b6 b7].</p>
     </div>
     <div class="function" id="unpackhi8" data-name="unpackhi8">
-      <h3 class="function-name">unpackhi8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>unpackhi8()</code></pre>
+      <h3 class="function-name">unpackhi8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>unpackhi8(a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="pairs_lo8" data-name="pairs_lo8">
-      <h3 class="function-name">pairs_lo8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>pairs_lo8()</code></pre>
+      <h3 class="function-name">pairs_lo8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>pairs_lo8(a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="pairs_hi8" data-name="pairs_hi8">
-      <h3 class="function-name">pairs_hi8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>pairs_hi8()</code></pre>
+      <h3 class="function-name">pairs_hi8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>pairs_hi8(a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="halves_lo8" data-name="halves_lo8">
-      <h3 class="function-name">halves_lo8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>halves_lo8()</code></pre>
+      <h3 class="function-name">halves_lo8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>halves_lo8(a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
+      <p class="doc">Whole halves: [a0 a1 a2 a3 b0 b1 b2 b3] and [a4 a5 a6 a7 b4 b5 b6 b7].</p>
     </div>
     <div class="function" id="halves_hi8" data-name="halves_hi8">
-      <h3 class="function-name">halves_hi8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>halves_hi8()</code></pre>
+      <h3 class="function-name">halves_hi8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>halves_hi8(a, b) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: f32x8, b: f32x8</span></p>
     </div>
     <div class="function" id="bits4" data-name="bits4">
-      <h3 class="function-name">bits4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>bits4()</code></pre>
+      <h3 class="function-name">bits4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>bits4(v) <span class="arrow">-&gt;</span> i32x4</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x4</span></p>
+      <p class="doc">The same bits read as integer lanes, and back: a reinterpretation, not a conversion (`bits4(splat4(1.0))` is 0x3f800000 in every lane). With `mask_and` / `mask_or` (`mask8_and` / `mask8_or`), which are bitwise on any integer lanes, this edits a float's bits in place, as an index embedded in the low mantissa bits of a value is: tagged = from_bits8(mask8_or(mask8_and(bits8(v), i32splat8(0 - 128)), index))</p>
     </div>
     <div class="function" id="from_bits4" data-name="from_bits4">
-      <h3 class="function-name">from_bits4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>from_bits4()</code></pre>
+      <h3 class="function-name">from_bits4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>from_bits4(v) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">v: i32x4</span></p>
     </div>
     <div class="function" id="bits8" data-name="bits8">
-      <h3 class="function-name">bits8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>bits8()</code></pre>
+      <h3 class="function-name">bits8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>bits8(v) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x8</span></p>
     </div>
     <div class="function" id="from_bits8" data-name="from_bits8">
-      <h3 class="function-name">from_bits8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>from_bits8()</code></pre>
+      <h3 class="function-name">from_bits8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>from_bits8(v) <span class="arrow">-&gt;</span> f32x8</code></pre>
+      <p class="signature"><span class="sig-params">v: i32x8</span></p>
     </div>
     <div class="function" id="i32x8" data-name="i32x8">
-      <h3 class="function-name">i32x8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32x8()</code></pre>
+      <h3 class="function-name">i32x8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32x8(a, b, c, d, e, f, g, h) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int</span></p>
+      <p class="doc">Eight integer lanes from eight values, or one value in every lane. The arithmetic operators and comparisons work on i32x8 as on f32x8.</p>
     </div>
     <div class="function" id="i32splat8" data-name="i32splat8">
-      <h3 class="function-name">i32splat8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>i32splat8()</code></pre>
+      <h3 class="function-name">i32splat8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>i32splat8(v) <span class="arrow">-&gt;</span> i32x8</code></pre>
+      <p class="signature"><span class="sig-params">v: int</span></p>
     </div>
     <div class="function" id="reduce_min4" data-name="reduce_min4">
-      <h3 class="function-name">reduce_min4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>reduce_min4()</code></pre>
+      <h3 class="function-name">reduce_min4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>reduce_min4(v) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x4</span></p>
+      <p class="doc">The smallest / largest lane. The lanes are compared in one fixed order with min4's rule (`a &lt; b ? a : b`): for eight, lane i against lane i + 4 first, then as for four, lanes 0 and 2, 1 and 3, then the two winners. A tie or a NaN therefore gives the same answer on every instruction set and in either form of f32x8.</p>
     </div>
     <div class="function" id="reduce_max4" data-name="reduce_max4">
-      <h3 class="function-name">reduce_max4 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>reduce_max4()</code></pre>
+      <h3 class="function-name">reduce_max4 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>reduce_max4(v) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x4</span></p>
     </div>
     <div class="function" id="reduce_min8" data-name="reduce_min8">
-      <h3 class="function-name">reduce_min8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>reduce_min8()</code></pre>
+      <h3 class="function-name">reduce_min8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>reduce_min8(v) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x8</span></p>
     </div>
     <div class="function" id="reduce_max8" data-name="reduce_max8">
-      <h3 class="function-name">reduce_max8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>reduce_max8()</code></pre>
+      <h3 class="function-name">reduce_max8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>reduce_max8(v) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">v: f32x8</span></p>
     </div>
     <div class="function" id="native8" data-name="native8">
-      <h3 class="function-name">native8 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>native8()</code></pre>
+      <h3 class="function-name">native8 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>native8() <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="doc">Whether an f32x8 is one 256-bit register in the code that calls this: the build's answer (true under `-mavx2`), and true in a copy imported at `@target(&quot;avx2&quot;)` on x86.</p>
     </div>
     <div class="function" id="cpu_has_avx2" data-name="cpu_has_avx2">
-      <h3 class="function-name">cpu_has_avx2 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>cpu_has_avx2()</code></pre>
+      <h3 class="function-name">cpu_has_avx2 <span class="kind">extern</span></h3>
+      <pre class="usage"><code>cpu_has_avx2() <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="doc">Whether this CPU runs AVX2 code, and its system saves the 256-bit registers: the check to make before calling into an `@target(&quot;avx2&quot;)` copy. False off x86.</p>
     </div>
   </div>
 </main>

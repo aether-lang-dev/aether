@@ -1,0 +1,199 @@
+// A pooled upstream connection that fails at the read is retried on a fresh
+// one, for every request on a kept client connection (#3809).
+//
+// A pooled connection the upstream has closed can take the request without
+// an error and fail only when the answer is read: the write lands in a
+// socket buffer, and the end or the reset comes back after it. macOS
+// loopback does that where Linux and Windows usually fail the write. A
+// request whose reused connection ended with no byte of an answer is sent
+// again down a fresh connection, on the proxy event loop and on the worker
+// path's client alike; #3809 asked whether the worker path did so only for
+// a failed write.
+//
+// This program is the upstream, so the case is forced rather than timed.
+// One kept client connection sends four GETs through the proxy. The first
+// dials the upstream, which answers and keeps the connection. Each of the
+// next three reaches the upstream on that pooled connection; the upstream
+// reads the request whole and closes without a byte of an answer. The proxy
+// must dial again, and the request must arrive on a new connection, which
+// the upstream answers: each of the four gets its 200 within three seconds,
+// against the proxy's five second upstream timeout, so a retry that waited
+// for that timeout fails too. Through a bare proxy (the event loop on Linux
+// and macOS) and through one behind a program's middleware (the worker
+// path). Every socket is on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.client
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(pool: ptr, opts: ptr, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    merr = proxy.mount(s, "/", pool, opts)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// What `sock` sends until a head has ended, it closes, or `ms` pass.
+read_head(sock: ptr, ms: int) -> string {
+    wire = ""
+    waited = 0
+    while waited < ms {
+        ready, _perr = tcp.poll(sock, 50)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                return wire
+            }
+            wire = string.concat(wire, chunk)
+            if string.index_of(wire, "\r\n\r\n") >= 0 {
+                return wire
+            }
+        } else {
+            waited = waited + 50
+        }
+    }
+    return wire
+}
+
+// The next connection to `listener` within `ms`, or null.
+accept_within(listener: ptr, ms: int) -> ptr {
+    if tcp.server_poll(listener, ms) != 1 {
+        return null
+    }
+    sock, aerr = tcp.accept(listener)
+    if aerr != "" {
+        return null
+    }
+    return sock
+}
+
+status(wire: string) -> string {
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+const ANSWER = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\np"
+const GET = "GET /p HTTP/1.1\r\nHost: x\r\n\r\n"
+
+main() {
+    println("=== a pooled connection that fails at the read is retried on a fresh one (#3809) ===")
+    listener, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: listen: ${lerr}")
+        exit(1)
+    }
+    up_url = "http://127.0.0.1:${tcp.server_port(listener)}"
+
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        // The upstream connections are this pool's (#3851): a phase that
+        // must start on a fresh one clears them.
+        pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+        aerr = proxy.upstream_add(pool, up_url, 1)
+        if aerr != "" {
+            println("FAIL: upstream_add: ${aerr}")
+            exit(1)
+        }
+        opts = proxy.opts_new()
+        s = gateway(pool, opts, g)
+        port = start(s)
+        sleep(100)
+        client.pool_clear(proxy.pool_conns(pool))
+
+        k, kerr = tcp.connect("127.0.0.1", port)
+        if kerr != "" {
+            println("FAIL: connect")
+            exit(1)
+        }
+        tcp.write(k, GET)
+        up = accept_within(listener, 3000)
+        if up == null {
+            println("FAIL: the first request reached no upstream connection (${names[g]})")
+            exit(1)
+        }
+        _head = read_head(up, 3000)
+        tcp.write(up, ANSWER)
+        rounds = "${status(read_head(k, 3000))} "
+
+        // Three more on the kept connection, each reaching the upstream on
+        // the pooled connection the one before left, which then ends with
+        // the request read and no answer.
+        r = 0
+        while r < 3 {
+            tcp.write(k, GET)
+            head = read_head(up, 3000)
+            tcp.close(up)
+            up = null
+            if string.index_of(head, "\r\n\r\n") < 0 {
+                rounds = string.concat(rounds, "not-reused ")
+            } else {
+                up = accept_within(listener, 3000)
+                if up == null {
+                    rounds = string.concat(rounds, "no-retry ")
+                } else {
+                    _again = read_head(up, 3000)
+                    tcp.write(up, ANSWER)
+                    rounds = string.concat(rounds, "${status(read_head(k, 3000))} ")
+                }
+            }
+            if up == null {
+                r = 3
+            }
+            r = r + 1
+        }
+        tcp.close(k)
+        if up != null {
+            tcp.close(up)
+        }
+        if rounds != "200 200 200 200 " {
+            println("  FAIL every request after a pooled connection ended unanswered (${names[g]}): got '${rounds}', expected '200 200 200 200 '")
+            bad = bad + 1
+        } else {
+            println("  PASS every request after a pooled connection ended unanswered (${names[g]})")
+        }
+        http.server_stop(s)
+        http.server_free(s)
+        proxy.opts_free(opts)
+        proxy.upstream_pool_free(pool)
+        g = g + 1
+    }
+
+    tcp.server_close(listener)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

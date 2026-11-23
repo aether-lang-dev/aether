@@ -1,0 +1,8 @@
+// probe.h includes a std header through a macro, which the scan cannot
+// follow: the compile line names every header directory.
+@c_include("probe.h")
+extern probe_magic() -> int @c_import
+
+main() {
+    println("magic ${probe_magic()}")
+}

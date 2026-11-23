@@ -59,14 +59,33 @@
  * Under a cap the check has to be exact, so the capped path counts on
  * g_mem.exact alone, and setting the cap first moves every slot's count
  * into it (caps_fold_slots): a cap set later sees the bytes already in use.
- * The total is always g_mem.exact plus the slots. */
+ *
+ * A slot has one writer (#3829): a thread that counts owns one of the first
+ * CAPS_USE_SLOTS - 1 until it ends, when it gives it back with its count
+ * still in it, for the next thread to count on from (caps_slot_give_back);
+ * a thread that finds all of them held shares the last. An owned
+ * slot is counted with a plain load and store, not a locked add: the two
+ * locked adds were 6 ns of the 30 a malloc and free of 40 bytes took.
+ * Nothing else writes an owned slot: a fold does not empty it,
+ * it records how much of it is already in g_mem.exact (`folded`, written
+ * only under g_fold_lock). The shared slot keeps the atomic add. The total
+ * is always g_mem.exact plus each slot's bytes past its folded part. Counts
+ * wrap as unsigned (two's complement), so a slot that only ever counts up
+ * on one thread and down on another is exact however far it goes. */
 #define CAPS_USE_SLOTS 64
+#define CAPS_SHARED_SLOT (CAPS_USE_SLOTS - 1)
 typedef struct {
     _Atomic int64_t bytes;
-    char pad[64 - sizeof(_Atomic int64_t)];
+    _Atomic int64_t folded;
+    char pad[64 - 2 * sizeof(_Atomic int64_t)];
 } CapsUseSlot;
+_Static_assert(sizeof(CapsUseSlot) == 64, "a slot is one cache line");
 static CapsUseSlot g_use_slots[CAPS_USE_SLOTS] AETHER_ALIGNED(64);
 static _Atomic unsigned g_use_next = 0;
+/* The owned slots given back by threads that ended (#3829), bit i for slot
+ * i, taken again before any slot never taken. */
+static _Atomic uint64_t g_use_free = 0;
+_Static_assert(CAPS_SHARED_SLOT <= 64, "a bit for each owned slot");
 /* This thread's slot, plus one; 0 until it first counts. */
 static AETHER_TLS_SHARED unsigned t_use_slot = 0;
 /* The capped count and the cap. While a cap is set every allocation and
@@ -132,40 +151,30 @@ static int64_t ns_after_ms(int64_t ms) {
     return now + span;
 }
 
-/* This thread's slot. A thread takes the next one the first time it counts,
- * so threads that run at once use different lines until there are more of
- * them than slots; after that two share one, which an atomic add keeps
- * right. */
-static inline _Atomic int64_t* caps_use_slot(void) {
-#if defined(AETHER_NO_THREADING)
-    /* No threads: one slot, which the tasks of a cooperative build with
-     * task contexts share through the atomic add (t_use_slot would be a
-     * plain global they all wrote). */
-    return &g_use_slots[0].bytes;
-#endif
-    unsigned s = t_use_slot;
-    if (__builtin_expect(s == 0, 0)) {
-        s = atomic_fetch_add_explicit(&g_use_next, 1, memory_order_relaxed) % CAPS_USE_SLOTS + 1;
-        t_use_slot = s;
+/* This thread's slot, plus one. A thread takes the next one the first time
+ * it counts, so threads that run at once use different lines: one a thread
+ * that ended gave back (g_use_free) first, else one never taken. Once every
+ * owned slot is held, a thread shares CAPS_SHARED_SLOT. */
+static unsigned caps_take_slot(void) {
+    /* Acquire, against the give-back's release: the slot's last count by
+     * the thread that held it is seen before this one counts on it. */
+    uint64_t f = atomic_load_explicit(&g_use_free, memory_order_acquire);
+    while (f) {
+        if (atomic_compare_exchange_weak_explicit(&g_use_free, &f, f & (f - 1),
+                                                  memory_order_acquire, memory_order_acquire))
+            return (unsigned)__builtin_ctzll(f) + 1;
     }
-    return &g_use_slots[s - 1].bytes;
+    unsigned n = atomic_fetch_add_explicit(&g_use_next, 1, memory_order_relaxed);
+    /* g_use_next never wraps back into the owned range: a thread past it
+     * stays on the shared slot however many threads came and went. */
+    if (n >= CAPS_SHARED_SLOT) {
+        atomic_store_explicit(&g_use_next, CAPS_SHARED_SLOT, memory_order_relaxed);
+        n = CAPS_SHARED_SLOT;
+    }
+    return n + 1;
 }
 
-static inline void caps_use_add(int64_t bytes) {
-    atomic_fetch_add_explicit(caps_use_slot(), bytes, memory_order_relaxed);
-}
-
-static inline int caps_capped(void) {
-    return (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & CAPS_SLOW_CAP) != 0;
-}
-
-/* Every slot's count moved into g_mem.exact, under g_fold_lock. Each slot
- * is emptied by an exchange, an atomic read and write, so a thread adding
- * to it at the same time loses nothing: its add lands before the exchange,
- * and moves, or after it, and stays for the next fold. A total below zero
- * afterwards is frees of more than was ever counted, and is forgotten, as
- * the one counter always held them at zero. */
-static void caps_fold_slots(void) {
+static void caps_fold_lock(void) {
     while (atomic_flag_test_and_set_explicit(&g_fold_lock, memory_order_acquire)) {
 #if defined(AETHER_NO_THREADING)
         aether_context_relax();
@@ -173,9 +182,98 @@ static void caps_fold_slots(void) {
         AETHER_CPU_PAUSE();
 #endif
     }
+}
+
+#if !defined(AETHER_NO_THREADING)
+/* A thread gives its owned slot back when it ends (#3829). Slots were never
+ * given back: once 63 threads had ever counted, every later one shared the
+ * last slot through a locked add, so a thread per connection, or a worker
+ * pool made again and again, fought over one line. The slot keeps its
+ * count: every total and every fold sums it, so nothing is lost, and the
+ * next thread to take it counts on from it. It is published free with
+ * release, for that thread's acquire, which so reads this one's last
+ * count; the slot still has one writer at a time. No lock: a give-back
+ * under g_fold_lock, which is not fair, waited for as long as another
+ * thread set and lifted caps, and a thread could not end. What this thread
+ * still counts after (a later exit hook's free) goes to the shared slot.
+ * The hook is the thread's execution state's
+ * (aether_context_local): its release runs as the thread ends, from the
+ * thread-exit hook the unwind journal keeps (aether_unwind.c), or from a
+ * scheduler thread's own cleanup. */
+static void caps_slot_give_back(void* block) {
+    unsigned s = *(unsigned*)block;
+    t_use_slot = CAPS_SHARED_SLOT + 1;
+    if (s == 0 || s - 1 >= CAPS_SHARED_SLOT) return;
+    unsigned i = s - 1;
+    atomic_fetch_or_explicit(&g_use_free, (uint64_t)1 << i, memory_order_release);
+}
+
+static const char k_caps_slot_key = 0;   /* its address keys the hook */
+
+/* Slot `s` (plus one) held by this thread until it ends. With no memory
+ * for the hook the slot stays this thread's for good, as before #3829. */
+static void caps_slot_hold(unsigned s) {
+    unsigned* b = (unsigned*)aether_context_local(&k_caps_slot_key, sizeof(unsigned),
+                                                  caps_slot_give_back);
+    if (b) *b = s;
+}
+#endif
+
+static inline void caps_use_add(int64_t bytes) {
+#if defined(AETHER_NO_THREADING)
+    /* No threads: the shared slot, which the tasks of a cooperative build
+     * with task contexts share through the atomic add (t_use_slot would be
+     * a plain global they all wrote). */
+    (void)t_use_slot;
+    (void)caps_take_slot;
+    atomic_fetch_add_explicit(&g_use_slots[CAPS_SHARED_SLOT].bytes, bytes, memory_order_relaxed);
+#else
+    unsigned s = t_use_slot;
+    if (__builtin_expect(s == 0, 0)) {
+        s = caps_take_slot();
+        t_use_slot = s;
+        if (s - 1 != CAPS_SHARED_SLOT) caps_slot_hold(s);
+    }
+    _Atomic int64_t* slot = &g_use_slots[s - 1].bytes;
+    if (__builtin_expect(s - 1 == CAPS_SHARED_SLOT, 0)) {
+        atomic_fetch_add_explicit(slot, bytes, memory_order_relaxed);
+        return;
+    }
+    /* This thread is the slot's only writer: a load and a store, each
+     * atomic (a reader summing the slots sees one or the other), with no
+     * read-modify-write between them to lock. */
+    uint64_t cur = (uint64_t)atomic_load_explicit(slot, memory_order_relaxed);
+    atomic_store_explicit(slot, (int64_t)(cur + (uint64_t)bytes), memory_order_relaxed);
+#endif
+}
+
+/* The bytes of slot `i` not yet in g_mem.exact. */
+static inline int64_t caps_slot_unfolded(int i) {
+    uint64_t now = (uint64_t)atomic_load_explicit(&g_use_slots[i].bytes, memory_order_relaxed);
+    uint64_t done = (uint64_t)atomic_load_explicit(&g_use_slots[i].folded, memory_order_relaxed);
+    return (int64_t)(now - done);
+}
+
+static inline int caps_capped(void) {
+    return (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & CAPS_SLOW_CAP) != 0;
+}
+
+/* Every slot's count moved into g_mem.exact, under g_fold_lock. A slot is
+ * not emptied, which would race its owner's load and store: the fold reads
+ * it once, adds what it holds past its `folded` part, and records the value
+ * it read as folded. A count its thread adds at the same time lands after
+ * that read, and stays for the next fold. A total below zero afterwards is
+ * frees of more than was ever counted, and is forgotten, as the one counter
+ * always held them at zero. */
+static void caps_fold_slots(void) {
+    caps_fold_lock();
     int64_t moved = 0;
-    for (int i = 0; i < CAPS_USE_SLOTS; i++)
-        moved += atomic_exchange_explicit(&g_use_slots[i].bytes, 0, memory_order_relaxed);
+    for (int i = 0; i < CAPS_USE_SLOTS; i++) {
+        uint64_t now = (uint64_t)atomic_load_explicit(&g_use_slots[i].bytes, memory_order_relaxed);
+        uint64_t done = (uint64_t)atomic_load_explicit(&g_use_slots[i].folded, memory_order_relaxed);
+        moved += (int64_t)(now - done);
+        atomic_store_explicit(&g_use_slots[i].folded, (int64_t)now, memory_order_relaxed);
+    }
     int64_t cur = atomic_fetch_add_explicit(&g_mem.exact, moved, memory_order_relaxed) + moved;
     while (cur < 0 &&
            !atomic_compare_exchange_weak_explicit(&g_mem.exact, &cur, 0,
@@ -313,8 +411,22 @@ uint64_t aether_caps_used_bytes(void) {
      * total of some moment close to the call, as the one counter was. */
     int64_t total = atomic_load_explicit(&g_mem.exact, memory_order_relaxed);
     for (int i = 0; i < CAPS_USE_SLOTS; i++)
-        total += atomic_load_explicit(&g_use_slots[i].bytes, memory_order_relaxed);
+        total += caps_slot_unfolded(i);
     return total > 0 ? (uint64_t)total : 0;
+}
+
+int aether_caps_thread_owns_slot(void) {
+#if defined(AETHER_NO_THREADING)
+    return 0;
+#else
+    caps_use_add(0);   /* takes this thread's slot, as a first count does */
+    return t_use_slot - 1 != CAPS_SHARED_SLOT;
+#endif
+}
+
+void aether_caps_test_hold_folds(int on) {
+    if (on) caps_fold_lock();
+    else atomic_flag_clear_explicit(&g_fold_lock, memory_order_release);
 }
 
 #include <stdlib.h>

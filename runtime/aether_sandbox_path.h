@@ -46,12 +46,23 @@
 #define PATH_MAX 4096
 #endif
 
+// The longest resolved path, in bytes, a check keeps: PATH_MAX, except on
+// Windows, where PATH_MAX is MAX_PATH (260) and a path the file system holds
+// can be far longer (#3850). There it is the bound the UTF-16 resolution
+// works with, so a long path is resolved and matched as a short one is.
+#ifdef _WIN32
+#define AETHER_SANDBOX_PATH_MAX 4096
+#else
+#define AETHER_SANDBOX_PATH_MAX PATH_MAX
+#endif
+
 #ifdef _WIN32
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "aether_win_path.h"
 
 // The longest path, in UTF-16 units, the Windows resolution works with.
 #define AETHER_SANDBOX_WPATH 4096
@@ -61,6 +72,13 @@
 // cannot be followed or opened: refused rather than taken as missing, so a
 // dangling link cannot be matched as the name it is.
 static int aether_sandbox_final_w(const wchar_t* p, wchar_t* out, DWORD cap) {
+    // A path at or past MAX_PATH is asked in its long form (#3850);
+    // one that cannot be put in it is not followed, so it is refused.
+    wchar_t lp[AETHER_SANDBOX_WPATH];
+    if (aether_win_path_is_long(p)) {
+        if (!aether_win_long_form(p, lp, AETHER_SANDBOX_WPATH)) return -1;
+        p = lp;
+    }
     HANDLE h = CreateFileW(p, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_CANT_ACCESS_FILE) {
@@ -93,7 +111,7 @@ static int aether_sandbox_final_w(const wchar_t* p, wchar_t* out, DWORD cap) {
         return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_INVALID_NAME ||
                 e == ERROR_DIRECTORY || e == ERROR_BAD_PATHNAME) ? 0 : -1;
     }
-    DWORD n = GetFinalPathNameByHandleW(h, out, cap, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    DWORD n = aether_win_final_path(h, out, cap);   // past MAX_PATH on Wine too, #3850
     CloseHandle(h);
     return (n == 0 || n >= cap) ? -1 : 1;
 }
@@ -144,7 +162,7 @@ static wchar_t* aether_sandbox_wunprefix(wchar_t* fin) {
 // on: 1, or 0 when it has none.
 static int aether_sandbox_final_of_handle(HANDLE h, char* out, size_t out_size) {
     wchar_t fin[AETHER_SANDBOX_WPATH];
-    DWORD n = GetFinalPathNameByHandleW(h, fin, AETHER_SANDBOX_WPATH, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    DWORD n = aether_win_final_path(h, fin, AETHER_SANDBOX_WPATH);   // #3850
     if (n == 0 || n >= AETHER_SANDBOX_WPATH) return 0;
     return WideCharToMultiByte(CP_UTF8, 0, aether_sandbox_wunprefix(fin), -1, out, (int)out_size,
                                NULL, NULL) > 0;
@@ -681,9 +699,9 @@ static int aether_sandbox_canon_entry(const char* in, char* out, size_t out_size
         wchar_t wname[AETHER_SANDBOX_WPATH];
         memcpy(wname, full + ws, (wl - ws + 1) * sizeof(wchar_t));
         full[ws > root ? ws - 1 : root] = L'\0';
-        char udir[PATH_MAX];
-        char uname[PATH_MAX];
-        char rdir[PATH_MAX];
+        char udir[AETHER_SANDBOX_PATH_MAX];
+        char uname[AETHER_SANDBOX_PATH_MAX];
+        char rdir[AETHER_SANDBOX_PATH_MAX];
         if (WideCharToMultiByte(CP_UTF8, 0, full, -1, udir, (int)sizeof udir, NULL, NULL) <= 0 ||
             WideCharToMultiByte(CP_UTF8, 0, wname, -1, uname, (int)sizeof uname, NULL, NULL) <= 0 ||
             !aether_sandbox_canon_path(udir, rdir, sizeof rdir))
@@ -741,7 +759,7 @@ static int aether_sandbox_canon_pattern(const char* pat, char* out, size_t out_s
         if (*q == '/' || *q == '\\') slash = q;
     }
     if (!slash) return 0;
-    char dir[PATH_MAX];
+    char dir[AETHER_SANDBOX_PATH_MAX];
     size_t dl = (size_t)(slash - pat);
     if (dl == 0) { dir[0] = '/'; dl = 1; }
     else {
@@ -749,7 +767,7 @@ static int aether_sandbox_canon_pattern(const char* pat, char* out, size_t out_s
         memcpy(dir, pat, dl);
     }
     dir[dl] = '\0';
-    char rdir[PATH_MAX];
+    char rdir[AETHER_SANDBOX_PATH_MAX];
     if (!aether_sandbox_canon_path(dir, rdir, sizeof(rdir))) return 0;
     size_t rl = strlen(rdir);
     const char* tail = slash + 1;   // "a*" or "*"

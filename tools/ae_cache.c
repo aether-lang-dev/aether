@@ -1404,6 +1404,16 @@ enum {
  * and the next unchanged build missed. Such a run is tried again; a compiler
  * that always exits without a line gives that outcome, with its exit status,
  * every time, so it still caches. */
+/* #3842: the first `--version` run of the C compiler, started before the
+ * key's walks and its depfile fold (cache_ccid_start) and waited for when
+ * the key is put together. One per process; `command` is what it ran. */
+static struct {
+    int started;
+    char* command;
+    char out_path[1200];
+    AeChild child;
+} s_ccver_early;
+
 static int compiler_version_probe(const char* command, char* line, size_t line_size,
                                   int* rc, int* runs) {
     int outcome = CCVER_NO_SPAWN;
@@ -1417,9 +1427,18 @@ static int compiler_version_probe(const char* command, char* line, size_t line_s
          * the line to cmd.exe on Windows, a second process start that was
          * about half of this probe's 23 ms there. */
         char out_path[1200];
-        ae_private_temp_path(out_path, sizeof(out_path), "ccver.out");   /* #3745 */
-        remove(out_path);   /* a run that never starts must not read the last one's */
-        *rc = run_cmd_capture_stdout(cmd, out_path);
+        if (attempt == 0 && s_ccver_early.started == 1 &&
+            strcmp(s_ccver_early.command, cmd) == 0) {
+            /* #3842: this run was started already; its answer is the same
+             * one, only the waiting overlapped other work. */
+            s_ccver_early.started = 2;
+            snprintf(out_path, sizeof(out_path), "%s", s_ccver_early.out_path);
+            *rc = run_cmd_capture_stdout_wait(&s_ccver_early.child);
+        } else {
+            ae_private_temp_path(out_path, sizeof(out_path), "ccver.out");   /* #3745 */
+            remove(out_path);   /* a run that never starts must not read the last one's */
+            *rc = run_cmd_capture_stdout(cmd, out_path);
+        }
         (*runs)++;
         int have_line = 0;
         FILE* vf = fopen(out_path, "r");
@@ -1439,29 +1458,85 @@ static int compiler_version_probe(const char* command, char* line, size_t line_s
     return outcome;
 }
 
-static unsigned long long c_compiler_fingerprint(void) {
-    static int done = 0;
-    static unsigned long long fp = 0;
-    if (done) return fp;
-    done = 1;
+/* The C compiler the build runs, as c_compiler_fingerprint names it: $AE_CC
+ * / $CC verbatim, else `gcc` when one is on PATH, else on Windows the
+ * WinLibs gcc ae installs and elsewhere `cc`. NULL when out of memory;
+ * `*owned` is what the caller frees. */
+static const char* cc_fingerprint_spec(char** owned) {
+    *owned = NULL;
     const char* spec = c_backend_env_override();
-    char* owned = NULL;
-    if (!spec) {
-        char* gcc = resolve_program("gcc");
-        if (gcc) {
-            spec = "gcc";
-            free(gcc);
-        } else {
-#ifdef _WIN32
-            const char* home = get_home_dir() ? get_home_dir() : "";
-            spec = owned = str_join4(home, strlen(home),
-                                     "\\.aether\\tools\\mingw64\\bin\\gcc.exe", "", "");
-            if (!owned) return 0;
-#else
-            spec = "cc";
-#endif
-        }
+    if (spec) return spec;
+    char* gcc = resolve_program("gcc");
+    if (gcc) {
+        free(gcc);
+        return "gcc";
     }
+#ifdef _WIN32
+    const char* home = get_home_dir() ? get_home_dir() : "";
+    *owned = str_join4(home, strlen(home), "\\.aether\\tools\\mingw64\\bin\\gcc.exe", "", "");
+    return *owned;
+#else
+    return "cc";
+#endif
+}
+
+/* The command whose `--version` names the compiler (#3814, below): the
+ * whole of $AE_CC / $CC with its arguments, or the one program ae found,
+ * quoted. Malloc'd; NULL when out of memory. */
+static char* cc_version_asked(const char* spec) {
+    return c_backend_env_override() ? str_join4(spec, strlen(spec), "", "", "")
+                                    : str_join4("\"", 1, spec, "\"", "");
+}
+
+static int s_ccid_done = 0;
+
+/* #3842: the early `--version` run, waited for and its output removed, when
+ * nothing asked for it. */
+static void cache_ccid_reap(void) {
+    if (s_ccver_early.started != 1) return;
+    s_ccver_early.started = 2;
+    (void)run_cmd_capture_stdout_wait(&s_ccver_early.child);
+    remove(s_ccver_early.out_path);
+}
+
+/* #3842: start the C compiler's `--version` run now, so it runs while the
+ * key hashes the toolchain, walks the headers and folds the depfile, and
+ * the key waits for it only where it is put together. The answer is the
+ * same run's as before, asked on every key as before: only the waiting
+ * overlaps. Nothing is started when the compiler is already known to this
+ * process, or the run cannot be started this way (it is then made whole,
+ * where the key asks). */
+void cache_ccid_start(void) {
+    if (s_ccid_done || s_ccver_early.started) return;
+    s_ccver_early.started = -1;   /* tried; set to 1 below when running */
+    char* owned;
+    const char* spec = cc_fingerprint_spec(&owned);
+    char* asked = spec ? cc_version_asked(spec) : NULL;
+    char* cmd = asked ? str_join4(asked, strlen(asked), " --version", "", "") : NULL;
+    free(asked);
+    free(owned);
+    if (!cmd) return;
+    ae_private_temp_path(s_ccver_early.out_path, sizeof(s_ccver_early.out_path),
+                         "ccver_early.out");
+    remove(s_ccver_early.out_path);
+    if (run_cmd_capture_stdout_start(cmd, s_ccver_early.out_path, &s_ccver_early.child)) {
+        s_ccver_early.command = cmd;
+        s_ccver_early.started = 1;
+        /* A command that ends before it makes a key still waits for the
+         * run, ahead of the removal of its private temp directory. */
+        atexit(cache_ccid_reap);
+    } else {
+        free(cmd);
+    }
+}
+
+static unsigned long long c_compiler_fingerprint(void) {
+    static unsigned long long fp = 0;
+    if (s_ccid_done) return fp;
+    s_ccid_done = 1;
+    char* owned = NULL;
+    const char* spec = cc_fingerprint_spec(&owned);
+    if (!spec) return 0;
     unsigned long long h = fnv64_str(spec);
     const char* cursor = spec;
     size_t spec_len = strlen(spec) + 1;
@@ -1495,8 +1570,7 @@ static unsigned long long c_compiler_fingerprint(void) {
      * the binaries the old one built (the staleness #2477 fixed). `ccache
      * gcc --version` answers with gcc's line through ccache, as a compile
      * through it runs. A compiler ae found itself is one program, quoted. */
-    char* asked = c_backend_env_override() ? str_join4(spec, strlen(spec), "", "", "")
-                                           : str_join4("\"", 1, spec, "\"", "");
+    char* asked = cc_version_asked(spec);
     if (!asked) { free(owned); return 0; }
     char line[512];
     int version_rc = 0, runs = 0;
@@ -1868,9 +1942,53 @@ unsigned long long compute_cache_key(const char* ae_file,
      * already, by the command's dependency resolution. */
     tc_lib_dirs_seed_from_env();
 
+    /* #3842: the C compiler's `--version` (part of ccid below) runs while
+     * the key hashes the toolchain, walks the headers and folds the
+     * depfile; the key waits for it where ccid goes in. Usually started
+     * already, where the command began. */
+    cache_ccid_start();
+
     KeyText key = { NULL, 0, 0, 0 };
     int complete = 1;
     key_append(&key, "%016llx", src_hash);
+
+    /* #3842: the two walks that do not need the compiler's answer, made
+     * before the wait for it: the header walk of a source tree (used below
+     * when the build links the archive, the usual case) and the depfile
+     * fold. Their parts go into the key text where they always went. */
+    unsigned long long hdr_acc = 1469598103934665603ULL;
+    int hdr_count = 0, hdr_complete = 1, hdr_oom = 0, hdr_walked = 0;
+    char* hdr_why_dir = NULL;     /* the directory a walk could not finish */
+    const char* hdr_why = NULL;   /* and why */
+    /* Only for a build that links the archive: with no libaether.a (none
+     * built, or --trace, which drops it) the runtime is compiled from
+     * source, the key below folds the runtime key in place of :hdr=, and
+     * the walk, about 20 ms, was thrown away. When the archive is there and
+     * then refused for its C runtime (a decision that needs the compiler,
+     * made below), the walk is made and not used, as before. */
+    if (tc.dev_mode && tc.src_root[0] && tc.has_lib) {
+        hdr_walked = 1;
+        static const char* hdr_dirs[] = { "runtime", "std" };
+        for (size_t d = 0; hdr_complete && d < sizeof(hdr_dirs) / sizeof(hdr_dirs[0]); d++) {
+            char* dir = str_join4(tc.src_root, strlen(tc.src_root), "/", hdr_dirs[d], "");
+            if (!dir) { hdr_oom = 1; break; }
+            const char* why = hash_tree_kind(dir, &hdr_acc, &hdr_count, 1);
+            if (why) {
+                hdr_why = why;
+                hdr_why_dir = dir;
+                dir = NULL;
+                hdr_complete = 0;
+            }
+            free(dir);
+        }
+    }
+    unsigned long long dep_acc = 1469598103934665603ULL;
+    int dep_folded;
+    {
+        char depfile[1200];
+        cache_depfile_path(ae_file, depfile, sizeof(depfile));
+        dep_folded = fold_depfile(depfile, &dep_acc);
+    }
 
     /* The three toolchain binaries — aetherc (the compiler, which owns
      * codegen), the ae driver (owns the flags passed to the C compiler),
@@ -1958,21 +2076,21 @@ unsigned long long compute_cache_key(const char* ae_file,
         if (rt) key_append(&key, ":rt=%016llx:manifest=%016llx", rt, mh);
         else complete = 0;
     } else if (tc.dev_mode && tc.src_root[0]) {
-        static const char* hdr_dirs[] = { "runtime", "std" };
-        unsigned long long hdr_acc = 1469598103934665603ULL;
-        int hdr_count = 0;
-        for (size_t d = 0; complete && d < sizeof(hdr_dirs) / sizeof(hdr_dirs[0]); d++) {
-            char* dir = str_join4(tc.src_root, strlen(tc.src_root), "/", hdr_dirs[d], "");
-            if (!dir) { key.oom = 1; break; }
-            const char* why = hash_tree_kind(dir, &hdr_acc, &hdr_count, 1);
-            if (why) {
-                if (tc.verbose) fprintf(stderr, "[cache] no key: %s %s\n", dir, why);
-                complete = 0;
-            }
-            free(dir);
+        /* The walk was made above, before the wait for the compiler
+         * (#3842). */
+        if (hdr_oom) key.oom = 1;
+        else if (!hdr_walked) {
+            /* Not walked (no archive then), yet linking it now: no key
+             * rather than one without the headers (#2707). */
+            if (tc.verbose) fprintf(stderr, "[cache] no key: the headers were not walked\n");
+            complete = 0;
+        } else if (!hdr_complete) {
+            if (tc.verbose) fprintf(stderr, "[cache] no key: %s %s\n", hdr_why_dir, hdr_why);
+            complete = 0;
         }
-        if (complete) key_append(&key, ":hdr=%d:%016llx", hdr_count, hdr_acc);
+        if (complete && !hdr_oom) key_append(&key, ":hdr=%d:%016llx", hdr_count, hdr_acc);
     }
+    free(hdr_why_dir);
 
     if (extra_files && extra_files[0]) {
         /* Any one path is no longer than the whole list (a 2 KB copy cut a
@@ -1996,15 +2114,10 @@ unsigned long long compute_cache_key(const char* ae_file,
      * we fall through to the tree hash — which is also what aetherc's own
      * --emit-deps run keys on, so the cold key and the tree-walk key agree. */
     int used_depfile = 0;
-    {
-        char depfile[1200];
-        cache_depfile_path(ae_file, depfile, sizeof(depfile));
-        unsigned long long dep_acc = 1469598103934665603ULL;
-        if (fold_depfile(depfile, &dep_acc)) {
-            key_append(&key, ":deps=%016llx", dep_acc);
-            used_depfile = 1;
-            s_key_from_depfile = 1;
-        }
+    if (dep_folded) {   /* folded above, before the wait for the compiler (#3842) */
+        key_append(&key, ":deps=%016llx", dep_acc);
+        used_depfile = 1;
+        s_key_from_depfile = 1;
     }
 
     if (!used_depfile) {

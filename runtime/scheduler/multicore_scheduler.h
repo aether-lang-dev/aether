@@ -947,6 +947,10 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
 #define AETHER_ASK_NO_REPLY   5   /* the handler returned without replying */
 #define AETHER_ASK_KILLED     6   /* the asking actor was killed while it waited (#2974) */
 #define AETHER_ASK_FULL       7   /* the actor's mailbox bound was reached (#2974) */
+/* The message at msg_data is the ask's from the call on (#3847): handed to
+ * the target, or, where it is not (the target dead, no reply slot, no
+ * memory), given back through the target's release
+ * (aether_ask_message_unsent), as a dropped message is. */
 void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
                                    int timeout_ms, int* status);
 
@@ -985,6 +989,9 @@ extern AETHER_TLS void* g_current_reply_slot;
 // a message built so, as aether_send_message routes one.
 int  aether_ask_message(void* actor, void* message_data, size_t message_size,
                         void* reply_slot, Message* out);
+/* An ask's message that is not handed over, given back through the
+ * target's release (#3847). */
+void aether_ask_message_unsent(void* actor, void* message_data);
 void aether_send_built(ActorBase* actor, Message msg);
 
 #endif

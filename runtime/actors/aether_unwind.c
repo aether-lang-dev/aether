@@ -342,17 +342,22 @@ int aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
     return journal_at(p, free_fn, F->depth);
 }
 
-void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release) {
+/* 1 when `place` is in the journal after the call, 0 when nothing was
+ * journaled (no frame is live, or no room): a place told 0 has nothing for
+ * its exit to forget (#3840, runtime ABI revision 8, the token #3787 gave
+ * aether_unwind_track). */
+int aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release) {
     AetherFrames* F = &t_frames;
-    if (F->depth == 0 || !place || !release) return;
-    journal_at(place, release, F->depth);
+    if (F->depth == 0 || !place || !release) return 0;
+    if (!journal_at(place, release, F->depth)) return 0;
     for (int i = F->journal_count - 1; i >= 0; i--) {
         if (F->journal[i].ptr == place) {
             F->journal[i].owned = owned;
             F->journal[i].place = 1;
-            return;
+            return 1;
         }
     }
+    return 0;
 }
 
 /* An owned place is journaled once, where its function or arm begins, at

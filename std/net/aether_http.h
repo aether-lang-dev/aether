@@ -510,7 +510,11 @@ int  http_upstream_acquire(HttpClientPool* pool, const char* host, int port,
                            HttpUpstreamConn* out);
 /* As above, but `allow_pool` 0 forces a fresh connection. Use it when a pooled
  * connection has just been found closed: the pool may hold more of them, and
- * spending a retry on another corpse is how a client ends up with nothing. */
+ * spending a retry on another corpse is how a client ends up with nothing.
+ * HTTP_POOL_TAKE_CHECKED takes from the pool only a connection whose peer has
+ * not closed it while it sat idle, for a request that may not be sent twice
+ * (#3824): see http_method_idempotent. */
+#define HTTP_POOL_TAKE_CHECKED 2
 int  http_upstream_acquire_ex(HttpClientPool* pool, const char* host, int port,
                               int allow_pool, HttpUpstreamConn* out);
 /* 1 when the connect has completed, 0 when it is still in flight, -1 when it
@@ -538,6 +542,11 @@ int  http_upstream_acquire_nb(HttpClientPool* pool, const char* host, int port,
                               HttpUpstreamConn* out);
 int  http_upstream_lookup(const HttpUpstreamConn* c);
 void http_upstream_release(HttpUpstreamConn* c, int keep);
+/* Whether `method` is idempotent (RFC 9110 9.2.2: GET, HEAD, OPTIONS, TRACE,
+ * PUT, DELETE), so a client may send it again by itself after a connection
+ * failed with no response: the upstream may have acted on the first one, and
+ * a second does no more (#3824). */
+int  http_method_idempotent(const char* method);
 /* Whether a response head lets its connection carry another request: not
  * when it says Connection: close, nor when it is HTTP/1.0 without a
  * Connection header saying otherwise. `head` is the response's first

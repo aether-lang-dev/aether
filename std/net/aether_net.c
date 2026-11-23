@@ -23,6 +23,8 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* s, int m) {
 int tcp_send_bytes_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return -1; }
 int tcp_send_all_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return 0; }
 int tcp_receive_into_raw(TcpSocket* s, void* b, int c) { (void)s; (void)b; (void)c; return TCP_RECV_CLOSED; }
+int tcp_reset_raw(TcpSocket* s) { (void)s; return 0; }
+int tcp_send_timed_out_raw(TcpSocket* s) { (void)s; return 0; }
 int tcp_close(TcpSocket* s) { (void)s; return 0; }
 TcpOpenResult tcp_connect_unix_raw(const char* p) {
     (void)p;
@@ -165,7 +167,30 @@ struct TcpSocket {
     long long due_ms;
     TcpCancel* cancel;
     int stop;
+    /* 1 when the last receive failed because the peer reset or aborted the
+     * connection (net_note_recv, tcp_reset_raw). */
+    int reset;
+    /* 1 when the last send that waits for room (tcp_send_all_raw, or any
+     * send on a bound socket) ended because the socket's send timeout
+     * passed with nothing taken (tcp_send_timed_out_raw). */
+    int send_timed_out;
 };
+
+/* After a receive on `sock` that returned `received`: whether it failed
+ * because the peer reset or aborted the connection, read from the error it
+ * left, at once, before anything else can set another. Only -1 is a failed
+ * recv(2); a byte count, a close and a bound receive's own stops (a
+ * timeout, a deadline, a cancel) are no reset. */
+static void net_note_recv(TcpSocket* sock, int received) {
+    if (received != -1) { sock->reset = 0; return; }
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    sock->reset = e == WSAECONNRESET || e == WSAECONNABORTED;
+#else
+    int e = errno;
+    sock->reset = e == ECONNRESET || e == ECONNABORTED || e == EPIPE;
+#endif
+}
 
 /* A cancel handle (tcp_cancel_new_raw): a flag, and a descriptor that turns
  * readable when the flag is set, which every wait of a socket bound to it
@@ -195,6 +220,8 @@ static TcpSocket* net_sock_new(int fd) {
     sock->due_ms = 0;
     sock->cancel = NULL;
     sock->stop = TCP_STOP_NONE;
+    sock->reset = 0;
+    sock->send_timed_out = 0;
     return sock;
 }
 
@@ -930,6 +957,7 @@ static void net_nonblock_end(int fd, int saved) {
  * nothing was sent and the send failed or stopped. Do not send on the
  * socket from another thread at the same time. */
 static int net_send_bound(TcpSocket* sock, const char* p, int length, int all) {
+    sock->send_timed_out = 0;
     if (sock->cancel && atomic_load(&sock->cancel->tripped)) { sock->stop = TCP_STOP_CANCELLED; return -1; }
     if (sock->due_ms > 0 && net_mono_ms() >= sock->due_ms) { sock->stop = TCP_STOP_DEADLINE; return -1; }
     long long period = net_sock_timeout_ms(sock->fd, SO_SNDTIMEO);
@@ -951,7 +979,10 @@ static int net_send_bound(TcpSocket* sock, const char* p, int length, int all) {
                 long long now = net_mono_ms();
                 if (!period_due) period_due = now + period;
                 if (period_due - now <= 0) {
-                    if (!progressed) break;      /* a whole period, nothing went */
+                    if (!progressed) {           /* a whole period, nothing went */
+                        sock->send_timed_out = 1;
+                        break;
+                    }
                     progressed = 0;
                     period_due = now + period;
                 }
@@ -992,6 +1023,18 @@ long long tcp_deadline_raw(TcpSocket* sock) {
  * `sock`: TCP_STOP_DEADLINE, TCP_STOP_CANCELLED, or TCP_STOP_NONE. */
 int tcp_stop_raw(TcpSocket* sock) {
     return sock ? sock->stop : TCP_STOP_NONE;
+}
+
+/* Whether the last receive on `sock` failed because the peer reset or
+ * aborted the connection (net_note_recv). */
+int tcp_reset_raw(TcpSocket* sock) {
+    return sock ? sock->reset : 0;
+}
+
+/* Whether the last send on `sock` that waits for room ended because the
+ * socket's send timeout passed with nothing taken. */
+int tcp_send_timed_out_raw(TcpSocket* sock) {
+    return sock ? sock->send_timed_out : 0;
 }
 
 /* tcp_connect_raw held to the absolute deadline `due_ms` (aether_now_ns's
@@ -1066,17 +1109,14 @@ char* tcp_receive_raw(TcpSocket* sock, int max_bytes) {
      * The buffer becomes the payload of the counted string returned. */
     char* buffer = (char*)aether_caps_malloc((size_t)max_bytes + 1);
     if (!buffer) return NULL;
-    int received = 0;
-    if (net_bound(sock)) {
-        received = net_recv_bound(sock, buffer, max_bytes);
-        if (received < -1) {
-            /* A receive timeout, a passed deadline or a cancel: the socket
-             * stays connected for its owner to close. */
-            aether_caps_free(buffer, (size_t)max_bytes + 1);
-            return NULL;
-        }
-    } else {
-        received = net_recv(sock->fd, buffer, max_bytes);
+    int received = net_bound(sock) ? net_recv_bound(sock, buffer, max_bytes)
+                                   : net_recv(sock->fd, buffer, max_bytes);
+    net_note_recv(sock, received);
+    if (received < -1) {
+        /* A receive timeout, a passed deadline or a cancel: the socket
+         * stays connected for its owner to close. */
+        aether_caps_free(buffer, (size_t)max_bytes + 1);
+        return NULL;
     }
 
     if (received <= 0) {
@@ -1114,20 +1154,17 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes) {
         return out;
     }
 
-    int received = 0;
-    if (net_bound(sock)) {
-        received = net_recv_bound(sock, buffer, max_bytes);
-        if (received < -1) {
-            aether_caps_free(buffer, (size_t)max_bytes);
-            /* Distinct from each other and from a close: the socket stays
-             * connected, and its owner closes it. */
-            if (received == TCP_RECV_DEADLINE) out._2 = TCP_ERR_DEADLINE;
-            else if (received == TCP_RECV_CANCELLED) out._2 = TCP_ERR_CANCELLED;
-            else out._2 = "timeout";
-            return out;
-        }
-    } else {
-        received = net_recv(sock->fd, buffer, max_bytes);
+    int received = net_bound(sock) ? net_recv_bound(sock, buffer, max_bytes)
+                                   : net_recv(sock->fd, buffer, max_bytes);
+    net_note_recv(sock, received);
+    if (received < -1) {
+        aether_caps_free(buffer, (size_t)max_bytes);
+        /* Distinct from each other and from a close: the socket stays
+         * connected, and its owner closes it. */
+        if (received == TCP_RECV_DEADLINE) out._2 = TCP_ERR_DEADLINE;
+        else if (received == TCP_RECV_CANCELLED) out._2 = TCP_ERR_CANCELLED;
+        else out._2 = "timeout";
+        return out;
     }
     if (received <= 0) {
         aether_caps_free(buffer, (size_t)max_bytes);
@@ -1234,6 +1271,7 @@ static int net_wait_writable(int fd, NetSendWait* w) {
  * that time. The pure-Aether TLS server writes through here. */
 int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
     if (!sock || !sock->connected || length <= 0 || !data) return 0;
+    sock->send_timed_out = 0;
     if (net_bound(sock)) {
         int n = net_send_bound(sock, (const char*)data, length, 1);
         return n < 0 ? 0 : n;
@@ -1268,6 +1306,8 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
             continue;
         }
         if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
+        /* A blocking send that waited out SO_SNDTIMEO. */
+        if (n < 0 && WSAGetLastError() == WSAETIMEDOUT) sock->send_timed_out = 1;
 #else
         int n = (int)send(sock->fd, p + sent, (size_t)(length - sent), MSG_DONTWAIT | AE_NET_NOSIGNAL);
         if (n > 0) {
@@ -1276,9 +1316,11 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
-            net_wait_writable(sock->fd, &wait))
-            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (net_wait_writable(sock->fd, &wait)) continue;
+            /* No room within a period of the send timeout the socket has. */
+            if (wait.timeout_ms > 0) sock->send_timed_out = 1;
+        }
 #endif
         break;
     }
@@ -1300,13 +1342,10 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
  * dead), a null/closed handle or a bad buffer. */
 int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap) {
     if (!sock || !sock->connected || !buf || cap <= 0) return TCP_RECV_CLOSED;
-    int received = 0;
-    if (net_bound(sock)) {
-        received = net_recv_bound(sock, buf, cap);
-        if (received < -1) return received;   /* TIMEOUT, DEADLINE, CANCELLED */
-    } else {
-        received = net_recv(sock->fd, buf, cap);
-    }
+    int received = net_bound(sock) ? net_recv_bound(sock, buf, cap)
+                                   : net_recv(sock->fd, buf, cap);
+    net_note_recv(sock, received);
+    if (received < -1) return received;   /* TIMEOUT, DEADLINE, CANCELLED */
     if (received > 0) return received;
     if (received < 0 && aether_net_wouldblock()) return TCP_RECV_TIMEOUT;
     sock->connected = 0;
@@ -1377,7 +1416,13 @@ static TcpServer* tcp_listen_impl(const char* address, int port, int allow_zero)
         return NULL;
     }
 
-    if (listen(sockfd, 5) < 0) {
+    /* SOMAXCONN, the kernel's own limit (net.core.somaxconn,
+     * kern.ipc.somaxconn; on Windows a maximum Winsock picks), as Go and
+     * nginx listen by default (#3832). The backlog was 5: a burst of
+     * connects the server had not accepted yet filled it, and past it
+     * Linux and macOS dropped the SYN, so a connect took a second longer
+     * with nothing in any log, and Windows refused it. */
+    if (listen(sockfd, SOMAXCONN) < 0) {
         close(sockfd);
         return NULL;
     }
@@ -1609,7 +1654,9 @@ TcpOpenResult tcp_listen_unix_raw(const char* path) {
         close(fd);
         return out;
     }
-    if (listen(fd, 16) != 0) {
+    /* SOMAXCONN, as tcp_listen_impl (#3832): a full queue refuses a Unix
+     * socket's connect (macOS) or blocks it (Linux). */
+    if (listen(fd, SOMAXCONN) != 0) {
         close(fd);
         remove(path);
         return out;

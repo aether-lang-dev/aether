@@ -295,6 +295,7 @@ void emit_string_element_free(CodeGenerator* gen, ASTNode* e);
 int string_take_kind(CodeGenerator* gen, ASTNode* e);
 int string_take_is_view(CodeGenerator* gen, ASTNode* e);
 int alias_source_must_copy(CodeGenerator* gen, const char* src_name);
+int binding_read_is_last_use(ASTNode* body, const char* name, ASTNode* read);
 void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* target);
 
 
@@ -410,6 +411,7 @@ const char* stmt_struct_temp_of(const ASTNode* expr);
 /* Drop `e as T` between string types before ownership is decided. */
 void erase_string_retype_casts(ASTNode* node);
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
+const char* message_binding_move_place(CodeGenerator* gen, ASTNode* init);
 ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on
  * the definition; the callers' ownership decisions and the bare-fn adapter
@@ -713,6 +715,9 @@ void push_own_drop_carrier(CodeGenerator* gen, const char* name, Type* t, int li
 void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t);
 ASTNode* find_message_definition(ASTNode* program, const char* name);
 int message_owns_fields(CodeGenerator* gen, const char* name);
+/* #3847: the `ptr` fields whose boxes a message marks in `_ae_boxed`. */
+int message_box_slot(ASTNode* def, const char* name);
+int message_box_bytes(ASTNode* def);
 /* #3142: owned pointers (`type T = owned ptr drop f`). */
 int tc_type_is_owned(const Type* t);
 const char* tc_owned_drop_c(const Type* t);

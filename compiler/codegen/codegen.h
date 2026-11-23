@@ -89,6 +89,10 @@ typedef struct {
     // top-level function and main; closures inherit their function's.
     const char* current_origin_module;
     int module_global_var_count;
+    // #3835: module_global_vars by name, its index + 1 (the names are
+    // deduped, so one each): an identifier asked whether it is one walked
+    // the list, the program's vars times its identifiers.
+    StrMap module_global_var_by_name;
     int generating_lvalue;  // Track if we're generating an assignment target (lvalue)
     /* #3029: versioning on the unbounded-view sentinel. While a function's
      * view body is emitted, `slice_view_names` are its slice parameters,
@@ -440,6 +444,15 @@ typedef struct {
     // Set by generate_function_definition / generate_main_function on
     // entry, restored on exit. NULL outside a function-body context.
     ASTNode* current_function;
+
+    // #3827: while a receive arm's handler is emitted, the arm's body and
+    // its string bindings that are views of the message's own fields
+    // (`S(s) -> ...` binds `s` to `_pattern->s`): a send that is such a
+    // binding's last use takes the message's reference out of the place.
+    ASTNode* msg_binding_body;
+    const char** msg_binding_names;   // the binding's name in the arm
+    const char** msg_binding_fields;  // the message field it views
+    int msg_binding_count;
 
     // Issue #348 — when 1, codegen skips `requires`/`ensures` check
     // emission entirely (the per-call cost goes to zero, matching C's

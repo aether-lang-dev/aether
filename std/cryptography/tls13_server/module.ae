@@ -50,7 +50,8 @@ import std.cryptography
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
-extern string_length(s: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(s: string) -> int @c_import
 extern tcp_socket_adopt_fd(fd: int) -> ptr
 extern os_now_monotonic_ms_raw() -> long
 

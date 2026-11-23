@@ -20,7 +20,8 @@ exports(
     clean, rel, is_within_base, separator, join_clean
 )
 
-extern string_length(s: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(s: string) -> int @c_import
 extern path_join(path1: string, path2: string) -> string @heap
 extern path_dirname(path: string) -> string @heap
 extern path_basename(path: string) -> string @heap

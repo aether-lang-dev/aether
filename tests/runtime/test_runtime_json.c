@@ -2,8 +2,11 @@
 #include "../../std/json/aether_json.h"
 #include "../../std/string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/aether_locale_num.h"   /* #3828: the formatter the old path used */
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <math.h>
 
 TEST_CATEGORY(json_parse_null, TEST_CATEGORY_STDLIB) {
     JsonValue* value = json_parse_raw("null");
@@ -275,4 +278,50 @@ TEST_CATEGORY(json_parsed_document_first_chunk_scales_with_input, TEST_CATEGORY_
     ASSERT_TRUE(d < 16u * 1024u + ARENA_HDR_SLACK);
     json_free(v);
     free(doc);
+}
+
+/* #3828: an integral number below 1e15 is written as its digits without
+ * snprintf or a parse back. The text is what the round-trip formatter
+ * wrote before: %.15g if it reads back, else %.16g, else %.17g, checked
+ * here against that rule (through aether_c_strtod, which reads every such text
+ * exactly) for every integer near zero, both sides of 1e15, the powers of
+ * two around 2^53, both zeros and values with a fraction. */
+static int json_number_text_matches(double x) {
+    char want[64];
+    static const char* const fmts[] = { "%.15g", "%.16g", "%.17g" };
+    for (int i = 0; i < 3; i++) {
+        aether_c_snprintf_double(want, sizeof(want), fmts[i], x);
+        if (i == 2 || aether_c_strtod(want, NULL) == x) break;
+    }
+    JsonValue* v = json_create_number(x);
+    char* text = json_stringify_raw(v);
+    int ok = text && strcmp(aether_string_data(text), want) == 0;
+    if (!ok) fprintf(stderr, "json number %.17g: got '%s', want '%s'\n",
+                     x, text ? aether_string_data(text) : "(null)", want);
+    if (text) string_release(text);
+    json_free(v);
+    return ok;
+}
+
+TEST_CATEGORY(json_integral_number_text_unchanged, TEST_CATEGORY_STDLIB) {
+    int bad = 0;
+    for (int i = -20000; i <= 20000; i++) bad += !json_number_text_matches((double)i);
+    for (int k = -2000; k <= 2000; k++) {
+        bad += !json_number_text_matches(1e15 + k);
+        bad += !json_number_text_matches(-1e15 - k);
+        bad += !json_number_text_matches(1e15 + k + 0.5);
+    }
+    for (int e = 40; e <= 62; e++) {
+        double p = ldexp(1.0, e);
+        bad += !json_number_text_matches(p);
+        bad += !json_number_text_matches(-p);
+        bad += !json_number_text_matches(p - 1);
+    }
+    bad += !json_number_text_matches(0.0);
+    bad += !json_number_text_matches(-0.0);
+    bad += !json_number_text_matches(0.5);
+    bad += !json_number_text_matches(-2.5);
+    bad += !json_number_text_matches(1e300);
+    bad += !json_number_text_matches(123456789.125);
+    ASSERT_EQ(0, bad);
 }

@@ -154,6 +154,32 @@ TEST_CATEGORY(unwind_track_returns_whether_journaled, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(before, left);
 }
 
+/* #3840 (runtime ABI revision 8): a place's track says so too, so the
+ * forget after a call that held a string argument is skipped on 0. */
+TEST_CATEGORY(unwind_track_place_returns_whether_journaled, TEST_CATEGORY_RUNTIME) {
+    static int slot;
+    int before = aether_unwind_journal_size();
+    ASSERT_EQ(0, aether_unwind_track_place(&slot, NULL, rel_one));
+    ASSERT_EQ(0, aether_unwind_track_place(NULL, NULL, rel_one));
+    ASSERT_EQ(before, aether_unwind_journal_size());
+    AetherJmpFrame* f = aether_try_push();
+    volatile int first = 0, again = 0, empty = 0, size = 0;
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        first = aether_unwind_track_place(&slot, NULL, rel_one);
+        again = aether_unwind_track_place(&slot, NULL, rel_one);
+        empty = aether_unwind_track_place(&slot, NULL, NULL);
+        size = aether_unwind_journal_size();
+        aether_unwind_forget(&slot);
+    }
+    int left = aether_unwind_journal_size();
+    aether_try_pop();
+    ASSERT_EQ(1, first);
+    ASSERT_EQ(1, again);
+    ASSERT_EQ(0, empty);
+    ASSERT_EQ(before + 1, size);
+    ASSERT_EQ(before, left);
+}
+
 /* A release that forgets another entry of the frame (its free has run, or
  * its value moved): that entry is not released too. The drain used to
  * release every entry from a copy it took before the first release, so the

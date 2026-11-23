@@ -3,12 +3,14 @@
 #include "../../runtime/aether_process_mem.h"
 #include "../../runtime/aether_resource_caps.h"   /* aether_caps_malloc */
 #include "../../runtime/actors/aether_panic.h"
+#include "../../runtime/aether_locale_num.h"   /* #3828 */
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 
 TEST_CATEGORY(string_concat_basic, TEST_CATEGORY_STDLIB) {
     AetherString* s1 = string_from_cstr("Hello");
@@ -462,4 +464,95 @@ TEST_CATEGORY(string_publish_only_marks_counted, TEST_CATEGORY_STDLIB) {
     aether_string_publish(s);   /* a second publish changes nothing */
     ASSERT_EQ(AETHER_STRING_SHARED_BIT | 1, s->ref_count);
     string_release(s);
+}
+
+/* #3830: string.from_int and from_long write their digits without snprintf.
+ * The text, its length and the string's shape are snprintf's "%d" / "%lld",
+ * checked over every value near zero, both ends of each width, and each
+ * power of ten and its neighbours. */
+static int from_signed_matches(long long v, int as_int) {
+    char want[32];
+    if (as_int) snprintf(want, sizeof(want), "%d", (int)v);
+    else snprintf(want, sizeof(want), "%lld", v);
+    AetherString* s = as_int ? string_from_int((int)v) : string_from_long(v);
+    int ok = s && is_aether_string(s) && s->length == strlen(want) &&
+             s->data[s->length] == '\0' && memcmp(s->data, want, s->length) == 0;
+    if (!ok) fprintf(stderr, "from_%s(%lld): got '%s', want '%s'\n",
+                     as_int ? "int" : "long", v, s ? s->data : "(null)", want);
+    if (s) string_release(s);
+    return ok;
+}
+
+TEST_CATEGORY(string_from_int_and_long_match_snprintf, TEST_CATEGORY_STDLIB) {
+    int bad = 0;
+    for (long long v = -100000; v <= 100000; v++) {
+        bad += !from_signed_matches(v, 1);
+        bad += !from_signed_matches(v, 0);
+    }
+    const long long ends[] = { INT_MIN, INT_MIN + 1, INT_MAX - 1, INT_MAX,
+                               LLONG_MIN, LLONG_MIN + 1, LLONG_MAX - 1, LLONG_MAX };
+    for (size_t i = 0; i < sizeof(ends) / sizeof(ends[0]); i++) {
+        if (ends[i] >= INT_MIN && ends[i] <= INT_MAX) bad += !from_signed_matches(ends[i], 1);
+        bad += !from_signed_matches(ends[i], 0);
+    }
+    for (long long p = 10; p > 0 && p <= LLONG_MAX / 10; p *= 10) {
+        for (long long d = -1; d <= 1; d++) {
+            long long vs[] = { p + d, -(p + d) };
+            for (int k = 0; k < 2; k++) {
+                if (vs[k] >= INT_MIN && vs[k] <= INT_MAX) bad += !from_signed_matches(vs[k], 1);
+                bad += !from_signed_matches(vs[k], 0);
+            }
+        }
+    }
+    ASSERT_EQ(0, bad);
+}
+
+/* #3828: an integral double below 1e6 is interpolated, and made by
+ * string.from_float, as its digits without snprintf; below 1e15 the same
+ * text stands in for %.15g (std.json). Checked against
+ * aether_c_snprintf_double, the path every other value still takes, for
+ * every integer near zero, both sides of each bound, both zeros, the
+ * powers of two to 2^62, values with a fraction, NaN and the infinities. */
+static int integral_text_matches(double x) {
+    char want[64], got[64];
+    int ok = 1;
+    aether_c_snprintf_double(want, sizeof(want), "%g", x);
+    void* s = interp_new("<%g>", x);
+    char framed[80];
+    snprintf(framed, sizeof(framed), "<%s>", want);
+    if (!s || strcmp(aether_string_data(s), framed) != 0 ||
+        aether_string_length(s) != strlen(framed)) ok = 0;
+    if (s) string_release(s);
+    AetherString* f = string_from_float(x);
+    if (!f || strcmp(aether_string_data(f), want) != 0 || f->length != strlen(want)) ok = 0;
+    if (f) string_release(f);
+    /* The helper itself, at %.15g's bound: digits exactly where %.15g
+     * writes digits, nothing elsewhere. */
+    aether_c_snprintf_double(want, sizeof(want), "%.15g", x);
+    int n = aether_integral_double_text(got, x, 1e15);
+    int integral = isfinite(x) && fabs(x) < 1e15 && x == floor(x);
+    if (integral ? (n <= 0 || strcmp(got, want) != 0 || (size_t)n != strlen(want)) : n != 0) ok = 0;
+    if (!ok) fprintf(stderr, "integral double text of %.17g wrong\n", x);
+    return ok;
+}
+
+TEST_CATEGORY(integral_double_text_matches_snprintf, TEST_CATEGORY_STDLIB) {
+    int bad = 0;
+    for (int i = -50000; i <= 50000; i++) bad += !integral_text_matches((double)i);
+    for (int k = -3000; k <= 3000; k++) {
+        bad += !integral_text_matches(1e6 + k);
+        bad += !integral_text_matches(-1e6 - k);
+        bad += !integral_text_matches(1e15 + k);
+        bad += !integral_text_matches(-1e15 - k);
+        bad += !integral_text_matches(k + 0.5);
+    }
+    for (int e = 0; e <= 62; e++) {
+        bad += !integral_text_matches(ldexp(1.0, e));
+        bad += !integral_text_matches(-ldexp(1.0, e));
+        bad += !integral_text_matches(ldexp(1.0, e) - 1.0);
+    }
+    const double odd[] = { 0.0, -0.0, 0.25, -0.75, 999999.5, 1e-300, 1e300,
+                           NAN, -NAN, INFINITY, -INFINITY, 4.5e15, 9.007199254740993e15 };
+    for (size_t i = 0; i < sizeof(odd) / sizeof(odd[0]); i++) bad += !integral_text_matches(odd[i]);
+    ASSERT_EQ(0, bad);
 }

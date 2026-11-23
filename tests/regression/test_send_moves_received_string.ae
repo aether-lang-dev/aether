@@ -1,0 +1,196 @@
+// Regression (#3827): a handler that forwards a string field it received,
+// on that binding's last use, moves the message's reference on instead of
+// copying it.
+//
+// `R(text) -> { peer ! M { text: text } }` copied the string on every hop:
+// the binding is a view of the received message's field, which the message
+// released after the arm. A send that is the binding's last use, exact by
+// construction (the one read of the name in the arm, under no loop, closure
+// or `defer`, with nothing in the arm binding the name), now takes the
+// reference out of the message, which then releases nothing of it. Every
+// other use keeps the copy: a read after the send, a send in a loop, a
+// closure that captures the binding, two sends of it.
+//
+// The sink compares the bytes it got with the ones main made (a fresh
+// string moves into the first message, #3535), and their address with the
+// one main recorded: the same address is a move, another a copy. A panic
+// after the moving send, caught in the arm or not, releases the emptied
+// message without a double free. Where the heap count is exact
+// (mem.heap_in_use_exact), a window of rounds must hold the heap steady
+// (mem.steady_growth); elsewhere the leak gates cover this program.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern aether_string_raw_ptr(s: ptr) -> ptr
+extern scheduler_release_actor(a: ptr) @c_import
+extern scheduler_reclaim_released() -> int @c_import
+
+var made: ptr = null
+
+// A fresh string, its bytes' address recorded.
+fresh(p: string) -> string {
+    s = "${p}-value"
+    made = aether_string_raw_ptr(s)
+    return s
+}
+
+message Take { text: string, want: string }
+message Get {}
+message Seen { v: int }
+
+// Counts what it is given: takes, moves (same address as main made) and
+// wrong bytes, as takes * 10000 + moves * 100 + wrong, zeroed by each Get.
+actor Sink {
+    state takes = 0
+    state same = 0
+    state bad = 0
+    receive {
+        Take(text, want) -> {
+            takes = takes + 1
+            if aether_string_raw_ptr(text) == made { same = same + 1 }
+            if text != want { bad = bad + 1 }
+        }
+        Get() -> {
+            v = takes * 10000 + same * 100 + bad
+            takes = 0
+            same = 0
+            bad = 0
+            reply Seen { v: v }
+        }
+    }
+}
+
+message Last { text: string, want: string }
+message After { text: string, want: string }
+message Loop { text: string, want: string }
+message Clos { text: string, want: string }
+message Twice { text: string, want: string }
+message Caught { text: string, want: string }
+message Facts {}
+
+actor Relay {
+    state sink = 0
+    state after_len = 0
+    state clos_len = 0
+    state caught = 0
+    receive {
+        // The send is the binding's last use: moved on.
+        Last(text, want) -> {
+            sink ! Take { text: text, want: want }
+        }
+        // Read after the send: copied, and still whole after it.
+        After(text, want) -> {
+            sink ! Take { text: text, want: want }
+            after_len = string.length(text)
+        }
+        // A send in a loop runs again: copied every time.
+        Loop(text, want) -> {
+            i = 0
+            while i < 3 {
+                sink ! Take { text: text, want: "${want}" }
+                i = i + 1
+            }
+        }
+        // A closure captures the binding: copied.
+        Clos(text, want) -> {
+            f = || { return string.length(text) }
+            sink ! Take { text: text, want: want }
+            clos_len = f()
+        }
+        // Two sends of it: neither is its only use, both copy.
+        Twice(text, want) -> {
+            sink ! Take { text: text, want: "${want}" }
+            sink ! Take { text: text, want: "${want}" }
+        }
+        // A panic after the moving send, caught in the arm: the message,
+        // emptied, releases nothing of what moved.
+        Caught(text, want) -> {
+            try {
+                sink ! Take { text: text, want: want }
+                panic("after the send")
+            } catch e {
+                caught = caught + 1
+            }
+        }
+        Facts() -> { reply Seen { v: after_len * 10000 + clos_len * 100 + caught } }
+    }
+}
+
+// Moves its string on, then dies: the step barrier releases the message,
+// which holds nothing of it any more.
+actor Doomed {
+    state sink = 0
+    receive {
+        Last(text, want) -> {
+            sink ! Take { text: text, want: want }
+            panic("after the send")
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3827: ${msg}")
+        exit(1)
+    }
+}
+
+fn seen(sink: ptr, want: int, what: string) {
+    wait_for_idle()
+    int v = sink ? Get {}
+    check(v == want, "${what}: takes*10000 + moves*100 + wrong = ${v}, want ${want}")
+}
+
+fn round(p: string, relay: ptr, sink: @keep ptr) {
+    relay ! Last { text: fresh(p), want: "${p}-value" }
+    seen(sink, 10100, "forwarded on its last use")
+    relay ! After { text: fresh(p), want: "${p}-value" }
+    seen(sink, 10000, "read after the send")
+    relay ! Loop { text: fresh(p), want: "${p}-value" }
+    seen(sink, 30000, "sent in a loop")
+    relay ! Clos { text: fresh(p), want: "${p}-value" }
+    seen(sink, 10000, "captured by a closure")
+    relay ! Twice { text: fresh(p), want: "${p}-value" }
+    seen(sink, 20000, "sent twice")
+    relay ! Caught { text: fresh(p), want: "${p}-value" }
+    seen(sink, 10100, "a caught panic after the send")
+
+    d = spawn(Doomed())
+    d.sink = sink
+    d ! Last { text: fresh(p), want: "${p}-value" }
+    seen(sink, 10100, "an uncaught panic after the send")
+    let dp: ptr = d
+    scheduler_release_actor(dp)
+    wait_for_idle()
+    check(scheduler_reclaim_released() == 0, "a released actor still retired")
+}
+
+fn window(p: string, n: int, relay: ptr, sink: @keep ptr) {
+    i = 0
+    while i < n {
+        round(p, relay, sink)
+        i = i + 1
+    }
+}
+
+main() {
+    sink = spawn(Sink())
+    relay = spawn(Relay())
+    relay.sink = sink
+    window("ab", 1, relay, sink)
+    // "ab-value" is 8 bytes; one caught panic so far.
+    int facts = relay ? Facts {}
+    check(facts == 80801, "the relay's own reads: ${facts}")
+    window("ab", 20, relay, sink)
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            window("ab", 20, relay, sink)
+        }, 5)
+    check(grown == 0, "forwarded strings grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

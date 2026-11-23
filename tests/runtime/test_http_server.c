@@ -976,6 +976,49 @@ TEST(http_proxy_exchange_leaves_the_backoff_to_its_caller) {
 }
 #endif
 
+/* One rule for which methods may be sent again (RFC 9110 9.2.2): the
+ * proxy's retry policy kept a list of its own, which left out TRACE, so the
+ * client sent a TRACE again on a fresh connection and the proxy's retry
+ * policy did not. Now both read http_method_idempotent. The attempts a
+ * request gets with two retries allowed, or -1. */
+static int proxy_attempts_for(const char* method) {
+    AetherProxyPool* pool = aether_proxy_pool_new(AETHER_PROXY_LB_ROUND_ROBIN, 5, 0, 0);
+    AetherProxyOpts* opts = aether_proxy_opts_new();
+    if (!pool || !opts) return -1;
+    opts->pool = pool;   /* the opts free the pool with themselves */
+    char raw[128];
+    snprintf(raw, sizeof raw, "%s /x HTTP/1.1\r\nHost: h\r\n\r\n", method);
+    HttpRequest* req = http_parse_request(raw);
+    HttpServerResponse* res = http_response_create();
+    int attempts = -1;
+    AetherProxyExchange px;
+    if (req && res && aether_proxy_upstream_add(pool, "http://127.0.0.1:9", 1)[0] == '\0' &&
+        aether_proxy_opts_set_retry_policy(opts, 2, 1)[0] == '\0' &&
+        aether_proxy_exchange_begin(&px, req, res, opts, NULL) == PX_NEED_SEND) {
+        attempts = px.max_attempts;
+        aether_proxy_exchange_abandon(&px);
+        http_request_free_raw(px.outbound);
+        free(px.upstream_url);
+    }
+    if (res) http_server_response_free(res);
+    if (req) http_request_free(req);
+    aether_proxy_opts_free(opts);
+    return attempts;
+}
+
+TEST(http_proxy_retries_the_methods_the_client_sends_again) {
+    const char* again[] = { "GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE" };
+    for (size_t i = 0; i < sizeof again / sizeof again[0]; i++) {
+        ASSERT_EQ(1, http_method_idempotent(again[i]));
+        ASSERT_EQ(3, proxy_attempts_for(again[i]));
+    }
+    const char* once[] = { "POST", "PATCH" };
+    for (size_t i = 0; i < sizeof once / sizeof once[0]; i++) {
+        ASSERT_EQ(0, http_method_idempotent(once[i]));
+        ASSERT_EQ(1, proxy_attempts_for(once[i]));
+    }
+}
+
 /* The rate limiter keeps a bucket per client address, and addresses are the
  * clients' to have: IPv6 hands one client more than any table holds. Kept
  * without a bound, a client cycling addresses grew the table for good under

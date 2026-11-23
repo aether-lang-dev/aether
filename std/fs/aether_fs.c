@@ -203,11 +203,14 @@ void fs_watch_close(void* w) { (void)w; }
     #include <winioctl.h>      // FSCTL_GET_REPARSE_POINT for fs_readlink_raw
     #include <aclapi.h>        // SetNamedSecurityInfoW: owner-only files
     #include <sddl.h>          // ConvertSidToStringSidW and the SDDL parser
+    #include "../../runtime/aether_win_path.h"   // long paths, #3850
     #ifdef _MSC_VER
         #pragma comment(lib, "advapi32.lib")
     #endif
-    #define mkdir(path, mode) _mkdir(path)
-    #define rmdir _rmdir
+    // A path past MAX_PATH goes to the wide call on its long form instead
+    // (fs_win_mkdir and the rest, below; #3850).
+    #define mkdir(path, mode) fs_win_mkdir(path)
+    #define rmdir fs_win_rmdir
     #define stat _stat
     #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
     // Windows stat result has no S_ISREG / S_ISLNK macros; emulate the
@@ -264,7 +267,221 @@ void fs_watch_close(void* w) { (void)w; }
  * owner: an administrator's new files are owned by the Administrators
  * group, and "only me" means the account running the program. */
 
-static wchar_t* fs_win_wide(const char* utf8, size_t* bytes);
+/* UTF-8 -> UTF-16 as it is, cap-accounted like the realpath path scratch
+ * (#462). `*bytes` is what to hand aether_caps_free. For what is not a path
+ * a call opens by: a symbolic link's target, stored as given. */
+static wchar_t* fs_win_utf16(const char* utf8, size_t* bytes) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    *bytes = (size_t)n * sizeof(wchar_t);
+    wchar_t* w = (wchar_t*)aether_caps_malloc(*bytes);
+    if (!w) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, n);
+    return w;
+}
+
+/* `w` (from fs_win_utf16, `*bytes` long) as a Win32 call is given it: past
+ * MAX_PATH its long form (aether_win_path.h), in place of `w`, which is
+ * freed; any other path is `w` itself, unchanged. NULL when the long form
+ * cannot be made. */
+static wchar_t* fs_win_lengthen(wchar_t* w, size_t* bytes) {
+    if (!w || !aether_win_path_is_long(w)) return w;
+    DWORD need = aether_win_long_form(w, NULL, 0);
+    size_t lbytes = (size_t)need * sizeof(wchar_t);
+    wchar_t* lw = need ? (wchar_t*)aether_caps_malloc(lbytes) : NULL;
+    if (lw && !aether_win_long_form(w, lw, need)) {
+        aether_caps_free(lw, lbytes);
+        lw = NULL;
+    }
+    aether_caps_free(w, *bytes);
+    if (lw) *bytes = lbytes;
+    return lw;
+}
+
+/* A path as a Win32 call is given it (#3850): the one place std.fs turns a
+ * UTF-8 path into the wide path of a call by name. A path under MAX_PATH is
+ * converted as it is; one at or past it is made absolute, its separators
+ * and "." and ".." resolved, and prefixed "\\?\" (aether_win_path.h), so
+ * every call takes a long path as it takes a short one. */
+static wchar_t* fs_win_wide(const char* utf8, size_t* bytes) {
+    return fs_win_lengthen(fs_win_utf16(utf8, bytes), bytes);
+}
+
+/* For the narrow calls std.fs makes (the CRT's, FindFirstFileA): the long
+ * form of `path` when it is at or past MAX_PATH, for the wide call to be
+ * given instead; NULL for any other, which the narrow call takes as it
+ * always has. */
+static wchar_t* fs_win_long(const char* path, size_t* bytes) {
+    /* UTF-16 never has more units than UTF-8 has bytes. */
+    if (!path || strlen(path) + 1 < AETHER_WIN_LONG_PATH) return NULL;
+    wchar_t* w = fs_win_utf16(path, bytes);
+    if (!w) return NULL;
+    if (!aether_win_path_is_long(w)) {
+        aether_caps_free(w, *bytes);
+        return NULL;
+    }
+    return fs_win_lengthen(w, bytes);
+}
+
+/* Free a long form, keeping the errno and last error its call left. */
+static void fs_win_long_free(wchar_t* w, size_t bytes) {
+    int e = errno;
+    DWORD le = GetLastError();
+    aether_caps_free(w, bytes);
+    errno = e;
+    SetLastError(le);
+}
+
+/* The narrow CRT calls std.fs makes by name, a path past MAX_PATH given to
+ * the wide twin in its long form instead (#3850). */
+static int fs_win_mkdir(const char* path) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return _mkdir(path);
+    int rc = _wmkdir(w);
+    fs_win_long_free(w, b);
+    return rc;
+}
+
+static int fs_win_rmdir(const char* path) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return _rmdir(path);
+    int rc = _wrmdir(w);
+    fs_win_long_free(w, b);
+    return rc;
+}
+
+static int fs_win_remove(const char* path) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return remove(path);
+    int rc = _wremove(w);
+    fs_win_long_free(w, b);
+    return rc;
+}
+
+static int fs_win_unlink(const char* path) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return _unlink(path);
+    int rc = _wunlink(w);
+    fs_win_long_free(w, b);
+    return rc;
+}
+
+static int fs_win_open(const char* path, int flags, int mode) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return _open(path, flags, mode);
+    int rc = _wopen(w, flags, mode);
+    fs_win_long_free(w, b);
+    return rc;
+}
+
+static int fs_win_stat(const char* path, struct _stat* st) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return _stat(path, st);
+    int rc = _wstat(w, st);
+    fs_win_long_free(w, b);
+    return rc;
+}
+
+static int fs_win_stati64(const char* path, struct _stati64* st) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return _stati64(path, st);
+    int rc = _wstati64(w, st);
+    fs_win_long_free(w, b);
+    return rc;
+}
+
+static int fs_win_stat64(const char* path, struct _stat64* st) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return _stat64(path, st);
+    int rc = _wstat64(w, st);
+    fs_win_long_free(w, b);
+    return rc;
+}
+
+static DWORD fs_win_attrs(const char* path) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(path, &b);
+    if (!w) return GetFileAttributesA(path);
+    DWORD a = GetFileAttributesW(w);
+    fs_win_long_free(w, b);
+    return a;
+}
+
+/* A found entry as FindFirstFileA gives it under the UTF-8 code page: its
+ * name in UTF-8, the rest as found. 0 when the name does not fit. */
+static int fs_win_find_data_a(const WIN32_FIND_DATAW* w, WIN32_FIND_DATAA* a) {
+    memset(a, 0, sizeof *a);
+    a->dwFileAttributes = w->dwFileAttributes;
+    a->ftCreationTime = w->ftCreationTime;
+    a->ftLastAccessTime = w->ftLastAccessTime;
+    a->ftLastWriteTime = w->ftLastWriteTime;
+    a->nFileSizeHigh = w->nFileSizeHigh;
+    a->nFileSizeLow = w->nFileSizeLow;
+    a->dwReserved0 = w->dwReserved0;
+    a->dwReserved1 = w->dwReserved1;
+    return WideCharToMultiByte(CP_UTF8, 0, w->cFileName, -1, a->cFileName, (int)sizeof a->cFileName,
+                               NULL, NULL) > 0;
+}
+
+/* FindFirstFileA, and for a pattern past MAX_PATH FindFirstFileW on its long
+ * form (#3850), its entries given as FindFirstFileA gives them. `*wide` says
+ * which, for fs_win_find_next; FindClose closes either. */
+static HANDLE fs_win_find_first(const char* pattern, WIN32_FIND_DATAA* fd, int* wide) {
+    size_t b = 0;
+    wchar_t* w = fs_win_long(pattern, &b);
+    *wide = w != NULL;
+    if (!w) return FindFirstFileA(pattern, fd);
+    WIN32_FIND_DATAW wfd;
+    HANDLE h = FindFirstFileW(w, &wfd);
+    fs_win_long_free(w, b);
+    if (h == INVALID_HANDLE_VALUE) return h;
+    while (!fs_win_find_data_a(&wfd, fd)) {   /* a name too long for it: passed over */
+        if (!FindNextFileW(h, &wfd)) {
+            FindClose(h);
+            SetLastError(ERROR_FILE_NOT_FOUND);
+            return INVALID_HANDLE_VALUE;
+        }
+    }
+    return h;
+}
+
+static BOOL fs_win_find_next(HANDLE h, WIN32_FIND_DATAA* fd, int wide) {
+    if (!wide) return FindNextFileA(h, fd);
+    WIN32_FIND_DATAW wfd;
+    while (FindNextFileW(h, &wfd)) {
+        if (fs_win_find_data_a(&wfd, fd)) return TRUE;
+    }
+    return FALSE;
+}
+
+/* The entries of the directory `dir`: fs_win_find_first of "<dir>\*", the
+ * pattern not cut at MAX_PATH. */
+static HANDLE fs_win_find_in(const char* dir, WIN32_FIND_DATAA* fd, int* wide) {
+    size_t cap = strlen(dir) + 3;
+    char small[MAX_PATH];
+    char* pattern = cap <= sizeof small ? small : (char*)aether_caps_malloc(cap);
+    *wide = 0;
+    if (!pattern) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return INVALID_HANDLE_VALUE;
+    }
+    snprintf(pattern, cap, "%s\\*", dir);
+    HANDLE h = fs_win_find_first(pattern, fd, wide);
+    if (pattern != small) {
+        DWORD e = GetLastError();
+        aether_caps_free(pattern, cap);
+        SetLastError(e);
+    }
+    return h;
+}
 
 /* The SDDL for an owner-only object: "D:P" a protected DACL, then an
  * allow-full-control entry each for the user, SYSTEM and Administrators;
@@ -427,6 +644,14 @@ static DWORD fs_win_private_dest(const wchar_t* wdst, int* created) {
     LocalFree(sd);
     return rc;
 }
+#endif
+
+/* remove(3) by name; on Windows a path past MAX_PATH through _wremove on its
+ * long form (fs_win_remove, #3850). */
+#ifdef _WIN32
+#define fs_remove_named(p) fs_win_remove(p)
+#else
+#define fs_remove_named(p) remove(p)
 #endif
 
 // The payload+length for write_binary / write_atomic. `data` is always raw
@@ -878,6 +1103,14 @@ static int fs_sbx_lookup(const char* path, int nofollow, AetherSandboxStat* st) 
     return aether_sandbox_stat(path, nofollow, st) == 0 ? 1 : -1;
 }
 
+/* stat(2) by name; on Windows a path past MAX_PATH through _wstat on its long
+ * form (fs_win_stat, #3850). */
+#ifdef _WIN32
+#define fs_stat_named(p, st) fs_win_stat((p), (st))
+#else
+#define fs_stat_named(p, st) stat((p), (st))
+#endif
+
 /* The POSIX lookups that do not follow a last symlink (lstat); Windows has
  * none and follows. */
 #ifdef _WIN32
@@ -896,7 +1129,7 @@ int file_exists(const char* path) {
     if (!aether_sandbox_check("fs_read", path)) return 0;
 
     struct stat st;
-    return (stat(path, &st) == 0 && !S_ISDIR(st.st_mode));
+    return (fs_stat_named(path, &st) == 0 && !S_ISDIR(st.st_mode));
 }
 
 /* Path-agnostic existence check: returns 1 if anything is at `path`
@@ -923,7 +1156,7 @@ int fs_path_exists(const char* path) {
     /* Windows lacks lstat; stat is fine — symlinks behave like
      * their target on Windows by default. */
     struct stat st;
-    return stat(path, &st) == 0 ? 1 : 0;
+    return fs_win_stat(path, &st) == 0 ? 1 : 0;
 #else
     struct stat st;
     return lstat(path, &st) == 0 ? 1 : 0;
@@ -937,7 +1170,7 @@ int file_delete_raw(const char* path) {
 #ifdef _WIN32
     if (aether_sandbox_levels_here() > 0) return aether_sandbox_remove(path) == 0 ? 1 : 0;
     if (!aether_sandbox_check_entry("fs_write", path)) return 0;
-    return remove(path) == 0 ? 1 : 0;
+    return fs_win_remove(path) == 0 ? 1 : 0;
 #else
     return aether_sandbox_remove(path) == 0 ? 1 : 0;
 #endif
@@ -952,8 +1185,8 @@ int file_delete_raw(const char* path) {
  * Windows CRT; fs_stat_raw's symlink branch is POSIX-only anyway.) */
 #ifdef _WIN32
 typedef struct _stati64 aether_stat64_t;
-#define aether_stat64(p, st)  _stati64((p), (st))
-#define aether_lstat64(p, st) _stati64((p), (st))
+#define aether_stat64(p, st)  fs_win_stati64((p), (st))
+#define aether_lstat64(p, st) fs_win_stati64((p), (st))
 #else
 typedef struct stat aether_stat64_t;
 #define aether_stat64(p, st)  stat((p), (st))
@@ -1029,7 +1262,7 @@ int dir_exists(const char* path) {
     if (!aether_sandbox_check("fs_read", path)) return 0;   /* as file_exists, #3743 */
 
     struct stat st;
-    return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+    return (fs_stat_named(path, &st) == 0 && S_ISDIR(st.st_mode));
 }
 
 int dir_create_raw(const char* path) {
@@ -1136,7 +1369,7 @@ static int fs_mkdir_p_allowed(const char* path) {
         char saved = buf[i];
         buf[i] = '\0';
         struct stat st;
-        if (buf[0] && (stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) &&
+        if (buf[0] && (fs_stat_named(buf, &st) != 0 || !S_ISDIR(st.st_mode)) &&
             !aether_sandbox_check("fs_write", buf))
             return 0;
         buf[i] = saved;
@@ -1188,14 +1421,14 @@ int fs_mkdir_p_raw(const char* path) {
             // that has to be made is a write of its own, checked as one:
             // the check on `path` above covers only the last component.
             struct stat st;
-            if (stat(buf, &st) == 0) {
+            if (fs_stat_named(buf, &st) == 0) {
                 if (!S_ISDIR(st.st_mode)) return 0;
             } else {
                 if (!aether_sandbox_check("fs_write", buf)) { errno = EACCES; return 0; }
                 if (mkdir(buf, 0755) != 0) {
                     // Tolerate already-exists. Anything else is a real failure.
                     if (errno != EEXIST) return 0;
-                    if (stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+                    if (fs_stat_named(buf, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
                 }
             }
             buf[i] = saved;
@@ -1205,7 +1438,7 @@ int fs_mkdir_p_raw(const char* path) {
     if (mkdir(buf, 0755) != 0) {
         if (errno != EEXIST) return 0;
         struct stat st;
-        if (stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+        if (fs_stat_named(buf, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
     }
     return 1;
 }
@@ -1360,18 +1593,6 @@ static int fs_unlink_os(const char* path) {
 
 #else // _WIN32
 
-/* UTF-8 → UTF-16 scratch for the symlink primitives, cap-accounted like the
- * realpath path scratch (#462). `*bytes` is what to hand aether_caps_free. */
-static wchar_t* fs_win_wide(const char* utf8, size_t* bytes) {
-    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
-    if (n <= 0) return NULL;
-    *bytes = (size_t)n * sizeof(wchar_t);
-    wchar_t* w = (wchar_t*)aether_caps_malloc(*bytes);
-    if (!w) return NULL;
-    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, n);
-    return w;
-}
-
 #ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
 #define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
 #endif
@@ -1424,15 +1645,19 @@ int fs_hard_link_raw(const char* target, const char* link_path) {
 int fs_symlink_raw(const char* target, const char* link_path) {
     if (!target || !link_path) return 0;
     if (!aether_sandbox_check_entry("fs_write", link_path)) return 0;   /* the new name, #3751 */
-    size_t wt_bytes = 0, wl_bytes = 0;
-    wchar_t* wt = fs_win_wide(target, &wt_bytes);
+    size_t wt_bytes = 0, wl_bytes = 0, wn_bytes = 0;
+    /* The target is stored as given; the link's name is a path a call
+     * makes, past MAX_PATH in its long form (#3850). The probe is built
+     * from the name as given, a relative target's ".." resolved with it. */
+    wchar_t* wt = fs_win_utf16(target, &wt_bytes);
     wchar_t* wl = fs_win_wide(link_path, &wl_bytes);
+    wchar_t* wn = fs_win_utf16(link_path, &wn_bytes);
     int ok = 0;
-    if (wt && wl) {
+    if (wt && wl && wn) {
         for (wchar_t* c = wt; *c; c++) if (*c == L'/') *c = L'\\';
         DWORD flags = 0;
         int absolute = (wt[0] == L'\\') || (wt[0] && wt[1] == L':');
-        size_t link_len = wcslen(wl), target_len = wcslen(wt);
+        size_t link_len = wcslen(wn), target_len = wcslen(wt);
         size_t probe_bytes = (link_len + target_len + 2) * sizeof(wchar_t);
         wchar_t* probe = (wchar_t*)aether_caps_malloc(probe_bytes);
         if (probe) {
@@ -1440,11 +1665,14 @@ int fs_symlink_raw(const char* target, const char* link_path) {
                 wcscpy(probe, wt);
             } else {
                 wchar_t* slash = NULL;
-                for (wchar_t* c = wl; *c; c++) if (*c == L'\\' || *c == L'/') slash = c;
-                size_t dir_len = slash ? (size_t)(slash - wl) + 1 : 0;
-                memcpy(probe, wl, dir_len * sizeof(wchar_t));
+                for (wchar_t* c = wn; *c; c++) if (*c == L'\\' || *c == L'/') slash = c;
+                size_t dir_len = slash ? (size_t)(slash - wn) + 1 : 0;
+                memcpy(probe, wn, dir_len * sizeof(wchar_t));
                 wcscpy(probe + dir_len, wt);
             }
+            probe = fs_win_lengthen(probe, &probe_bytes);
+        }
+        if (probe) {
             DWORD attrs = GetFileAttributesW(probe);
             if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
                 flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
@@ -1473,6 +1701,7 @@ int fs_symlink_raw(const char* target, const char* link_path) {
     }
     if (wt) aether_caps_free(wt, wt_bytes);
     if (wl) aether_caps_free(wl, wl_bytes);
+    if (wn) aether_caps_free(wn, wn_bytes);
     return ok;
 }
 
@@ -1532,16 +1761,6 @@ char* fs_readlink_raw(const char* path) {
     return (char*)out;
 }
 
-/* Windows has no mkdtemp/mkstemp. GetTempFileNameA(dir, prefix, 0, out) is the
- * OS primitive: with uUnique=0 it derives a unique name in `dir` (using only
- * the first 3 chars of `prefix`) AND atomically CREATES that empty file, then
- * writes the full path into `out` (which must be >= MAX_PATH). It requires
- * `dir` to already exist and to be no longer than MAX_PATH-14. GetTempFileNameA
- * returns 0 on failure.
- *
- * These used to be NULL stubs — that is why make_temp_dir/make_temp_file failed
- * on every Windows target: the real bodies lived under `#ifndef _WIN32` and the
- * Windows build only ever saw "return NULL". */
 /* errno for a Win32 error, as the CRT's own calls set it: the reason
  * fs_error_message renders (#3817: the temp functions left errno 0, so
  * their error said no more than that they failed). */
@@ -1555,6 +1774,96 @@ static void fs_win_set_errno(DWORD err) {
         default: errno = EIO; break;
     }
 }
+#ifndef STATUS_DELETE_PENDING
+#define STATUS_DELETE_PENDING ((LONG)0xC0000056L)
+#endif
+
+/* The NTSTATUS the last failed call on this thread ended with: what a
+ * Win32 error folds away (ACCESS_DENIED is also a name deleted but still
+ * held open). 0 when ntdll has no RtlGetLastNtStatus. */
+static LONG fs_win_last_nt_status(void) {
+    typedef LONG (NTAPI* last_status_fn)(void);
+    HMODULE m = GetModuleHandleW(L"ntdll.dll");
+    FARPROC p = m ? GetProcAddress(m, "RtlGetLastNtStatus") : NULL;
+    last_status_fn f;
+    memcpy(&f, &p, sizeof f);
+    return f ? f() : 0;
+}
+
+/* Each call's names start from a place of their own: the process-wide count
+ * of calls, as aether_sandbox_temp_in mixes in its own (#3817). */
+static volatile LONG g_fs_win_temp_calls = 0;
+
+/* Windows has no mkdtemp/mkstemp. fs.make_temp_dir and fs.make_temp_file
+ * outside an enforce block make a fresh name in `dir` as the enforce block's
+ * aether_sandbox_temp_in does, named as GetTempFileNameA names one: up to
+ * three characters of the prefix, four hex digits and ".tmp". It is made
+ * with CreateFileW (CREATE_NEW: nothing that exists is opened) or
+ * CreateDirectoryW, past MAX_PATH on its long form (fs_win_wide, #3850);
+ * GetTempFileNameA, which this used, takes no directory past MAX_PATH less
+ * 14. A name in use, or one deleted but still held open (no create takes it
+ * until the last handle closes), is passed over for the next. The path
+ * returned is `dir` as given and the name; a file comes back closed and
+ * empty. NULL with errno set otherwise. */
+static char* fs_win_temp_in(const char* dir, const char* prefix, int is_dir) {
+    char pre[16];
+    size_t pl = 0;
+    for (int c = 0; c < 3 && prefix[pl]; c++) {   /* a UTF-8 sequence whole */
+        size_t n = 1;
+        while (prefix[pl + n] && ((unsigned char)prefix[pl + n] & 0xC0) == 0x80) n++;
+        if (pl + n >= sizeof pre) break;
+        memcpy(pre + pl, prefix + pl, n);
+        pl += n;
+    }
+    pre[pl] = '\0';
+    size_t dl = strlen(dir);
+    int sep = dl && dir[dl - 1] != '\\' && dir[dl - 1] != '/';
+    size_t cap = dl + (size_t)sep + pl + 9;   /* four hex digits, ".tmp", NUL */
+    char* out = (char*)aether_caps_malloc(cap);
+    if (!out) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    unsigned seed = (unsigned)GetTickCount() ^ ((unsigned)GetCurrentProcessId() << 16) ^
+                    ((unsigned)InterlockedIncrement(&g_fs_win_temp_calls) * 0x9E3779B9u);
+    DWORD err = ERROR_FILE_EXISTS;
+    for (int attempt = 0; attempt < 256; attempt++) {
+        seed = seed * 1103515245u + 12345u;
+        snprintf(out, cap, "%s%s%s%04X.tmp", dir, sep ? "\\" : "", pre, (seed >> 8) & 0xFFFF);
+        size_t wb = 0;
+        wchar_t* w = fs_win_wide(out, &wb);
+        if (!w) {
+            aether_caps_free(out, cap);
+            errno = ENOMEM;
+            return NULL;
+        }
+        BOOL ok;
+        if (is_dir) {
+            ok = CreateDirectoryW(w, NULL);
+        } else {
+            HANDLE h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                                   FILE_ATTRIBUTE_NORMAL, NULL);
+            ok = h != INVALID_HANDLE_VALUE;
+            if (ok) CloseHandle(h);
+        }
+        err = ok ? ERROR_SUCCESS : GetLastError();
+        LONG nt = ok ? 0 : fs_win_last_nt_status();
+        aether_caps_free(w, wb);
+        if (ok) {
+            char* made = (char*)string_new(out);
+            aether_caps_free(out, cap);
+            return made;
+        }
+        if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS ||
+            (err == ERROR_ACCESS_DENIED && nt == STATUS_DELETE_PENDING))
+            continue;
+        break;
+    }
+    aether_caps_free(out, cap);
+    fs_win_set_errno(err);
+    return NULL;
+}
+
 char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     errno = 0; /* fs.make_temp_*'s error reads errno: only this call's (#3817) */
     if (!dir) dir = ".";
@@ -1562,20 +1871,7 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     char* made_out = NULL;
     if (fs_temp_checked(dir, prefix, 1, &made_out)) return made_out;
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
-    /* GetTempFileNameA makes a FILE; we want a DIRECTORY. Take its unique name,
-     * delete the placeholder file, then _mkdir the same name (standard Windows
-     * file->dir idiom). Retry to close the tiny unlink/mkdir race. */
-    for (int attempt = 0; attempt < 64; attempt++) {
-        char out[MAX_PATH];
-        if (GetTempFileNameA(dir, prefix, 0, out) == 0) {
-            fs_win_set_errno(GetLastError());
-            return NULL;
-        }
-        DeleteFileA(out);
-        if (_mkdir(out) == 0) return (char*)string_new(out);
-        /* name got taken between delete and mkdir — try a fresh one */
-    }
-    return NULL;
+    return fs_win_temp_in(dir, prefix, 1);
 }
 char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     errno = 0; /* fs.make_temp_*'s error reads errno: only this call's (#3817) */
@@ -1584,13 +1880,7 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     char* made_out = NULL;
     if (fs_temp_checked(dir, prefix, 0, &made_out)) return made_out;
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
-    char out[MAX_PATH];
-    /* uUnique=0 => the file is created here, atomically; mktemp(1)'s contract. */
-    if (GetTempFileNameA(dir, prefix, 0, out) == 0) {
-        fs_win_set_errno(GetLastError());
-        return NULL;
-    }
-    return (char*)string_new(out);
+    return fs_win_temp_in(dir, prefix, 0);
 }
 /* 1 when `path` is a link itself, not what it points at: the directory
  * entry's reparse tag says so without opening anything. A link here is any
@@ -1818,9 +2108,9 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     // 0666 modified by the process umask (so users with a relaxed
     // umask still get group/world write if that's their convention).
 #ifdef _WIN32
-    int fd = _open(tmp,
-                   _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
-                   _S_IREAD | _S_IWRITE);
+    int fd = fs_win_open(tmp,
+                         _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
+                         _S_IREAD | _S_IWRITE);
 #elif defined(__wasi__)
     /* WASI has no umask: permissions are the host runtime's business under
      * its capability model, and there is no process-wide mask to consult.
@@ -1849,7 +2139,7 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
         int err_save = errno;
 #ifdef _WIN32
         _close(fd);
-        _unlink(tmp);
+        fs_win_unlink(tmp);
 #else
         close(fd);
         aether_sandbox_stage(tmp, path);
@@ -1903,7 +2193,7 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     // (#3751, which wraps rename, unlink and remove there).
     if (!fwrite_ok || !fsync_ok) {
         aether_sandbox_stage(tmp, path);
-        remove(tmp);  // don't leak a half-written tmp file
+        fs_remove_named(tmp);  // don't leak a half-written tmp file
         aether_sandbox_stage(NULL, NULL);
         errno = err_save;
         return 0;
@@ -1917,7 +2207,7 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     aether_sandbox_stage(tmp, path);
     if (aether_fs_rename_over(tmp, path) != 0) {
         int err_rename = errno;
-        remove(tmp);
+        fs_remove_named(tmp);
         aether_sandbox_stage(NULL, NULL);
         errno = err_rename;
         return 0;
@@ -3029,25 +3319,22 @@ _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
     /* Windows fast path: kernel-side block copy via CopyFileExW.
      * UTF-8 → UTF-16 conversion required; CopyFileA only handles ANSI
      * code-page paths, which mishandles non-Latin1 filenames. */
-    int wsrc_len = MultiByteToWideChar(CP_UTF8, 0, src, -1, NULL, 0);
-    int wdst_len = MultiByteToWideChar(CP_UTF8, 0, dst, -1, NULL, 0);
-    if (wsrc_len <= 0 || wdst_len <= 0) {
+    if (MultiByteToWideChar(CP_UTF8, 0, src, -1, NULL, 0) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, dst, -1, NULL, 0) <= 0) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "path UTF-8 invalid");
     }
     /* #462: transient UTF-8 → UTF-16 path scratch — alloc'd and freed
      * locally on every path through this function, sized by the
      * (plugin-supplied) path length. Gate it and free through the cap
-     * with the exact byte count so accounting balances. */
-    size_t wsrc_bytes = (size_t)wsrc_len * sizeof(wchar_t);
-    size_t wdst_bytes = (size_t)wdst_len * sizeof(wchar_t);
-    wchar_t* wsrc = (wchar_t*)aether_caps_malloc(wsrc_bytes);
-    wchar_t* wdst = (wchar_t*)aether_caps_malloc(wdst_bytes);
+     * with the exact byte count so accounting balances. Past MAX_PATH
+     * each is its long form (fs_win_wide, #3850). */
+    size_t wsrc_bytes = 0, wdst_bytes = 0;
+    wchar_t* wsrc = fs_win_wide(src, &wsrc_bytes);
+    wchar_t* wdst = wsrc ? fs_win_wide(dst, &wdst_bytes) : NULL;
     if (!wsrc || !wdst) {
-        aether_caps_free(wsrc, wsrc_bytes); aether_caps_free(wdst, wdst_bytes);
+        if (wsrc) aether_caps_free(wsrc, wsrc_bytes);
         return aether_fs_iks_err(AETHER_FS_KIND_IO, "allocation failed");
     }
-    MultiByteToWideChar(CP_UTF8, 0, src, -1, wsrc, wsrc_len);
-    MultiByteToWideChar(CP_UTF8, 0, dst, -1, wdst, wdst_len);
     if (aether_sandbox_levels_here() > 0) {
         /* Inside an enforce block CopyFileExW, which opens both by name
          * again, is not used: src and dst are opened as the checked opens
@@ -3165,7 +3452,7 @@ _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
      * succeeded so the file is fully written). */
     struct _stat64 win_st;
     long long bytes = 0;
-    if (_stat64(dst, &win_st) == 0) bytes = (long long)win_st.st_size;
+    if (fs_win_stat64(dst, &win_st) == 0) bytes = (long long)win_st.st_size;
     return aether_fs_iks_ok(bytes);
 #else
     /* POSIX path. src is opened first and looked at through its descriptor,
@@ -3363,22 +3650,18 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
         _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
         return out;
     }
-    int wsrc_len = MultiByteToWideChar(CP_UTF8, 0, src, -1, NULL, 0);
-    int wdst_len = MultiByteToWideChar(CP_UTF8, 0, dst, -1, NULL, 0);
-    if (wsrc_len <= 0 || wdst_len <= 0) {
+    if (MultiByteToWideChar(CP_UTF8, 0, src, -1, NULL, 0) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, dst, -1, NULL, 0) <= 0) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "path UTF-8 invalid");
     }
     /* #462: transient UTF-8 → UTF-16 path scratch — see fs_copy_raw. */
-    size_t wsrc_bytes = (size_t)wsrc_len * sizeof(wchar_t);
-    size_t wdst_bytes = (size_t)wdst_len * sizeof(wchar_t);
-    wchar_t* wsrc = (wchar_t*)aether_caps_malloc(wsrc_bytes);
-    wchar_t* wdst = (wchar_t*)aether_caps_malloc(wdst_bytes);
+    size_t wsrc_bytes = 0, wdst_bytes = 0;
+    wchar_t* wsrc = fs_win_wide(src, &wsrc_bytes);
+    wchar_t* wdst = wsrc ? fs_win_wide(dst, &wdst_bytes) : NULL;
     if (!wsrc || !wdst) {
-        aether_caps_free(wsrc, wsrc_bytes); aether_caps_free(wdst, wdst_bytes);
+        if (wsrc) aether_caps_free(wsrc, wsrc_bytes);
         return aether_fs_iks_err(AETHER_FS_KIND_IO, "allocation failed");
     }
-    MultiByteToWideChar(CP_UTF8, 0, src, -1, wsrc, wsrc_len);
-    MultiByteToWideChar(CP_UTF8, 0, dst, -1, wdst, wdst_len);
     BOOL ok = MoveFileExW(wsrc, wdst,
                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
     DWORD win_err = GetLastError();
@@ -3475,18 +3758,17 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
     }
 
 #ifdef _WIN32
-    int wpath_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-    if (wpath_len <= 0) {
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0) <= 0) {
         return aether_fs_sks_err(AETHER_FS_KIND_INVALID, "path UTF-8 invalid");
     }
     /* #462: transient UTF-8 → UTF-16 path scratch — alloc'd and freed
-     * locally, sized by the (plugin-supplied) path length. */
-    size_t wpath_bytes = (size_t)wpath_len * sizeof(wchar_t);
-    wchar_t* wpath = (wchar_t*)aether_caps_malloc(wpath_bytes);
+     * locally, sized by the (plugin-supplied) path length; past MAX_PATH
+     * its long form (fs_win_wide, #3850). */
+    size_t wpath_bytes = 0;
+    wchar_t* wpath = fs_win_wide(path, &wpath_bytes);
     if (!wpath) {
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "allocation failed");
     }
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wpath_len);
     HANDLE h = CreateFileW(wpath, 0,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            NULL, OPEN_EXISTING,
@@ -3517,7 +3799,7 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         return aether_fs_sks_err(kind, msg);
     }
     /* GetFinalPathNameByHandleW: first call with cb=0 returns required size. */
-    DWORD need = GetFinalPathNameByHandleW(h, NULL, 0, FILE_NAME_NORMALIZED);
+    DWORD need = aether_win_final_path(h, NULL, 0);   /* past MAX_PATH on Wine too, #3850 */
     if (need == 0) {
         CloseHandle(h);
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "GetFinalPathNameByHandleW failed");
@@ -3530,7 +3812,7 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         CloseHandle(h);
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "allocation failed");
     }
-    DWORD got = GetFinalPathNameByHandleW(h, wresult, need, FILE_NAME_NORMALIZED);
+    DWORD got = aether_win_final_path(h, wresult, need);
     CloseHandle(h);
     if (got == 0 || got >= need) {
         aether_caps_free(wresult, wresult_bytes);
@@ -3610,16 +3892,14 @@ static _tuple_int_int_string fs_chmod_win_by_name(const char* path, int mode) {
         return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
                                  "sandbox: cannot chmod path");
     }
-    int wpath_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-    if (wpath_len <= 0) {
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0) <= 0) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "path UTF-8 invalid");
     }
-    size_t wpath_bytes = (size_t)wpath_len * sizeof(wchar_t);
-    wchar_t* wpath = (wchar_t*)aether_caps_malloc(wpath_bytes);
+    size_t wpath_bytes = 0;
+    wchar_t* wpath = fs_win_wide(path, &wpath_bytes);   /* #3850 */
     if (!wpath) {
         return aether_fs_iks_err(AETHER_FS_KIND_IO, "allocation failed");
     }
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wpath_len);
     DWORD attrs = GetFileAttributesW(wpath);
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         aether_caps_free(wpath, wpath_bytes);
@@ -4132,6 +4412,7 @@ DirList* dir_list_raw(const char* path) {
     #ifdef _WIN32
     WIN32_FIND_DATAA find_data;
     HANDLE hFind = INVALID_HANDLE_VALUE;
+    int find_wide = 0;
     if (!wdir && verified) {
         /* The verified open failed (missing, not a directory, denied):
          * an error, as FindFirstFileA's failure is below. */
@@ -4140,9 +4421,8 @@ DirList* dir_list_raw(const char* path) {
         return NULL;
     }
     if (!wdir) {
-        char search_path[MAX_PATH];
-        snprintf(search_path, sizeof(search_path), "%s\\*", path);
-        hFind = FindFirstFileA(search_path, &find_data);
+        /* A directory past MAX_PATH through its long form (#3850). */
+        hFind = fs_win_find_in(path, &find_data, &find_wide);
         if (hFind == INVALID_HANDLE_VALUE) {
             DWORD werr = GetLastError();
             /* No entry at all: an empty drive root, which has no "." either. */
@@ -4166,7 +4446,7 @@ DirList* dir_list_raw(const char* path) {
     // N-entry directory into O(N^2) work.
     int cap = 0;
     char wname[MAX_PATH * 4];
-    for (int more = 1; more; more = wdir ? 1 : FindNextFileA(hFind, &find_data)) {
+    for (int more = 1; more; more = wdir ? 1 : fs_win_find_next(hFind, &find_data, find_wide)) {
         const char* entry_name = find_data.cFileName;
         DWORD entry_attrs = 0;
         if (wdir) {
@@ -4361,11 +4641,9 @@ static int win_fnmatch(const char* pattern, const char* name) {
 static void walk_recursive(const char* dir, const char* suffix_pattern, DirList* result,
                            int check) {
     if (check && !aether_sandbox_check("fs_read", dir)) return;
-    char search[MAX_PATH];
-    snprintf(search, sizeof(search), "%s\\*", dir);
-
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(search, &fd);
+    int wide = 0;
+    HANDLE h = fs_win_find_in(dir, &fd, &wide);   /* past MAX_PATH too, #3850 */
     if (h == INVALID_HANDLE_VALUE) return;
 
     do {
@@ -4388,7 +4666,7 @@ static void walk_recursive(const char* dir, const char* suffix_pattern, DirList*
                 dirlist_add(result, fullpath);
             }
         }
-    } while (FindNextFileA(h, &fd));
+    } while (fs_win_find_next(h, &fd, wide));
 
     FindClose(h);
 }
@@ -4702,7 +4980,8 @@ DirList* fs_glob_raw(const char* pattern) {
         size_t dir_prefix_len = sep ? (size_t)(sep - pattern) + 1 : 0; // includes the separator
 
         WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA(pattern, &fd);
+        int wide = 0;
+        HANDLE h = fs_win_find_first(pattern, &fd, &wide);   /* #3850 */
         if (h != INVALID_HANDLE_VALUE) {
             do {
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -4721,7 +5000,7 @@ DirList* fs_glob_raw(const char* pattern) {
                         dirlist_add(result, fd.cFileName);
                     }
                 }
-            } while (FindNextFileA(h, &fd));
+            } while (fs_win_find_next(h, &fd, wide));
             FindClose(h);
         }
     }
@@ -5095,7 +5374,7 @@ typedef _AeClosureBox AeFsClosure;
  * filesystems don't fill d_type). lstat so a symlink reports as symlink. */
 static int fs_walk_stat_kind(const char* path) {
 #ifdef _WIN32
-    DWORD attr = GetFileAttributesA(path);
+    DWORD attr = fs_win_attrs(path);   /* past MAX_PATH too, #3850 */
     if (attr == INVALID_FILE_ATTRIBUTES) return 0;
     return fs_winattr_to_kind(attr);
 #else
@@ -5133,7 +5412,8 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
     buf[len + 1] = '*';
     buf[len + 2] = '\0';
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(buf, &fd);
+    int wide = 0;
+    HANDLE h = fs_win_find_first(buf, &fd, &wide);   /* past MAX_PATH too, #3850 */
     buf[len] = '\0';
     if (h == INVALID_HANDLE_VALUE) return 0;    /* unreadable dir — skip */
     do {
@@ -5156,7 +5436,7 @@ static int fs_walk_recurse(char* buf, size_t len, int depth,
             }
         }
         buf[len] = '\0';
-    } while (FindNextFileA(h, &fd));
+    } while (fs_win_find_next(h, &fd, wide));
     FindClose(h);
 #else
     DIR* dir;
@@ -5404,11 +5684,14 @@ void* fs_watch_open_raw(const char* path) {
         }
         return w;
     }
-    HANDLE h = FindFirstChangeNotificationA(
-        path, FALSE,
-        FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
-        FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE |
-        FILE_NOTIFY_CHANGE_ATTRIBUTES);
+    const DWORD notify = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                         FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE |
+                         FILE_NOTIFY_CHANGE_ATTRIBUTES;
+    size_t lb = 0;
+    wchar_t* lw = fs_win_long(path, &lb);   /* past MAX_PATH: its long form, #3850 */
+    HANDLE h = lw ? FindFirstChangeNotificationW(lw, FALSE, notify)
+                  : FindFirstChangeNotificationA(path, FALSE, notify);
+    if (lw) fs_win_long_free(lw, lb);
     if (h == INVALID_HANDLE_VALUE) return NULL;
     AeFsWatch* w = (AeFsWatch*)aether_caps_malloc(sizeof(AeFsWatch));
     if (!w) { FindCloseChangeNotification(h); return NULL; }

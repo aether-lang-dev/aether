@@ -1,0 +1,6 @@
+import std.lanes
+
+main() {
+    v = lanes.splat4(2.0)
+    println("${lanes.sum4(v * v)}")
+}

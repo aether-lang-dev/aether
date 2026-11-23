@@ -43,6 +43,7 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms);
 // Forward declaration: a pending send batch goes before a send around it
 // and before a wait (#3117), defined with the batch below.
 static inline void batch_flush_pending(void);
+static void batch_send_out(void);
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -4766,6 +4767,11 @@ typedef struct {
     Message messages[BATCH_SEND_SIZE];
     int count;
     int by_core[MAX_CORES];  // Count per target core for efficient sorting
+    /* The batches open on this thread, by the `try` depth each was opened at
+     * (#3826): a batch opened inside an open one shares the buffer with it.
+     * While open_at[d] is not 0, &open_at[d] is the journal's entry for the
+     * batches of depth d (scheduler_send_batch_start). */
+    int open_at[AETHER_PANIC_MAX_DEPTH + 1];
 } BatchSendBuffer;
 
 static AETHER_TLS BatchSendBuffer* g_batch_buffer = NULL;
@@ -4774,17 +4780,63 @@ static AETHER_TLS BatchSendBuffer* g_batch_buffer = NULL;
  * wait for quiescence, sends the batch first: the batch's messages are older,
  * and messages nobody has sent are not pending to the wait. */
 static inline void batch_flush_pending(void) {
-    if (unlikely(g_batch_buffer && g_batch_buffer->count > 0)) scheduler_send_batch_flush();
+    if (unlikely(g_batch_buffer && g_batch_buffer->count > 0)) batch_send_out();
+}
+
+/* A panic out of a batched loop (#3826): the drain of the panic's frame
+ * sends what the loop sent before it, in order, as the loop's end would
+ * have, and the drain takes the entry out of the journal. The batches opened
+ * in that frame are closed; one opened in a frame below keeps its own entry
+ * and goes on. */
+static void batch_unwind_send(const void* open) {
+    g_batch_buffer->open_at[(const int*)open - g_batch_buffer->open_at] = 0;
+    batch_send_out();
+}
+
+/* The thread's buffer, made on first use. NULL when there is no memory for
+ * it: batching stays off, and callers send unbatched. */
+static BatchSendBuffer* batch_buffer(void) {
+    if (!g_batch_buffer) g_batch_buffer = calloc(1, sizeof(BatchSendBuffer));
+    return g_batch_buffer;
 }
 
 /* Opening a batch never drops what one holds (#3117): only a flush empties
  * the buffer. An inner loop's start emptied it and lost the outer loop's
- * messages. */
+ * messages.
+ *
+ * The open batch is in the unwind journal (#3826): the loop's end
+ * (scheduler_send_batch_flush) sends it and closes it, and a panic that
+ * leaves the loop for a `try` sends it from the drain. The loop jumped past
+ * its end, and its messages stayed in the buffer until this thread's next
+ * send or wait: never, on a thread with nothing more to send (a worker's).
+ *
+ * A batch opened inside an open one (a nested start) shares the buffer, and
+ * the journal keeps one entry per pointer: the inner batch once re-tracked
+ * the outer one's entry and its end forgot it, so the outer batch's later
+ * sends were journaled by nothing, and an inner batch in a `try` of its own
+ * moved the entry to that frame, whose drain took it. So the entry is per
+ * `try` depth: the first batch opened at a depth journals &open_at[depth],
+ * at that depth, and the last one closed there forgets it. The outer batch
+ * keeps its entry until its own end, and a panic that leaves a deeper `try`
+ * closes that frame's batches alone. Outside every frame nothing is
+ * journaled (the panic ends the program), and a scheduler thread batches
+ * nothing. */
 void scheduler_send_batch_start(void) {
-    if (!g_batch_buffer) {
-        g_batch_buffer = calloc(1, sizeof(BatchSendBuffer));
-        if (!g_batch_buffer) return;  // OOM: batching stays off, callers fall back
-    }
+    BatchSendBuffer* b = batch_buffer();
+    if (!b || current_core_id >= 0) return;
+    int depth = aether_try_depth();
+    if (b->open_at[depth]++ == 0 && depth > 0)
+        (void)aether_unwind_track(&b->open_at[depth], batch_unwind_send);
+}
+
+/* The loop's end: its batch sent and closed, in the frame it was opened in
+ * (a loop's end is in its loop's frame). */
+void scheduler_send_batch_flush(void) {
+    batch_send_out();
+    BatchSendBuffer* b = g_batch_buffer;
+    if (!b || current_core_id >= 0) return;
+    int* open = &b->open_at[aether_try_depth()];
+    if (*open > 0 && --*open == 0) aether_unwind_forget(open);
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
@@ -4806,19 +4858,17 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
         send_remote_admitted(actor, msg, current_core_id);
         return;
     }
-    // BATCH PATH: Multi-actor fan-out optimization
-    if (!g_batch_buffer) {
-        scheduler_send_batch_start();
-        if (!g_batch_buffer) {
-            // No buffer: the send goes out on its own, as an unbatched one.
-            send_remote_admitted(actor, msg, current_core_id);
-            return;
-        }
+    // BATCH PATH: Multi-actor fan-out optimization. The buffer is made here
+    // when no start made it, and no batch is opened: none would close it.
+    if (!batch_buffer()) {
+        // No buffer: the send goes out on its own, as an unbatched one.
+        send_remote_admitted(actor, msg, current_core_id);
+        return;
     }
 
     // If buffer is full, flush first
     if (g_batch_buffer->count >= BATCH_SEND_SIZE) {
-        scheduler_send_batch_flush();
+        batch_send_out();
     }
 
     int idx = g_batch_buffer->count++;
@@ -4832,7 +4882,7 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
     }
 }
 
-void scheduler_send_batch_flush(void) {
+static void batch_send_out(void) {
     if (!g_batch_buffer || g_batch_buffer->count == 0) return;
 
     int count = g_batch_buffer->count;
@@ -5430,13 +5480,18 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     if (!status) status = &why_dummy;
     *status = AETHER_ASK_DEAD;
     if (!target || !msg_data) return NULL;
-    /* A dead actor answers nothing: no message, no wait (#3151). */
-    if (atomic_load_explicit(&target->dead, memory_order_acquire)) return NULL;
+    /* A dead actor answers nothing: no message, no wait (#3151). What the
+     * message holds is given back (#3847). */
+    if (atomic_load_explicit(&target->dead, memory_order_acquire)) {
+        aether_ask_message_unsent(target, msg_data);
+        return NULL;
+    }
 
     ActorReplySlot* slot = reply_slot_lend();
     if (!slot) {
         /* The script gets the error; a library call ends at its next safe
          * point with AETHER_OUT_OF_MEMORY (#2956). */
+        aether_ask_message_unsent(target, msg_data);
         aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         *status = AETHER_ASK_NO_MEMORY;
         return NULL;

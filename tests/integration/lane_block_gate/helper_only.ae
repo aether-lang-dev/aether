@@ -1,0 +1,15 @@
+// The program's only lane use: externs that name two of the lane block's
+// helpers. Neither holds a lane type, so only the extern gate emits the
+// block they are defined in.
+extern _ae_lanes8_native() -> bool
+extern _ae_cpu_avx2() -> bool
+
+main() {
+    n = _ae_lanes8_native()
+    a = _ae_cpu_avx2()
+    if n && !a {
+        println("native8 without avx2")
+        return
+    }
+    println("lane helpers ok")
+}

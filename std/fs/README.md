@@ -56,6 +56,18 @@ A hardcoded `/tmp` is fine on POSIX and wrong on Windows, where it may not
 exist. Resolve `TEMP`, then `TMPDIR`, then `/tmp`: see #1702 for the
 accessor that will make that one call.
 
+## Long paths on Windows
+
+A path of 260 characters or more works on Windows as a shorter one does
+(#3850), whether or not the system's LongPathsEnabled policy is on. Each call
+gives such a path to Windows the way Rust's std does: made absolute, with its
+separators turned to `\` and its `.` and `..` resolved, then prefixed `\\?\`
+(`\\?\UNC\` for a UNC path), a form Windows takes literally and without the
+limit. A shorter path is given as it is. `make_temp_dir` and
+`make_temp_file` name the file themselves, in the shape GetTempFileName
+gives (three letters of the prefix, four hex digits, `.tmp`), as that call
+takes no directory of 247 characters or more.
+
 ## Private files on Windows
 
 Windows keeps no mode bits, so `chmod` and `create_dir_with_mode` emulate

@@ -64,7 +64,8 @@ const RESP_PUSH = 62 // '>'  RESP3 push (out-of-band)
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
-extern string_length(s: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(s: string) -> int @c_import
 
 // A decoded/constructed RESP value. Aggregate children live in std.list; scalar
 // text (simple/error/bulk/verbatim/bignum) lives in an owned bytes buffer.

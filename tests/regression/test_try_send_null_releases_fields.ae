@@ -1,0 +1,113 @@
+// Regression (#3847): a try_send that does not deliver releases what the
+// message owns.
+//
+// A send to a null actor reference panics by name (#3172), and try_send's
+// does too. The message was already built by then: its string fields held a
+// copy of a string the sender keeps, or the fresh string the send moved in,
+// and the panic left them to no one, one leak per send. The message is now
+// released before the panic, as the receiver's handler end releases it, on
+// every send, try_send and `!` alike, including a field that moved a
+// received string on (#3827). A dead actor and a full mailbox were released
+// already: the runtime drops those messages with the target's release.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same sends grows by exactly 0
+// (mem.steady_growth). Elsewhere the leak gates cover this program.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Line { text: string, kept: string, n: int }
+message Fwd { text: string }
+message Pass { text: string }
+
+// Never spawned: Line's handler, so the message has a release.
+actor Sink {
+    state total = 0
+    receive {
+        Line(text, kept, n) -> { total = total + n + string.length(text) + string.length(kept) }
+    }
+}
+
+// Forwards what it receives to a null reference, each a panic it catches:
+// by try_send (a copy), and by `!` on the binding's last use, which moves
+// the received string into the message (#3827).
+actor Relay {
+    state next: actor_ref = null
+    state caught = 0
+    receive {
+        Fwd(text) -> {
+            try {
+                why = try_send(next, Line { text: text, kept: "k", n: 1 })
+                println("unreachable: ${why}")
+            } catch e {
+                caught = caught + 1
+            }
+        }
+        Pass(text) -> {
+            try {
+                next ! Line { text: text, kept: "k", n: 1 }
+            } catch e {
+                caught = caught + 1
+            }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3847: ${msg}")
+        exit(1)
+    }
+}
+
+fn sends(n: int, keep: string) -> int {
+    let none_ref: actor_ref = null
+    caught = 0
+    i = 0
+    while i < n {
+        try {
+            why = try_send(none_ref, Line { text: string.from_int(i), kept: keep, n: i })
+            println("unreachable: ${why}")
+        } catch e {
+            caught = caught + 1
+        }
+        try {
+            none_ref ! Line { text: string.from_int(i), kept: keep, n: i }
+        } catch e {
+            caught = caught + 1
+        }
+        i = i + 1
+    }
+    return caught
+}
+
+fn forwards(r: ptr, n: int) {
+    i = 0
+    while i < n {
+        r ! Fwd { text: string.from_int(i) }
+        r ! Pass { text: string.from_int(i) }
+        i = i + 1
+    }
+    wait_for_idle()
+}
+
+main() {
+    keep = string.concat(string.from_int(7), "-kept")
+    relay = spawn(Relay())
+    check(sends(50, keep) == 100, "a send to null was not a panic")
+    forwards(relay, 50)
+    check(relay.caught == 100, "the relay caught ${relay.caught} of 100")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            sends(50, keep)
+            forwards(relay, 50)
+        }, 5)
+    check(grown == 0, "sends to null grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

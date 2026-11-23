@@ -82,7 +82,10 @@ not share one stack; a threaded build's generated C is unchanged; 7,
 did not (no frame live, no room), and generated C skips the exit's
 `aether_unwind_forget` on 0 (#3787): run on a revision 6 runtime, whose
 `aether_unwind_track` returns nothing, it would read an undefined result
-and could leave a dead stack slot in the journal.
+and could leave a dead stack slot in the journal; 8,
+`aether_unwind_track_place` returns 1 when the place is in the journal and
+0 when nothing was written, and generated C skips the forget after a call
+that held a string argument on 0 (#3840), for the reason revision 7 gave.
 
 **Shared facilities.** A library without `--shared-runtime` brings a copy
 of the runtime, and copies in one process share the sandbox levels and the

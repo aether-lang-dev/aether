@@ -1,0 +1,64 @@
+// #3836: string.length and string.char_at read the string's header in
+// place (aether_string_inline.h). The semantics are the out-of-line ones:
+// null is 0 long and reads 0 at every index, an index out of range reads 0,
+// a byte is 0..255, and a counted string's length includes an embedded NUL.
+
+import std.string
+import std.bytes
+import std.os
+
+check(got: int, want: int, label: string) -> int {
+    if got == want {
+        return 0
+    }
+    println("FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+main() {
+    failures = 0
+
+    absent = os.getenv("AE_STRING_INLINE_READS_UNSET")
+    failures = failures + check(string.length(absent), 0, "null length")
+    failures = failures + check(string.char_at(absent, 0), 0, "null char_at 0")
+    failures = failures + check(string.char_at(absent, -1), 0, "null char_at -1")
+
+    s = "abc"
+    failures = failures + check(string.length(s), 3, "literal length")
+    failures = failures + check(string.char_at(s, 0), 97, "first byte")
+    failures = failures + check(string.char_at(s, 2), 99, "last byte")
+    failures = failures + check(string.char_at(s, 3), 0, "one past the end")
+    failures = failures + check(string.char_at(s, -1), 0, "a negative index")
+    failures = failures + check(string.char_at(s, 2147483647), 0, "INT_MAX")
+    failures = failures + check(string.length(""), 0, "empty length")
+    failures = failures + check(string.char_at("", 0), 0, "empty char_at 0")
+
+    b = bytes.new(5)
+    bytes.set(b, 0, 255)
+    bytes.set(b, 1, 0)
+    bytes.set(b, 2, 128)
+    bytes.set(b, 3, 133)
+    bytes.set(b, 4, 127)
+    h = bytes.finish(b, 5)
+    failures = failures + check(string.length(h), 5, "length past an embedded NUL")
+    failures = failures + check(string.char_at(h, 0), 255, "0xFF is unsigned")
+    failures = failures + check(string.char_at(h, 1), 0, "the embedded NUL")
+    failures = failures + check(string.char_at(h, 2), 128, "0x80 is unsigned")
+    failures = failures + check(string.char_at(h, 3), 133, "0x85 is unsigned")
+    failures = failures + check(string.char_at(h, 4), 127, "0x7F")
+    failures = failures + check(string.char_at(h, 5), 0, "past a counted string's end")
+
+    // A scan, the loop shape the inline reads are for.
+    t = "${s}-${s}"
+    sum = 0
+    i = 0
+    while i < string.length(t) {
+        sum = sum + string.char_at(t, i)
+        i = i + 1
+    }
+    failures = failures + check(sum, 97 + 98 + 99 + 45 + 97 + 98 + 99, "a scan's sum")
+
+    if failures == 0 {
+        println("reads ok")
+    }
+}

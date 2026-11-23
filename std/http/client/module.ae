@@ -134,7 +134,8 @@ extern http_response_free(response: @frees ptr)
 
 // String helpers for the wrappers below.
 extern string_concat(a: string, b: string) -> string @heap
-extern string_length(str: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(str: string) -> int @c_import
 
 // ---- Go-style wrappers ----
 

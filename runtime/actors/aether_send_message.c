@@ -208,23 +208,35 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
     return message_of(msg_copy, *(int*)message_data, NULL);
 }
 
+/* #3847: an ask's message the ask does not hand over: its target has ended,
+ * no reply slot or no copy could be had. What the message holds is the
+ * ask's from the call on (its strings copied in, its closures taken, each
+ * box its send made, marked), so it is given back here, through the
+ * target's release, as a message dropped at its target is
+ * (aether_message_drop). Every such exit of scheduler_ask_message_status,
+ * on either scheduler, goes through here and nowhere else. */
+void aether_ask_message_unsent(void* actor_ptr, void* message_data) {
+    ActorBase* actor = (ActorBase*)actor_ptr;
+    if (actor && message_data && actor->release_message)
+        actor->release_message(*(int*)message_data, message_data);
+}
+
 // An ask's message (#3387): the payload copied (into the message when it
 // fits, #3534), the asker's reply slot in it.
 // An ask can fail, so a copy that finds no memory is its failure, not an
-// unwind: 0, with what the message owns released (its values moved into it)
+// unwind: 0, with what the message owns released (aether_ask_message_unsent)
 // and nothing sent. The slot is passed here rather than through a
 // thread-local the send reads: the send can step its target inline, and
 // every payload send that handler made read the asker's slot too.
 int aether_ask_message(void* actor_ptr, void* message_data, size_t message_size,
                        void* reply_slot, Message* out) {
-    ActorBase* actor = (ActorBase*)actor_ptr;
     if (payload_fits_inline(message_size)) {   /* #3534 */
         *out = inline_message(message_data, message_size, reply_slot);
         return 1;
     }
     void* msg_copy = payload_copy(message_data, message_size);
     if (!msg_copy) {
-        if (actor && actor->release_message) actor->release_message(*(int*)message_data, message_data);
+        aether_ask_message_unsent(actor_ptr, message_data);
         return 0;
     }
     *out = message_of(msg_copy, *(int*)message_data, reply_slot);

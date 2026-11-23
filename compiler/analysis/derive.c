@@ -321,6 +321,7 @@ static void derive_add(ASTNode* program, ASTNode* struct_def, ASTNode* fn) {
     if (struct_def->origin_module && !fn->origin_module)
         fn->origin_module = strdup(struct_def->origin_module);
     add_child(program, fn);
+    tc_names_inserted(program, fn, program->child_count - 1);   /* #3835 */
 }
 
 int derive_synthesize_pass(ASTNode* program) {

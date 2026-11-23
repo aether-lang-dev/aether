@@ -949,6 +949,43 @@ TEST(codegen_wide_message_has_natural_alignment) {
     free(buf);
 }
 
+/* #3826: a `for` loop in main that only sends is batched as a `while` loop
+ * is (#3117): one batch opened before it, its sends added to the batch, and
+ * the batch sent after it. One that prints between its sends is not. */
+TEST(codegen_for_loop_sends_are_batched) {
+    char* buf = generate_typechecked(
+        "message Hit { n: int }\n"
+        "actor Sink {\n"
+        "    state total = 0\n"
+        "    receive { Hit(n) -> { total = total + n } }\n"
+        "}\n"
+        "main() {\n"
+        "    s = spawn(Sink())\n"
+        "    for i in 0..100 { s ! Hit { n: i } }\n"
+        "}\n");
+    ASSERT_NOT_NULL(buf);
+    const char* start = strstr(buf, "scheduler_send_batch_start();");
+    ASSERT_NOT_NULL(start);
+    const char* add = strstr(start, "scheduler_send_batch_add(");
+    ASSERT_NOT_NULL(add);
+    ASSERT_NOT_NULL(strstr(add, "scheduler_send_batch_flush();"));
+    free(buf);
+
+    buf = generate_typechecked(
+        "message Hit { n: int }\n"
+        "actor Sink {\n"
+        "    state total = 0\n"
+        "    receive { Hit(n) -> { total = total + n } }\n"
+        "}\n"
+        "main() {\n"
+        "    s = spawn(Sink())\n"
+        "    for i in 0..100 { s ! Hit { n: i }\n println(i) }\n"
+        "}\n");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "scheduler_send_batch_start();") == NULL);
+    free(buf);
+}
+
 /* Like generate_typechecked, with the --emit-header file as well. */
 static char* generate_with_header(const char* source, char** header_out) {
     int count;
@@ -1029,8 +1066,10 @@ TEST(codegen_emit_header_message_matches_generated_struct) {
     ASSERT_NOT_NULL(in_h);
     ASSERT_STREQ(in_c, in_h);
     /* Packed by alignment (#3773): the 4-byte fields after the id, then the
-     * 8-byte ones, a double and pointers alike, in declaration order. */
-    ASSERT_STREQ("\nint _message_id;\nint a;\nint b;\nint c;\nconst char* s;\ndouble f;\nvoid* p;\n", in_c);
+     * 8-byte ones, a double and pointers alike, in declaration order. The
+     * marks of the boxes a send made in a `ptr` field follow the id (#3847). */
+    ASSERT_STREQ("\nint _message_id;\nunsigned char _ae_boxed[1];\nint a;\nint b;\nint c;\nconst char* s;\n"
+                 "double f;\nvoid* p;\n", in_c);
 
     /* The lone int of an inline-payload message is intptr_t on both sides. */
     char* bump_c = struct_body_after(buf, "typedef struct Bump {");

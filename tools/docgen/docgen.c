@@ -725,7 +725,25 @@ static int parse_module_ae(const char* filepath, const char* module_name) {
             }
 
             char *nm = NULL, *pr = NULL, *rt = NULL;
-            if (strncmp(t, "extern", 6) == 0 && isspace((unsigned char)t[6])) {
+            /* `@extern("sym") name(params) -> Ret`: the binding is the
+             * Aether name's, documented as an `extern name(...)` is (std.lanes,
+             * and std.string's length and char_at, #3836). */
+            const char* at_extern = NULL;
+            if (strncmp(t, "@extern(", 8) == 0) {
+                const char* close = strchr(t + 8, ')');
+                if (close) {
+                    at_extern = close + 1;
+                    while (*at_extern == ' ' || *at_extern == '\t') at_extern++;
+                }
+            }
+            if (at_extern && is_ident_char((unsigned char)*at_extern)) {
+                const char* src_defstart = line + (at_extern - buf);
+                if (read_callable(src_defstart, &nm, &pr, &rt)) {
+                    extern_ret_add(nm, rt);
+                    record_def(mod, exports, export_count, nm, DEF_EXTERN,
+                               pr, rt, NULL, str_get(&pending_doc));
+                }
+            } else if (strncmp(t, "extern", 6) == 0 && isspace((unsigned char)t[6])) {
                 const char* defstart = t + 6;
                 while (*defstart == ' ' || *defstart == '\t') defstart++;
                 /* resolve against the ORIGINAL source so multi-line param

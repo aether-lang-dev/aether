@@ -126,6 +126,20 @@ typedef struct {
      * too_large is set once a read passes it. */
     size_t max_len;
     int    too_large;
+    /* A read failed because the socket's receive timeout fired: Winsock's
+     * WSAETIMEDOUT, or a would-block on a transport used blocking, which is
+     * how POSIX reports it (#3825, #3846). */
+    int    recv_timed_out;
+    /* Why the last read failed, when one did: HTTP_IO_TIMED_OUT,
+     * HTTP_IO_RESET or HTTP_IO_OTHER (aether_http.c), 0 being OTHER, so a
+     * timeout and a reset are told apart (#3846). */
+    int    recv_failure;
+    /* Why the last write failed, when one did, in the same kinds: a write
+     * is classified as a read is (http_io_failure_kind), so a write that
+     * waited out the socket's send timeout is HTTP_IO_TIMED_OUT on every
+     * platform, Winsock's WSAETIMEDOUT and POSIX's would-block alike, and
+     * is never written again (#3824). */
+    int    send_failure;
     /* The pool a fresh receive buffer is counted against
      * (http_client_pool_rx_buffer_allocs_raw), or NULL. */
     struct HttpClientPool* rx_pool;
@@ -160,6 +174,26 @@ struct HttpUpstreamConnOpaque {
     char pool_key[512];
 };
 
+/* Why a read or a write failed (HttpExchange.recv_failure, send_failure,
+ * #3846). */
+#define HTTP_IO_OTHER       0
+#define HTTP_IO_TIMED_OUT   1
+#define HTTP_IO_WOULD_BLOCK 2
+#define HTTP_IO_RESET       3
+
+/* What the pure-TLS client's recv and send (aether_pure_tls_client_recv,
+ * aether_pure_tls_client_send) return for a read or a write that waited
+ * out the socket's timeout (its socket says so for a write,
+ * tcp_send_timed_out_raw), and recv for a read the peer's reset ended (its
+ * socket says so, tcp_reset_raw); -1 is any other failure. */
+#define HTTP_PT_TIMED_OUT      (-2)
+#define HTTP_PT_RECV_RESET     (-3)
+
+/* Why a read or a write on `t` that returned `n` failed, as one of the
+ * kinds above: by the TLS layer's own answer on a TLS transport, never by
+ * an errno it did not set (#3846). */
+int  http_io_failure_kind(const Transport* t, int n);
+
 #define AE_X_DONE        0
 #define AE_X_WANT_READ   1
 #define AE_X_WANT_WRITE  2
@@ -177,6 +211,10 @@ void http_exchange_init(HttpExchange* x, Transport* t,
 /* Arm the whole-exchange deadline from a request timeout (ns; 0 = none). */
 void http_exchange_set_timeout(HttpExchange* x, int64_t timeout_ns);
 int  http_exchange_send(HttpExchange* x);
+/* Whether a write that ended in `r` (not DONE) on a reused connection may
+ * go again on a fresh one: an idempotent request, or one none of which went
+ * out and whose write did not time out (#3824). */
+int  http_exchange_send_retryable(const HttpExchange* x, int r);
 int  http_exchange_recv(HttpExchange* x);
 
 

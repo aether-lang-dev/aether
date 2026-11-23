@@ -331,6 +331,61 @@ int alias_source_must_copy(CodeGenerator* gen, const char* src_name) {
     return sole_read_repeats(gen->current_function, src_name);
 }
 
+/* Does `n` name `name` as anything but a plain read: a binding of it (a
+ * declaration or an assignment, a pattern's or a closure's parameter, a
+ * catch clause), a write (`+=`), or a read the identifier count does not
+ * see (a call of it, a dotted `name.x`)? */
+static int node_names_otherwise(const ASTNode* n, const char* name) {
+    if (!n->value) return 0;
+    size_t len = strlen(name);
+    if (strncmp(n->value, name, len) != 0) return 0;
+    switch (n->type) {
+        case AST_IDENTIFIER:
+            return n->value[len] == '.';
+        case AST_FUNCTION_CALL:
+            return n->value[len] == '\0' || n->value[len] == '.';
+        case AST_VARIABLE_DECLARATION: case AST_ASSIGNMENT: case AST_COMPOUND_ASSIGNMENT:
+        case AST_PATTERN_VARIABLE: case AST_CLOSURE_PARAM: case AST_CATCH_CLAUSE:
+        case AST_STATE_DECLARATION: case AST_CONST_DECLARATION:
+            return n->value[len] == '\0';
+        default:
+            return 0;
+    }
+}
+
+static int tree_names_otherwise(const ASTNode* n, const char* name) {
+    if (!n) return 0;
+    if (node_names_otherwise(n, name)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (tree_names_otherwise(n->children[i], name)) return 1;
+    return 0;
+}
+
+/* #3827, R5: is `read` the last use of `name` in `body`, exact by
+ * construction? The rule a local's last-use move keeps
+ * (alias_source_must_copy: named once, by a read no loop or closure runs
+ * again), made strict for a binding the body cannot rebind: `read` is that
+ * one identifier; nothing in `body` binds, writes or otherwise names `name`,
+ * so the read is the binding's own; and no `while`, `for`, closure or
+ * `defer` encloses it, so it runs at most once, where it stands. Anything
+ * else answers no, and the caller takes a reference instead (one count
+ * operation too many, never a leak or a double free). */
+int binding_read_is_last_use(ASTNode* body, const char* name, ASTNode* read) {
+    enum { CAP = 512 };
+    ASTNode* path[CAP];
+    if (!body || !name || !read || read->type != AST_IDENTIFIER || !read->value ||
+        strcmp(read->value, name) != 0) return 0;
+    if (count_var_identifier_uses(body, name) != 1 || tree_names_otherwise(body, name)) return 0;
+    int n = path_to_var_read(body, name, path, 0, CAP);
+    if (n <= 0 || path[n - 1] != read) return 0;
+    for (int i = 0; i < n - 1; i++) {
+        int t = path[i]->type;
+        if (t == AST_WHILE_LOOP || t == AST_FOR_LOOP || t == AST_CLOSURE ||
+            t == AST_DEFER_STATEMENT) return 0;
+    }
+    return 1;
+}
+
 /* #2461: taking a string into an owning slot (a local, a struct field, a
  * return value) from an expression that only VIEWS a buffer someone else
  * owns.
@@ -12081,6 +12136,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * header declared a new one, so `i = 5; for (i = 0; i < 3; i++)
              * {}` left `i` at 5. */
             int assign_init = loop_var && for_init->type_inferred;
+            /* #3826: a `for` loop's sends are batched as a `while` loop's
+             * are (#3117), under the same guard: outside an actor, not
+             * inside a loop already batching, and nothing in the loop
+             * (its init, condition, step or body) can wait between two
+             * sends. The guard refuses a `return` and a labeled `break` or
+             * `continue`, so the loop is left only past its end, where the
+             * flush is. Unbatched, `for i in 0..n { a ! M{} }` in main took
+             * the foreign send path for every message: 112-143 ns a message
+             * where the `while` form took 18-23. */
+            int for_batch = contains_send_expression(stmt) && gen->current_actor == NULL &&
+                            !gen->in_main_loop && loop_sends_without_waiting(stmt);
+            if (for_batch) {
+                print_line(gen, "scheduler_send_batch_start();");
+                gen->in_main_loop = 1;
+            }
             int cell_init = !assign_init && loop_var && is_promoted_capture(gen, loop_var);
             /* #2742: the loop's variable is owned as the binding a while-loop
              * rewrite makes, in the same block of its own:
@@ -12250,6 +12320,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * one a C `break` cannot express (#2696). */
             if (for_lbl_idx >= 0 && gen->loop_label_break_used[for_lbl_idx]) {
                 print_line(gen, "__ae_brk_%d: ;", gen->loop_label_id[for_lbl_idx]);
+            }
+            if (for_batch) {
+                print_line(gen, "scheduler_send_batch_flush();");
+                gen->in_main_loop = 0;
             }
             if (own_block) {
                 /* #2737: the loop's reference to its cell; #2742: what the
@@ -12681,7 +12755,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "AetherSlice _match_subj = ");
                     generate_expression(gen, match_expr);
                     fprintf(gen->output, ";\n");
-                    print_line(gen, "int %s = (int)aether_slice_len(_match_subj);", len_name);
+                    print_line(gen, "int64_t %s = aether_slice_len(_match_subj);   /* #3843: no cut to int */", len_name);
                     ASTNode* subj = create_ast_node(AST_IDENTIFIER, "_match_subj", match_expr->line,
                                                     match_expr->column);
                     if (subj) {
@@ -14239,15 +14313,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
                         /* Send reply back to the waiting asker via the
                          * scheduler reply slot. #2528: a reply that owns
-                         * strings or closures names its release, for the
-                         * case nobody takes it. */
-                        int reply_owns = 0;
-                        for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                            if (f->type_kind == TYPE_STRING ||
-                                (f->type_kind == TYPE_FUNCTION && f->c_type &&
-                                 strcmp(f->c_type, "_AeClosure") == 0)) { reply_owns = 1; break; }
-                        }
-                        if (reply_owns) {
+                         * anything names its release, for the case nobody
+                         * takes it; one rule with the asker's
+                         * (message_owns_fields), a box the reply made in a
+                         * `ptr` field among them (#3847). */
+                        if (message_owns_fields(gen, reply_expr->value)) {
                             fprintf(gen->output, "scheduler_reply_owned((ActorBase*)self, &_reply, sizeof(%s), (void (*)(void*))_aether_msg_release_%s); }\n",
                                     reply_expr->value, reply_expr->value);
                         } else {
