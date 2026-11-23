@@ -13,7 +13,7 @@
  * so C that calls the exported names and an Aether program that calls the
  * inline ones read a string the same way: null is 0 long and has no bytes,
  * an index out of range reads 0, a byte is unsigned, and a length past
- * INT_MAX panics (a cold call, aether_string_int_overflow).
+ * INT_MAX panics (a cold call of aether_panic).
  *
  * Injected into the translation unit of every program that imports
  * std.string, so it declares nothing that is not prefixed (the lesson of
@@ -94,18 +94,26 @@ static inline size_t aether_string_byte_count(const void* s) {
     return strlen((const char*)s);
 }
 
-/* A length or position past INT_MAX, which no int the string API returns
- * can hold (#3523): panics. Out of line and cold, so the inline reads
- * below stay small. Declared int so a caller can return its call. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((cold, noinline))
-#endif
-int aether_string_int_overflow(void);
+/* The runtime's panic (runtime/actors/aether_panic.h), declared here as it
+ * is there. A length past INT_MAX, which no int the string API returns can
+ * hold, panics with it (#3523).
+ *
+ * This header is compiled into every program and library that imports
+ * std.string, so what it calls is part of what such a library needs from
+ * the runtime it loads on. It calls nothing newer than the runtime ABI it
+ * is built against already exports: a library is linked to bind every
+ * symbol at load (-z now), and one that named a function an older shared
+ * runtime lacks was refused by the loader before its preflight could say
+ * which runtime it wants (abi_matrix, docs/abi-policy.md). */
+void aether_panic(const char* reason);
 
 /* string.length: the length in bytes. */
 static inline int aether_string_length_inline(const void* s) {
     size_t n = aether_string_byte_count(s);
-    if (n > (size_t)INT_MAX) return aether_string_int_overflow();
+    if (n > (size_t)INT_MAX) {
+        aether_panic("string: a length or position past 2 GiB does not fit an int");
+        return 0;
+    }
     return (int)n;
 }
 

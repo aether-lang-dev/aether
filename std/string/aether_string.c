@@ -36,8 +36,13 @@ static inline size_t str_len(const void* s) {
 // INT_MAX has no right int answer: cast, a string over 2 GiB read as a
 // negative length, and a loop over it did nothing and said nothing. Cut to
 // INT_MAX it would be a wrong length or a wrong position just as quietly, so
-// it panics.
-int aether_string_int_overflow(void) {
+// it panics. This file's own; the inline reads programs compile
+// (aether_string_inline.h) panic through aether_panic itself, so a library
+// built from them names no runtime function an older runtime lacks.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((cold, noinline))
+#endif
+static int aether_string_int_overflow(void) {
     aether_panic("string: a length or position past 2 GiB does not fit an int");
     return 0;
 }
