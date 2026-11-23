@@ -14114,7 +14114,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 inner->type == AST_UNARY_EXPRESSION ||
                                 inner->type == AST_SEND_ASK ||
                                 (inner->type == AST_BINARY_EXPRESSION &&
-                                 !(inner->value && strcmp(inner->value, "=") == 0)));
+                                 !(inner->value && strcmp(inner->value, "=") == 0)) ||
+                                /* #3821: a call whose slice is held in a
+                                 * statement temporary is a comma expression
+                                 * ending in that temporary, which clang
+                                 * reports as an unused value; -Werror builds
+                                 * failed on 0.937. */
+                                (inner->type == AST_FUNCTION_CALL &&
+                                 annotation_has_marker(inner->annotation, "slice_stmt_temp")));
                             if (discards_value) fprintf(gen->output, "(void)(");
                             generate_expression(gen, inner);
                             if (discards_value) fprintf(gen->output, ")");
