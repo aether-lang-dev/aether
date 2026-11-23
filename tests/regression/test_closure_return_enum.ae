@@ -13,7 +13,7 @@ extern exit(code: int)
 enum Color { Red, Green, Blue }
 
 main() {
-    f = |x: int| {
+    f = | x: int | {
         if x > 2 { return Color.Blue }
         return Color.Red
     }
