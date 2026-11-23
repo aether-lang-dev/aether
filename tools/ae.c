@@ -4419,7 +4419,17 @@ static const char* bracket_depth_flags(const char* cc) {
  * source, for generated C and, through the Makefile, the runtime's own C.
  * It cost nothing measurable on bench-core, where steering every float
  * comparison through the quiet builtins cost 2x on a float-min chain. The
- * parameter is GCC 12's; a GCC without it predates the optimiser it fixes. */
+ * parameter is GCC 12's; a GCC without it predates the optimiser it fixes.
+ *
+ * It goes on every GCC compile ae makes, -O0 included, where it changes
+ * nothing: the -O level ae picks is not the only one, as `[build] cflags`,
+ * AETHER_CFLAGS_EXTRA and the $AE_CC / $CC command can each say -O2 on a
+ * --quick or `ae run` build. `ae cflags` prints it too, for C built by hand
+ * from generated C. The backward threader's path oracle records relations
+ * along a path whatever the limit says, but it chains none (only the
+ * dominator oracle does), and GCC folds a single relation only with NaN
+ * ruled out: the reduction and a variant whose comparisons meet only along a
+ * threaded path answer right at -O3 with the limit (gcc_relation_limit). */
 #define AETHER_GCC_RELATION_CFLAGS " --param relation-block-limit=0"
 static const char* const k_gcc_flags_none = "";
 static const char* const k_gcc_flags_inline = AETHER_GCC_INLINE_CFLAGS;
@@ -4454,14 +4464,20 @@ static int gcc_tuning_support(const char* cc) {
     return answer;
 }
 
+/* The relation limit (#3848) when compiler `cc` is a GCC that takes it,
+ * else "". */
+static const char* gcc_relation_flags(const char* cc) {
+    if (!cc || !*cc) return k_gcc_flags_none;
+    return (gcc_tuning_support(cc) & 2) ? k_gcc_flags_relation : k_gcc_flags_none;
+}
+
 /* The GCC flags a compile of generated C takes: the inlining budget (#3779)
  * on an optimising build, unless --coverage or --size, and unless the user
- * names a budget; the relation limit (#3848) on every build GCC optimises,
+ * names a budget; the relation limit (#3848) on every build, -O0 included,
  * whatever the user names, since without it the program's float comparisons
- * can answer wrong. */
+ * can answer wrong at any -O level the user's own flags ask for. */
 static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
-    bool optimised = optimize || g_size;
-    if (!optimised || !cc || !*cc) return k_gcc_flags_none;
+    if (!cc || !*cc) return k_gcc_flags_none;
     int support = gcc_tuning_support(cc);
     /* A budget the user names wins, wherever it sits. In the cflags it would
      * win anyway, coming after this one; in the $AE_CC / $CC command it sits
@@ -5738,7 +5754,9 @@ static const char* vendored_sqlite_link(const char* cc, const char* ae_link,
 #else
     const char* pic = " -fPIC";
 #endif
-    char* flags = ae_strdup_printf("-O2%s%s%s", pic, user_cflags[0] ? " " : "", user_cflags);
+    /* The relation limit too (#3848): SQLite's C compares doubles. */
+    char* flags = ae_strdup_printf("-O2%s%s%s%s", pic, gcc_relation_flags(cc),
+                                   user_cflags[0] ? " " : "", user_cflags);
     if (!flags) {
         fprintf(stderr, "Error: out of memory building the contrib.sqlite compile command.\n");
         return NULL;
@@ -14739,6 +14757,15 @@ static int cmd_cflags(int argc, char** argv) {
         if (find_gcc_windows(false)) fputs(bracket_depth_flags(s_gcc_cmd), stdout);
 #else
         fputs(bracket_depth_flags(posix_driven_cc()), stdout);
+#endif
+        /* #3848: GCC's float relations off, as on every `ae` compile, for C
+         * built by hand from generated C (aeb, --emit=csrc): without it a
+         * float comparison beside a NaN can answer wrong from -O1 up. When
+         * the driven compiler is a GCC that takes it. */
+#if defined(_WIN32)
+        if (find_gcc_windows(false)) fputs(gcc_relation_flags(s_gcc_cmd), stdout);
+#else
+        fputs(gcc_relation_flags(posix_driven_cc()), stdout);
 #endif
     }
 

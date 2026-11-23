@@ -361,6 +361,36 @@ At 100 the three scenes step as fast as with aephysics' own parameters, in
 less code and build time than any larger budget. Raising
 `early-inlining-insns` as well measured within the noise, so `ae` leaves it.
 
+## Float comparisons and GCC's relations
+
+GCC 12 and later record the false edge of a float comparison `a > n` as the
+relation `a <= n`, which a NaN breaks, and chain such relations: from `a > n`
+and `n > b` both false, with `n` a NaN, GCC folds `a > b` to false for
+`a = 1`, `b = 0` (#3848). From `-O1` up a program's float comparisons could
+answer wrong; std.lanes' `pick_max` returned the min.
+
+`--param relation-block-limit=0` records no relation in any block, so there is
+nothing to chain. `ae` gives it to every GCC compile it makes: the program at
+every `-O` level, `-O0` included (where it changes nothing, but a project's
+`[build] cflags`, `AETHER_CFLAGS_EXTRA` or the `$AE_CC` / `$CC` command can say
+`-O2` on a `--quick` build or `ae run`), a runtime compiled from source, and
+the vendored SQLite. The Makefile builds libaether.a with it. `ae cflags`
+prints it when the compiler `ae` drives is a GCC that takes it, so C built by
+hand from generated C gets it too:
+
+```bash
+aetherc app.ae app.c
+gcc -O2 app.c $(ae cflags) -o app   # --param relation-block-limit=0 arrives with the -I flags
+```
+
+It measured within noise on bench-core. The backward jump threader records
+relations along a path whatever the limit says, but it does not chain them,
+and GCC folds a single relation only once NaN is ruled out: with the limit,
+the reduction and a variant whose comparisons meet only along a threaded path
+answer right at `-O3` (tests/integration/gcc_relation_limit). Clang folds no
+such chain, and a GCC without the parameter (before 12) predates the
+optimiser that does.
+
 ## Binary Hardening
 
 `ae build` asks the C toolchain for the mitigations whose cost is a rounding
