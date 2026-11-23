@@ -1,0 +1,38 @@
+// Regression (#3843): a slice's `.len` past 2^31 elements panics, where it
+// wrapped.
+//
+// `.len` is an int (#1286). Emitted as `(int)aether_slice_len(xs)`, the
+// length of a view of more than 2^31 elements came out negative, and a loop
+// `for i in 0..xs.len` ran zero times, or a wrong number, with no warning.
+// It is now checked, as string.length is (#3523). `for x in xs` counts with
+// the 64-bit length itself (test_for_in_wide_count checks its C).
+//
+// The view is over 16 real bytes and is never read: only its length is
+// asked for.
+
+extern malloc(n: int) -> ptr
+extern exit(code: int)
+
+main() {
+    p = malloc(16)
+    long n = 2147483653
+    v = (p as byte[])[0..n]
+    caught = ""
+    try {
+        k = v.len
+        println("FAIL: .len of a view past 2^31 read as ${k}")
+        exit(1)
+    } catch e {
+        caught = e
+    }
+    if caught == "" {
+        println("FAIL: .len of a view past 2^31 did not panic")
+        exit(1)
+    }
+    small = (p as byte[])[0..16]
+    if small.len != 16 {
+        println("FAIL: a small view's .len is ${small.len}")
+        exit(1)
+    }
+    println("PASS: .len past 2^31 panics: ${caught}")
+}

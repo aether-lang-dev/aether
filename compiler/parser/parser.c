@@ -4440,7 +4440,11 @@ ASTNode* parse_for_loop(Parser* parser) {
             ASTNode* n_decl = create_ast_node(AST_VARIABLE_DECLARATION, n_name, ln, col);
             n_decl->node_type = create_type(TYPE_UNKNOWN);
             n_decl->type_inferred = 1;
+            /* #3843: the loop's own length and index are longs, so it covers
+             * every element of a slice past 2^31 (`len64`: the 64-bit length,
+             * which a user's `.len`, an int, is not). */
             ASTNode* len = create_ast_node(AST_MEMBER_ACCESS, "len", ln, col);
+            len->annotation = annotation_add_marker(len->annotation, "len64");
             add_child(len, FI_XS());
             add_child(n_decl, len);
             add_child(wrap, n_decl);
@@ -4448,7 +4452,7 @@ ASTNode* parse_for_loop(Parser* parser) {
             ASTNode* init = create_ast_node(AST_VARIABLE_DECLARATION, idx_name, ln, col);
             init->node_type = create_type(TYPE_UNKNOWN);
             ASTNode* zero = create_ast_node(AST_LITERAL, "0", ln, col);
-            zero->node_type = create_type(TYPE_INT);
+            zero->node_type = create_type(TYPE_INT64);
             add_child(init, zero);
 
             Token lt_op = { .type = TOKEN_LESS, .value = "<", .line = ln, .column = col };

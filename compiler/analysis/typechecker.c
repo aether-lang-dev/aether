@@ -4416,7 +4416,8 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
      * compiler cannot know). */
     if (expr->value && strcmp(expr->value, "len") == 0 &&
         obj && obj->kind == TYPE_ARRAY)
-        return create_type(TYPE_INT);
+        return create_type(annotation_has_marker(expr->annotation, "len64") ? TYPE_INT64
+                                                                            : TYPE_INT);
     /* #2146: `v.x` / `.y` / `.z` / `.w` on a lane value is that
      * lane's scalar: an f32 from an f32x4, a float from an f64x2,
      * an int from a mask. `.z` on an f64x2 is a type error (it has
@@ -18608,10 +18609,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * call as an undefined variable. */
                 Type* lt = infer_type(expr->children[0], table);
                 if (lt && lt->kind == TYPE_ARRAY && strcmp(expr->value, "len") == 0) {
-                    /* #1286 `s.len` */
+                    /* #1286 `s.len`; a `for x in xs` loop's own length is a
+                     * long (#3843, the parser's `len64`). */
                     free_type(lt);
                     typecheck_expression(expr->children[0], table);
-                    set_node_type(expr, create_type(TYPE_INT));
+                    set_node_type(expr, create_type(annotation_has_marker(expr->annotation, "len64")
+                                                        ? TYPE_INT64 : TYPE_INT));
                     return 1;
                 }
                 if (lt && lt->kind == TYPE_ARRAY) {

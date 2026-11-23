@@ -10658,7 +10658,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (expr->value && strcmp(expr->value, "len") == 0 &&
                     child->node_type && child->node_type->kind == TYPE_ARRAY) {
                     if (type_is_slice(child->node_type)) {
-                        fprintf(gen->output, "((int)aether_slice_len(");
+                        /* #3843: a `for x in xs` loop's own length counts in
+                         * 64 bits (the parser marks it `len64`); a user's
+                         * `.len` is an int, checked, not wrapped. */
+                        int wide = annotation_has_marker(expr->annotation, "len64");
+                        fprintf(gen->output, wide ? "(aether_slice_len(" : "(aether_slice_len_int(");
                         generate_expression(gen, child);
                         fprintf(gen->output, "))");
                     } else {
