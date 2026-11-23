@@ -8,22 +8,30 @@
 # whether it targets that runtime and, when not, compiles the runtime from
 # source with it, as a --trace build does (#1333).
 #
-# What this test checks is the decision, which `ae build -v` states before
-# anything is compiled. The steps that end in the source fallback build
-# with a stand-in compiler that answers the C runtime probes (the files
-# named ae_crt_*) with the real one and fails every other compile at once,
-# so they stop right after the decision instead of compiling the whole
-# runtime: what the fallback builds is runtime_cache's to check, and step 3
-# builds and runs one with a real compiler on another runtime.
+# What this test checks is mostly the decision, which `ae build -v` states
+# before anything is compiled. Steps 2 and 2b end in the source fallback
+# and build with a stand-in compiler that answers the C runtime probes (the
+# files named ae_crt_*) with the real one and fails every other compile at
+# once, so they stop right after the decision instead of compiling the
+# whole runtime. One build goes through the fallback end to end, compiling
+# the runtime and running the program: step 2c on Windows (msvcrt archives,
+# -mcrtdll=ucrt, --quick; about 9 s on a 24-thread Windows box), and step 3
+# wherever zig is found. On a platform with neither (Linux with no zig) the
+# fallback build itself is runtime_cache's (--trace) to check.
 #
-#   1. make wrote the record beside the tree's archive.
+#   1. make wrote the record beside the tree's archive, and the record is a
+#      product of the archive: relinking ae does not rewrite it. It names
+#      the compiler as it was when the archive was built, so a compiler
+#      upgraded since (another mingw-w64 with it) is asked, not trusted.
 #   2. A compiler that says it targets another runtime (the real one, given
 #      the other runtime's macro on the probes only) takes the source
 #      fallback, -v says so, and the program's key folds the runtime's; the
 #      compiler as it is links the archive and the program runs.
 #   2b. On Windows, an archive recorded for another mingw-w64 major takes
 #      the source fallback too.
-#   2c. cflags that change the C runtime (-mcrtdll=ucrt) are asked about.
+#   2c. cflags that change the C runtime (-mcrtdll=ucrt) are asked about,
+#      and the program, a try and catch on the runtime compiled from source
+#      for UCRT, builds and runs.
 #   2d. The record names the compiler that built the archive (`cc <id>`, as
 #      `ae cache ccid` prints it), and a build by that compiler with no
 #      cflags, on a cold cache, links the archive without asking: no
@@ -34,6 +42,9 @@
 #      the probe's control is compiled with the same cflags as the probe,
 #      and the probe declares what it defines. The build links the archive,
 #      so its key does not fold the runtime's sources.
+#   2f. A compiler that cannot be asked (its probes fail, controls too)
+#      links the archive, and the decision is remembered: a warm build does
+#      not ask again from its cache key.
 #   3. With zig (on PATH or under build/scratch/.zig), AE_CC="zig cc" builds
 #      and runs a program that panics and catches it.
 
@@ -79,6 +90,26 @@ else
         fail "on Windows the archive's C runtime is '$crt', not msvcrt or ucrt"
     fi
     done_what="the record says '${crt:-none}'"
+fi
+
+# 1b. Relinking ae leaves the record as it is: make, told ae is new (-W,
+# which changes no file), does not run the record's recipe, whose last line
+# says "C runtime of libaether.a". First made up to date as it is (the
+# flags stamp's recipe runs every time and changes nothing when the flags
+# are the same).
+exe=""
+[ -f "$ROOT/build/ae.exe" ] && exe=".exe"
+MAKE_CMD="$(command -v gmake 2>/dev/null || command -v make 2>/dev/null)"
+if [ -n "$MAKE_CMD" ] && [ -f "$rec" ] &&
+   (cd "$ROOT" && "$MAKE_CMD" -s build/libaether.crt) > "$TMP/make0.log" 2>&1; then
+    (cd "$ROOT" && "$MAKE_CMD" -s -W "build/ae$exe" build/libaether.crt) > "$TMP/make1.log" 2>&1
+    if grep -q "C runtime of libaether.a" "$TMP/make1.log"; then
+        fail "a relink of ae rewrites build/libaether.crt, the record of an archive that is not rebuilt"
+    else
+        done_what="$done_what; relinking ae leaves it as it is"
+    fi
+else
+    echo "  [SKIP] $NAME: step 1b: no make, or build/libaether.crt could not be brought up to date"
 fi
 
 printf 'main() {\n    println("crt ok")\n}\n' > "$TMP/hello.ae"
@@ -158,15 +189,19 @@ fi
 # 2c. The project's own cflags can change the C runtime: with
 # `-mcrtdll=ucrt`, MinGW GCC builds against UCRT. The question is asked with
 # them, so an msvcrt archive is not linked into a UCRT program.
-if [ "$crt" = msvcrt ] && [ -n "$REAL_CC" ]; then
-    ASIS="$(stand_in asis "")"
+if [ "$crt" = msvcrt ]; then
     mkdir -p "$TMP/mcrt"
-    cp "$TMP/hello.ae" "$TMP/mcrt/"
+    printf 'main() {\n    try {\n        panic("boom")\n    } catch e {\n        println("caught ${e}")\n    }\n}\n' > "$TMP/mcrt/catch.ae"
     printf '[build]\ncflags = "-mcrtdll=ucrt"\n' > "$TMP/mcrt/aether.toml"
-    (cd "$TMP/mcrt" && CC="$ASIS" "$AE" build -v hello.ae -o mcrt) > "$TMP/mcrt.log" 2>&1
+    if ! (cd "$TMP/mcrt" && "$AE" build -v --quick catch.ae -o mcrt) > "$TMP/mcrt.log" 2>&1; then
+        grep -i "error" "$TMP/mcrt.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        fail "the build with cflags -mcrtdll=ucrt, on the runtime compiled from source, failed"
+    elif [ "$("$TMP/mcrt/mcrt" | tr -d '\r')" != "caught boom" ]; then
+        fail "the program built with -mcrtdll=ucrt did not print 'caught boom'"
+    fi
     grep -q "^\[toolchain\] libaether.a is msvcrt[^;]*; .* targets ucrt[^:]*: the runtime is compiled from source" "$TMP/mcrt.log" ||
         fail "with cflags -mcrtdll=ucrt, -v does not say the runtime was compiled from source for ucrt: $(decided mcrt.log)"
-    done_what="$done_what; cflags naming another C runtime (-mcrtdll=ucrt) are asked about too"
+    done_what="$done_what; cflags naming another C runtime (-mcrtdll=ucrt) are asked about, and a try and catch builds and runs on the runtime compiled from source"
 fi
 
 # 2d. The compiler that built the archive, in the record, and not asked.
@@ -174,7 +209,9 @@ built_by="$(sed -n 's/^cc \([0-9a-f]\{16\}\)$/\1/p' "$rec" 2>/dev/null | tr -d '
 if [ -n "$crt" ]; then
     mine="$("$AE" cache ccid 2>/dev/null | tr -d '\r')"
     if [ -z "$built_by" ]; then
-        fail "build/libaether.crt does not name the compiler that built the archive (no 'cc <id>' line)"
+        # make leaves the line out when the compiler with no flags names
+        # another runtime than with the build's CFLAGS, or ae could not run.
+        echo "  [SKIP] $NAME: step 2d: build/libaether.crt names no compiler (no 'cc <id>' line)"
     elif [ "$mine" != "$built_by" ]; then
         echo "  [SKIP] $NAME: step 2d: the C compiler here ($mine) is not the one that built the archive ($built_by)"
     elif ! (cd "$TMP" && AETHER_CACHE_DIR="$TMP/cache_own" "$AE" build -v hello.ae -o own) > "$TMP/own.log" 2>&1; then
@@ -212,6 +249,36 @@ if [ -n "$crt" ] && [ -n "$REAL_CC" ]; then
         fi
     else
         echo "  [SKIP] $NAME: step 2e: $REAL_CC does not take -Wmissing-variable-declarations"
+    fi
+fi
+
+# 2f. A compiler that fails the C runtime probes, and their controls, and
+# compiles anything else as the real one does: it cannot be asked, so the
+# archive is linked; the next build, a cache hit, does not ask again.
+if [ -n "$crt" ] && [ -n "$REAL_CC" ]; then
+    mkdir -p "$TMP/mute"
+    if [ "$WIN" = 1 ]; then
+        printf '@echo off\r\necho %%* | findstr /c:"ae_crt_" >nul\r\nif not errorlevel 1 exit /b 1\r\n"%s" %%*\r\n' \
+            "$(cygpath -w "$REAL_CC")" > "$TMP/mute/gcc.cmd"
+        MUTE="$(cygpath -m "$TMP/mute/gcc.cmd")"
+    else
+        printf '#!/bin/sh\ncase "$*" in *ae_crt_*) exit 1 ;; esac\nexec "%s" "$@"\n' "$REAL_CC" > "$TMP/mute/gcc"
+        chmod +x "$TMP/mute/gcc"
+        MUTE="$TMP/mute/gcc"
+    fi
+    if ! (cd "$TMP" && CC="$MUTE" AETHER_CACHE_DIR="$TMP/cache_mute" "$AE" build -v hello.ae -o mute) > "$TMP/mute1.log" 2>&1; then
+        grep -i "error" "$TMP/mute1.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        fail "the build with a compiler that cannot be asked failed"
+    elif ! grep -q "could not be asked which C runtime it targets: the archive is linked" "$TMP/mute1.log"; then
+        fail "-v does not say the compiler could not be asked: $(decided mute1.log)"
+    elif ! (cd "$TMP" && CC="$MUTE" AETHER_CACHE_DIR="$TMP/cache_mute" "$AE" build -v hello.ae -o mute) > "$TMP/mute2.log" 2>&1; then
+        fail "the second build with a compiler that cannot be asked failed"
+    elif ! grep -q '^\[cache\] hit: ' "$TMP/mute2.log"; then
+        fail "the second build with a compiler that cannot be asked was not a cache hit"
+    elif grep -q "ae_crt_probe" "$TMP/mute2.log"; then
+        fail "a cache hit asked again which C runtime a compiler that cannot be asked targets: $(grep -c ae_crt_probe "$TMP/mute2.log") probe compiles"
+    else
+        done_what="$done_what; a compiler that cannot be asked links the archive and is not asked again"
     fi
 fi
 

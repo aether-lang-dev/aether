@@ -7,4 +7,6 @@
   one compiler start less on every cold cache, 8 commands to 7 for
   `ae build -v benchmarks/core/compile_heavy.ae`, 491 to 465 ms on Windows
   (10 runs each). Any other compiler, any cflags, and a record without the
-  line are asked as before.
+  line are asked as before. The record is written with the archive, not
+  when `ae` relinks, so a compiler upgraded since the archive was built is
+  asked, not trusted.

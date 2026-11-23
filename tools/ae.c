@@ -4074,10 +4074,14 @@ static void archive_crt_check(const char* cc) {
          * so of the remembered answer too. */
         char* flags = user[0] ? ae_strdup_printf(" %s", user) : ae_strdup_printf("%s", "");
         int told = text && flags ? cc_probe_takes(cc, flags, "", "ae_crt_probe", text) : -1;
-        /* For the next build's cache key (ae_runtime_from_source). A
-         * compiler that could not be asked is asked again next time, as
-         * cc_probe_takes remembers no such answer, so neither is this. */
-        if (name[0] && (told >= 0 || !header)) cache_crt_decision_put(told == 0);
+        /* For the next build's cache key (ae_runtime_from_source), whatever
+         * the answer: a compiler that could not be asked links the archive,
+         * and that is the decision this build made. Left out, every warm hit
+         * had its key find the compiler and ask it again, the probe and its
+         * control in both forms, four compiler starts. The build itself
+         * still asks it (cc_probe_takes remembers no such answer), and what
+         * it is told then replaces what was remembered. */
+        if (name[0]) cache_crt_decision_put(told == 0);
         if (told == 0) {
             matches = 0;
             if (tc.verbose) {
@@ -5737,7 +5741,13 @@ static int ae_archive_has_symbol_index(const char* path) {
                 unsigned long long left = size;
                 char name[40] = "";
                 if (memcmp(hdr, "#1/", 3) == 0) {
-                    unsigned long long nlen = strtoull((const char*)hdr + 3, NULL, 10);
+                    /* The length is the rest of the 16-byte name field,
+                     * read from a terminated copy of it: the header is not
+                     * a string, and its last field may be digits too. */
+                    char lenf[14];
+                    memcpy(lenf, hdr + 3, 13);
+                    lenf[13] = '\0';
+                    unsigned long long nlen = strtoull(lenf, NULL, 10);
                     if (nlen < sizeof(name) && nlen <= size) {
                         memcpy(name, d, (size_t)nlen);
                         name[nlen] = '\0';

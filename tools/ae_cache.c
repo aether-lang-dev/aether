@@ -1746,15 +1746,24 @@ int cache_crt_decision_get(void) {
     return c == '1' ? 1 : c == '0' ? 0 : -1;
 }
 
+/* The build's decision replaces one remembered before, when they differ: a
+ * compiler that could not be asked once and answers now is keyed by its
+ * answer from the next build on. */
 void cache_crt_decision_put(int from_source) {
     char path[1200], tmp[1300];
     if (!crt_decision_path(path, sizeof(path))) return;
+    if (cache_crt_decision_get() == (from_source ? 1 : 0)) return;
     snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
     FILE* f = fopen(tmp, "w");
     if (!f) return;
     int ok = fputc(from_source ? '1' : '0', f) != EOF;
     if (fclose(f) != 0) ok = 0;
-    if (!ok || cache_publish(tmp, path) != 0) remove(tmp);
+#ifdef _WIN32
+    if (ok) ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    if (ok) ok = rename(tmp, path) == 0;
+#endif
+    if (!ok) remove(tmp);
 }
 
 /* "<path> <size> <mtime ns>" of the file `name` in the directory the program
@@ -1937,10 +1946,16 @@ unsigned long long compute_cache_key(const char* ae_file,
      * (ccid, the salt, the -O level), so they are left out of it here,
      * where the build's compile line is not known. */
     if (tc.dev_mode && tc.src_root[0] && ae_runtime_from_source()) {
-        /* No source list: it is read only once the compile line is made,
-         * after this key, and the walk sees every file it can name. */
+        /* The source list is read only once the compile line is made, after
+         * this key, so the file it comes from (build/MANIFEST, which `make
+         * stdlib` writes) is folded instead: the walk sees every file the
+         * list can name, but not which of them it names (make ci-coop lists
+         * the cooperative scheduler in place of the multicore one). */
         unsigned long long rt = cache_runtime_key("", "", "");
-        if (rt) key_append(&key, ":rt=%016llx", rt);
+        char* manifest = str_join4(tc.root, strlen(tc.root), "/build/MANIFEST", "", "");
+        unsigned long long mh = manifest ? file_hash(manifest) : 0;
+        free(manifest);
+        if (rt) key_append(&key, ":rt=%016llx:manifest=%016llx", rt, mh);
         else complete = 0;
     } else if (tc.dev_mode && tc.src_root[0]) {
         static const char* hdr_dirs[] = { "runtime", "std" };

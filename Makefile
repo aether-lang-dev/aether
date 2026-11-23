@@ -2416,7 +2416,14 @@ $(BUILD_DIR)/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(
 # when the compiler given no flags at all, as ae asks it, names the same
 # runtime: CFLAGS such as -mcrtdll=ucrt change it. ccache runs the compiler
 # it names, and ae runs that compiler, so the identity is the compiler's.
-$(BUILD_DIR)/libaether.crt: runtime/aether_crt_id.h $(BUILD_FLAGS_STAMP) $(BUILD_DIR)/ae$(EXE_EXT) | $(BUILD_DIR)
+#
+# The record is a product of the archive: written when libaether.a is, and
+# not when ae relinks (ae only has to exist, so it is order-only). Asked
+# again on a relink, it named the compiler as it was then: after an upgrade
+# of gcc and mingw-w64 (15 to 16) that left the archive as it was, the record
+# said 16 and the new compiler's identity, which then skipped the probe and
+# linked an archive built against 15.
+$(BUILD_DIR)/libaether.crt: runtime/aether_crt_id.h $(BUILD_FLAGS_STAMP) $(BUILD_DIR)/libaether.a | $(BUILD_DIR) $(BUILD_DIR)/ae$(EXE_EXT)
 	@probe='#include "runtime/aether_crt_id.h"\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n#ifdef AETHER_CRT_MINGW_MAJOR\nAETHER_CRT_MINGW AETHER_CRT_MINGW_MAJOR\n#endif\n'; \
 	  pp=$$(printf "$$probe" | $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -E -P -x c - 2>/dev/null | tr -d '\r'); \
 	  crt=$$(printf '%s\n' "$$pp" | sed -n 's/^AETHER_CRT_RECORD //p'); \
