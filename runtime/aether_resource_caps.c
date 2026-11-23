@@ -61,9 +61,9 @@
  * into it (caps_fold_slots): a cap set later sees the bytes already in use.
  *
  * A slot has one writer (#3829): a thread that counts owns one of the first
- * CAPS_USE_SLOTS - 1 until it ends, when it gives it back, its count folded
- * first (caps_slot_give_back); a thread that finds all of them held shares
- * the last. An owned
+ * CAPS_USE_SLOTS - 1 until it ends, when it gives it back with its count
+ * still in it, for the next thread to count on from (caps_slot_give_back);
+ * a thread that finds all of them held shares the last. An owned
  * slot is counted with a plain load and store, not a locked add: the two
  * locked adds were 6 ns of the 30 a malloc and free of 40 bytes took.
  * Nothing else writes an owned slot: a fold does not empty it,
@@ -188,12 +188,15 @@ static void caps_fold_lock(void) {
 /* A thread gives its owned slot back when it ends (#3829). Slots were never
  * given back: once 63 threads had ever counted, every later one shared the
  * last slot through a locked add, so a thread per connection, or a worker
- * pool made again and again, fought over one line. The slot's count is
- * folded into g_mem.exact first, under g_fold_lock as every fold is, so it
- * holds nothing past its folded part and none of its count is lost; then
- * it is published free, with release, for the next thread's acquire. What
- * this thread still counts after (a later exit hook's free) goes to the
- * shared slot. The hook is the thread's execution state's
+ * pool made again and again, fought over one line. The slot keeps its
+ * count: every total and every fold sums it, so nothing is lost, and the
+ * next thread to take it counts on from it. It is published free with
+ * release, for that thread's acquire, which so reads this one's last
+ * count; the slot still has one writer at a time. No lock: a give-back
+ * under g_fold_lock, which is not fair, waited for as long as another
+ * thread set and lifted caps, and a thread could not end. What this thread
+ * still counts after (a later exit hook's free) goes to the shared slot.
+ * The hook is the thread's execution state's
  * (aether_context_local): its release runs as the thread ends, from the
  * thread-exit hook the unwind journal keeps (aether_unwind.c), or from a
  * scheduler thread's own cleanup. */
@@ -202,14 +205,6 @@ static void caps_slot_give_back(void* block) {
     t_use_slot = CAPS_SHARED_SLOT + 1;
     if (s == 0 || s - 1 >= CAPS_SHARED_SLOT) return;
     unsigned i = s - 1;
-    caps_fold_lock();
-    uint64_t now = (uint64_t)atomic_load_explicit(&g_use_slots[i].bytes, memory_order_relaxed);
-    uint64_t done = (uint64_t)atomic_load_explicit(&g_use_slots[i].folded, memory_order_relaxed);
-    /* Not held at zero, as a fold of every slot is: the other slots may
-     * hold what this one's frees count down. */
-    atomic_fetch_add_explicit(&g_mem.exact, (int64_t)(now - done), memory_order_relaxed);
-    atomic_store_explicit(&g_use_slots[i].folded, (int64_t)now, memory_order_relaxed);
-    atomic_flag_clear_explicit(&g_fold_lock, memory_order_release);
     atomic_fetch_or_explicit(&g_use_free, (uint64_t)1 << i, memory_order_release);
 }
 
@@ -427,6 +422,11 @@ int aether_caps_thread_owns_slot(void) {
     caps_use_add(0);   /* takes this thread's slot, as a first count does */
     return t_use_slot - 1 != CAPS_SHARED_SLOT;
 #endif
+}
+
+void aether_caps_test_hold_folds(int on) {
+    if (on) caps_fold_lock();
+    else atomic_flag_clear_explicit(&g_fold_lock, memory_order_release);
 }
 
 #include <stdlib.h>

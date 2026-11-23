@@ -262,6 +262,52 @@ TEST_CATEGORY(caps_slots_given_back_at_thread_exit, TEST_CATEGORY_STDLIB) {
     ASSERT_TRUE(aether_caps_used_bytes() == before);
 }
 
+/* #3829: a thread ending gives its slot back without waiting for a fold.
+ * The give-back folded the slot under the folds' spin lock, so a thread
+ * that ended while another set and lifted a cap over and over (as
+ * caps_owned_slots_exact_under_folds does) could wait on that lock for as
+ * long as the folds went on: under ThreadSanitizer the workers never ended
+ * and their join hung. The slot's count needs no fold to be kept: it stays
+ * in the slot, which every total still sums, for the next thread that
+ * takes it. Here the lock is held while a thread that owns a slot ends;
+ * a second thread joins it and says so. The join must end with the lock
+ * still held (it is let go after five seconds either way, so a regression
+ * fails here and does not hang). */
+static _Atomic int caps_exit_joined;
+static void* caps_exit_worker(void* arg) {
+    (void)arg;
+    void* p = aether_caps_malloc(48);
+    aether_caps_free(p, 48);
+    return NULL;
+}
+static void* caps_exit_joiner(void* arg) {
+    pthread_join(*(pthread_t*)arg, NULL);
+    atomic_store(&caps_exit_joined, 1);
+    return NULL;
+}
+
+TEST_CATEGORY(caps_thread_exit_waits_for_no_fold, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    uint64_t before = aether_caps_used_bytes();
+    atomic_store(&caps_exit_joined, 0);
+    aether_caps_test_hold_folds(1);
+    pthread_t worker, joiner;
+    ASSERT_EQ(0, pthread_create(&worker, NULL, caps_exit_worker, NULL));
+    ASSERT_EQ(0, pthread_create(&joiner, NULL, caps_exit_joiner, &worker));
+    int joined_while_held = 0;
+    for (int i = 0; i < 500 && !joined_while_held; i++) {
+        joined_while_held = atomic_load(&caps_exit_joined);
+        if (!joined_while_held) {
+            struct timespec ten_ms = {0, 10 * 1000 * 1000};
+            nanosleep(&ten_ms, NULL);
+        }
+    }
+    aether_caps_test_hold_folds(0);
+    pthread_join(joiner, NULL);
+    ASSERT_EQ(1, joined_while_held);
+    ASSERT_TRUE(aether_caps_used_bytes() == before);
+}
+
 TEST_CATEGORY(caps_saturating_decrement, TEST_CATEGORY_STDLIB) {
     /* Free more than we allocated → counter saturates at 0 in
      * release. (Debug builds would assert; this test only runs the

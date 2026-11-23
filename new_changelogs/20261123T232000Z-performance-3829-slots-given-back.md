@@ -3,6 +3,6 @@
   slots were never given back: once 63 threads had ever counted, every later
   thread shared the last slot through a locked add, so a server with a
   thread per connection, or a worker pool made again and again, contended on
-  one cache line. A thread now folds its slot's count into the exact total
-  as it ends, so nothing it counted is lost, and gives the slot back for the
-  next thread to take.
+  one cache line. A thread now gives its slot back as it ends, with no lock:
+  the count stays in the slot, which every total sums, so nothing it counted
+  is lost, and the next thread to take the slot counts on from it.
