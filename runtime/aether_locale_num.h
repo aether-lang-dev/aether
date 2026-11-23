@@ -27,6 +27,7 @@
 #define AETHER_LOCALE_NUM_H
 
 #include <stddef.h>
+#include <math.h>   /* signbit, aether_integral_double_text */
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,34 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
 // The same for a long double, with an "L" conversion ("%Lg", "%Lf"), as
 // interpolation and print of a long double use (#3525).
 int aether_c_snprintf_long_double(char* buf, size_t n, const char* fmt, long double value);
+
+// #3828: an integral double's text as "%.<precision>g" writes it, without a
+// call into snprintf, in `buf` (at least 24 bytes, NUL-terminated); returns
+// its length, or 0 when `value` is not integral with |value| < `limit`,
+// where the caller formats it as before. `limit` is 10^precision: 1e6 for
+// "%g", 1e15 for "%.15g". Below it %g writes an integral value with no
+// exponent and no fraction, so the text is its digits, and "-0" for -0.0:
+// the same bytes snprintf writes, in every locale (there is no radix). A
+// NaN or an infinity fails the range test.
+static inline int aether_integral_double_text(char* buf, double value, double limit) {
+    if (!(value > -limit && value < limit)) return 0;
+    long long i = (long long)value;
+    if ((double)i != value) return 0;
+    char tmp[24];
+    char* end = tmp + sizeof(tmp);
+    char* p = end;
+    unsigned long long m = i < 0 ? 0ULL - (unsigned long long)i : (unsigned long long)i;
+    do {
+        *--p = (char)('0' + (int)(m % 10));
+        m /= 10;
+    } while (m);
+    /* -0.0: the only integral value below zero whose integer is 0. */
+    if (i < 0 || (i == 0 && signbit(value))) *--p = '-';
+    int n = (int)(end - p);
+    for (int k = 0; k < n; k++) buf[k] = p[k];
+    buf[n] = '\0';
+    return n;
+}
 
 // strtod/strtof with '.' as the decimal separator regardless of locale.
 // `errno` and `endptr` follow the standard functions exactly, so existing

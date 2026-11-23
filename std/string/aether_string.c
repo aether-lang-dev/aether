@@ -1017,8 +1017,9 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
 /* Formats one numeric argument of type T with the conversion `sub`, through
  * PRINT (snprintf's arguments), and offers it to the sink: on the stack when
  * it fits, else on the heap, so no conversion is ever cut short. */
-#define INTERP_CONV(T, PRINT) do {                                          \
-        T v_ = va_arg(ap, T);                                               \
+#define INTERP_CONV(T, PRINT) INTERP_CONV_VALUE(T, PRINT, va_arg(ap, T))
+#define INTERP_CONV_VALUE(T, PRINT, VALUE) do {                             \
+        T v_ = (VALUE);                                                     \
         char small_[64];                                                    \
         int n_ = PRINT(small_, sizeof(small_), sub, v_);                    \
         if (n_ < 0) break;                                                  \
@@ -1049,7 +1050,19 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
  * the locale, so in a host that called setlocale(LC_ALL, "de_DE.UTF-8")
  * "${0.5}" was "0,5" and print(0.5) "0,500000", while string.from_float(0.5)
  * was "0.5" (docs/locale-independent-float-text.md). A long double the same. */
-#define INTERP_DOUBLE() INTERP_CONV(double, aether_c_snprintf_double)
+/* #3828: a plain %g (what codegen writes for a float) of an integral value
+ * below 1e6 is its digits (aether_integral_double_text): no snprintf. */
+#define INTERP_DOUBLE() do {                                                \
+        double d_ = va_arg(ap, double);                                     \
+        char digits_[24];                                                   \
+        int dn_;                                                            \
+        if (sl == 2 && conv == 'g' &&                                       \
+            (dn_ = aether_integral_double_text(digits_, d_, 1e6)) > 0) {    \
+            interp_put(&k, digits_, (size_t)dn_);                           \
+            break;                                                          \
+        }                                                                   \
+        INTERP_CONV_VALUE(double, aether_c_snprintf_double, d_);            \
+    } while (0)
 #define INTERP_LONG_DOUBLE() INTERP_CONV(long double, aether_c_snprintf_long_double)
 
 size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap) {
@@ -1141,6 +1154,7 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
 #undef INTERP_DOUBLE
 #undef INTERP_LONG_DOUBLE
 #undef INTERP_CONV
+#undef INTERP_CONV_VALUE
 
 void* aether_interp_string(const char* fmt, va_list ap) {
     /* Most interpolations are short: format once into the stack and copy,
@@ -1554,6 +1568,9 @@ AetherString* string_from_long(long long value) {
 // floating-point promotion in varargs), so the format string stays.
 AetherString* string_from_float(double value) {
     char buffer[64];
+    /* #3828: an integral value below 1e6 is its digits, as %g writes it. */
+    int n = aether_integral_double_text(buffer, value, 1e6);
+    if (n > 0) return string_new_with_length(buffer, (size_t)n);
     aether_c_snprintf_double(buffer, sizeof(buffer), "%g", value);
     return string_new(buffer);
 }

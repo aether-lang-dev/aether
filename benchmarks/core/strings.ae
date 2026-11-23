@@ -52,6 +52,17 @@ main() {
     }
     println("row string_from_int ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
 
+    // #3828: a float with no fraction, interpolated.
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        x = (i % 100000) as float
+        s = "x=${x}"
+        total = total + string.length(s)
+        i = i + 1
+    }
+    println("row interp_float_integral ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
     // A 256 KiB text with the needle only at its end.
     text = "abcdefghijklmnop"
     k = 0
