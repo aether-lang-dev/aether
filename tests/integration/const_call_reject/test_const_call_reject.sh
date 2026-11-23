@@ -134,6 +134,33 @@ main() { println("ok") }
 EOF2
 expect_reject "const struct literal with a call field" $AE_TMP/ae_const_bad5.ae
 
+# Case 7: an array literal as a plain `const` (naeb's ask
+# aether-array-literal-return-and-const.md). The array form is spelt with
+# brackets on the name, `const NAMES[] = [...]`; the error said the
+# initialiser had to be a compile-time constant and talked about function
+# calls, which the literal is not, and never named the form that works.
+cat > $AE_TMP/ae_const_bad6.ae << 'EOF2'
+const NAMES = ["a", "b"]
+main() { print(NAMES[0]) }
+EOF2
+out=$(AETHER_HOME="" "$ROOT/build/ae" build $AE_TMP/ae_const_bad6.ae -o $AE_TMP/ae_const_reject_out 2>&1)
+if echo "$out" | grep -q "E0200" &&
+   echo "$out" | grep -qF 'const NAMES[] = [...]' &&
+   ! echo "$out" | grep -q "function calls are inlined"; then
+    echo "  [PASS] const = array literal names the const NAMES[] form"
+    pass=$((pass + 1))
+else
+    echo "  [FAIL] const = array literal: expected E0200 naming \`const NAMES[] = [...]\`; got:"
+    echo "$out" | head -8 | sed 's/^/    /'
+    fail=$((fail + 1))
+fi
+cat > $AE_TMP/ae_const_ok4.ae << 'EOF2'
+const NAMES[] = ["a", "b"]
+names() -> string[] { return NAMES }
+main() { print(names()[1]) }
+EOF2
+expect_accept "the form the message names compiles, and a function may return it" $AE_TMP/ae_const_ok4.ae
+
 rm -f $AE_TMP/ae_const_bad*.ae $AE_TMP/ae_const_ok*.ae \
       $AE_TMP/ae_const_reject_out $AE_TMP/ae_const_ok_out $AE_TMP/ae_const_ok_fold.ae
 
