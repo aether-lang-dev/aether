@@ -1444,10 +1444,11 @@ int run_cmd_capture_stdout_wait(AeChild* child) {
     child->running = 0;
     HANDLE p = (HANDLE)(intptr_t)child->handle;
     DWORD code = (DWORD)-1;
-    WaitForSingleObject(p, INFINITE);
-    GetExitCodeProcess(p, &code);
+    /* A wait or an exit code that cannot be had is no answer: the probe
+     * asks again, as on POSIX. */
+    int ok = WaitForSingleObject(p, INFINITE) == WAIT_OBJECT_0 && GetExitCodeProcess(p, &code);
     CloseHandle(p);
-    return (int)code;
+    return ok ? (int)code : AE_SPAWN_FAILED;
 }
 #endif
 
@@ -1590,11 +1591,46 @@ int run_cmd_capture_stdout_start(const char* cmd, const char* path, AeChild* chi
     return 1;
 }
 
+/* A child another wait reaped before its own wait came (ae_run_parallel's
+ * waitpid(-1) can reap the overlapped `--version` run, #3842): its status,
+ * kept for that wait. One such child at a time is all ae starts; a full
+ * table leaves the child's own wait to fail, which is safe. */
+static struct { pid_t pid; int status; } s_reaped_early[4];
+static int s_reaped_early_n;
+
+static void child_reaped_early(pid_t pid, int status) {
+    if (s_reaped_early_n < (int)(sizeof(s_reaped_early) / sizeof(s_reaped_early[0]))) {
+        s_reaped_early[s_reaped_early_n].pid = pid;
+        s_reaped_early[s_reaped_early_n].status = status;
+        s_reaped_early_n++;
+    }
+}
+
+static int child_take_reaped(pid_t pid, int* status) {
+    for (int i = 0; i < s_reaped_early_n; i++) {
+        if (s_reaped_early[i].pid != pid) continue;
+        *status = s_reaped_early[i].status;
+        s_reaped_early[i] = s_reaped_early[--s_reaped_early_n];
+        return 1;
+    }
+    return 0;
+}
+
+/* A wait that fails (ECHILD: the child was reaped elsewhere and its status
+ * is gone) is AE_SPAWN_FAILED, never an answer: status 0 would read as an
+ * exit 0, and the `--version` probe would take whatever its output file
+ * holds for the compiler's answer. As AE_SPAWN_FAILED, the probe asks the
+ * compiler again (#3707). */
 int run_cmd_capture_stdout_wait(AeChild* child) {
     if (!child->running) return AE_SPAWN_FAILED;
     child->running = 0;
+    pid_t pid = (pid_t)child->handle;
     int status = 0;
-    while (waitpid((pid_t)child->handle, &status, 0) < 0 && errno == EINTR) { }
+    if (!child_take_reaped(pid, &status)) {
+        pid_t got;
+        while ((got = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
+        if (got != pid) return AE_SPAWN_FAILED;
+    }
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return -WTERMSIG(status);
     return -1;
@@ -5994,14 +6030,19 @@ static int ae_run_parallel(char* const* cmds, char* const* logs, int n, int jobs
             if (errno == EINTR) continue;
             break;   /* ECHILD: none of ours is left */
         }
+        int ours = 0;
         for (int i = 0; i < next; i++) {
             if (pids[i] != p) continue;
+            ours = 1;
             pids[i] = 0;
             running--;
             int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
             if (!ok && failed < 0) failed = i;
             break;
         }
+        /* Another child of ae's, such as the `--version` run started beside
+         * the key's walks (#3842): its status goes to its own wait. */
+        if (!ours) child_reaped_early(p, status);
     }
     free(pids);
 #endif

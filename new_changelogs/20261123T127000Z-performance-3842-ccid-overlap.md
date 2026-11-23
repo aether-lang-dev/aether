@@ -6,3 +6,6 @@
   the key is put together. The answer is the same, asked on every key as
   before and never remembered by the compiler's file identity: only the
   waiting overlaps. A warm-cache `ae run` is about 10 ms faster on Windows.
+  A wait for that run that fails (its status reaped elsewhere) counts as no
+  answer and the compiler is asked again, and a parallel runtime compile
+  that reaps the run hands its status to the run's own wait.
