@@ -91,10 +91,20 @@ extern string_concat(a: string, b: string) -> string @heap
 // its payload bytes at naive-C-extern boundaries (#297). The C ABI is
 // unchanged — the header still declares `AetherString*`.
 extern string_concat_wrapped(a: string, b: string) -> string @heap
+@c_include("aether_string_inline.h")
+// #3836: `string.length` and `string.char_at` are `static inline` in that
+// header, so `while i < string.length(s)` reads the header in place rather
+// than calling out twice a character. The same bodies are exported as
+// string_length and string_char_at for C and for the modules that declare
+// those names themselves. @c_import: the header's definition is the only
+// declaration of these names in the program.
+
 // The length in bytes. A string longer than an int can count (2 GiB)
 // panics rather than reporting a negative or cut length.
-extern string_length(str: string) -> int
-extern string_char_at(str: string, index: int) -> int
+@extern("aether_string_length_inline") string_length(str: string) -> int @c_import
+// The byte at `index`, 0 to 255; 0 when `str` is null or `index` is out of
+// range.
+@extern("aether_string_char_at_inline") string_char_at(str: string, index: int) -> int @c_import
 extern string_equals(a: string, b: string) -> int
 // Lexicographic byte order, sign only: -1 when a sorts before b, 0 when
 // they are equal, 1 when a sorts after. Never a raw byte difference, so

@@ -33,7 +33,8 @@ import std.bytes
 import std.string
 import std.cryptography.hkdf
 
-extern string_length(s: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(s: string) -> int @c_import
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports(

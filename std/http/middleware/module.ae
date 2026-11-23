@@ -133,7 +133,8 @@ extern aether_error_pages_opts_new() -> ptr
 extern aether_error_pages_register(opts: ptr, status: int, body: string, content_type: string) -> int
 extern aether_xform_error_pages(req: ptr, res: ptr, user_data: ptr)
 
-extern string_length(s: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(s: string) -> int @c_import
 
 // ---- Aether-facing wrappers ----
 

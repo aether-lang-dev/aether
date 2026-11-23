@@ -278,7 +278,8 @@ fn set_hexn(b: ptr, n: int, s: string) {
 }
 
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
-extern string_length(s: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(s: string) -> int @c_import
 
 fn char_at(s: string, i: int) -> int {
     return string_char_at_n(s, string_length(s), i)

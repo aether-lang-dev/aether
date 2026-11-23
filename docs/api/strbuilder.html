@@ -194,8 +194,10 @@
       <p class="doc">UTF-8 encode the Unicode code point `cp` and append it (1–4 bytes). Returns 0 — appending nothing — for invalid code points (negative, surrogate halves 0xD800–0xDFFF, or above 0x10FFFF); 1 on success.</p>
     </div>
     <div class="function" id="append_format" data-name="append_format">
-      <h3 class="function-name">append_format <span class="kind">fn</span></h3>
-      <pre class="usage"><code>append_format()</code></pre>
+      <h3 class="function-name">append_format <span class="kind">extern</span></h3>
+      <pre class="usage"><code>append_format(b, fmt, ...) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr, fmt: string, ...</span></p>
+      <p class="doc">printf-style formatted append: `append_format(b, fmt, ...)` with any number of trailing arguments. Bound directly to the C symbol via `@extern` because the trailing `...` cannot be forwarded by an ordinary Aether wrapper — defining (rather than declaring) varargs is not a language feature, so a thunk would have nothing to pass the variadic tail through. Returns 1 on success, 0 on failure (null args, encoding error, OOM). `%s` arguments must be plain C strings / Aether string literals — an AetherString-typed variable would format its struct header, not its bytes. `%d` takes int, `%lld` takes long. For binary or AetherString-bearing content, use `append` / `append_n` instead.</p>
     </div>
     <div class="function" id="length" data-name="length">
       <h3 class="function-name">length <span class="kind">fn</span></h3>

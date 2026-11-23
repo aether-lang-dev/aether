@@ -22,17 +22,14 @@
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
 #endif
 
-// Helper: get data pointer and length from either AetherString* or plain char*
+// Helper: get data pointer and length from either AetherString* or plain
+// char* (aether_string_inline.h, the reads std.string's programs inline).
 static inline const char* str_data(const void* s) {
-    if (!s) return "";
-    if (is_aether_string(s)) return ((const AetherString*)s)->data;
-    return (const char*)s;
+    return aether_string_bytes(s);
 }
 
 static inline size_t str_len(const void* s) {
-    if (!s) return 0;
-    if (is_aether_string(s)) return ((const AetherString*)s)->length;
-    return strlen((const char*)s);
+    return aether_string_byte_count(s);
 }
 
 // A length or position as the int the string API returns (#3523). One past
@@ -40,9 +37,13 @@ static inline size_t str_len(const void* s) {
 // negative length, and a loop over it did nothing and said nothing. Cut to
 // INT_MAX it would be a wrong length or a wrong position just as quietly, so
 // it panics.
+int aether_string_int_overflow(void) {
+    aether_panic("string: a length or position past 2 GiB does not fit an int");
+    return 0;
+}
+
 static inline int str_int(size_t v) {
-    if (v > (size_t)INT_MAX)
-        aether_panic("string: a length or position past 2 GiB does not fit an int");
+    if (v > (size_t)INT_MAX) return aether_string_int_overflow();
     return (int)v;
 }
 
@@ -284,22 +285,16 @@ AetherString* string_concat_wrapped(const void* a, const void* b) {
     return wrapped;
 }
 
+/* The exported forms of the reads std.string's programs inline (#3836):
+ * the same bodies, for C and for the modules that declare these names
+ * themselves. Returning int matches what codegen emits for the prototype
+ * and what the stdlib externs declare. */
 int string_length(const void* str) {
-    return str_int(str_len(str));
+    return aether_string_length_inline(str);
 }
 
 int string_char_at(const void* str, int index) {
-    size_t len = str_len(str);
-    /* Compared as a size_t (#3523): `(int)len` of a string over 2 GiB is
-     * negative, and every index read as out of range. The index is the
-     * caller's int, so it always fits; the length is never cut. */
-    if (!str || index < 0 || (size_t)index >= len) return 0;
-    /* Unsigned: a byte >= 0x80 used to come back sign-extended, so 0x85 read
-     * as -123 and every binary parser written against this silently broke on
-     * high bytes (#1516 found it through WebSocket framing). Returning int
-     * also matches what codegen emits for the prototype and what the stdlib
-     * extern declares; the old `char` return disagreed with both. */
-    return (int)(unsigned char)str_data(str)[index];
+    return aether_string_char_at_inline(str, index);
 }
 
 /* By length and bytes, embedded NULs included. `==` and `!=` on strings

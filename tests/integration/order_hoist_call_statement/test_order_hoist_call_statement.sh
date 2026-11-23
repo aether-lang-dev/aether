@@ -34,7 +34,9 @@ if ! "$AETHERC" "$SCRIPT_DIR/probe.ae" "$TMPDIR/out.c" >"$TMPDIR/cc.log" 2>&1; t
     exit 1
 fi
 
-INC="-I$ROOT/runtime -I$ROOT/runtime/actors -I$ROOT/std -I$ROOT/std/io -I$ROOT/std/collections"
+# std/string: std.string's length and char_at are in its @c_include header
+# (#3836), which the modules the probe imports ask for.
+INC="-I$ROOT/runtime -I$ROOT/runtime/actors -I$ROOT/std -I$ROOT/std/io -I$ROOT/std/collections -I$ROOT/std/string"
 CC_BIN="${CC:-cc}"
 command -v "$CC_BIN" >/dev/null 2>&1 || CC_BIN=gcc
 if ! "$CC_BIN" $INC -c "$TMPDIR/out.c" -o "$TMPDIR/out.o" 2>"$TMPDIR/c.log"; then

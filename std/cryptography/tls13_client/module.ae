@@ -147,7 +147,8 @@ extern malloc(size: int) -> ptr
 // Adopt an already-connected fd (the http client hands us one, possibly a
 // forward-proxy CONNECT tunnel). Declared here as the server module does.
 extern tcp_socket_adopt_fd(fd: int) -> ptr
-extern string_length(s: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(s: string) -> int @c_import
 
 exports(
     transcript_new, transcript_add, transcript_hash, transcript_free,

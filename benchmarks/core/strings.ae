@@ -98,5 +98,24 @@ main() {
     }
     println("row string_split_2000 ${per_op(t0, os.now_monotonic_ns(), splits) / 1000.0} us/split")
 
+    // #3836: a byte scan, the loop a hand-written parser runs: a length and
+    // a char_at per character, over a 132-character line. A counted string,
+    // as one read from a file or a socket is (a literal carries no length,
+    // and each read of it would be a strlen).
+    scan = string.concat("GET /index.html?query=abc&page=2 HTTP/1.1, Host: example.org, ",
+                         "Accept: */*, User-Agent: bench/1.0, Connection: keep-alive, X-Id: 1234")
+    scans = 200000
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < scans {
+        j = 0
+        while j < string.length(scan) {
+            total = total + string.char_at(scan, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    println("row string_scan_char_at ${per_op(t0, os.now_monotonic_ns(), scans)} ns/scan")
+
     if total == 0 { println("nothing measured") }
 }

@@ -1,0 +1,16 @@
+// std.fs declares the exported string_length and string_char_at by their
+// own names; std.string binds the inline ones. Both in one program.
+import std.string
+import std.fs
+
+main() {
+    p = "with_fs_probe.txt"
+    _w = fs.write(p, "xyz")
+    text, err = fs.read(p)
+    _d = fs.delete(p)
+    if err != "" {
+        println("read failed: ${err}")
+        return
+    }
+    println("${string.length(text)} ${string.char_at(text, 1)}")
+}

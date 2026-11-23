@@ -29,7 +29,8 @@ extern file_fd_raw(file: ptr) -> int
 
 // string_concat used to duplicate borrowed strings across free boundaries.
 extern string_concat(a: string, b: string) -> string @heap
-extern string_length(str: string) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(str: string) -> int @c_import
 extern fs_error_message(path: string, fallback: string) -> string
 
 // Open a file. Returns (handle, "") on success, (null, error) on failure.

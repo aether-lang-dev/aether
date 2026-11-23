@@ -421,8 +421,9 @@ extern fs_watch_close(watch: ptr)
 // do NOT use for binary payloads (it truncates at the first embedded
 // NUL). Length-aware reads use string_new_with_length.
 extern string_concat(a: string, b: string) -> string @heap
-extern string_length(str: string) -> int
-extern string_char_at(str: string, index: int) -> int
+@c_include("aether_string_inline.h")
+@extern("aether_string_length_inline") string_length(str: string) -> int @c_import
+@extern("aether_string_char_at_inline") string_char_at(str: string, index: int) -> int @c_import
 extern string_substring(str: string, start: int, end: int) -> string @heap
 
 // Length-preserving string constructor. Takes an explicit byte count

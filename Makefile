@@ -169,6 +169,9 @@ gen-version-header: $(VERSION_HEADER)
 # #1366: the bare C symbols the stdlib exposes. Codegen renames a user function
 # that would collide with one, so this must track std/ automatically: a
 # hand-kept list is what let string_replace_all reach a release.
+# A name bound to a header's inline form (`@extern("sym") name(...) @c_import`,
+# std.string's length and char_at, #3836) counts too: libaether still exports
+# the function under that name, for C.
 # GENERATED, do not commit or edit by hand (gitignored).
 STDLIB_SYMS_HEADER := compiler/codegen/aether_stdlib_symbols.h
 STDLIB_MODULE_AE := $(wildcard std/*/module.ae) $(wildcard std/*/*/module.ae)
@@ -180,8 +183,11 @@ $(STDLIB_SYMS_HEADER): $(STDLIB_MODULE_AE) Makefile
 	  echo "#define AETHER_STDLIB_SYMBOLS_H"; \
 	  echo "/* Sorted for bsearch. */"; \
 	  echo "static const char* const AETHER_STDLIB_SYMBOLS[] = {"; \
-	  grep -rhoE '^extern[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' $(STDLIB_MODULE_AE) 2>/dev/null \
-	    | awk '{print $$2}' | LC_ALL=C sort -u | sed 's/.*/    "&",/'; \
+	  { grep -rhoE '^extern[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' $(STDLIB_MODULE_AE) 2>/dev/null \
+	      | awk '{print $$2}'; \
+	    grep -rhE '^@extern\("[^"]*"\)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*\(.*@c_import' $(STDLIB_MODULE_AE) 2>/dev/null \
+	      | sed -E 's/^@extern\("[^"]*"\)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\1/'; \
+	  } | LC_ALL=C sort -u | sed 's/.*/    "&",/'; \
 	  echo "};"; \
 	  echo "#define AETHER_STDLIB_SYMBOL_COUNT \\"; \
 	  echo "    (sizeof(AETHER_STDLIB_SYMBOLS) / sizeof(AETHER_STDLIB_SYMBOLS[0]))"; \
