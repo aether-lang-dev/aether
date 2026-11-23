@@ -579,6 +579,12 @@ static void emit_message_struct_body(ASTNode* program, ASTNode* msg_def, FILE* o
     int n = fields ? message_struct_fields(program, msg_def, fields) : 0;
     for (int level = 0; level < indent; level++) fprintf(out, "    ");
     fprintf(out, "int _message_id;\n");
+    /* #3847: which `ptr` fields hold a box the send made (message_box_slot). */
+    int boxed = message_box_bytes(msg_def);
+    if (boxed > 0) {
+        for (int level = 0; level < indent; level++) fprintf(out, "    ");
+        fprintf(out, "unsigned char _ae_boxed[%d];\n", boxed);
+    }
     for (int i = 0; i < n; i++) {
         for (int level = 0; level < indent; level++) fprintf(out, "    ");
         if (type_is_sized_array(fields[i]->node_type))
@@ -2345,11 +2351,45 @@ ASTNode* find_message_definition(ASTNode* program, const char* name) {
     return NULL;
 }
 
+/* #3847: the slot of field `name` among the `ptr` fields of message
+ * definition `def`, in declaration order, or -1 when it is no `ptr` field. A
+ * closure a send stores into a `ptr` field is boxed (emit_closure_into_ptr),
+ * and the send marks that slot's bit in the message's `_ae_boxed`: the box is
+ * the message's until a handler binds the field and takes it, and the
+ * message's release gives back every box still marked, on whichever path the
+ * message ends without its handler (a drop, a null target). A bare function
+ * there is its code address and is never marked. */
+int message_box_slot(ASTNode* def, const char* name) {
+    int slot = 0;
+    for (int i = 0; def && name && i < def->child_count; i++) {
+        ASTNode* f = def->children[i];
+        if (!f || f->type != AST_MESSAGE_FIELD || !f->value || !f->node_type ||
+            f->node_type->kind != TYPE_PTR || tc_type_is_owned(f->node_type)) continue;
+        if (strcmp(f->value, name) == 0) return slot;
+        slot++;
+    }
+    return -1;
+}
+
+/* #3847: the bytes of `_ae_boxed` message definition `def` carries, one bit
+ * per `ptr` field (message_box_slot), or 0 when it has none. */
+int message_box_bytes(ASTNode* def) {
+    int n = 0;
+    for (int i = 0; def && i < def->child_count; i++) {
+        ASTNode* f = def->children[i];
+        if (f && f->type == AST_MESSAGE_FIELD && f->value && f->node_type &&
+            f->node_type->kind == TYPE_PTR && !tc_type_is_owned(f->node_type)) n++;
+    }
+    return (n + 7) / 8;
+}
+
 /* #2921: does message `name` hold anything it owns: a string, a closure, a
- * struct or composite that owns? Its _aether_msg_release_<Msg> drops those once
- * the handler is done. */
+ * struct or composite that owns, or a box its send made in a `ptr` field
+ * (#3847, message_box_slot)? Its _aether_msg_release_<Msg> drops those once
+ * the handler is done, and when no handler runs. */
 int message_owns_fields(CodeGenerator* gen, const char* name) {
     ASTNode* def = gen->program ? find_message_definition(gen->program, name) : NULL;
+    if (message_box_bytes(def) > 0) return 1;
     for (int i = 0; def && i < def->child_count; i++) {
         ASTNode* f = def->children[i];
         if (f && f->type == AST_MESSAGE_FIELD &&
@@ -9232,6 +9272,12 @@ static void emit_message_definition(CodeGenerator* gen, ASTNode* child) {
                  * that was never handled. */
                 else if (f && f->type == AST_MESSAGE_FIELD)
                     emit_owned_ptr_drop(gen, f->node_type, cg_internf("m->%s", f->value));
+                /* #3847: a box its send made that no handler took. */
+                int slot = f && f->type == AST_MESSAGE_FIELD ? message_box_slot(child, f->value) : -1;
+                if (slot >= 0)
+                    print_line(gen, "if (m->_ae_boxed[%d] & 0x%xu) { m->_ae_boxed[%d] &= (unsigned char)~0x%xu; "
+                                    "_aether_release_closure(m->%s); m->%s = NULL; }",
+                               slot / 8, 1u << (slot % 8), slot / 8, 1u << (slot % 8), f->value, f->value);
             }
             unindent(gen);
             print_line(gen, "}");

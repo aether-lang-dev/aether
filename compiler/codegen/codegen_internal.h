@@ -715,6 +715,9 @@ void push_own_drop_carrier(CodeGenerator* gen, const char* name, Type* t, int li
 void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t);
 ASTNode* find_message_definition(ASTNode* program, const char* name);
 int message_owns_fields(CodeGenerator* gen, const char* name);
+/* #3847: the `ptr` fields whose boxes a message marks in `_ae_boxed`. */
+int message_box_slot(ASTNode* def, const char* name);
+int message_box_bytes(ASTNode* def);
 /* #3142: owned pointers (`type T = owned ptr drop f`). */
 int tc_type_is_owned(const Type* t);
 const char* tc_owned_drop_c(const Type* t);

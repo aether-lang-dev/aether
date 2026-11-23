@@ -781,6 +781,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                     field->children[0]->type == AST_PATTERN_VARIABLE && field->children[0]->value) {
                                     var_name = field->children[0]->value;
                                 }
+                                /* #3847: a box its send made in this `ptr`
+                                 * field is the handler's once bound, to give
+                                 * back with release_closure; the message's
+                                 * release gives back only one no handler
+                                 * took (message_box_slot). */
+                                int box_slot = message_box_slot(
+                                    find_message_definition(gen->program, pattern->value), field->value);
+                                if (box_slot >= 0)
+                                    print_line(gen, "_pattern->_ae_boxed[%d] &= (unsigned char)~0x%xu;",
+                                               box_slot / 8, 1u << (box_slot % 8));
                                 int promoted = 0;
                                 for (int pp = 0; pp < arm_promoted_count; pp++) {
                                     if (arm_promoted[pp] && strcmp(arm_promoted[pp], var_name) == 0) {

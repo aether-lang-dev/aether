@@ -539,6 +539,10 @@ static void message_record(ASTNode* md, ASTNode* program, const LayoutTarget* tg
     ASTNode** order = (ASTNode**)calloc((size_t)cap, sizeof(ASTNode*));
     if (!r->f || !order) { free(order); r->unknown_why = "out of memory"; return; }
     add_field(r, cap, "_message_id", "int", 4, 4, LF_FIRST);
+    /* #3847: the marks of the boxes a send made, after the id. */
+    int boxed = message_box_bytes(md);
+    if (boxed > 0)
+        add_field(r, cap, "_ae_boxed", aether_internf("unsigned char[%d]", boxed), boxed, 1, LF_FIRST);
     int n = message_struct_fields(program, md, order);
     int ok = 1;
     for (int i = 0; i < n; i++) {

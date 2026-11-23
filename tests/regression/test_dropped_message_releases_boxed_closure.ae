@@ -1,0 +1,225 @@
+// Regression (#3847): a message dropped instead of handled gives back the
+// closure its send boxed into a `ptr` field.
+//
+// A closure stored into a `ptr` field is boxed at the send (#2890), and the
+// box, with its reference to the closure's environment, is the receiver's
+// handler's to give back (release_closure). A message that never reaches a
+// handler is dropped through the message's release (#3142), which left a
+// `ptr` field alone, so the box and the environment it keeps leaked: a send
+// to an actor that has ended (or the messages queued to it when it ended),
+// to one released with messages still queued, to one with no handler for
+// the type, into a full bounded mailbox (`!`, a refused try_send, a failed
+// ask), and a try_send to a dead actor. The send now marks each box it makes
+// in the message, and the message's release gives back what is still marked;
+// the handler's binding takes the box, so a handled one is given back once,
+// by the handler.
+//
+// Each round settles (the released actors' messages dropped, their blocks
+// reclaimed), as test_undelivered_message_releases_fields.ae explains, so
+// the number of actor blocks kept is the program's, not the timing's.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same rounds grows by exactly 0
+// (mem.steady_growth). Elsewhere the leak gates cover this program.
+
+import std.mem
+import std.string
+import std.sync
+
+extern exit(code: int)
+extern scheduler_release_actor(a: ptr) @c_import
+extern scheduler_reclaim_released() -> int @c_import
+
+// One field: the payload on its own (#2890's one-field path).
+message Run { f: ptr }
+// Small enough to travel in the message itself (#3534).
+message RunN { f: ptr, n: int }
+// Too big for that: a heap payload, with a string of its own.
+message RunS { f: ptr, text: string, a: int64, b: int64 }
+message Ask { f: ptr, n: int }
+message Done { v: int }
+message Boom {}
+message Ping {}
+message Hold { started: ptr, gate: ptr }
+
+// Dies on Boom: what is queued behind it, and what is sent after, is
+// dropped.
+actor Fragile {
+    receive {
+        Boom() -> { panic("boom") }
+        Run(f) -> { release_closure(f) }
+        RunN(f, n) -> { release_closure(f) }
+        RunS(f, text, a, b) -> { release_closure(f) }
+        Ask(f, n) -> {
+            release_closure(f)
+            reply Done { v: n }
+        }
+    }
+}
+
+// Has no handler for the closure messages.
+actor Deaf {
+    state pings = 0
+    receive {
+        Ping() -> { pings = pings + 1 }
+    }
+}
+
+// Handles them, until it is released with some still queued: each one
+// handled gives its box back exactly once.
+actor Slow {
+    state seen = 0
+    receive {
+        Run(f) -> {
+            release_closure(f)
+            seen = seen + 1
+        }
+        RunN(f, n) -> {
+            release_closure(f)
+            seen = seen + n
+        }
+        RunS(f, text, a, b) -> {
+            release_closure(f)
+            seen = seen + string.length(text)
+        }
+    }
+}
+
+// Takes one message at a time and holds the first until it is let go.
+@mailbox(bound: 1)
+actor Narrow {
+    state seen = 0
+    receive {
+        Hold(started, gate) -> {
+            sync.atomic_store(started, 1)
+            while sync.atomic_load(gate) == 0 {
+                sleep(1)
+            }
+        }
+        Run(f) -> {
+            release_closure(f)
+            seen = seen + 1
+        }
+        RunN(f, n) -> { release_closure(f) }
+        RunS(f, text, a, b) -> { release_closure(f) }
+        Ask(f, n) -> {
+            release_closure(f)
+            reply Done { v: n }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3847: ${msg}")
+        exit(1)
+    }
+}
+
+// Each closure holds a string built at run time, so its environment is an
+// allocation of its own that the box keeps.
+fn closures(a: ptr, p: string, n: int) {
+    i = 0
+    while i < n {
+        tag = string.concat(p, string.from_int(i))
+        a ! Run { f: || { println(tag) } }
+        a ! RunN { f: || { println(tag) }, n: i }
+        a ! RunS { f: || { println(tag) }, text: string.concat(p, "-s"), a: 1, b: 2 }
+        i = i + 1
+    }
+}
+
+// try_sends that are refused, each with the reason `want`.
+fn refused(a: actor_ref, p: string, want: string) {
+    tag = string.concat(p, "-try")
+    w1 = try_send(a, Run { f: || { println(tag) } })
+    w2 = try_send(a, RunN { f: || { println(tag) }, n: 1 })
+    w3 = try_send(a, RunS { f: || { println(tag) }, text: string.concat(p, "-s"), a: 1, b: 2 })
+    check(w1 == want && w2 == want && w3 == want, "try_send said \"${w1}\" \"${w2}\" \"${w3}\", not \"${want}\"")
+}
+
+fn asked(a: ptr, p: string) -> string {
+    tag = string.concat(p, "-ask")
+    let to: actor_ref[Narrow] = a
+    _v, err = to ? Ask { f: || { println(tag) }, n: 1 }
+    return err
+}
+
+fn settle() {
+    wait_for_idle()
+    check(scheduler_reclaim_released() == 0, "a released actor still retired")
+}
+
+fn round(p: string) {
+    // Queued behind a panic, and sent after it.
+    f = spawn(Fragile())
+    f ! Boom {}
+    closures(f, p, 3)
+    wait_for_idle()
+    closures(f, p, 3)
+    refused(f, p, "the actor is dead")
+    wait_for_idle()
+    let fp: ptr = f
+    scheduler_release_actor(fp)
+
+    // A type its receiver has no handler for.
+    d = spawn(Deaf())
+    closures(d, p, 3)
+    d ! Ping {}
+    wait_for_idle()
+    check(d.pings == 1, "the actor without the handlers still handles its own messages")
+    let dp: ptr = d
+    scheduler_release_actor(dp)
+
+    // Released with messages still queued (or handled first: neither leaks).
+    s = spawn(Slow())
+    closures(s, p, 5)
+    let sp: ptr = s
+    scheduler_release_actor(sp)
+
+    // A full bounded mailbox: the one accepted is handled, the rest dropped.
+    n = spawn(Narrow())
+    started = sync.atomic_new(0)
+    gate = sync.atomic_new(0)
+    n ! Hold { started: started, gate: gate }
+    while sync.atomic_load(started) == 0 {
+        sleep(1)
+    }
+    tag = string.concat(p, "-first")
+    n ! Run { f: || { println(tag) } }
+    closures(n, p, 3)
+    refused(n, p, "the mailbox is full")
+    err = asked(n, p)
+    check(err == "the mailbox is full", "an ask past the bound said \"${err}\"")
+    sync.atomic_store(gate, 1)
+    wait_for_idle()
+    check(n.seen == 1, "the narrow actor handled ${n.seen} messages, not 1")
+    sync.atomic_free(started)
+    sync.atomic_free(gate)
+    let np: ptr = n
+    scheduler_release_actor(np)
+    settle()
+}
+
+fn window(p: string, n: int) {
+    i = 0
+    while i < n {
+        round(p)
+        i = i + 1
+    }
+}
+
+main() {
+    window("a", 10)
+    check(scheduler_reclaim_released() == 0, "released actors still retired after the warm-up")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            window("a", 10)
+            check(scheduler_reclaim_released() == 0, "released actors still retired after a window")
+        }, 5)
+    check(grown == 0, "dropped messages grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

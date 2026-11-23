@@ -6162,6 +6162,25 @@ int message_has_array_fields(CodeGenerator* gen, ASTNode* message) {
     return 0;
 }
 
+/* #3847: does `v`, stored into message field `f`, box a closure
+ * (emit_closure_into_ptr)? A bare function there is its code address. */
+static int message_field_boxes(CodeGenerator* gen, MessageFieldDef* f, ASTNode* v) {
+    return f && f->type_kind == TYPE_PTR && fn_value_into_ptr(gen, v) && !bare_top_level_fn(gen, v);
+}
+
+/* #3847: does message literal `message` box a closure into any field? Its
+ * send carries the message whole, where the mark of each box is
+ * (message_box_slot), never as a bare payload. */
+static int message_literal_boxes(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def) {
+    for (int i = 0; i < message->child_count; i++) {
+        ASTNode* fi = message->children[i];
+        if (fi && fi->type == AST_FIELD_INIT && fi->child_count > 0 &&
+            message_field_boxes(gen, find_msg_field(msg_def, fi->value), fi->children[0]))
+            return 1;
+    }
+    return 0;
+}
+
 /* The initializers of message literal `message` after its `._message_id`.
  * A fixed-size array is left out: C initializes no array from an array
  * value, so emit_message_array_fills fills it once the message exists. */
@@ -6191,6 +6210,24 @@ void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* 
             emit_message_field_init(gen, fdef, fi->children[0]);
         }
     }
+    /* #3847: each box made above is marked where it was made, for the
+     * message's release (message_box_slot). */
+    ASTNode* def = find_message_definition(gen->program, message->value);
+    int bytes = message_box_bytes(def);
+    if (bytes <= 0 || !message_literal_boxes(gen, message, msg_def)) return;
+    fprintf(gen->output, ", ._ae_boxed = {");
+    for (int b = 0; b < bytes; b++) {
+        unsigned mark = 0;
+        for (int i = 0; i < message->child_count; i++) {
+            ASTNode* fi = message->children[i];
+            int slot = fi && fi->type == AST_FIELD_INIT && fi->child_count > 0 &&
+                       message_field_boxes(gen, find_msg_field(msg_def, fi->value), fi->children[0])
+                           ? message_box_slot(def, fi->value) : -1;
+            if (slot >= 0 && slot / 8 == b) mark |= 1u << (slot % 8);
+        }
+        fprintf(gen->output, "%s0x%xu", b ? ", " : " ", mark);
+    }
+    fprintf(gen->output, " }");
 }
 
 /* Does message literal `message` share a field with its sender that
@@ -6320,47 +6357,28 @@ static void emit_send_target_read(CodeGenerator* gen, const char* var, ASTNode* 
     fprintf(gen->output, ")");
 }
 
-/* What message literal `message` took for its fields, given back when its
- * target is null, before that panic (#3847): the fields the message owns,
- * by its release, as the receiver's handler end releases them, and each
- * closure the send boxed into a `ptr` field (emit_closure_into_ptr). A
- * `ptr` owns nothing, so the release leaves a box to its receiver, and with
- * no receiver the box and its reference to the environment were no one's.
- * `lv` is the message's struct, or NULL for a one-field message, whose
- * field is the payload `payload` (an intptr_t). With `emit`, writes the
- * releases as a comma-separated list of void expressions. Returns how many
- * there are: none when the message took nothing it owns. */
-static int message_take_releases(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def,
-                                 const char* lv, const char* payload, int emit) {
-    int n = 0;
-    if (lv && message_owns_fields(gen, message->value)) {
-        if (emit) fprintf(gen->output, "_aether_msg_release_%s(&%s)", message->value, lv);
-        n++;
-    }
-    for (int i = 0; i < message->child_count; i++) {
-        ASTNode* fi = message->children[i];
-        if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
-        MessageFieldDef* f = find_msg_field(msg_def, fi->value);
-        ASTNode* v = fi->children[0];
-        if (!f || f->type_kind != TYPE_PTR || !fn_value_into_ptr(gen, v) || bare_top_level_fn(gen, v))
-            continue;
-        if (emit) {
-            if (n) fprintf(gen->output, ", ");
-            if (lv) fprintf(gen->output, "_aether_release_closure(%s.%s)", lv, fi->value);
-            else fprintf(gen->output, "_aether_release_closure((void*)(intptr_t)%s)", payload);
-        }
-        n++;
-    }
-    return n;
+/* What message `lv`, built from literal `message`, took for its fields,
+ * given back when its target is null, before that panic (#3847): by the
+ * message's release, as a dropped message's is and as the receiver's
+ * handler end releases what the handler did not take. That release gives
+ * back the fields the message owns and each box its send made in a `ptr`
+ * field and marked (message_box_slot). A message with nothing to give back
+ * has no release; one that boxed a closure is always sent whole, never as a
+ * bare payload (message_literal_boxes). With `emit`, writes the release as
+ * a void expression. Returns 1 when there is one. */
+static int message_take_releases(CodeGenerator* gen, ASTNode* message, const char* lv, int emit) {
+    if (!message_owns_fields(gen, message->value)) return 0;
+    if (emit) fprintf(gen->output, "_aether_msg_release_%s(&%s)", message->value, lv);
+    return 1;
 }
 
-/* The releases of message_take_releases as a statement run when the target
+/* The release of message_take_releases as a statement run when the target
  * read into `to` is null, or nothing when the message took nothing. */
-static void emit_null_target_releases(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def,
-                                      const char* lv, const char* payload, const char* to) {
-    if (!message_take_releases(gen, message, msg_def, lv, payload, 0)) return;
+static void emit_null_target_releases(CodeGenerator* gen, ASTNode* message, const char* lv,
+                                      const char* to) {
+    if (!message_take_releases(gen, message, lv, 0)) return;
     fprintf(gen->output, "if (!%s) (void)(", to);
-    message_take_releases(gen, message, msg_def, lv, payload, 1);
+    message_take_releases(gen, message, lv, 1);
     fprintf(gen->output, "); ");
 }
 
@@ -14289,12 +14307,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * as a one-int one does, with no payload to allocate
                          * (its handler reads none). */
                         int no_fields = msg_def->fields == NULL;
-                        if (single_int || no_fields) {
+                        /* #3847: a send that boxes a closure into its `ptr`
+                         * field sends the message whole (still in the
+                         * message's own bytes, #3534), where the box is
+                         * marked for the message's release: a bare payload
+                         * has no release, and a dropped one leaked the box. */
+                        if ((single_int || no_fields) && !message_literal_boxes(gen, message, msg_def)) {
                             /* Single-field inline: value stored in payload_int
                              * (no malloc). The target is read first, as on the
-                             * heap path below (#3827): a closure boxed into a
-                             * `ptr` field is a take, and a target that panics
-                             * after it left the box to no one. */
+                             * heap path below (#3827). */
                             fprintf(gen->output, "{ void* _ae_to = ");
                             emit_send_target_value(gen, target);
                             fprintf(gen->output, "; Message _imsg = {%d, 0, ", msg_def->message_id);
@@ -14307,18 +14328,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     int is_actor_ref = val->node_type && val->node_type->kind == TYPE_ACTOR_REF;
                                     if (is_actor_ref || fk == TYPE_INT64 || fk == TYPE_PTR || fk == TYPE_ACTOR_REF)
                                         fprintf(gen->output, "(intptr_t)");
-                                    /* #2890: a closure into a `ptr` field is
-                                     * boxed, a bare function its address. */
+                                    /* #2890: a bare function into a `ptr`
+                                     * field is its address (a closure is
+                                     * boxed, and goes below, #3847). */
                                     if (!(fk == TYPE_PTR && emit_closure_into_ptr(gen, val)))
                                         generate_expression(gen, val);
                                     break;
                                 }
                             }
+                            /* The payload takes nothing: no release. */
                             fprintf(gen->output, ", NULL, {NULL, 0, 0}}; ");
-                            /* #3847: a closure boxed into the payload is given
-                             * back before a null target's panic. */
-                            emit_null_target_releases(gen, message, msg_def, NULL, "_imsg.payload_int",
-                                                      "_ae_to");
 
                             if (try_var) {
                                 fprintf(gen->output, "%s = scheduler_try_send(", try_var);
@@ -14407,13 +14426,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             emit_message_publishes(gen, message, "_msg", NULL);
                             /* #3847: the message owns its fields from here
                              * (a string copied, a fresh one or a received
-                             * one moved in, #3827). The target was read
+                             * one moved in, #3827, a closure boxed and
+                             * marked). The target was read
                              * before any of them was taken, but a null one
                              * is found only now, and is a panic (#3172),
                              * try_send's too: what the message took is given
                              * back first (message_take_releases), or that
                              * panic left it to no one. */
-                            emit_null_target_releases(gen, message, msg_def, "_msg", NULL, "_ae_to");
+                            emit_null_target_releases(gen, message, "_msg", "_ae_to");
                             /* #3117: in a batched loop every send joins the
                              * batch, so a payload message keeps its place
                              * among the loop's one-int ones. */
@@ -14529,7 +14549,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * taken, and what the request took is given back
                          * before that panic (#3847, message_take_releases),
                          * on both paths. */
-                        int ask_takes = message_take_releases(gen, message, msg_def, "_msg", NULL, 0);
+                        int ask_takes = message_take_releases(gen, message, "_msg", 0);
 
                         // Emit the ask expression with GCC/MSVC guards
                         fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
@@ -14558,7 +14578,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
                         emit_message_publishes(gen, message, "_msg", NULL);
-                        emit_null_target_releases(gen, message, msg_def, "_msg", NULL, "_ask_to");
+                        emit_null_target_releases(gen, message, "_msg", "_ask_to");
 
                         fprintf(gen->output, "void* _ask_r = scheduler_ask_message_status(");
                         emit_send_target_read(gen, "_ask_to", target, "ask");
@@ -14628,7 +14648,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             if (ask_takes) {
                                 seq_next(gen, &s);
                                 fprintf(gen->output, "(%s ? (void)0 : (void)(", to);
-                                message_take_releases(gen, message, msg_def, mv, NULL, 1);
+                                message_take_releases(gen, message, mv, 1);
                                 fprintf(gen->output, "))");
                             }
                         }
