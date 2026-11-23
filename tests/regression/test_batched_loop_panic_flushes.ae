@@ -14,6 +14,11 @@
 //   - in main, before main sends or waits again (a read of the sink's
 //     state, polled), and after a wait_for_idle;
 //   - on a worker's thread, which sends nothing after the panic.
+// The nested shapes (an inner loop, plain or in a `try` of its own, with the
+// panic in a later pass of the outer loop) send 0 to 5 as well: the inner
+// loop joins the outer loop's batch, and that batch stays in the journal
+// until the outer loop ends (the runtime's nested starts are
+// test_scheduler_nested_batches_stay_journaled).
 
 import std.worker
 
@@ -96,6 +101,45 @@ fn for_panics(s: actor_ref[Sink]) {
     }
 }
 
+// Nested loops: the inner loop sends 3i and 3i+1, the outer loop 3i+2 after
+// it, and the panic comes in the outer loop's second pass, after its inner
+// loop closed.
+fn nested_panics(s: actor_ref[Sink]) {
+    try {
+        i = 0
+        while i < 10 {
+            j = 0
+            while j < 2 {
+                s ! M { n: 3 * i + j }
+                j = j + 1
+            }
+            s ! M { n: 3 * i + 2 }
+            if i == 1 { panic("in the outer loop, after the inner one") }
+            i = i + 1
+        }
+    } catch e {
+    }
+}
+
+// The inner loop in a `try` of its own, left by a panic that `try` catches
+// in the first pass; the outer loop goes on and panics in its second pass.
+fn nested_in_try_panics(s: actor_ref[Sink]) {
+    try {
+        for i in 0..10 {
+            try {
+                for j in 0..2 {
+                    s ! M { n: 3 * i + j }
+                    if i == 0 && j == 1 { panic("in the inner loop, in its own try") }
+                }
+            } catch e {
+            }
+            s ! M { n: 3 * i + 2 }
+            if i == 1 { panic("in the outer loop, after the inner one's panic") }
+        }
+    } catch e {
+    }
+}
+
 main() {
     s = spawn(Sink())
 
@@ -132,6 +176,25 @@ main() {
         }, | r: ptr | {})
     worker.wait()
     delivered(s, "worker, for")
+
+    // Nested loops, the inner one plain and in a `try` of its own: the
+    // outer loop's sends after the inner loop are sent by the later panic.
+    nested_panics(s)
+    delivered(s, "main, nested")
+    nested_in_try_panics(s)
+    delivered(s, "main, nested in a try")
+    worker.run(|| {
+            nested_panics(s)
+            return 0
+        }, | r: ptr | {})
+    worker.wait()
+    delivered(s, "worker, nested")
+    worker.run(|| {
+            nested_in_try_panics(s)
+            return 0
+        }, | r: ptr | {})
+    worker.wait()
+    delivered(s, "worker, nested in a try")
 
     // Twice in a row on one thread: the second batch is the second loop's
     // alone.
