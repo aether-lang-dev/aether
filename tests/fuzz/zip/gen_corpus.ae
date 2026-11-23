@@ -83,6 +83,16 @@ main() {
     done(dir, "empty_archive", 0, w)
 
     one(dir, "dotdot", "../outside/canary")
+    // An entry 80 directories deep, inside the destination: legal, and
+    // extracted as it is. The fuzzer found such a name on Linux, where the
+    // harness's walk took any depth past 64 for a failure.
+    deep = ""
+    k = 0
+    while k < 80 {
+        deep = "${deep}d${k}/"
+        k = k + 1
+    }
+    one(dir, "deep_path", "${deep}x.txt")
     one(dir, "dotdot_inside", "a/../../outside/canary")
     one(dir, "absolute", "/tmp/aether_fuzz_zip_absolute")
     one(dir, "drive", "C:/aether_fuzz_zip_drive")

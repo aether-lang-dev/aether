@@ -75,7 +75,12 @@ fn nothing_outside(root: string) {
 
 // Z1 (links) and Z3 (bounds): the number of regular files under `dir`.
 fn walk_out(dir: string, max_bytes: long, depth: int) -> int {
-    if depth > 64 { fail("the destination nests deeper than 64") }
+    // A bound on this walk's recursion, not a property of std.zip: an entry
+    // may legally name a path many directories deep (Z1-Z3 bound where it
+    // goes, not how deep), and at 64 a fuzzed 65-level name on Linux was
+    // taken for a failure. A path the OS can hold (PATH_MAX 4096: two bytes
+    // a level at the least) is at most 2048 deep.
+    if depth > 2048 { fail("the destination nests deeper than a path can") }
     lst, lerr = fs.list_dir(dir)
     if lerr != "" { return 0 }
     files = 0
