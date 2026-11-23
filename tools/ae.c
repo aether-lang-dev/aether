@@ -6042,19 +6042,21 @@ static void freebsd_casper_libs(char* out, size_t size) {
  * here; the object was compiled with none of them, so signed overflow was
  * undefined in the object and defined in the executable.
  *
- * The POSIX line carries -pipe, and must carry -Wformat as opt_flags does:
- * the -pipe path once hardcoded its own string and dropped it, so the C
+ * The line carries -pipe, and must carry -Wformat as opt_flags does: the
+ * -pipe path once hardcoded its own string and dropped it, so the C
  * compiler's printf-family checks never ran on a normal build (#1252).
- * Coverage, profile and size builds take opt_flags' string as it is. */
+ * Coverage, profile and size builds take opt_flags' string as it is.
+ * Windows has it too (#3837): GCC, Clang and zig cc all take it, the
+ * tree's own Windows make passes it, and without it each stage of a
+ * compile went through a temporary file (5 to 20 ms of a hello build). */
 static char* generated_c_compile_flags(const char* cc, bool optimize, const char* user_cflags) {
-#ifdef _WIN32
-    const char* base_opt = opt_flags(optimize);
-    const char* avx = win_avx_stack_flags(user_cflags);
-#else
     const char* base_opt = (g_coverage || g_profile || g_size)
                           ? opt_flags(optimize)
                           : (optimize ? "-O2 -pipe -Wformat" AETHER_WRAP_CFLAGS
                                       : "-O0 -g -pipe -Wformat" AETHER_WRAP_CFLAGS);
+#ifdef _WIN32
+    const char* avx = win_avx_stack_flags(user_cflags);
+#else
     const char* avx = "";
 #endif
     return ae_strdup_printf("%s%s%s%s%s%s%s%s", base_opt, gcc_inline_budget_flags(cc, optimize),
