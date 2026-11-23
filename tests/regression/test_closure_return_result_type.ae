@@ -1,0 +1,104 @@
+// Regression (#3811): a closure's `return` holds its value in a result of
+// the closure's own C return type (the signature resolve_closure_return_type
+// gives it), then gives back its statement's temporaries, then returns.
+//
+// Since #3811 every value return computes its result first. A closure has
+// no declared return type, so a result typed from the value's stamped type
+// (or `int` when there is none) could disagree with the closure's C
+// signature where the checker typed the value through a fallback (a
+// captured name, `call()` of a captured closure, which it leaves `int`): a
+// returned pointer truncated, or the C failed under -Werror=int-conversion.
+// Each shape here returns a string or a pointer through such a value, from
+// a closure, a closure of a closure and a call of a captured closure, and
+// one returns a void call; every value reads back.
+
+import std.string
+
+extern exit(code: int)
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3811: ${what}")
+        exit(1)
+    }
+}
+
+made(n: int) -> string {
+    return "made ${n}"
+}
+
+note(n: int) {
+    println("note ${n}")
+}
+
+via(f: fn) -> int {
+    h = || {
+        return call(f)
+    }
+    return h()
+}
+
+main() {
+    s = made(12)
+    p = malloc(8)
+
+    captured_string = || {
+        return s
+    }
+    check(string.length(captured_string()) == 7, "a captured string returned")
+
+    captured_ptr = || {
+        return p
+    }
+    check(captured_ptr() == p, "a captured pointer returned")
+
+    called_string = || {
+        return call(captured_string)
+    }
+    check(string.length(called_string()) == 7, "call() of a captured string closure")
+
+    called_ptr = || {
+        return call(captured_ptr)
+    }
+    check(called_ptr() == p, "call() of a captured pointer closure")
+
+    nested = || {
+        inner = || {
+            mid = || {
+                return s
+            }
+            return call(mid)
+        }
+        return inner()
+    }
+    check(string.length(nested()) == 7, "closures of closures")
+
+    nested_ptr = || {
+        inner = || {
+            return p
+        }
+        return call(inner)
+    }
+    check(nested_ptr() == p, "a pointer through closures of closures")
+
+    void_call = | n: int | {
+        if n > 0 {
+            return note(n)
+        }
+        note(0)
+    }
+    void_call(1)
+    void_call(0)
+    arrow = | n: int | -> note(n)
+    arrow(2)
+
+    counted = || {
+        return string.length(s)
+    }
+    check(via(counted) == 7, "call() of a closure parameter")
+
+    free(p)
+    println("OK")
+}

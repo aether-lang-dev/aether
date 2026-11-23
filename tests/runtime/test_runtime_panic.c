@@ -135,7 +135,9 @@ TEST_CATEGORY(unwind_track_returns_whether_journaled, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(0, aether_unwind_track(NULL, rel_one));
     ASSERT_EQ(before, aether_unwind_journal_size());
     AetherJmpFrame* f = aether_try_push();
-    int first = 0, again = 0, empty = 0, size = 0;
+    /* Set between the setjmp and the read after it: volatile, so a longjmp
+     * back (none is expected) could not leave them clobbered (-Wclobbered). */
+    volatile int first = 0, again = 0, empty = 0, size = 0;
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
         first = aether_unwind_track(&a, rel_one);
         again = aether_unwind_track(&a, rel_one);

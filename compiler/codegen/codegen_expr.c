@@ -5403,6 +5403,8 @@ void emit_closure_definitions(CodeGenerator* gen) {
         mark_try_clobbered_vars(gen, body);
 
         const char* ret_type = resolve_closure_return_type(gen, ci);
+        /* #3811: the type its returns hold their result in. */
+        gen->closure_ret_ct = cg_intern(ret_type);
         restore_fnptr_scope_for_closure(gen, parent_func);
         emit_closure_signature(gen, ci, ret_type, 1);
         fprintf(gen->output, " {\n");
@@ -5747,6 +5749,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
         }
         gen->in_string_closure = 0;
         gen->current_func_return_type = NULL;
+        gen->closure_ret_ct = NULL;
         if (closure_ret_tuple) free_type(closure_ret_tuple);
         restore_try_clobbered_vars(gen, &outer_try_set);
 

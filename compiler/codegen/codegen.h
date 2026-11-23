@@ -419,6 +419,12 @@ typedef struct {
     // call() is tracked as owned on the caller's side.
     int in_string_closure;
 
+    // #3811: the C return type of the closure whose body is being emitted
+    // (resolve_closure_return_type), which its `return` statements hold
+    // their result in, as a function's hold theirs in its declared type.
+    // NULL outside a closure.
+    const char* closure_ret_ct;
+
     // Cooperative preemption: insert sched_yield() at loop back-edges
     int preempt_loops;
 

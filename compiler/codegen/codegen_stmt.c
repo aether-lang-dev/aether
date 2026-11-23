@@ -13409,12 +13409,28 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "}");
                     break;
                 }
+                /* The C type the function returns, which `return
+                 * _builder_ret;` is checked against: a closure's is its
+                 * resolved signature (resolve_closure_return_type, the one
+                 * its C prototype has); a function's, its declared return
+                 * type. The value's own stamped type can be wrong in a
+                 * closure (a name the checker typed through a fallback,
+                 * `call()` of a captured closure, which it leaves `int`),
+                 * and a result of that type truncated a pointer or failed
+                 * under -Werror=int-conversion (#3811). */
+                Type* fn_ret = gen->current_func_return_type;
+                int fn_typed = fn_ret && fn_ret->kind != TYPE_VOID && fn_ret->kind != TYPE_UNKNOWN;
+                const char* closure_ct = !fn_typed ? gen->closure_ret_ct : NULL;
                 /* A void value (`return f()` of a void `f`) has no result to
-                 * hold: it runs as a statement, then the drain. */
-                Type* void_fn = gen->current_func_return_type;
-                if (returns_value && stmt->children[0]->node_type &&
-                    stmt->children[0]->node_type->kind == TYPE_VOID &&
-                    (!void_fn || void_fn->kind == TYPE_VOID || void_fn->kind == TYPE_UNKNOWN)) {
+                 * hold: it runs as a statement, then the drain. A closure
+                 * whose signature is void returns no value whatever its
+                 * return's value is typed. */
+                int void_return =
+                    returns_value &&
+                    (closure_ct ? strcmp(closure_ct, "void") == 0
+                                : (!fn_typed && stmt->children[0]->node_type &&
+                                   stmt->children[0]->node_type->kind == TYPE_VOID));
+                if (void_return) {
                     print_indent(gen);
                     generate_expression(gen, stmt->children[0]);
                     fprintf(gen->output, ";\n");
@@ -13432,36 +13448,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "{");
                     gen->indent_level++;
                     print_indent(gen);
-                    /* Pick the C type for `_builder_ret`. Order:
-                     *   1. The function's declared return type
-                     *      (`gen->current_func_return_type`) — this
-                     *      is what the C compiler will check the
-                     *      `return _builder_ret;` against, so using
-                     *      anything else risks a type-mismatch
-                     *      compile error.
-                     *   2. The expression's stamped node_type — used
-                     *      when the function doesn't declare a
-                     *      return type (Aether's type inference
-                     *      stamps the expression).
-                     *   3. `int` — last-resort fallback so we always
-                     *      emit something compilable.
-                     * Without (1), bare-identifier returns whose
-                     * node_type isn't filled in (a common gap) fell
-                     * through to `int`, which the C compiler then
-                     * rejected against a `const char*`-returning
-                     * function. Surfaced when the function-exit
-                     * defer-free pre-pass started pushing defers
-                     * for previously-leaking heap-string locals,
-                     * which forced this branch to take effect for
-                     * functions that previously skipped it. */
-                    Type* fn_ret = gen->current_func_return_type;
-                    Type* ret_type = (fn_ret &&
-                                      fn_ret->kind != TYPE_VOID &&
-                                      fn_ret->kind != TYPE_UNKNOWN)
-                                     ? fn_ret
-                                     : stmt->children[0]->node_type;
-                    const char* ret_c_type = (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
-                                             ? c_result_type(ret_type) : "int";
+                    /* Pick the C type for `_builder_ret`: the function's C
+                     * return type (above); in a function with no declared
+                     * type, the expression's stamped node_type; `int` as the
+                     * last resort, so something compilable is emitted.
+                     * Bare-identifier returns whose node_type is not filled
+                     * in (a common gap) fell through to `int`, which the C
+                     * compiler rejected against a `const char*`-returning
+                     * function. */
+                    Type* ret_type = fn_typed ? fn_ret : stmt->children[0]->node_type;
+                    const char* ret_c_type =
+                        closure_ct ? closure_ct
+                        : (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
+                            ? c_result_type(ret_type) : "int";
                     fprintf(gen->output, "%s _builder_ret = ", ret_c_type);
                     /* R3: every return hands the caller one reference,
                      * whichever branch produced it. See
