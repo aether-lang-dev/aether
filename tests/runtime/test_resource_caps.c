@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdint.h>
+#include <stdatomic.h>
 
 /* Reset to a known baseline between tests by lifting the cap and
  * draining whatever the prior test accumulated. The counter doesn't
@@ -119,6 +121,85 @@ TEST_CATEGORY(caps_split_count_across_threads, TEST_CATEGORY_STDLIB) {
         for (int j = CAPS_SPLIT_BLOCKS / 2; j < CAPS_SPLIT_BLOCKS; j++)
             aether_caps_free(caps_split_blocks[i][j], 64);
     ASSERT_TRUE(aether_caps_used_bytes() == before);
+}
+
+/* #3829: a thread's own slot is counted with a plain load and store, and a
+ * fold no longer empties it but records how much of it is folded. Many
+ * threads (more than there are owned slots, so the last ones share one)
+ * allocate and free while another thread sets and lifts a cap over and
+ * over, each time folding every slot into the capped counter as the
+ * owners write to them. Nothing is lost or counted twice: the total is
+ * exactly what the threads still hold, and nothing once they free it. */
+#define CAPS_MANY_THREADS 96
+#define CAPS_MANY_ROUNDS  20000
+#define CAPS_MANY_KEPT    8
+static void* caps_many_kept[CAPS_MANY_THREADS][CAPS_MANY_KEPT];
+static size_t caps_many_size[CAPS_MANY_THREADS][CAPS_MANY_KEPT];
+static _Atomic int caps_many_running;
+static void* caps_many_worker(void* arg) {
+    int t = (int)(intptr_t)arg;
+    void* ring[CAPS_MANY_KEPT] = {0};
+    size_t sizes[CAPS_MANY_KEPT] = {0};
+    for (int r = 0; r < CAPS_MANY_ROUNDS; r++) {
+        int k = r % CAPS_MANY_KEPT;
+        if (ring[k]) aether_caps_free(ring[k], sizes[k]);
+        sizes[k] = (size_t)(16 * (1 + (r + t) % 7));
+        ring[k] = aether_caps_malloc(sizes[k]);
+    }
+    for (int k = 0; k < CAPS_MANY_KEPT; k++) {
+        caps_many_kept[t][k] = ring[k];
+        caps_many_size[t][k] = sizes[k];
+    }
+    return NULL;
+}
+static void* caps_many_folder(void* arg) {
+    (void)arg;
+    while (atomic_load(&caps_many_running)) {
+        aether_caps_set_memory_cap((uint64_t)1 << 60);
+        aether_caps_set_memory_cap(0);
+    }
+    return NULL;
+}
+
+TEST_CATEGORY(caps_owned_slots_exact_under_folds, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    /* A megabyte held throughout, so the capped counter never nears zero:
+     * a fold forgets a total below zero, and a block made on a slot and
+     * freed under the cap takes the counter that far below the slots. */
+    void* floor_block = aether_caps_malloc(1 << 20);
+    ASSERT_NOT_NULL(floor_block);
+    uint64_t before = aether_caps_used_bytes();
+    atomic_store(&caps_many_running, 1);
+    pthread_t folder;
+    ASSERT_EQ(0, pthread_create(&folder, NULL, caps_many_folder, NULL));
+    pthread_t t[CAPS_MANY_THREADS];
+    for (int i = 0; i < CAPS_MANY_THREADS; i++)
+        ASSERT_EQ(0, pthread_create(&t[i], NULL, caps_many_worker, (void*)(intptr_t)i));
+    for (int i = 0; i < CAPS_MANY_THREADS; i++) pthread_join(t[i], NULL);
+    atomic_store(&caps_many_running, 0);
+    pthread_join(folder, NULL);
+
+    uint64_t held = 0;
+    int nulls = 0;
+    for (int i = 0; i < CAPS_MANY_THREADS; i++)
+        for (int k = 0; k < CAPS_MANY_KEPT; k++) {
+            nulls += caps_many_kept[i][k] == NULL;
+            held += caps_many_size[i][k];
+        }
+    ASSERT_EQ(0, nulls);
+    ASSERT_TRUE(aether_caps_used_bytes() == before + held);
+    /* And a fold now moves exactly that into the capped counter. */
+    aether_caps_set_memory_cap(before + held + 64);
+    ASSERT_TRUE(aether_caps_used_bytes() == before + held);
+    void* refused = aether_caps_malloc(128);
+    ASSERT_TRUE(refused == NULL);
+    aether_caps_set_memory_cap(0);
+
+    for (int i = 0; i < CAPS_MANY_THREADS; i++)
+        for (int k = 0; k < CAPS_MANY_KEPT; k++)
+            aether_caps_free(caps_many_kept[i][k], caps_many_size[i][k]);
+    ASSERT_TRUE(aether_caps_used_bytes() == before);
+    aether_caps_free(floor_block, 1 << 20);
 }
 
 TEST_CATEGORY(caps_saturating_decrement, TEST_CATEGORY_STDLIB) {
