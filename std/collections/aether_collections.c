@@ -568,39 +568,50 @@ static void hashmap_resize(HashMap* map) {
                      (size_t)old_capacity * sizeof(HashMapEntry*));
 }
 
-// map_put_raw returns 1 on success, 0 on failure (null map/key or OOM).
-// The Aether wrapper `map.put` in std.map/std.collections turns the 0
-// into an error string.
-int map_put_raw(HashMap* map, const char* key, void* value) {
-    if (!map || !key) return 0;
-
+static int map_load_exceeded(const HashMap* map) {
     // Integer load-factor check: resize when size/capacity > 3/4.
-    if ((long)map->size * HASHMAP_LOAD_DENOMINATOR >
-        (long)map->capacity * HASHMAP_LOAD_NUMERATOR) {
-        hashmap_resize(map);
-    }
+    return (long)map->size * HASHMAP_LOAD_DENOMINATOR >
+           (long)map->capacity * HASHMAP_LOAD_NUMERATOR;
+}
+
+/* Every put, in one walk with one hash of the key (#3831): stores `value`
+ * under `key` with `owned` as its value_owned (0 not the map's, 1 a string
+ * reference it holds, 2 a closure box it holds), releasing the value the key
+ * held before when the map owned it (#467). 1 on success, 0 on failure (out
+ * of memory). The owned puts hashed and walked the key up to four times:
+ * once for the replace walk, again in map_put_raw, again to find the entry
+ * to flag, and a closure once more.
+ *
+ * `resize_first` keeps each put's own moment to grow the table, so the
+ * buckets, and the order a walk of the map sees, are what they were: the
+ * plain put grows before it looks for the key, an owned put only when it
+ * adds one. */
+static int map_store(HashMap* map, const char* key, void* value, int owned, int resize_first) {
+    if (resize_first && map_load_exceeded(map)) hashmap_resize(map);
 
     unsigned int key_len = 0;
     const char* kd = NULL;
     unsigned int hash = key_hash(key, &kd, &key_len);
-    unsigned int index = HASHMAP_SLOT(hash, map->capacity);
-    HashMapEntry* entry = map->buckets[index];
+    HashMapEntry* entry = map->buckets[HASHMAP_SLOT(hash, map->capacity)];
 
     while (entry) {
         // Hash check is a cheap prefilter before key_equals (which
         // still runs memcmp for false hash collisions).
         if (entry->hash == hash && key_equals(entry, kd, key_len)) {
             /* #467: if the entry was previously owned-put, release
-             * the prior heap-string before overwriting with the
-             * (unowned) new value. Subsequent map.free won't see
-             * the dropped allocation since value_owned is reset. */
+             * the prior heap-string before overwriting. Subsequent
+             * map.free won't see the dropped allocation since
+             * value_owned is replaced. */
             release_owned_value(entry->value, entry->value_owned);
             entry->value = value;
-            entry->value_owned = 0;
+            entry->value_owned = owned;
             return 1;
         }
         entry = entry->next;
     }
+
+    if (!resize_first && map_load_exceeded(map)) hashmap_resize(map);
+    unsigned int index = HASHMAP_SLOT(hash, map->capacity);
 
     HashMapEntry* new_entry = (HashMapEntry*)aether_caps_malloc(sizeof(HashMapEntry));
     if (!new_entry) return 0;
@@ -618,13 +629,21 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
         if (!new_entry->key) { aether_caps_free(new_entry, sizeof(HashMapEntry)); return 0; }
     }
     new_entry->value       = value;
-    new_entry->value_owned = 0;
+    new_entry->value_owned = owned;
     new_entry->hash        = hash;
     new_entry->key_len     = key_len;
     new_entry->next        = map->buckets[index];
     map->buckets[index] = new_entry;
     map->size++;
     return 1;
+}
+
+// map_put_raw returns 1 on success, 0 on failure (null map/key or OOM).
+// The Aether wrapper `map.put` in std.map/std.collections turns the 0
+// into an error string.
+int map_put_raw(HashMap* map, const char* key, void* value) {
+    if (!map || !key) return 0;
+    return map_store(map, key, value, 0, 1);
 }
 
 /* std.map's `put` and std.collections' `map_put` (#3086), as list_add. */
@@ -656,41 +675,11 @@ const char* map_put(HashMap* map, const char* key, void* value) {
  * at map_free time. Hand-written code wants map_put_string_owned. */
 int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
     if (!map || !key) return 0;
-
-    /* Replace path: walk the bucket. If the key exists, release
-     * the previous value when it was previously owned, then store
-     * the new value with value_owned=1. If the previous put was
-     * unowned (literal / int-cast-to-ptr), DON'T release it —
-     * the caller never expected ownership transfer for that path. */
-    if (map->size > 0) {
-        unsigned int key_len = 0;
-        const char* kd = NULL;
-        unsigned int hash = key_hash(key, &kd, &key_len);
-        unsigned int index = HASHMAP_SLOT(hash, map->capacity);
-        HashMapEntry* entry = map->buckets[index];
-        while (entry) {
-            if (entry->hash == hash && key_equals(entry, kd, key_len)) {
-                release_owned_value(entry->value, entry->value_owned);
-                entry->value = (void*)value;
-                entry->value_owned = !is_pinned_string(value);
-                return 1;
-            }
-            entry = entry->next;
-        }
-    }
-
-    /* Fresh entry: insert via map_put_raw, then flip the new
-     * entry's value_owned. map_put_raw guarantees the inserted
-     * entry is at the head of the bucket. */
-    int ok = map_put_raw(map, key, (void*)value);
-    if (!ok) return 0;
-    unsigned int key_len = 0;
-    const char* kd = NULL;
-    unsigned int hash = key_hash(key, &kd, &key_len);
-    unsigned int index = HASHMAP_SLOT(hash, map->capacity);
-    HashMapEntry* head = map->buckets[index];
-    if (head) head->value_owned = !is_pinned_string(value);
-    return 1;
+    /* The value is the map's (value_owned 1), unless it is pinned: a
+     * literal is never released. If the key held a value the map did not
+     * own (a literal, an int cast to a pointer), that one is not released:
+     * the caller never handed it over. */
+    return map_store(map, key, (void*)value, !is_pinned_string(value), 0);
 }
 
 /* OWNING put: the map acquires its OWN reference to `value`, so the
@@ -727,16 +716,10 @@ int map_put_string_owned(HashMap* map, const char* key, const void* value) {
 int map_put_closure_owned(HashMap* map, const char* key, void* box) {
     if (!map || !key) return 0;
     closure_box_retain_env(box);
-    if (!map_put_string_adopted(map, key, box)) {
+    if (!map_store(map, key, box, 2, 0)) {
         aether_closure_env_free(box ? ((_AeClosureBox*)box)->env : NULL);
         return 0;
     }
-    unsigned int key_len = 0;
-    const char* kd = NULL;
-    unsigned int hash = key_hash(key, &kd, &key_len);
-    HashMapEntry* entry = map->buckets[HASHMAP_SLOT(hash, map->capacity)];
-    while (entry && !(entry->hash == hash && key_equals(entry, kd, key_len))) entry = entry->next;
-    if (entry) entry->value_owned = 2;
     return 1;
 }
 

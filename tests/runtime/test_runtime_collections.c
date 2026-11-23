@@ -123,3 +123,85 @@ TEST_CATEGORY(map_keys, TEST_CATEGORY_COLLECTIONS) {
     map_keys_free(keys);
     map_free(map);
 }
+
+/* #3831: an owned put hashes and walks its key once. What it stores is what
+ * the three walks stored: a new key goes where a plain put puts it (the
+ * keys of the two maps come back in the same order across every resize),
+ * a replaced value the map owned is released and one it did not own is
+ * left alone, a replace moves no key, and freeing the map releases each
+ * value it owns, once. */
+TEST_CATEGORY(map_owned_put_one_walk_same_map, TEST_CATEGORY_COLLECTIONS) {
+    enum { N = 3000 };
+    static int plain_value;
+    HashMap* plain = map_new();
+    HashMap* owned = map_new();
+    ASSERT_NOT_NULL(plain);
+    ASSERT_NOT_NULL(owned);
+    AetherString* first[N];
+    char key[32], text[32];
+    for (int i = 0; i < N; i++) {
+        snprintf(key, sizeof(key), "key-%d", i);
+        snprintf(text, sizeof(text), "value-%d", i);
+        ASSERT_EQ(1, map_put_raw(plain, key, &plain_value));
+        first[i] = string_new(text);
+        string_retain(first[i]);          /* ours, to watch the map's go */
+        ASSERT_EQ(1, map_put_string_adopted(owned, key, first[i]));
+    }
+    MapKeys* pk = map_keys_raw(plain);
+    MapKeys* ok = map_keys_raw(owned);
+    ASSERT_EQ(N, pk->count);
+    ASSERT_EQ(N, ok->count);
+    int same = 1;
+    for (int i = 0; i < N; i++)
+        if (strcmp(aether_string_data(map_keys_get_raw(pk, i)),
+                   aether_string_data(map_keys_get_raw(ok, i))) != 0) same = 0;
+    ASSERT_TRUE(same);
+
+    /* Replace every value: the map's reference to each first value goes. */
+    for (int i = 0; i < N; i++) {
+        snprintf(key, sizeof(key), "key-%d", i);
+        snprintf(text, sizeof(text), "again-%d", i);
+        ASSERT_EQ(1, map_put_string_adopted(owned, key, string_new(text)));
+    }
+    int released = 0;
+    for (int i = 0; i < N; i++) released += (first[i]->ref_count & AETHER_STRING_COUNT_MASK) == 1;
+    ASSERT_EQ(N, released);
+    ASSERT_EQ(N, map_size(owned));
+    MapKeys* ok2 = map_keys_raw(owned);
+    same = ok2->count == N;
+    for (int i = 0; same && i < N; i++)
+        if (strcmp(aether_string_data(map_keys_get_raw(ok, i)),
+                   aether_string_data(map_keys_get_raw(ok2, i))) != 0) same = 0;
+    ASSERT_TRUE(same);
+    snprintf(key, sizeof(key), "key-%d", 7);
+    ASSERT_STREQ("again-7", aether_string_data(map_get_raw(owned, key)));
+
+    /* A value the map does not own is not released when replaced; one it
+     * owns that a plain put replaces is. */
+    AetherString* kept = string_new("kept");
+    ASSERT_EQ(1, map_put_raw(owned, "key-1", kept));
+    ASSERT_EQ(1, map_put_string_adopted(owned, "key-1", string_new("owned")));
+    ASSERT_EQ(1, kept->ref_count & AETHER_STRING_COUNT_MASK);
+    string_release(kept);
+    AetherString* watched = string_new("watched");
+    string_retain(watched);
+    ASSERT_EQ(1, map_put_string_adopted(owned, "key-2", watched));
+    ASSERT_EQ(1, map_put_raw(owned, "key-2", &plain_value));
+    ASSERT_EQ(1, watched->ref_count & AETHER_STRING_COUNT_MASK);
+    string_release(watched);
+
+    /* A closure box the map owns replaces an owned string, which goes. */
+    AetherString* boxed_out = string_new("boxed out");
+    string_retain(boxed_out);
+    ASSERT_EQ(1, map_put_string_adopted(owned, "key-3", boxed_out));
+    ASSERT_EQ(1, map_put_closure_owned(owned, "key-3", NULL));
+    ASSERT_EQ(1, boxed_out->ref_count & AETHER_STRING_COUNT_MASK);
+    string_release(boxed_out);
+
+    map_keys_free(ok2);
+    map_keys_free(ok);
+    map_keys_free(pk);
+    map_free(owned);
+    map_free(plain);
+    for (int i = 0; i < N; i++) string_release(first[i]);
+}

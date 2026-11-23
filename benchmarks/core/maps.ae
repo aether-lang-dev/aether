@@ -30,4 +30,18 @@ main() {
     println("row map_get ${(t1 - t0) as float / n as float} ns/op")
     if found != n { println("map lost keys: ${found} of ${n}") }
     map.free(m)
+
+    // #3831: a value built for each put, which the map takes over (an
+    // owned put). The difference from map_put is the owned put's own work
+    // and building the value.
+    owned = map.new()
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        map.put(owned, "key-${i}", "value-${i}")
+        i = i + 1
+    }
+    t1 = os.now_monotonic_ns()
+    println("row map_put_owned_value ${(t1 - t0) as float / n as float} ns/op")
+    map.free(owned)
 }
