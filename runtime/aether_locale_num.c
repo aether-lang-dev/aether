@@ -4,7 +4,9 @@
 //
 //   1. _l-suffixed libc calls, locale as an explicit argument.
 //        macOS/BSD: snprintf_l(buf, n, LOC, fmt, ...)   locale BEFORE fmt
-//        Windows:   _strtod_l / _strtof_l, parse side only.
+//        Windows:   _strtod_l / _strtof_l, parse side only. msvcrt under
+//                   mingw-w64 parses floats with mingw-w64's own parser
+//                   instead (aether_msvcrt_c_parse, #3818).
 //
 //   2. Thread-local locale bracket, where the parser takes a locale but the
 //      formatter does not. Never disturbs other threads or the host.
@@ -53,6 +55,20 @@
 #  define AETHER_LOCALE_WIN32 1
 #else
 #  define AETHER_LOCALE_WIN32 0
+#endif
+
+// msvcrt under mingw-w64: MSYS2's MINGW64 and the msvcrt WinLibs. <_mingw.h>,
+// which every CRT header includes, defines _UCRT when the headers target
+// UCRT (MSYS2's UCRT64, the UCRT WinLibs, zig cc), and MSVC does not define
+// __MINGW32__. msvcrt.dll exports no _strtof_l: mingw-w64 12's import
+// library has no __imp__strtof_l, so the call did not link (#3818), and
+// mingw-w64 15's provides one that narrows _strtod_l, rounding twice. No
+// mingw-w64 version gives a correctly rounded one, so the condition does not
+// depend on __MINGW64_VERSION_MAJOR.
+#if AETHER_LOCALE_WIN32 && defined(__MINGW32__) && !defined(_UCRT)
+#  define AETHER_LOCALE_MSVCRT 1
+#else
+#  define AETHER_LOCALE_MSVCRT 0
 #endif
 
 // macOS and FreeBSD/DragonFly expose snprintf_l and friends via <xlocale.h>.
@@ -498,6 +514,98 @@ static int aether_c_special(const char* s, int prec, int emin, int emax,
     return 1;
 }
 
+#if AETHER_LOCALE_MSVCRT
+// mingw-w64's own parsers (gdtoa, in libmingwex), correctly rounded to the
+// result type. <stdlib.h> declares them unless __NO_ISOCEXT; they are
+// declared here too so the call never depends on that.
+float __cdecl __mingw_strtof(const char* __restrict__ s, char** __restrict__ end);
+
+static double aether_mingw_parse(const char* text, char** end, int single) {
+    (void)single;
+    return (double)__mingw_strtof(text, end);  // exact: a float widens exactly
+}
+
+// Decimal text read as the C locale reads it, on msvcrt (#3818).
+//
+// mingw-w64's parser rounds correctly but reads the ambient radix
+// (localeconv) and takes no locale argument, and msvcrt has no per-thread
+// locale to bracket it with: _configthreadlocale refuses
+// _ENABLE_PER_THREAD_LOCALE there (see aether_win_snprintf_c_locale). So
+// under a radix other than '.', the text a C-locale parse can read is copied
+// with its '.' spelt as the ambient radix, the copy is parsed, and the end is
+// mapped back to `s`. After aether_c_special has taken inf, nan and hex, that
+// text is a sign, digits, one '.', and an exponent: the longest run of those
+// characters with at most one '.' holds every byte the parse can take, and
+// the ambient radix (',') lies outside it, so in the input it ends the parse
+// as it does in the C locale. The digits reach the parser as they are, so the
+// result is the correctly rounded one, the same bits as UCRT's _strtof_l.
+//
+// Like the formatter's msvcrt path, this reads the radix of the process
+// global locale: a thread calling setlocale while another parses races with
+// it, as it does with every msvcrt locale call.
+static double aether_msvcrt_c_parse(const char* s, char** endptr, int single) {
+    const char* p = s;
+    while (aether_c_space(*p)) p++;
+
+    const struct lconv* lc = localeconv();
+    const char* radix = lc ? lc->decimal_point : NULL;
+    char* end = NULL;
+    if (!radix || !radix[0] || (radix[0] == '.' && radix[1] == '\0')) {
+        double v = aether_mingw_parse(p, &end, single);
+        if (endptr) *endptr = end == p ? (char*)s : end;
+        return v;
+    }
+
+    const size_t no_dot = (size_t)-1;
+    size_t n = 0;
+    size_t dot = no_dot;
+    for (;; n++) {
+        char c = p[n];
+        if (c == '.') {
+            if (dot != no_dot) break;
+            dot = n;
+        } else if (!((c >= '0' && c <= '9') || c == '+' || c == '-' || c == 'e' || c == 'E')) {
+            break;
+        }
+    }
+    size_t rl = strlen(radix);
+    size_t len = dot == no_dot ? n : n - 1 + rl;
+
+    char inline_buf[128];
+    char* buf = inline_buf;
+    if (len >= sizeof inline_buf) {
+        buf = (char*)malloc(len + 1);
+        if (!buf) {
+            if (endptr) *endptr = (char*)s;
+            errno = ENOMEM;
+            return 0.0;
+        }
+    }
+    if (dot == no_dot) {
+        memcpy(buf, p, n);
+    } else {
+        memcpy(buf, p, dot);
+        memcpy(buf + dot, radix, rl);
+        memcpy(buf + dot + rl, p + dot + 1, n - dot - 1);
+    }
+    buf[len] = '\0';
+
+    double v = aether_mingw_parse(buf, &end, single);
+    if (endptr) {
+        size_t off = (size_t)(end - buf);
+        // The parser takes the whole radix or none of it.
+        if (dot != no_dot && off > dot) off -= rl - 1;
+        *endptr = off == 0 ? (char*)s : (char*)(p + off);
+    }
+    if (buf != inline_buf) {
+        int parse_errno = errno;
+        free(buf);
+        errno = parse_errno;
+    }
+    return v;
+}
+#endif
+
 double aether_c_strtod(const char* s, char** endptr) {
     if (!s) {
         if (endptr) *endptr = NULL;
@@ -565,6 +673,9 @@ float aether_c_strtof(const char* s, char** endptr) {
 
 #if !AETHER_HAS_LOCALE_CONV
     return strtof(s, endptr);
+
+#elif AETHER_LOCALE_MSVCRT
+    return (float)aether_msvcrt_c_parse(s, endptr, 1);  // exact: a float's bits
 
 #elif AETHER_LOCALE_WIN32
     {

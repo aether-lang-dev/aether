@@ -110,8 +110,9 @@ fi
 # 2b. On Windows the record's second line is the archive's mingw-w64 major,
 # and a compiler on another mingw-w64 takes the source fallback too: the
 # same C runtime by name, other import libraries (WinLibs GCC 14.2's
-# mingw-w64 12 has no _strtof_l import, which MSYS2's 15 archive takes). A
-# toolchain of its own here, whose record names a mingw-w64 no compiler has.
+# mingw-w64 12 has no _strtof_l import, which MSYS2's 15 archive took until
+# #3818). A toolchain of its own here, whose record names a mingw-w64 no
+# compiler has.
 mingw="$(sed -n 's/^mingw-w64 \([0-9][0-9]*\)$/\1/p' "$rec" 2>/dev/null | tr -d '\r' | head -n 1)"
 if [ -n "$mingw" ] && [ -n "$crt" ]; then
     PRIV="$TMP/tc"
@@ -168,6 +169,31 @@ if [ -n "$zig" ]; then
     fi
 else
     echo "  [SKIP] $NAME: step 3 (zig): no zig on PATH or under build/scratch/.zig"
+fi
+
+# 4. The msvcrt WinLibs, when one is installed (tests/lib/find_msvcrt_gcc.sh).
+# Its mingw-w64 (12) differs from the archive's, so the runtime is compiled
+# from source with it, and its import library has no _strtof_l, which the
+# runtime called on msvcrt: that build did not link (#3818). A program that
+# parses floats next to float ties, in the C locale and under a comma-decimal
+# one, builds with it and gets UCRT strtof's bits.
+. "$ROOT/tests/lib/find_msvcrt_gcc.sh"
+mgcc=""
+[ "$WIN" = 1 ] && mgcc="$(find_msvcrt_gcc "$ROOT")"
+if [ -n "$mgcc" ]; then
+    halfway="$ROOT/tests/regression/test_string_parse_float_halfway.ae"
+    if ! (cd "$TMP" && AE_CC="$(cygpath -m "$mgcc")" "$AE" build -v "$halfway" -o halfway) > "$TMP/msvcrt.log" 2>&1; then
+        grep -o "undefined reference to .*\|error: .*" "$TMP/msvcrt.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        fail "AE_CC=$mgcc did not build a program that parses floats"
+    elif ! PATH="$(dirname "$mgcc"):$PATH" "$TMP/halfway" > "$TMP/halfway.out" 2>&1 ||
+         ! grep -q "^All PASS" "$TMP/halfway.out"; then
+        grep "FAIL" "$TMP/halfway.out" | head -5 | cut -c1-240 | sed 's/^/        /'
+        fail "the float parsing program built with AE_CC=$mgcc did not pass"
+    else
+        done_what="$done_what; the msvcrt WinLibs builds a program that parses floats, with UCRT's bits"
+    fi
+elif [ "$WIN" = 1 ]; then
+    echo "  [SKIP] $NAME: step 4 (msvcrt WinLibs): none in AETHER_TEST_MSVCRT_GCC or under build/scratch/.winlibs-msvcrt"
 fi
 
 [ "$fails" -eq 0 ] || exit 1

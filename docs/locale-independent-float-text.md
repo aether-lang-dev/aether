@@ -222,6 +222,16 @@ The probe also demonstrated the bug live: with the ambient locale set to German,
 `3.1400000000000001` and `_strtod_l("3.14")` consumed all four chars. So Windows takes backend 1
 (`_`-prefixed) unconditionally; no `#error` branch will be reachable on any supported platform.
 
+**Later (#3818): `_strtof_l` is not msvcrt.dll's.** msvcrt.dll exports no `_strtof_l`. The one
+MINGW64's mingw-w64 15 links is its own, `(float)_strtod_l(...)`, which rounds twice: decimal text
+just above a float tie came out one ulp low, and the text just under `FLT_MAX` plus half an ulp
+overflowed. mingw-w64 12 (the msvcrt WinLibs GCC 14.2) has none, so a runtime built with it did not
+link (`undefined reference to __imp__strtof_l`). On msvcrt under mingw-w64 (`__MINGW32__` without
+`_UCRT`), `aether_c_strtof` now parses with mingw-w64's correctly rounded `__mingw_strtof`; that
+parser reads the ambient radix and msvcrt has no per-thread locale, so under a radix other than
+`.` it parses a copy of the C-locale text with the `.` spelt as that radix. UCRT and MSVC keep
+`_strtof_l`.
+
 Windows locale-name detail for the §4.3 test's candidate list: `setlocale(LC_ALL, "de-DE")`
 succeeds on UCRT64 but fails on MINGW64 (msvcrt), which needs `"German_Germany.1252"`. Try
 `de-DE`, then `German_Germany.utf8`, then `German_Germany.1252`, and SKIP if all return NULL.

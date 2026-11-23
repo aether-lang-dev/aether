@@ -3986,9 +3986,10 @@ static void crt_name_of(const char* cc, const char* flags, const char* header, c
  * headers declare _setjmp as an msvcrt import, and AE_CC="zig cc", which
  * links UCRT, failed on "undefined symbol: __declspec(dllimport) _setjmp" as
  * soon as a program used try; two C runtimes in one program disagree on FILE,
- * errno and the heap besides. On Windows the mingw-w64 major counts too: an
- * archive MSYS2's mingw-w64 15 built imports _strtof_l, which mingw-w64 12
- * (WinLibs GCC 14.2, msvcrt like it) does not provide.
+ * errno and the heap besides. On Windows the mingw-w64 major counts too: the
+ * import libraries differ (an archive MSYS2's mingw-w64 15 built imported
+ * _strtof_l, which mingw-w64 12, WinLibs GCC 14.2 and msvcrt like it, does
+ * not provide, until the runtime stopped calling it on msvcrt, #3818).
  *
  * `make` records the archive's runtime beside it (libaether.crt, from
  * runtime/aether_crt_id.h): the name on the first line, `mingw-w64 <major>`
@@ -4110,9 +4111,9 @@ static const char* posix_driven_cc(void) {
 //
 // UCRT, while the Windows releases' libaether.a is msvcrt (MSYS2 MINGW64):
 // ae compiles the runtime from source for it (archive_crt_check, #3813). The
-// msvcrt build of this GCC is no better: its mingw-w64 (12) has no
-// _strtof_l import, which an archive MSYS2's mingw-w64 (15) built references,
-// so it fails the link where UCRT builds from source and runs.
+// msvcrt build of this GCC gets the same, for its mingw-w64 (12) against the
+// archive's (15); its import library has no _strtof_l, which failed that
+// link until the runtime stopped calling it on msvcrt (#3818).
 //
 // WINLIBS_SHA256 is the .sha256 WinLibs publishes beside the zip, pinned
 // here and checked in-process before the zip is opened: the compiler it

@@ -807,8 +807,9 @@ an msvcrt archive linked by a UCRT compiler (`AE_CC="zig cc"`) failed on
 `try` (#3813), and two C runtimes in one program disagree on `FILE`, `errno`
 and the heap besides. On Windows the mingw-w64 major counts too: the same C
 runtime by name comes with other import libraries (an archive MSYS2's
-mingw-w64 15 built imports `_strtof_l`, which WinLibs GCC 14.2's mingw-w64 12
-does not provide). `make` writes the archive's runtime to `libaether.crt`
+mingw-w64 15 built imported `_strtof_l`, which WinLibs GCC 14.2's mingw-w64 12
+does not provide, until the runtime stopped calling it on msvcrt, #3818).
+`make` writes the archive's runtime to `libaether.crt`
 beside it, from `runtime/aether_crt_id.h`: the name on the first line (msvcrt
 or ucrt on Windows, glibc, musl, bionic or uclibc on Linux; nothing where a
 platform has one C runtime) and, on Windows, `mingw-w64 <major>` on the
