@@ -1388,6 +1388,67 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
     }
     return ret;
 }
+
+/* #3842: see the POSIX twin above run_cmd_capture_stdout_wait. A command
+ * line long enough to need ae_spawn's response file is run whole. */
+int run_cmd_capture_stdout_start(const char* cmd, const char* path, AeChild* child) {
+    child->running = 0;
+    if (!path || !path[0]) return 0;
+    char** argv = ae_split_command(cmd, NULL);
+    if (!argv || !argv[0]) {
+        free(argv);
+        return 0;
+    }
+    int n = 0;
+    size_t room = 0;
+    for (; argv[n]; n++) room += 2 * strlen(argv[n]) + 3;
+    size_t vec = ((size_t)n + 1) * sizeof(char*);
+    char** list = malloc(vec + room);
+    if (!list) {
+        free(argv);
+        return 0;
+    }
+    char* w = (char*)list + vec;
+    size_t line = 0;
+    for (int i = 0; i < n; i++) {
+        list[i] = w;
+        w = win_quote_arg(argv[i], w);
+        line += (size_t)(w - list[i]) + 1;
+        *w++ = '\0';
+    }
+    list[n] = NULL;
+    intptr_t h = -1;
+    if (line <= WIN_CMD_LINE_MAX) {
+        if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
+        fflush(stdout);
+        int saved_stdout = _dup(1);
+        int fd = _open(path, _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE);
+        if (saved_stdout >= 0 && fd >= 0) {
+            _dup2(fd, 1);
+            h = _spawnvp(_P_NOWAIT, argv[0], (const char* const*)list);
+            _dup2(saved_stdout, 1);
+        }
+        if (fd >= 0) _close(fd);
+        if (saved_stdout >= 0) _close(saved_stdout);
+    }
+    free(list);
+    free(argv);
+    if (h == -1) return 0;
+    child->handle = (long long)h;
+    child->running = 1;
+    return 1;
+}
+
+int run_cmd_capture_stdout_wait(AeChild* child) {
+    if (!child->running) return AE_SPAWN_FAILED;
+    child->running = 0;
+    HANDLE p = (HANDLE)(intptr_t)child->handle;
+    DWORD code = (DWORD)-1;
+    WaitForSingleObject(p, INFINITE);
+    GetExitCodeProcess(p, &code);
+    CloseHandle(p);
+    return (int)code;
+}
 #endif
 
 int run_cmd(const char* cmd) {
@@ -1500,6 +1561,45 @@ int run_cmd_capture_all(const char* cmd, const char* path) {
     if (!path || !path[0]) return run_command(cmd, 0, NULL);
     return run_command(cmd, 4, path);
 }
+
+/* #3842: run_cmd_capture_stdout without the wait, and the wait. The child
+ * is spawned exactly as ae_spawn spawns it (quiet 3), only not waited for:
+ * ae goes on with other work, and the status comes from _wait. A command
+ * that cannot be started this way is reported as not started, and the
+ * caller runs it whole, which says why it failed if it does. */
+#ifndef _WIN32
+int run_cmd_capture_stdout_start(const char* cmd, const char* path, AeChild* child) {
+    child->running = 0;
+    if (!path || !path[0]) return 0;
+    char** argv = ae_split_command(cmd, NULL);
+    if (!argv || !argv[0]) {
+        free(argv);
+        return 0;
+    }
+    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    pid_t pid;
+    int ret = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    free(argv);
+    if (ret != 0) return 0;
+    child->handle = (long long)pid;
+    child->running = 1;
+    return 1;
+}
+
+int run_cmd_capture_stdout_wait(AeChild* child) {
+    if (!child->running) return AE_SPAWN_FAILED;
+    child->running = 0;
+    int status = 0;
+    while (waitpid((pid_t)child->handle, &status, 0) < 0 && errno == EINTR) { }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    return -1;
+}
+#endif
 
 /* Print a captured stdout log to stderr, so it interleaves with the
  * diagnostics that streamed through live. Silent when there is nothing. */
@@ -8659,6 +8759,9 @@ static int cmd_run(int argc, char** argv) {
      * root, entered above. */
     if (ae_resolve_dependencies() < 0) return 1;
     load_defines_from_toml();
+    /* #3842: the C compiler's `--version`, part of the cache key, runs from
+     * here while ae resolves the program and walks its trees. */
+    cache_ccid_start();
 
     // Project mode: no file argument, the project's src/main.ae
     if (!file && path_exists("aether.toml")) {
@@ -11302,6 +11405,9 @@ static int cmd_build(int argc, char** argv) {
      * walk-up they were found only from the project root, so the same
      * `ae build src/app.ae` compiled a different program from `src/`. */
     load_defines_from_toml();
+    /* #3842: the C compiler's `--version`, part of the cache key, runs from
+     * here while ae resolves the program and walks its trees. */
+    cache_ccid_start();
 
     // Read target from aether.toml if not specified on CLI
     if (!target && path_exists("aether.toml")) {
