@@ -685,6 +685,9 @@ int aether_sandbox_granted(const char* category, const char* path) {
 #ifndef IO_REPARSE_TAG_SYMLINK
 #define IO_REPARSE_TAG_SYMLINK 0xA000000CL
 #endif
+#ifndef STATUS_DELETE_PENDING
+#define STATUS_DELETE_PENDING ((NTSTATUS)0xC0000056L)
+#endif
 #ifndef STATUS_OBJECT_NAME_COLLISION
 #define STATUS_OBJECT_NAME_COLLISION ((NTSTATUS)0xC0000035L)
 #endif
@@ -1481,11 +1484,21 @@ void aether_sandbox_stage_abort(AetherSandboxStaged* s) {
     CloseHandle(root);
 }
 
+/* Each call's names start from a place of their own: the process-wide count
+ * of calls, as the POSIX aether_sandbox_temp_in mixes in g_stage_counter.
+ * Seeded by the tick count alone, every call in the same 15 ms tick began
+ * at the same name, so make_temp_dir's directory and the make_temp_file
+ * after it, both prefixed "t", asked for one name, which a delete still
+ * pending made unusable (#3817). */
+static volatile LONG g_win_temp_calls = 0;
+
 /* fs.make_temp_file and fs.make_temp_dir: a fresh name in `dir`, made by
  * NtCreateFile relative to `dir` opened and verified, named as
  * GetTempFileNameA names one: three letters of the prefix, four hex digits
  * and ".tmp". The path returned is `dir` as given and the name; a file
- * comes back closed. */
+ * comes back closed. A name in use, or one whose entry is deleted but still
+ * held open (STATUS_DELETE_PENDING, which no create can take until the last
+ * handle closes), is passed over for the next. */
 int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char* out, size_t cap) {
     if (!dir || !prefix || !out) { errno = EINVAL; return -1; }
     if (!fs_levels_here()) return -2;
@@ -1498,7 +1511,8 @@ int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char
     if (root == INVALID_HANDLE_VALUE) return -1;
     char pre[4] = { 0, 0, 0, 0 };
     for (int i = 0; i < 3 && prefix[i]; i++) pre[i] = prefix[i];
-    unsigned seed = (unsigned)GetTickCount() ^ ((unsigned)GetCurrentProcessId() << 16);
+    unsigned seed = (unsigned)GetTickCount() ^ ((unsigned)GetCurrentProcessId() << 16) ^
+                    ((unsigned)InterlockedIncrement(&g_win_temp_calls) * 0x9E3779B9u);
     for (int attempt = 0; attempt < 256; attempt++) {
         char name[32];
         seed = seed * 1103515245u + 12345u;
@@ -1511,7 +1525,7 @@ int aether_sandbox_temp_in(const char* dir, const char* prefix, int is_dir, char
                                     (is_dir ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE) |
                                         FILE_OPEN_REPARSE_POINT,
                                     NULL, &h);
-        if (st == STATUS_OBJECT_NAME_COLLISION) continue;
+        if (st == STATUS_OBJECT_NAME_COLLISION || st == STATUS_DELETE_PENDING) continue;
         CloseHandle(root);
         if (st < 0) return win_fail_status(st);
         CloseHandle(h);
