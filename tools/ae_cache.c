@@ -1957,10 +1957,17 @@ unsigned long long compute_cache_key(const char* ae_file,
      * when the build links the archive, the usual case) and the depfile
      * fold. Their parts go into the key text where they always went. */
     unsigned long long hdr_acc = 1469598103934665603ULL;
-    int hdr_count = 0, hdr_complete = 1, hdr_oom = 0;
+    int hdr_count = 0, hdr_complete = 1, hdr_oom = 0, hdr_walked = 0;
     char* hdr_why_dir = NULL;     /* the directory a walk could not finish */
     const char* hdr_why = NULL;   /* and why */
-    if (tc.dev_mode && tc.src_root[0]) {
+    /* Only for a build that links the archive: with no libaether.a (none
+     * built, or --trace, which drops it) the runtime is compiled from
+     * source, the key below folds the runtime key in place of :hdr=, and
+     * the walk, about 20 ms, was thrown away. When the archive is there and
+     * then refused for its C runtime (a decision that needs the compiler,
+     * made below), the walk is made and not used, as before. */
+    if (tc.dev_mode && tc.src_root[0] && tc.has_lib) {
+        hdr_walked = 1;
         static const char* hdr_dirs[] = { "runtime", "std" };
         for (size_t d = 0; hdr_complete && d < sizeof(hdr_dirs) / sizeof(hdr_dirs[0]); d++) {
             char* dir = str_join4(tc.src_root, strlen(tc.src_root), "/", hdr_dirs[d], "");
@@ -2072,7 +2079,12 @@ unsigned long long compute_cache_key(const char* ae_file,
         /* The walk was made above, before the wait for the compiler
          * (#3842). */
         if (hdr_oom) key.oom = 1;
-        else if (!hdr_complete) {
+        else if (!hdr_walked) {
+            /* Not walked (no archive then), yet linking it now: no key
+             * rather than one without the headers (#2707). */
+            if (tc.verbose) fprintf(stderr, "[cache] no key: the headers were not walked\n");
+            complete = 0;
+        } else if (!hdr_complete) {
             if (tc.verbose) fprintf(stderr, "[cache] no key: %s %s\n", hdr_why_dir, hdr_why);
             complete = 0;
         }

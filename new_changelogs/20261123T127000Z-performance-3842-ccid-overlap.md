@@ -9,3 +9,6 @@
   A wait for that run that fails (its status reaped elsewhere) counts as no
   answer and the compiler is asked again, and a parallel runtime compile
   that reaps the run hands its status to the run's own wait.
+  A build that compiles the runtime from source (`--trace`, or no
+  libaether.a) no longer walks the headers for a key part it does not use:
+  a warm `ae build --trace` hit is about 8 ms faster.
