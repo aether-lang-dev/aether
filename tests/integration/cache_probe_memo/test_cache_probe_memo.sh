@@ -9,7 +9,9 @@
 # so every build paid two extra compiles. They are kept in the cache
 # directory now (`<key>.probe`), by the compiler's identity: the first build
 # asks and records, later builds read. A record that is gone or unreadable
-# is asked again, and the binary is the same either way.
+# is asked again, and the binary is the same either way. The question
+# whether the compiler is GCC, for its inlining budget (#3779), is kept the
+# same way.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -51,7 +53,7 @@ asked || fail "the first build did not ask about -fbracket-depth"
 ls "$AETHER_CACHE_DIR"/*.probe > /dev/null 2>&1 || fail "the first build remembered no answer"
 
 build "after the first"
-if grep -E '^\[cmd\].*ae_(bracket|avx)_probe' "$n.log"; then
+if grep -E '^\[cmd\].*ae_(bracket|avx|inline)_probe' "$n.log"; then
     fail "a later build asked again"
 fi
 

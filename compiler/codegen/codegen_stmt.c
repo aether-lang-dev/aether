@@ -3627,19 +3627,6 @@ static int call_is_extern(CodeGenerator* gen, ASTNode* call) {
            find_extern_declaration_in_scope(gen, fn) != NULL;
 }
 
-/* May evaluating `e` hold an owning value in a statement temporary (a
- * call, an array or a tuple literal inside it, not `e` itself at `top`),
- * whose block-exit drop a return must run after taking `e`? */
-static int value_holds_temps(CodeGenerator* gen, ASTNode* e, int top) {
-    if (!e || e->type == AST_CLOSURE) return 0;
-    if (!top && (e->type == AST_ARRAY_LITERAL || e->type == AST_FUNCTION_CALL ||
-                 e->type == AST_TUPLE_LITERAL) && own_type_owns(gen, e->node_type))
-        return 1;
-    for (int i = 0; i < e->child_count; i++)
-        if (value_holds_temps(gen, e->children[i], 0)) return 1;
-    return 0;
-}
-
 /* The array value `e` wrapped in the optional `t` of its array type: the
  * optional is a temporary its array is filled into (emit_array_fill), as C
  * initializes no array from an array value. */
@@ -9208,6 +9195,7 @@ static void defer_caps_walk(CodeGenerator* gen, ASTNode* n, DeferCaps* caps) {
 
 static ASTNode** g_udefer_node = NULL;
 static int* g_udefer_id = NULL;
+static int* g_udefer_by_mark = NULL;   /* a slice drop journaled by its value's mark (#3787) */
 static int g_udefer_count = 0;
 
 /* The journal entry of the plain `defer` whose statement is `body`, as its
@@ -9215,6 +9203,184 @@ static int g_udefer_count = 0;
 const char* user_defer_ctx(ASTNode* body) {
     for (int i = g_udefer_count - 1; i >= 0; i--)
         if (g_udefer_node[i] == body) return cg_internf("_ae_dfc%d", g_udefer_id[i]);
+    return NULL;
+}
+
+/* Its journal token (#3787): what the registration's aether_unwind_track
+ * answered, so an exit forgets only an entry that was written. */
+const char* user_defer_token(ASTNode* body) {
+    for (int i = g_udefer_count - 1; i >= 0; i--)
+        if (g_udefer_node[i] == body) return cg_internf("_ae_dt%d", g_udefer_id[i]);
+    return NULL;
+}
+
+/* The slice local `body` gives back, when `body` is slice ownership's drop
+ * of one (`__slice_drop(x)`, slice_own.c's mk_drop_defer), or NULL. */
+static const char* slice_drop_local(const ASTNode* body) {
+    const ASTNode* c = body && body->type == AST_EXPRESSION_STATEMENT && body->child_count == 1
+                           ? body->children[0]
+                           : body;
+    if (!c || c->type != AST_FUNCTION_CALL || !c->value || strcmp(c->value, "__slice_drop") != 0 ||
+        c->child_count != 1 || !c->children[0] || c->children[0]->type != AST_IDENTIFIER)
+        return NULL;
+    return c->children[0]->value;
+}
+
+static int subtree_holds(const ASTNode* n, const ASTNode* target) {
+    if (!n) return 0;
+    if (n == target) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (subtree_holds(n->children[i], target)) return 1;
+    return 0;
+}
+
+/* The declaration a drop follows in its block (the binding `x = v` the
+ * drop is put after, or the hoisted `T[] x` put before it), or NULL. */
+static const ASTNode* drop_anchor(const ASTNode* n, const ASTNode* drop, const char* name) {
+    if (!n) return NULL;
+    for (int i = 0; i < n->child_count; i++) {
+        const ASTNode* ch = n->children[i];
+        if (ch == drop) {
+            const ASTNode* prev = i > 0 ? n->children[i - 1] : NULL;
+            return prev && prev->type == AST_VARIABLE_DECLARATION && prev->value &&
+                           strcmp(prev->value, name) == 0
+                       ? prev
+                       : NULL;
+        }
+        const ASTNode* a = drop_anchor(ch, drop, name);
+        if (a) return a;
+    }
+    return NULL;
+}
+
+typedef struct {
+    const char* name;
+    const ASTNode* anchor;   /* the declaration the drop follows */
+    const ASTNode* drop;     /* the `defer __slice_drop(x)` */
+    int seen;                /* every write to the place is one the journal sees */
+} PlaceWrites;
+
+static int is_store_into(const ASTNode* v, const char* name) {
+    return v && v->type == AST_FUNCTION_CALL && v->value && strcmp(v->value, "__slice_set") == 0 &&
+           v->child_count == 2 && v->children[0] && v->children[0]->type == AST_IDENTIFIER &&
+           v->children[0]->value && strcmp(v->children[0]->value, name) == 0;
+}
+
+static int names(const ASTNode* n, const char* name) {
+    return n && n->value && strcmp(n->value, name) == 0;
+}
+
+/* Every way the frame may change what the place `w->name` holds, read
+ * from the frame's own body, by name (a shadowing binding of the name
+ * counts against it). A store (`x = v`, slice ownership's `__slice_set`)
+ * outside any `try` the drop is not inside is seen: codegen journals the
+ * place there when the value is the first counted one. Anything else is
+ * not: another binding of the name (a pattern, a destructure, a parameter
+ * of a closure, a `catch`, a `for` variable), its address taken (C may
+ * write through it), an assignment of another form, a growth in place
+ * (`push`, `append`), and a store inside a `try` the drop is outside,
+ * which would journal the place at the frame the `try` opens, where a
+ * panic it catches would give back what the place still holds after it. */
+static void place_writes(PlaceWrites* w, const ASTNode* n, int foreign_try) {
+    if (!n || !w->seen || n == w->drop) return;
+    switch (n->type) {
+        case AST_VARIABLE_DECLARATION:
+            if (names(n, w->name) && n != w->anchor &&
+                (foreign_try || n->child_count < 1 || !is_store_into(n->children[0], w->name))) {
+                w->seen = 0;
+                return;
+            }
+            break;
+        case AST_PATTERN_VARIABLE: case AST_CLOSURE_PARAM: case AST_CATCH_CLAUSE:
+        case AST_COMPOUND_ASSIGNMENT:
+            if (names(n, w->name)) {
+                w->seen = 0;
+                return;
+            }
+            break;
+        case AST_TUPLE_DESTRUCTURE:
+            for (int i = 0; i + 1 < n->child_count; i++)
+                if (names(n->children[i], w->name)) {
+                    w->seen = 0;
+                    return;
+                }
+            break;
+        case AST_UNARY_EXPRESSION:
+            if (n->value && strcmp(n->value, "&") == 0 && n->child_count > 0 &&
+                names(n->children[0], w->name)) {
+                w->seen = 0;
+                return;
+            }
+            break;
+        case AST_ASSIGNMENT: case AST_BINARY_EXPRESSION:
+            if ((n->type == AST_ASSIGNMENT || (n->value && strcmp(n->value, "=") == 0)) &&
+                n->child_count > 0 && n->children[0] &&
+                n->children[0]->type == AST_IDENTIFIER && names(n->children[0], w->name)) {
+                w->seen = 0;
+                return;
+            }
+            break;
+        case AST_FUNCTION_CALL:
+            if (n->value && n->child_count > 0 && n->children[0] &&
+                n->children[0]->type == AST_IDENTIFIER && names(n->children[0], w->name) &&
+                (strcmp(n->value, "__slice_push") == 0 || strcmp(n->value, "append") == 0 ||
+                 strcmp(n->value, "push") == 0 || strcmp(n->value, "free") == 0)) {
+                w->seen = 0;
+                return;
+            }
+            break;
+        case AST_TRY_STATEMENT:
+            if (!foreign_try && !subtree_holds(n, w->drop)) foreign_try = 1;
+            break;
+        default:
+            break;
+    }
+    if (n->type == AST_FOR_LOOP && names(n, w->name)) {
+        w->seen = 0;
+        return;
+    }
+    for (int i = 0; i < n->child_count; i++) place_writes(w, n->children[i], foreign_try);
+}
+
+/* #3787: may the slice local `name`, which the `defer` `drop` gives back,
+ * be journaled by its value's mark, rather than from its declaration on?
+ * Only where the frame's body shows every write to it (place_writes). A
+ * drop outside the function being emitted (a receive arm's) is journaled
+ * as before. */
+static int slice_place_journals_by_mark(CodeGenerator* gen, const ASTNode* drop, const char* name) {
+    const ASTNode* frame = gen->current_function;
+    if (!frame || !name || !subtree_holds(frame, drop)) return 0;
+    PlaceWrites w = {name, drop_anchor(frame, drop, name), drop, 1};
+    /* The parameters are the frame's, bound before the body runs. */
+    const ASTNode* body = NULL;
+    for (int i = frame->child_count - 1; i >= 0 && !body; i--)
+        if (frame->children[i] && frame->children[i]->type == AST_BLOCK) body = frame->children[i];
+    if (!body) return 0;
+    place_writes(&w, body, 0);
+    return w.seen;
+}
+
+/* #3787: the store `place = v` into the slice local `place` names, given
+ * the C of the place: when the local's drop is journaled by its value's
+ * mark, the token and entry the store journals the place with, as
+ * "<token>:<entry>:<thunk>"; NULL when it is journaled from its declaration
+ * on, or it is no such local. The innermost live drop of the name is the
+ * local's (the defer stack holds what is live). */
+const char* slice_place_store_journal(CodeGenerator* gen, const ASTNode* place) {
+    if (!place || place->type != AST_IDENTIFIER || !place->value) return NULL;
+    for (int i = gen->defer_count - 1; i >= 0; i--) {
+        ASTNode* d = gen->defer_stack[i];
+        if (!d || gen->defer_mode[i] != DEFER_ALWAYS) continue;
+        const char* nm = slice_drop_local(d);
+        if (!nm || strcmp(nm, place->value) != 0) continue;
+        for (int k = g_udefer_count - 1; k >= 0; k--)
+            if (g_udefer_node[k] == d)
+                return g_udefer_by_mark[k] ? cg_internf("_ae_dt%d:_ae_dfc%d:_ae_defer_%d",
+                                                        g_udefer_id[k], g_udefer_id[k],
+                                                        g_udefer_id[k])
+                                           : NULL;
+        return NULL;
+    }
     return NULL;
 }
 
@@ -9279,21 +9445,35 @@ static void emit_defer_thunk(CodeGenerator* gen, ASTNode* body, int id, DeferCap
     gen->last_line_num = line_num;
 }
 
-static void emit_defer_registration(CodeGenerator* gen, ASTNode* body) {
+static void emit_defer_registration(CodeGenerator* gen, ASTNode* stmt, ASTNode* body) {
     DeferCaps found = { NULL, 0, 0 };
     defer_caps_walk(gen, body, &found);
     DeferCap* caps = found.v;
     int n = found.n;
     int id = gen->defer_thunk_count++;
     emit_defer_thunk(gen, body, id, caps, n);
+    /* #3787: a slice local's drop is journaled when the local holds a
+     * counted value, by the value's own mark: one of memory no count covers
+     * has nothing for a drain to give back. A store that brings the first
+     * counted value journals it then (slice_place_store_journal). */
+    const char* local = slice_drop_local(body);
+    int by_mark = local && n == 1 && slice_place_journals_by_mark(gen, stmt, local);
     print_indent(gen);
     fprintf(gen->output, "void* _ae_dfc%d[%d] = { ", id, n ? n : 1);
     for (int i = 0; i < n; i++) fprintf(gen->output, "%s(void*)&%s", i ? ", " : "", caps[i].name);
-    fprintf(gen->output, "%s }; aether_unwind_track((const void*)_ae_dfc%d, _ae_defer_%d);\n",
-            n ? "" : "0", id, id);
+    if (by_mark)
+        fprintf(gen->output, " }; int _ae_dt%d = aether_slice_journal((const void*)_ae_dfc%d, "
+                "*(AetherSlice*)&%s, _ae_defer_%d);\n", id, id, caps[0].name, id);
+    else
+        fprintf(gen->output, "%s }; int _ae_dt%d = aether_unwind_track((const void*)_ae_dfc%d, "
+                "_ae_defer_%d);\n", n ? "" : "0", id, id, id);
+    print_line(gen, "(void)_ae_dt%d;", id);
     g_udefer_node = aether_xrealloc(g_udefer_node, sizeof(ASTNode*) * (size_t)(g_udefer_count + 1));
     g_udefer_id = aether_xrealloc(g_udefer_id, sizeof(int) * (size_t)(g_udefer_count + 1));
+    g_udefer_by_mark =
+        aether_xrealloc(g_udefer_by_mark, sizeof(int) * (size_t)(g_udefer_count + 1));
     g_udefer_node[g_udefer_count] = body;
+    g_udefer_by_mark[g_udefer_count] = by_mark;
     g_udefer_id[g_udefer_count++] = id;
     free(caps);
 }
@@ -9332,8 +9512,10 @@ void emit_defer_thunks(CodeGenerator* gen) {
     free(tail);
     free(g_udefer_node);
     free(g_udefer_id);
+    free(g_udefer_by_mark);
     g_udefer_node = NULL;
     g_udefer_id = NULL;
+    g_udefer_by_mark = NULL;
     g_udefer_count = 0;
 }
 
@@ -9473,21 +9655,6 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     if (new_local && is_var_declared(gen, new_local) &&
         destructure_local_unread(gen, new_local))
         print_line(gen, "(void)%s;", new_local);
-}
-
-/* Does a `return`'s value hold a temporary for its statement
- * (value_holds_statement_temps), which its exit drain must release? A value
- * that is a slice may be a view of that very temporary: the drain then
- * releases a temporary string only when every slice result holds what it
- * views (return_slices_guard, #3570), where a slice result used to keep the
- * temporary for good, so `return string.bytes(t), 7` leaked `t`. */
-static int return_holds_statement_temps(CodeGenerator* gen, ASTNode* stmt) {
-    if (!hoist_ready(gen)) return 0;
-    for (int i = 0; i < stmt->child_count; i++) {
-        ASTNode* v = stmt->children[i];
-        if (v && v->type != AST_PRINT_STATEMENT && value_holds_statement_temps(gen, v)) return 1;
-    }
-    return 0;
 }
 
 /* #3570: the C condition that every slice result of the multi-value return
@@ -13136,12 +13303,23 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 }
                 break;
             }
-            // Emit ALL defers before return (unwind entire function)
-            /* And when the value holds a temporary for its statement
-             * (return_holds_statement_temps). */
-            if (gen->defer_count > 0 ||
-                (stmt->child_count == 1 && value_holds_temps(gen, stmt->children[0], 1)) ||
-                return_holds_statement_temps(gen, stmt)) {
+            /* #3811, R3 (leave): a return computes its value into the
+             * result, then gives back every temporary its statement made
+             * and runs every defer of the scopes it leaves, then returns.
+             * A temporary the value makes (a module `var`'s read, a call's
+             * slice read in place, an argument a view may point into, a
+             * composite argument, a string read ahead of a call) is put on
+             * the defer stack while the value is emitted, so the drain
+             * emitted after the value sees each one, whatever made it. The
+             * return used to choose its shape before emitting the value,
+             * from a guess at whether the value would make one; a value the
+             * guess missed (a module slice `var`'s read) was returned bare,
+             * and its release came after the `return`, where it never ran.
+             * A value with no temporary and no defer to run costs nothing:
+             * the result is a local the C compiler returns in place. */
+            int returns_value = stmt->child_count > 0 && stmt->children[0] &&
+                                stmt->children[0]->type != AST_PRINT_STATEMENT;
+            if (gen->defer_count > 0 || returns_value) {
                 // Multi-value return + defer: build a _builder_ret typed
                 // as the function's tuple return so the existing defer-
                 // unwind machinery still applies. Without this branch,
@@ -13231,6 +13409,36 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "}");
                     break;
                 }
+                /* The C type the function returns, which `return
+                 * _builder_ret;` is checked against: a closure's is its
+                 * resolved signature (resolve_closure_return_type, the one
+                 * its C prototype has); a function's, its declared return
+                 * type. The value's own stamped type can be wrong in a
+                 * closure (a name the checker typed through a fallback,
+                 * `call()` of a captured closure, which it leaves `int`),
+                 * and a result of that type truncated a pointer or failed
+                 * under -Werror=int-conversion (#3811). */
+                Type* fn_ret = gen->current_func_return_type;
+                int fn_typed = fn_ret && fn_ret->kind != TYPE_VOID && fn_ret->kind != TYPE_UNKNOWN;
+                const char* closure_ct = !fn_typed ? gen->closure_ret_ct : NULL;
+                /* A void value (`return f()` of a void `f`) has no result to
+                 * hold: it runs as a statement, then the drain. A closure
+                 * whose signature is void returns no value whatever its
+                 * return's value is typed. */
+                int void_return =
+                    returns_value &&
+                    (closure_ct ? strcmp(closure_ct, "void") == 0
+                                : (!fn_typed && stmt->children[0]->node_type &&
+                                   stmt->children[0]->node_type->kind == TYPE_VOID));
+                if (void_return) {
+                    print_indent(gen);
+                    generate_expression(gen, stmt->children[0]);
+                    fprintf(gen->output, ";\n");
+                    emit_all_defers(gen);
+                    emit_try_pops_for_nonlocal_exit(gen);
+                    print_line(gen, "return;");
+                    break;
+                }
                 // For return with value, save to temp first
                 if (stmt->child_count > 0 && stmt->children[0] &&
                     stmt->children[0]->type != AST_PRINT_STATEMENT) {
@@ -13240,36 +13448,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "{");
                     gen->indent_level++;
                     print_indent(gen);
-                    /* Pick the C type for `_builder_ret`. Order:
-                     *   1. The function's declared return type
-                     *      (`gen->current_func_return_type`) — this
-                     *      is what the C compiler will check the
-                     *      `return _builder_ret;` against, so using
-                     *      anything else risks a type-mismatch
-                     *      compile error.
-                     *   2. The expression's stamped node_type — used
-                     *      when the function doesn't declare a
-                     *      return type (Aether's type inference
-                     *      stamps the expression).
-                     *   3. `int` — last-resort fallback so we always
-                     *      emit something compilable.
-                     * Without (1), bare-identifier returns whose
-                     * node_type isn't filled in (a common gap) fell
-                     * through to `int`, which the C compiler then
-                     * rejected against a `const char*`-returning
-                     * function. Surfaced when the function-exit
-                     * defer-free pre-pass started pushing defers
-                     * for previously-leaking heap-string locals,
-                     * which forced this branch to take effect for
-                     * functions that previously skipped it. */
-                    Type* fn_ret = gen->current_func_return_type;
-                    Type* ret_type = (fn_ret &&
-                                      fn_ret->kind != TYPE_VOID &&
-                                      fn_ret->kind != TYPE_UNKNOWN)
-                                     ? fn_ret
-                                     : stmt->children[0]->node_type;
-                    const char* ret_c_type = (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
-                                             ? c_result_type(ret_type) : "int";
+                    /* Pick the C type for `_builder_ret`: the function's C
+                     * return type (above); in a function with no declared
+                     * type, the expression's stamped node_type; `int` as the
+                     * last resort, so something compilable is emitted.
+                     * Bare-identifier returns whose node_type is not filled
+                     * in (a common gap) fell through to `int`, which the C
+                     * compiler rejected against a `const char*`-returning
+                     * function. */
+                    Type* ret_type = fn_typed ? fn_ret : stmt->children[0]->node_type;
+                    const char* ret_c_type =
+                        closure_ct ? closure_ct
+                        : (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
+                            ? c_result_type(ret_type) : "int";
                     fprintf(gen->output, "%s _builder_ret = ", ret_c_type);
                     /* R3: every return hands the caller one reference,
                      * whichever branch produced it. See
@@ -13303,111 +13494,28 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "return _builder_ret;");
                     gen->indent_level--;
                     print_line(gen, "}");
-                } else if (stmt->child_count > 0 && stmt->children[0] &&
-                           stmt->children[0]->type == AST_PRINT_STATEMENT) {
-                    emit_all_defers(gen);
-                    generate_statement(gen, stmt->children[0]);
-                    /* Issue #501: drain try frames. */
-                    emit_try_pops_for_nonlocal_exit(gen);
-                    print_line(gen, "return;");
                 } else {
+                    /* A print the return carries is its value: it runs
+                     * first, then the drain, which gives back what it made. */
+                    if (stmt->child_count > 0 && stmt->children[0] &&
+                        stmt->children[0]->type == AST_PRINT_STATEMENT)
+                        generate_statement(gen, stmt->children[0]);
                     emit_all_defers(gen);
                     /* Issue #501: drain try frames. */
                     emit_try_pops_for_nonlocal_exit(gen);
                     print_line(gen, "return;");
                 }
             } else {
-                // No defers - original behavior
+                /* No value and no defer: nothing to give back. A print
+                 * the return carries runs first, and the drain after it
+                 * gives back what it made. */
                 if (stmt->child_count > 0 && stmt->children[0] &&
-                    stmt->children[0]->type == AST_PRINT_STATEMENT) {
+                    stmt->children[0]->type == AST_PRINT_STATEMENT)
                     generate_statement(gen, stmt->children[0]);
-                    /* Issue #501: drain try frames. */
-                    emit_try_pops_for_nonlocal_exit(gen);
-                    print_line(gen, "return;");
-                } else if (stmt->child_count > 1) {
-                    // Multi-value return: return a, b → return (_tuple_X_Y){a, b}
-                    /* Issue #501: drain try frames. Inside a `try` the
-                     * tuple is built first, into `_ae_tr`, and the frames
-                     * popped after, so a panic while building it is the
-                     * try's to catch. */
-                    int in_try = gen->try_frame_depth > 0;
-                    print_indent(gen);
-                    // Use the function's known return type if it's a tuple
-                    // (avoids UNKNOWN types from unresolved identifiers)
-                    Type* tuple = NULL;
-                    int owned = 0;
-                    if (gen->current_func_return_type &&
-                        gen->current_func_return_type->kind == TYPE_TUPLE) {
-                        tuple = gen->current_func_return_type;
-                    } else {
-                        // Fallback: build from expression types
-                        tuple = create_type(TYPE_TUPLE);
-                        tuple->tuple_count = stmt->child_count;
-                        tuple->tuple_types = malloc(stmt->child_count * sizeof(Type*));
-                        for (int j = 0; j < stmt->child_count; j++) {
-                            tuple->tuple_types[j] = stmt->children[j]->node_type
-                                ? clone_type(stmt->children[j]->node_type)
-                                : create_type(TYPE_INT);
-                        }
-                        owned = 1;
-                    }
-                    ensure_tuple_typedef(gen, tuple);
-                    const char* tname = get_c_type(tuple);
-                    /* #2478: the positions are evaluated left to right. */
-                    order_prelude_begin(gen, stmt->children, stmt->child_count, NULL);
-                    int arrays = tuple_return_has_array(gen, stmt);
-                    if (arrays || in_try) fprintf(gen->output, "{ %s _ae_tr = (%s){", tname, tname);
-                    else fprintf(gen->output, "return (%s){", tname);
-                    for (int j = 0; j < stmt->child_count; j++) {
-                        if (j > 0) fprintf(gen->output, ", ");
-                        emit_tuple_return_position(gen, stmt->children[j], j);
-                    }
-                    fprintf(gen->output, "};\n");
-                    if (arrays || in_try) {
-                        if (arrays) emit_tuple_array_fills(gen, stmt, "_ae_tr");
-                        emit_try_pops_for_nonlocal_exit(gen);
-                        print_line(gen, "return _ae_tr; }");
-                    }
-                    if (owned) free_type(tuple);
-                } else if (gen->try_frame_depth > 0 && stmt->child_count > 0) {
-                    /* Inside a `try`: the value is computed inside its frames
-                     * and they are popped after, as the defer-aware path
-                     * does. Popped first, a panic while computing it (an
-                     * index out of range, a call that panics) escaped the
-                     * `try` written around it and ended the process. */
-                    print_line(gen, "{");
-                    gen->indent_level++;
-                    Type* fn_ret = gen->current_func_return_type;
-                    Type* ret_type = (fn_ret && fn_ret->kind != TYPE_VOID &&
-                                      fn_ret->kind != TYPE_UNKNOWN)
-                                     ? fn_ret : stmt->children[0]->node_type;
-                    const char* ret_c_type =
-                        (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
-                        ? c_result_type(ret_type) : "int";
-                    print_indent(gen);
-                    fprintf(gen->output, "%s _builder_ret = ", ret_c_type);
-                    emit_return_value(gen, stmt);
-                    fprintf(gen->output, ";\n");
-                    emit_try_pops_for_nonlocal_exit(gen);
-                    print_line(gen, "return _builder_ret;");
-                    gen->indent_level--;
-                    print_line(gen, "}");
-                } else {
-                    /* Issue #501: drain try frames before the
-                     * print_indent for the `return <expr>;` line. */
-                    emit_try_pops_for_nonlocal_exit(gen);
-                    print_indent(gen);
-                    fprintf(gen->output, "return");
-                    if (stmt->child_count > 0) {
-                        fprintf(gen->output, " ");
-                        /* R3 on the no-defer single-value path,
-                         * as on the defer-aware path.
-                         * #340: emit_return_value also coerces a
-                         * bare value / `none` into a `T?` return. */
-                        emit_return_value(gen, stmt);
-                    }
-                    fprintf(gen->output, ";\n");
-                }
+                emit_all_defers(gen);
+                /* Issue #501: drain try frames. */
+                emit_try_pops_for_nonlocal_exit(gen);
+                print_line(gen, "return;");
             }
             break;
         }
@@ -13533,7 +13641,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (strcmp(stmt->value, "try") == 0)        mode = DEFER_TRY;
                     else if (strcmp(stmt->value, "catch") == 0) mode = DEFER_CATCH;
                 }
-                if (mode == DEFER_ALWAYS) emit_defer_registration(gen, stmt->children[0]);
+                if (mode == DEFER_ALWAYS) emit_defer_registration(gen, stmt, stmt->children[0]);
                 push_defer_mode(gen, stmt->children[0], mode);
             }
             break;

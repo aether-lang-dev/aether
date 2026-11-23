@@ -1094,7 +1094,12 @@ static void walk_entry(TreeWalk* w, const char* name, int is_dir, int depth) {
         else walk_dir(w, depth + 1);
         return;
     }
-    if (w->headers_only ? !walk_is_header(name) : !walk_is_source(name)) return;
+    /* headers_only: 1 the headers, 2 the C (headers and .c), 0 all sources. */
+    size_t nl = strlen(name);
+    int c_file = nl > 2 && strcmp(name + nl - 2, ".c") == 0;
+    if (w->headers_only == 1 ? !walk_is_header(name)
+        : w->headers_only == 2 ? !(c_file || walk_is_header(name))
+                               : !walk_is_source(name)) return;
     if (w->count >= TREE_WALK_MAX_FILES) {
         w->incomplete = "has more than 4096 source files";
         return;
@@ -1371,7 +1376,8 @@ enum {
 
 #define CCVER_ATTEMPTS 3
 
-/* Run `"<resolved>" --version` until it answers: the first line of its stdout
+/* Run `<command> --version` until it answers (`command` a command prefix, a
+ * program and any arguments, quoted where they need it): the first line of its stdout
  * into `line` (CCVER_LINE), or, after CCVER_ATTEMPTS runs that printed no
  * line, how the last one ended. *rc is the last run's result and *runs how
  * many there were.
@@ -1384,13 +1390,13 @@ enum {
  * and the next unchanged build missed. Such a run is tried again; a compiler
  * that always exits without a line gives that outcome, with its exit status,
  * every time, so it still caches. */
-static int compiler_version_probe(const char* resolved, char* line, size_t line_size,
+static int compiler_version_probe(const char* command, char* line, size_t line_size,
                                   int* rc, int* runs) {
     int outcome = CCVER_NO_SPAWN;
     *rc = AE_SPAWN_FAILED;
     *runs = 0;
     line[0] = '\0';
-    char* cmd = str_join4("\"", 1, resolved, "\" --version", "");
+    char* cmd = str_join4(command, strlen(command), " --version", "", "");
     if (!cmd) return CCVER_NO_SPAWN;
     for (int attempt = 0; attempt < CCVER_ATTEMPTS; attempt++) {
         /* Spawned directly, as every compile step is (#3532): popen hands
@@ -1451,54 +1457,65 @@ static unsigned long long c_compiler_fingerprint(void) {
         if (word[0] == '-' || strchr(word, '=')) continue;
         char* resolved = resolve_program(word);
         if (!resolved) continue;
-        unsigned long long driver_hash = file_hash(resolved);
+        unsigned long long word_hash = file_hash(resolved);
         h = (h * 1099511628211ULL) ^ fnv64_str(resolved);
-        h = (h * 1099511628211ULL) ^ driver_hash;
-        /* The file found on PATH may be a trampoline whose bytes never
-         * change when the compiler behind it does: macOS's /usr/bin/gcc
-         * and /usr/bin/clang (xcrun shims, switched by xcode-select or an
-         * Xcode update), a ccache masquerade directory. What the program
-         * says it is comes from the compiler that will actually run, so
-         * its first line of `--version` is folded in too. A program that
-         * answers with no such line folds in that it did not, and its exit
-         * status: the outcome of the run is part of the key, so a run that
-         * failed this once cannot pass for one that never prints a line
-         * (#3707). */
-        char line[512];
-        int version_rc = 0, runs = 0;
-        int outcome = compiler_version_probe(resolved, line, sizeof(line), &version_rc, &runs);
-        if (outcome == CCVER_LINE) {
-            h = (h * 1099511628211ULL) ^ fnv64_str(line);
-        } else if (outcome == CCVER_NO_LINE) {
-            char what[64];
-            snprintf(what, sizeof(what), "\n--version: no line, exit %d\n", version_rc);
-            h = (h * 1099511628211ULL) ^ fnv64_str(what);
-        }
-        /* Each part of the compiler's identity, under -v (#3707). */
-        if (tc.verbose) {
-            line[strcspn(line, "\r\n")] = '\0';
-            static const char* const outcome_name[] = { "line", "no line", "signalled",
-                                                        "not started" };
-            fprintf(stderr, "[cache] ccid: %s file=%016llx version rc=%d runs=%d outcome=%s line=%s\n",
-                    resolved, driver_hash, version_rc, runs, outcome_name[outcome],
-                    outcome == CCVER_LINE ? line : "none");
-        }
-        /* Still unanswered after every retry, the compiler's identity is not
-         * known, and a key made without it would be another build's key:
-         * this build makes none, so it neither serves nor publishes. */
-        if (outcome == CCVER_SIGNALLED || outcome == CCVER_NO_SPAWN) {
-            if (tc.verbose)
-                fprintf(stderr, "[cache] ccid: '%s --version' did not run to an answer in %d "
-                                "tries; this build is not cached\n", resolved, runs);
-            free(resolved);
-            free(word);
-            free(owned);
-            fp = 0;
-            return fp;
-        }
+        h = (h * 1099511628211ULL) ^ word_hash;
+        if (tc.verbose) fprintf(stderr, "[cache] ccid: %s file=%016llx\n", resolved, word_hash);
         free(resolved);
     }
     free(word);
+    /* The file found on PATH may be a trampoline whose bytes never change
+     * when the compiler behind it does: macOS's /usr/bin/gcc and
+     * /usr/bin/clang (xcrun shims, switched by xcode-select or an Xcode
+     * update), a ccache masquerade directory. What the program says it is
+     * comes from the compiler that will actually run, so the first line of
+     * its `--version` is folded in too. A program that answers with no such
+     * line folds in that it did not, and its exit status: the outcome of the
+     * run is part of the key, so a run that failed this once cannot pass for
+     * one that never prints a line (#3707).
+     *
+     * #3814: asked of the command as given, the whole of $AE_CC / $CC with
+     * its arguments, and not of each program in it. `zig cc` is zig's clang,
+     * and only `zig cc --version` says which: `zig --version` is "unknown
+     * command", the same answer from every zig, so a zig upgrade was served
+     * the binaries the old one built (the staleness #2477 fixed). `ccache
+     * gcc --version` answers with gcc's line through ccache, as a compile
+     * through it runs. A compiler ae found itself is one program, quoted. */
+    char* asked = c_backend_env_override() ? str_join4(spec, strlen(spec), "", "", "")
+                                           : str_join4("\"", 1, spec, "\"", "");
+    if (!asked) { free(owned); return 0; }
+    char line[512];
+    int version_rc = 0, runs = 0;
+    int outcome = compiler_version_probe(asked, line, sizeof(line), &version_rc, &runs);
+    if (outcome == CCVER_LINE) {
+        h = (h * 1099511628211ULL) ^ fnv64_str(line);
+    } else if (outcome == CCVER_NO_LINE) {
+        char what[64];
+        snprintf(what, sizeof(what), "\n--version: no line, exit %d\n", version_rc);
+        h = (h * 1099511628211ULL) ^ fnv64_str(what);
+    }
+    /* Each part of the compiler's identity, under -v (#3707). */
+    if (tc.verbose) {
+        line[strcspn(line, "\r\n")] = '\0';
+        static const char* const outcome_name[] = { "line", "no line", "signalled",
+                                                    "not started" };
+        fprintf(stderr, "[cache] ccid: %s --version rc=%d runs=%d outcome=%s line=%s\n",
+                asked, version_rc, runs, outcome_name[outcome],
+                outcome == CCVER_LINE ? line : "none");
+    }
+    /* Still unanswered after every retry, the compiler's identity is not
+     * known, and a key made without it would be another build's key: this
+     * build makes none, so it neither serves nor publishes. */
+    if (outcome == CCVER_SIGNALLED || outcome == CCVER_NO_SPAWN) {
+        if (tc.verbose)
+            fprintf(stderr, "[cache] ccid: '%s --version' did not run to an answer in %d "
+                            "tries; this build is not cached\n", asked, runs);
+        free(asked);
+        free(owned);
+        fp = 0;
+        return fp;
+    }
+    free(asked);
     free(owned);
     fp = h ? h : 1ULL;
     return fp;
@@ -1590,6 +1607,46 @@ void cache_probe_memo_put(const char* cc, const char* what, int answer) {
     int ok = fputc(answer ? '1' : '0', f) != EOF;
     if (fclose(f) != 0) ok = 0;
     if (!ok || cache_publish(tmp, path) != 0) remove(tmp);
+}
+
+/* #3813: the key of the runtime ae compiles from source for one compiler
+ * and caches as an archive (ae.c, ae_cached_runtime). What decides its
+ * objects: the compiler, by the identity the build cache trusts
+ * (c_compiler_fingerprint, #3814) and the command as written; `cflags`, the
+ * whole flag string the sources are compiled with (the -O level, -fwrapv,
+ * the user's cflags, -DAETHER_TRACE for --trace, the vendored defines and
+ * the include paths, which name the tree); `srcs`, the list compiled (from
+ * the MANIFEST, by path); and the content of every .c and .h under the
+ * runtime, std and include trees, walked as the build cache walks them
+ * (#2707), so an edit to any of them, or another tree, is another runtime.
+ * 0 when a part cannot be known (an unknown compiler, a walk that could not
+ * see everything): no key, and the runtime is compiled for this build only. */
+unsigned long long cache_runtime_key(const char* cc, const char* cflags, const char* srcs) {
+    unsigned long long ccid = c_compiler_fingerprint();
+    if (!ccid || !tc.src_root[0]) return 0;
+    unsigned long long h = fnv64_more(fnv64_more(fnv64_str(cc ? cc : ""), "\n"), cflags ? cflags : "");
+    h = fnv64_more(fnv64_more(h, "\n"), srcs ? srcs : "");
+    h = (h * 1099511628211ULL) ^ ccid;
+    char* trees[3];
+    trees[0] = str_join4(tc.src_root, strlen(tc.src_root), "/runtime", "", "");
+    trees[1] = str_join4(tc.src_root, strlen(tc.src_root), "/std", "", "");
+    trees[2] = tc.dev_mode ? str_join4(tc.root, strlen(tc.root), "/include", "", "")
+                           : str_join4(tc.root, strlen(tc.root), "/include/aether", "", "");
+    unsigned long long acc = 1469598103934665603ULL;
+    int count = 0, complete = 1;
+    for (int i = 0; i < 3; i++) {
+        if (!trees[i]) { complete = 0; continue; }
+        const char* why = complete ? hash_tree_kind(trees[i], &acc, &count, 2) : NULL;
+        if (why) {
+            if (tc.verbose) fprintf(stderr, "[cache] runtime: no key: %s %s\n", trees[i], why);
+            complete = 0;
+        }
+        free(trees[i]);
+    }
+    if (!complete || count == 0) return 0;
+    h = (h * 1099511628211ULL) ^ acc;
+    h = (h * 1099511628211ULL) ^ (unsigned long long)count;
+    return h ? h : 1ULL;
 }
 
 /* "<path> <size> <mtime ns>" of the file `name` in the directory the program
@@ -1726,6 +1783,21 @@ unsigned long long compute_cache_key(const char* ae_file,
     if (tc.has_lib) {
         unsigned long long lib_hash = file_hash(tc.lib);
         if (lib_hash) key_append(&key, ":lib=%016llx", lib_hash);
+        /* #3813: the record of the archive's C runtime decides, with the
+         * compiler, whether the archive is linked at all or the runtime is
+         * compiled from source (archive_crt_check), so it is part of what
+         * the binary is built from. */
+        {
+            const char* sep = strrchr(tc.lib, '/');
+            const char* bsep = strrchr(tc.lib, '\\');
+            if (bsep && (!sep || bsep > sep)) sep = bsep;
+            size_t dl = sep ? (size_t)(sep - tc.lib) : 0;
+            char* rec = str_join4(tc.lib, dl, dl ? "/" : "", "libaether.crt", "");
+            unsigned long long rec_hash = rec ? file_hash(rec) : 0;
+            if (!rec) key.oom = 1;
+            free(rec);
+            if (rec_hash) key_append(&key, ":crt=%016llx", rec_hash);
+        }
         unsigned long long contrib_hash = hash_contrib_archives(tc.lib);
         if (contrib_hash)
             key_append(&key, ":contrib=%016llx", contrib_hash);

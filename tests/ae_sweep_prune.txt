@@ -95,6 +95,7 @@ tests/integration/dsl_receiver_scoping_nested/
 tests/integration/effect_tags/
 tests/integration/emit_csrc/
 tests/integration/emit_csrc_cross/
+tests/integration/emit_obj_flags/
 tests/integration/emit_lib_clause_sets/
 tests/integration/emit_lib_const/
 tests/integration/emit_lib_deadline/

@@ -1,0 +1,62 @@
+// Regression (#3817): fs.make_temp_file and fs.make_temp_dir say which
+// directory they could not make a name in, and why, as fs.read does.
+//
+// Both returned a bare "cannot create temp file" / "cannot create temp dir",
+// so a failure in CI (inside an enforce block on Windows) left no way to
+// tell a refusal, a missing directory and a name that could not be made
+// apart. Checked both ways: outside a sandbox, and inside an enforce block,
+// where the name is made in the checked directory.
+
+import std.fs
+import std.os
+import std.sandbox
+import std.string
+
+extern exit(code: int)
+
+fn check(what: string, err: string, dir: string) {
+    if err == "" {
+        println("FAIL: ${what}: made a name in a directory that does not exist")
+        exit(1)
+    }
+    if string.index_of(err, dir) < 0 {
+        println("FAIL: ${what}: the error does not name the directory: '${err}'")
+        exit(1)
+    }
+    if string.ends_with(err, "cannot create temp file") == 1 || string.ends_with(err, "cannot create temp dir") == 1 {
+        println("FAIL: ${what}: the error gives no reason: '${err}'")
+        exit(1)
+    }
+}
+
+main() {
+    box, berr = fs.make_temp_dir("", "aetmp")
+    if berr != "" {
+        println("FAIL: no temp dir to work in: ${berr}")
+        exit(1)
+    }
+    missing = "${box}/no_such_dir"
+
+    _f, ferr = fs.make_temp_file(missing, "t")
+    check("make_temp_file", ferr, missing)
+    _d, derr = fs.make_temp_dir(missing, "t")
+    check("make_temp_dir", derr, missing)
+
+    in_box = sandbox.new("box") {
+        grant_fs_read("${box}/*")
+        grant_fs_write("${box}/*")
+    }
+    serr = ""
+    sderr = ""
+    sandbox.enforce(in_box) callback {
+        _sf, e1 = fs.make_temp_file(missing, "t")
+        serr = e1
+        _sd, e2 = fs.make_temp_dir(missing, "t")
+        sderr = e2
+    }
+    check("make_temp_file in an enforce block", serr, missing)
+    check("make_temp_dir in an enforce block", sderr, missing)
+
+    _r = fs.remove_tree(box)
+    println("PASS: make_temp_file and make_temp_dir name the directory and the reason")
+}

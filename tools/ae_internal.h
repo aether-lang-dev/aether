@@ -134,6 +134,7 @@ extern char s_cache_dir[512];   /* resolved once by init_cache_dir (ae_cache.c) 
 
 int  run_cmd_show_warnings(const char* cmd);
 int  run_cmd_capture_stdout(const char* cmd, const char* path);
+int  run_cmd_capture_all(const char* cmd, const char* path);   /* stdout and stderr (#3806) */
 void dump_captured_stdout(const char* path);
 bool path_exists(const char* path);
 void mkdirs(const char* path);
@@ -263,6 +264,9 @@ void cache_note_published(void);
  * the question and anything else its answer depends on. */
 int cache_probe_memo_get(const char* cc, const char* what);
 void cache_probe_memo_put(const char* cc, const char* what, int answer);
+/* #3813: the key of the runtime compiled from source for compiler `cc` with
+ * `cflags` from the sources `srcs`, cached as an archive; 0 for none. */
+unsigned long long cache_runtime_key(const char* cc, const char* cflags, const char* srcs);
 /* #3600: "<path> <size> <mtime ns>" of the file `name` beside the program
  * `prog` (its first word, looked up on PATH): 1, or 0 when either is not
  * found. */

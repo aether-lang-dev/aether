@@ -1,0 +1,43 @@
+// Regression (#3806): a local named like a <stdatomic.h> constant inside an
+// actor handler does not shadow the constant the state reads use.
+//
+// An actor's state is read with AETHER_STATE_LOAD, which expands to
+// atomic_load_explicit(&(f), memory_order_relaxed). A local spelled
+// `memory_order_relaxed` reached C under that name, so a state read after
+// it in the same scope passed the user's int as the memory order, and a
+// local spelled `atomic_int` hid the type. They are renamed as other C
+// header names are.
+
+extern exit(code: int)
+
+message Bump { by: int }
+message Report {}
+
+actor Counter {
+    state total = 0
+
+    receive {
+        Bump(by) -> {
+            memory_order_relaxed = 99
+            atomic_int = by
+            total = total + atomic_int + memory_order_relaxed - 99
+        }
+        Report() -> {
+            memory_order_seq_cst = 1
+            if total != 5 + memory_order_seq_cst - 1 {
+                println("FAIL: total ${total}")
+                exit(1)
+            }
+            println("PASS: stdatomic-named locals in a handler are the program's own")
+            exit(0)
+        }
+    }
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Bump { by: 2 }
+    c ! Bump { by: 3 }
+    c ! Report {}
+    wait_for_idle()
+}

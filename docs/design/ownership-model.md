@@ -678,6 +678,63 @@ owned buffer (5,000,000 calls, medians of 11 interleaved runs): 289 against
 binding costs one journal entry while a frame is live (a `try` or an actor
 step), about 3 ns at most, and one depth check outside one.
 
+**A slice place is journaled by its value's mark (#3787, an optimisation
+under R5).** The journal stands for a release a panic would skip. A slice
+that holds no reference (a view of memory no count covers: `p as T[]`, an
+array viewed as a slice, a literal's bytes, any function's result built from
+one) carries neither AETHER_SLICE_MADE nor AETHER_SLICE_STRING, and its
+release gives back nothing, so its journal entry gave back nothing either.
+Each such place still cost an out-of-line `aether_unwind_track` where it was
+set and an `aether_unwind_forget` at each exit, the first reading the
+runtime's thread-local frames (a call of its own under MinGW's emulated
+TLS): 3.6% of an aephysics collide step went to them, at its hull
+accessors' call sites. Two rules now cut that, reading nothing but the
+value and the frame's own body:
+- *The mark decides* (R1: the mark is the value's own, the one
+  `aether_slice_release` itself reads). A slice place of a statement (a
+  call's result read in place, given straight to a call, a module `var`'s
+  read, a store's value made ahead of its place) is journaled when its value
+  carries the mark, each time it is set, with a token beside it saying
+  whether it was; a slice local is journaled at its binding when its value
+  carries the mark, and a store that brings it its first counted value
+  journals it then (`aether_slice_set_journal`). That holds only where the
+  frame's body shows every write to the local, by name: its binding and
+  slice ownership's stores, outside any `try` the local is declared
+  outside of. A local grown in place (`push`, `append`), whose address is
+  taken, bound again by another form (a pattern, a destructure, a closure's
+  parameter, a `catch`) or stored into inside such a `try` (whose frame a
+  journal entry written there would belong to, so a panic it caught would
+  give back what the local still holds after it) is journaled from its
+  declaration, as before.
+- *The track says whether it journaled* (runtime ABI revision 7).
+  `aether_unwind_track` returns 1 when it wrote the entry and 0 when it
+  wrote nothing (no frame is live), and every exit of a defer's or a slice
+  place's entry calls `aether_unwind_forget` only on 1. A slice token of -1
+  records a refusal for want of a frame: the depth a local's stores run at
+  is its declaration's, so it is not asked again.
+
+Store, leave, pass and return keep their meaning (R2, R3): every place
+releases what it holds on every exit exactly as before, and only journal
+work that would do nothing is skipped. No rule reads another function's
+body, so a binary import, a closure or a function pointer changes nothing,
+and no annotation is added (R4). A value that holds a reference always
+carries the mark, so a skipped entry is never one a drain needed; where the
+frame might change a local unseen it is journaled from its declaration, so a
+wrong guess costs a journal call, never a leak or a double free (R5). A view
+replaced by a counted value in the same place is still given back on a
+panic: the store that brings the counted value journals the place, whose
+entry names the place, not the value, so the drain releases what the place
+holds then. A place journaled while it held a counted buffer and given a
+view later keeps its entry, whose release of the view does nothing.
+Measured (benchmarks/core/slices.ae, 1,000,000 calls, best of five
+interleaved runs): a function that reads a view an accessor returns of C
+memory, `slice_view_returned`, went from 2.08 to 0.31 ns a call, which is
+what the same cast written in place costs (`slice_view_cast`, 0.31 ns
+before and after). A store of a counted value into a place journaled by its
+mark reads its token, a load and a branch: `slice_view_bound`, a loop that
+stores a view of a `make` buffer into one place each turn, went from 1.88
+to 2.09 ns.
+
 **Temporaries live to the end of their statement when a view may point into
 them.** `string.bytes(s)` returns a view of `s`; given a temporary
 (`string.bytes(make())`), freeing the temporary as soon as the call returned
@@ -704,6 +761,21 @@ their skipped exit free, the free each other `return` ran ahead of the
 function's defers) is gone, and with it a free that ran before a user `defer`
 reading the local. Structs, tuples and optionals return the same way; the
 struct return-escape set went with it.
+
+**A return leaves its statement's temporaries too (#3811).** Every return
+with a value computes it into the result first, then gives back every
+temporary its statement made (a module `var`'s read, a call's slice read in
+place, a string an argument's view may point into, a composite argument)
+and runs the defers of every scope it leaves, then returns. A temporary is
+put on the defer stack while the value is emitted, so the drain after the
+value sees each one, whatever made it. A result that is a temporary's own
+value took a reference of its own when it was computed (`return gs` copies
+what the read holds, R3), so the temporary gives back only its own; a slice
+result that views a temporary string is the one exception R3 already names
+(#3570): the string is given back only when the view holds what it views.
+The return used to choose a bare `return v;` when it guessed the value would
+make no temporary, and a value the guess missed (a module slice `var`'s
+read) left its release after the `return`, where it never ran.
 
 **One retain and one drop per type (#2921).** Every owning type has two
 generated functions, used by every place: `_ae_retain_<T>(T*)` takes a

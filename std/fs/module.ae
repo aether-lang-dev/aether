@@ -688,8 +688,12 @@ fn temp_prefix(prefix: string) -> string {
 // caller owns it: clean up with remove_tree(). Returns (path, "") or ("", err).
 // Empty `dir` → the OS temp dir (os.temp_dir); empty `prefix` → "ae".
 make_temp_dir(dir: string, prefix: string) -> {
-    p = fs_make_temp_dir_raw(temp_parent(dir), temp_prefix(prefix))
-    if p == null { return "", "cannot create temp dir" }
+    parent = temp_parent(dir)
+    p = fs_make_temp_dir_raw(parent, temp_prefix(prefix))
+    // The directory and the OS reason, as fs.read gives them (#3817): the
+    // bare "cannot create temp dir" told a refusal, a missing directory and
+    // a name that could not be made apart in no log.
+    if p == null { return "", fs_error_message(parent, "cannot create temp dir") }
     return p, ""
 }
 
@@ -697,8 +701,10 @@ make_temp_dir(dir: string, prefix: string) -> {
 // temp FILE under `dir` (mkstemp — created O_EXCL, no race). The caller owns
 // it: delete() when done. Returns (path, "") or ("", err).
 make_temp_file(dir: string, prefix: string) -> {
-    p = fs_make_temp_file_raw(temp_parent(dir), temp_prefix(prefix))
-    if p == null { return "", "cannot create temp file" }
+    parent = temp_parent(dir)
+    p = fs_make_temp_file_raw(parent, temp_prefix(prefix))
+    // As make_temp_dir: the directory and the OS reason (#3817).
+    if p == null { return "", fs_error_message(parent, "cannot create temp file") }
     // p is @heap-owned; hand it straight back (string_concat here would leak
     // the original and double-allocate).
     return p, ""

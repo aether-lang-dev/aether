@@ -125,6 +125,35 @@ TEST_CATEGORY(unwind_drain_releases_newest_first, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(0, left);
 }
 
+/* #3787 (runtime ABI revision 7): the track says whether it journaled, so
+ * an exit told 0 skips the forget. Outside every frame nothing is written;
+ * inside one the entry is written, and tracking it again updates it. */
+TEST_CATEGORY(unwind_track_returns_whether_journaled, TEST_CATEGORY_RUNTIME) {
+    static int a;
+    int before = aether_unwind_journal_size();
+    ASSERT_EQ(0, aether_unwind_track(&a, rel_one));
+    ASSERT_EQ(0, aether_unwind_track(NULL, rel_one));
+    ASSERT_EQ(before, aether_unwind_journal_size());
+    AetherJmpFrame* f = aether_try_push();
+    /* Set between the setjmp and the read after it: volatile, so a longjmp
+     * back (none is expected) could not leave them clobbered (-Wclobbered). */
+    volatile int first = 0, again = 0, empty = 0, size = 0;
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        first = aether_unwind_track(&a, rel_one);
+        again = aether_unwind_track(&a, rel_one);
+        empty = aether_unwind_track(&a, NULL);
+        size = aether_unwind_journal_size();
+        aether_unwind_forget(&a);
+    }
+    int left = aether_unwind_journal_size();
+    aether_try_pop();
+    ASSERT_EQ(1, first);
+    ASSERT_EQ(1, again);
+    ASSERT_EQ(0, empty);
+    ASSERT_EQ(before + 1, size);
+    ASSERT_EQ(before, left);
+}
+
 /* A release that forgets another entry of the frame (its free has run, or
  * its value moved): that entry is not released too. The drain used to
  * release every entry from a copy it took before the first release, so the

@@ -609,6 +609,24 @@ int module_slice_var_read(CodeGenerator* gen, const ASTNode* e) {
            is_module_slice_var(gen, e->value);
 }
 
+/* #3787: a slice temporary `t` of a statement (a module `var`'s read, a
+ * call's result read in place) given its value, with its journal token
+ * `t_j` (declared beside it): the entry of the value before is forgotten
+ * and that value released, then the new one is journaled when it holds a
+ * reference, by its own mark. Decided afresh each time the statement runs,
+ * so the token is what is in the journal: a value that holds none, the
+ * view of memory no count covers a function returns, costs no journal
+ * call. open, the value's C, then close. */
+static void emit_slice_temp_set_open(CodeGenerator* gen, const char* t) {
+    fprintf(gen->output, "aether_unwind_forget_tok(%s_j, (const void*)&%s), aether_slice_release(&%s), "
+            "%s = (", t, t, t, t);
+}
+
+static void emit_slice_temp_set_close(CodeGenerator* gen, const char* t) {
+    fprintf(gen->output, "), %s_j = aether_slice_journal((const void*)&%s, %s, aether_slice_release_at), %s",
+            t, t, t, t);
+}
+
 /* #3568: a read of the module-level slice `var` `name`, as a string var's
  * is (emit_module_string_read): any thread may store into the var while the
  * value read is in use, and a store releases the buffer it replaces, so the
@@ -623,10 +641,12 @@ static void emit_module_slice_read(CodeGenerator* gen, const char* name) {
         return;
     }
     const char* t = cg_internf("_eo%d", g_order_counter++);
-    hoist_append_text(gen, cg_internf("AetherSlice %s = {0}; ", t));
-    fprintf(gen->output, "(aether_unwind_track((const void*)&%s, aether_slice_release_at), "
-            "aether_slice_release(&%s), %s = aether_slice_var_take(&%s, &%s))",
-            t, t, t, name, module_string_var_lock(name));
+    hoist_append_text(gen, cg_internf("AetherSlice %s = {0}; int %s_j = 0; ", t, t));
+    fprintf(gen->output, "(");
+    emit_slice_temp_set_open(gen, t);
+    fprintf(gen->output, "aether_slice_var_take(&%s, &%s)", name, module_string_var_lock(name));
+    emit_slice_temp_set_close(gen, t);
+    fprintf(gen->output, ")");
     push_scoped_slice_free(gen, t);
 }
 
@@ -644,28 +664,6 @@ static int string_arg_held(CodeGenerator* gen, ASTNode* arg) {
      * already, where a statement is being emitted (emit_module_string_read). */
     if (module_string_var_read(gen, arg) && hoist_ready(gen)) return 0;
     return string_reads_place(gen, arg);
-}
-
-/* May emitting `e` hold a temporary to the end of its statement, released
- * by the statement's block on its exit (push_scoped_temp_free)? A call
- * returning a view holds an argument it may point into (arg_drain_open), and
- * a string read from a place a call can store into is held for its
- * statement when evaluated ahead (order_hoist_operand, the field handovers).
- * A `return` releases what its value holds before it leaves, which it can
- * only do through its own exit drain; one emitted as a bare `return v;`
- * leaves that release after itself, where it never runs. An over-estimate
- * costs that return one temporary, so every call returning a view and every
- * read of such a place counts, whatever its arguments are. */
-int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e) {
-    if (!e || e->type == AST_CLOSURE) return 0;
-    if (e->type == AST_FUNCTION_CALL && call_returns_view(e) && e->child_count > 0) return 1;
-    /* #3568: a fresh slice read in place, held to the statement's end. */
-    if (e->type == AST_FUNCTION_CALL && annotation_has_marker(e->annotation, "slice_stmt_temp"))
-        return 1;
-    if (string_reads_place(gen, e)) return 1;
-    for (int i = 0; i < e->child_count; i++)
-        if (value_holds_statement_temps(gen, e->children[i])) return 1;
-    return 0;
 }
 
 /* Room for one more hoisted argument: the slots double onto the heap once
@@ -897,10 +895,14 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
             fprintf(gen->output, w->held[h] ? "), 0)" : ")");
         }
         seq_next(gen, &w->seq);
-        /* #2923: journaled for the call, which may panic. */
-        if (w->closure[h] == 3)
-            fprintf(gen->output, "aether_unwind_track((const void*)&%s, %s)", names[h], w->drop[h]);
-        else if (w->closure[h])
+        /* #2923: journaled for the call, which may panic. #3787: a slice
+         * only when it holds a reference, by its own mark, with a token the
+         * forget after the call reads (`<temp>_j`). */
+        if (w->closure[h] == 3) {
+            seq_let_named(gen, &w->seq, "int", cg_internf("%s_j", names[h]));
+            fprintf(gen->output, "aether_slice_journal((const void*)&%s, %s, %s)", names[h], names[h],
+                    w->drop[h]);
+        } else if (w->closure[h])
             fprintf(gen->output, "aether_unwind_track((const void*)&%s, _aether_closure_drop_unwind)",
                     names[h]);
         else if (!w->scoped[h])
@@ -934,7 +936,10 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
         const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
         if (!nm || w->scoped[h]) continue;
         seq_next(gen, &w->seq);
-        fprintf(gen->output, "aether_unwind_forget((const void*)&%s)", nm);
+        if (w->closure[h] == 3)
+            fprintf(gen->output, "aether_unwind_forget_tok(%s_j, (const void*)&%s)", nm, nm);
+        else
+            fprintf(gen->output, "aether_unwind_forget((const void*)&%s)", nm);
         seq_next(gen, &w->seq);
         if (w->closure[h] == 3) {
             fprintf(gen->output, "%s((const void*)&%s)", w->drop[h], nm);
@@ -5398,6 +5403,8 @@ void emit_closure_definitions(CodeGenerator* gen) {
         mark_try_clobbered_vars(gen, body);
 
         const char* ret_type = resolve_closure_return_type(gen, ci);
+        /* #3811: the type its returns hold their result in. */
+        gen->closure_ret_ct = cg_intern(ret_type);
         restore_fnptr_scope_for_closure(gen, parent_func);
         emit_closure_signature(gen, ci, ret_type, 1);
         fprintf(gen->output, " {\n");
@@ -5742,6 +5749,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
         }
         gen->in_string_closure = 0;
         gen->current_func_return_type = NULL;
+        gen->closure_ret_ct = NULL;
         if (closure_ret_tuple) free_type(closure_ret_tuple);
         restore_try_clobbered_vars(gen, &outer_try_set);
 
@@ -8961,14 +8969,15 @@ static ASTNode* g_slice_stmt_inner = NULL;
 static void emit_slice_stmt_temp(CodeGenerator* gen, ASTNode* call) {
     static int seq = 0;
     const char* t = cg_internf("_ae_sst%d", seq++);
-    hoist_append_text(gen, cg_internf("AetherSlice %s = {0}; ", t));
-    fprintf(gen->output, "(aether_unwind_track((const void*)&%s, aether_slice_release_at), "
-            "aether_slice_release(&%s), %s = (", t, t, t);
+    hoist_append_text(gen, cg_internf("AetherSlice %s = {0}; int %s_j = 0; ", t, t));
+    fprintf(gen->output, "(");
+    emit_slice_temp_set_open(gen, t);
     ASTNode* saved = g_slice_stmt_inner;
     g_slice_stmt_inner = call;
     generate_expression(gen, call);
     g_slice_stmt_inner = saved;
-    fprintf(gen->output, "))");
+    emit_slice_temp_set_close(gen, t);
+    fprintf(gen->output, ")");
     push_scoped_slice_free(gen, t);
 }
 
@@ -9079,14 +9088,16 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
                 const char* v = seq_let(gen, &s, "AetherSlice", "_ae_ssv");
                 generate_expression(gen, expr->children[1]);
                 seq_next(gen, &s);
-                fprintf(o, "aether_unwind_track((const void*)&%s, aether_slice_release_at)", v);
+                /* #3787: journaled when it holds a reference, by its mark. */
+                const char* vt = seq_let(gen, &s, "int", cg_internf("%s_j", v));
+                fprintf(o, "aether_slice_journal((const void*)&%s, %s, aether_slice_release_at)", v, v);
                 seq_next(gen, &s);
                 const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_ssp");
                 fprintf(o, "(AetherSlice*)&(");
                 emit_slice_place(gen, a);
                 fprintf(o, ")");
                 seq_next(gen, &s);
-                fprintf(o, "aether_unwind_forget((const void*)&%s)", v);
+                fprintf(o, "aether_unwind_forget_tok(%s, (const void*)&%s)", vt, v);
                 seq_next(gen, &s);
                 fprintf(o, whole, p);
                 fprintf(o, "%s(%s, %s)", set, p, v);
@@ -9104,6 +9115,22 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
             fprintf(o, ")");
             seq_close(gen, &s);
             return 1;
+        }
+        /* #3787: a local journaled by its value's mark is journaled by the
+         * store that brings it its first counted value. */
+        const char* j = strcmp(f, "__slice_set") == 0 ? slice_place_store_journal(gen, a) : NULL;
+        if (j) {
+            const char* e1 = strchr(j, ':');
+            const char* e2 = e1 ? strchr(e1 + 1, ':') : NULL;
+            if (e1 && e2) {
+                fprintf(o, "aether_slice_set_journal((AetherSlice*)&(");
+                emit_slice_place(gen, a);
+                fprintf(o, "), ");
+                generate_expression(gen, expr->children[1]);
+                fprintf(o, ", &%.*s, (const void*)%.*s, %s)", (int)(e1 - j), j,
+                        (int)(e2 - e1 - 1), e1 + 1, e2 + 1);
+                return 1;
+            }
         }
         fprintf(o, "%s((AetherSlice*)&(", set);
         emit_slice_place(gen, a);

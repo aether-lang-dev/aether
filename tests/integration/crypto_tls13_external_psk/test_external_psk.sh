@@ -296,7 +296,8 @@ if [ -n "$PYPSK" ]; then
         n=0
         while server_alive "$pypid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
         stop_server "$pypid"
-        seen=$(tr '\n' '|' <"$TMP/py.out")
+        # Python on Windows writes text with \r\n: the \r is not the peer's.
+        seen=$(tr -d '\r' <"$TMP/py.out" | tr '\n' '|')
         ok=1
         # shellcheck disable=SC2254
         case "$got" in $4) ;; *) ok=0 ;; esac

@@ -1,7 +1,8 @@
 // Slice hot paths (#3568): a `make` buffer made and released, one grown by
 // `append` from empty, a view of it bound to a local (which holds a
-// reference of its own), a view given to a function that only reads it, and
-// an index loop over a long slice.
+// reference of its own), a view given to a function that only reads it, an
+// index loop over a long slice, and a view a function returns against the
+// same cast in place.
 //
 // Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
 
@@ -17,6 +18,28 @@ total_of(xs: int[]) -> int {
         t = t + x
     }
     return t
+}
+
+// A view at an offset into memory a struct points at, as aephysics' hull
+// accessors return, read in a function of its own as a narrow-phase
+// routine reads one per call, and the same read through the cast written
+// in place.
+struct Block {
+    data: ptr
+}
+
+view_at(b: *Block, k: int) -> int[] {
+    return (b.data + k * 8) as int[]
+}
+
+read_returned(b: *Block, k: int) -> int {
+    faces = view_at(b, k)
+    return faces[3]
+}
+
+read_cast(b: *Block, k: int) -> int {
+    faces = (b.data + k * 8) as int[]
+    return faces[3]
 }
 
 main() {
@@ -66,6 +89,25 @@ main() {
         i = i + 1
     }
     println("row slice_view_passed ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
+    // A view a function returns (#3787) against the same cast in place: the
+    // view carries no count, so its caller journals nothing for it.
+    blk = Block { data: buf as ptr }
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        total = total + read_returned(&blk, i & 7)
+        i = i + 1
+    }
+    println("row slice_view_returned ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        total = total + read_cast(&blk, i & 7)
+        i = i + 1
+    }
+    println("row slice_view_cast ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
 
     big = make([]int, 4096)
     for k in 0..4096 {

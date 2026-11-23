@@ -77,7 +77,12 @@ for a cooperative runtime (`AETHER_NO_THREADING`) keeps its builder blocks'
 stack in a block of the task's execution context through a new entry point,
 `aether_context_local`, so that tasks with task contexts
 ([design/task-execution-contexts.md](design/task-execution-contexts.md)) do
-not share one stack; a threaded build's generated C is unchanged.
+not share one stack; a threaded build's generated C is unchanged; 7,
+`aether_unwind_track` returns 1 when it journaled the place and 0 when it
+did not (no frame live, no room), and generated C skips the exit's
+`aether_unwind_forget` on 0 (#3787): run on a revision 6 runtime, whose
+`aether_unwind_track` returns nothing, it would read an undefined result
+and could leave a dead stack slot in the journal.
 
 **Shared facilities.** A library without `--shared-runtime` brings a copy
 of the runtime, and copies in one process share the sandbox levels and the

@@ -319,6 +319,48 @@ aetherc app.ae app.c
 cc app.c $(ae cflags) -o app        # -fbracket-depth=2048 where cc is Clang
 ```
 
+## The inlining budget and GCC
+
+`aetherc` emits a whole program, its modules and the std modules it imports, as
+one C translation unit. GCC caps how far inlining may grow one unit:
+`--param inline-unit-growth`, 40 percent of the unit by default, a limit sized
+for a C file of ordinary length. Once a large program's inlining has used it,
+GCC refuses every later candidate in the unit, hot or not, with
+`--param inline-unit-growth limit reached` (`-fopt-info-inline-missed` shows
+it). In aephysics' joint grid that left the small maths of the solvers (a
+rotation, a quaternion product, a 3x3 solve), each emitted `static inline`, as
+real calls on 2,671 call sites (#3779).
+
+So `ae` gives GCC `--param inline-unit-growth=100` on the optimising builds of
+generated C: `ae build` (the executable, `--emit=lib` and `--emit=obj`, `--profile`
+included) and `ae examples`. It does not on `-O0` builds (`ae run`, `ae test`,
+`--quick`, `--coverage`), which inline
+nothing, nor with `--size`, which asks for bytes. When the project names a
+budget of its own, in `[build] cflags`, `AETHER_CFLAGS_EXTRA` or the
+`$AE_CC` / `$CC` command (`AE_CC="gcc --param inline-unit-growth=50"`), `ae`
+gives none, so that one is the one GCC uses. Clang
+has no such cap and gets nothing; neither does a cross build (`zig cc` and
+`xcrun clang` are Clang) or the wasm backend (emcc). Whether the compiler is
+GCC is asked once, by compiling a probe, and the answer is kept in the cache
+directory by the compiler's identity. libaether.a and the std's C in it are
+built by the Makefile and keep its flags. A runtime `ae` compiles from source
+instead (a compiler on another C runtime, or `--trace`, see below) is compiled
+with the program's own flags, the budget among them.
+
+100 is measured. aephysics at `-O3 -ffp-contract=off`, its own budget
+parameters removed, MinGW GCC 16.2, least of 10 alternated runs:
+
+| budget | joint grid, ms a step | large pyramid | ragdoll rain | physics_world executable | its build |
+|---|---|---|---|---|---|
+| 40 (GCC's default) | 15.18 | 7.06 | 5.62 | 1.23 MB | 13.6 s |
+| 100 | 11.02 | 6.37 | 4.67 | 1.41 MB | 17.0 s |
+| 200 (400 emits the same code) | 11.15 | 6.36 | 4.72 | 1.55 MB | 18.9 s |
+| aephysics' own `max-inline-insns-auto=400 inline-unit-growth=400` | 11.11 | 6.20 | 4.67 | 1.59 MB | 19.7 s |
+
+At 100 the three scenes step as fast as with aephysics' own parameters, in
+less code and build time than any larger budget. Raising
+`early-inlining-insns` as well measured within the noise, so `ae` leaves it.
+
 ## Binary Hardening
 
 `ae build` asks the C toolchain for the mitigations whose cost is a rounding
@@ -416,7 +458,8 @@ Both `ae run` and `ae build` cache compiled binaries in `~/.aether/cache/`. The 
 - Every `--extra` C file's *content* (editing an FFI shim invalidates the cache, not just touching it)
 - Every imported lib module's *content*: the `.ae`/`.c`/`.h` files under each lib-search directory, walked recursively. This covers both an explicit `--lib`/`$AETHER_LIB_DIR` directory and the **default `lib/`** the compiler searches when neither is set (the `src/main.ae` + `lib/<name>/module.ae` package layout). Because entries are content-hashed rather than keyed on mtime+size, a same-second, same-size edit (a one-character constant flip in an editor-save loop) still invalidates the cache, and a bare `touch` does not. The walk runs on Windows too (`FindFirstFileA`, #1235), with the same depth and entry caps, so a lib-module edit invalidates the cache on every platform.
 - The optimisation level (`-O0` for `ae run` and `ae build --quick`, `-O2` for default `ae build`)
-- The C compiler: `$AE_CC` / `$CC` as written, each program it names (its path and content), and the first line of that program's `--version`. A `--version` run that cannot be started, dies on a signal or prints nothing is tried again, up to three times, and how it ended is part of the key, so a compiler that never answers `--version` (tcc) keys the same every time (#3707). One that still has not answered after three tries leaves the build uncached; `ae build -v` prints each run's outcome on its `[cache] ccid:` line.
+- The C compiler: `$AE_CC` / `$CC` as written, each program it names (its path and content), and the first line of the command's `--version`, asked of the command as written (`zig cc --version`, zig's clang, where `zig --version` is refused alike by every zig, #3814). A `--version` run that cannot be started, dies on a signal or prints nothing is tried again, up to three times, and how it ended is part of the key, so a compiler that never answers `--version` (tcc) keys the same every time (#3707). One that still has not answered after three tries leaves the build uncached; `ae build -v` prints each run's outcome on its `[cache] ccid:` line.
+- `libaether.crt` beside the archive, the C runtime it was built against, which with the compiler decides whether the archive is linked or the runtime is compiled from source (#3813)
 
 `ae run` and `ae build` use separate cache slots so toggling between them doesn't churn one entry back and forth.
 
@@ -754,6 +797,67 @@ compiler the way the Makefile does: they honor `$AE_CC` first, then `$CC`,
 falling back to `gcc` (the WinLibs-bundled gcc on Windows) when neither is
 set. This affects only the C backend that turns Aether's generated C into the
 final binary; it never changes `aetherc`, the Aether-to-C front end.
+
+**The archive and the compiler's C runtime.** A prebuilt `libaether.a` is
+linked only when its C runtime is the one the build's compiler targets. The
+archive is compiled against one C runtime's headers and imports that runtime's
+symbols: MinGW GCC's msvcrt headers declare `_setjmp` as an msvcrt import, so
+an msvcrt archive linked by a UCRT compiler (`AE_CC="zig cc"`) failed on
+`undefined symbol: __declspec(dllimport) _setjmp` as soon as a program used
+`try` (#3813), and two C runtimes in one program disagree on `FILE`, `errno`
+and the heap besides. On Windows the mingw-w64 major counts too: the same C
+runtime by name comes with other import libraries (an archive MSYS2's
+mingw-w64 15 built imports `_strtof_l`, which WinLibs GCC 14.2's mingw-w64 12
+does not provide). `make` writes the archive's runtime to `libaether.crt`
+beside it, from `runtime/aether_crt_id.h`: the name on the first line (msvcrt
+or ucrt on Windows, glibc, musl, bionic or uclibc on Linux; nothing where a
+platform has one C runtime) and, on Windows, `mingw-w64 <major>` on the
+second. An `ae` that reads only the first line compares the runtime alone, as
+it did. `ae` asks the build compiler, through the same header, whether it
+targets that runtime and mingw-w64; the answer is kept in the cache directory
+by the compiler's identity. When it does not, `ae` does not link the archive
+and compiles the runtime from source with that compiler, as `--trace` does,
+and `ae build -v` says why:
+
+```
+[toolchain] libaether.a is msvcrt mingw-w64 15; zig cc targets ucrt mingw-w64 13: the runtime is compiled from source
+```
+
+An archive with no record (one an older tree built) is linked as before. The
+runtime compiled from source is kept in the build cache as an archive, one per
+compiler (its identity, #3814), flags (`--trace` has its own) and runtime and
+std sources (their content, so an edit or another tree is another archive),
+and every later program with that compiler links it: `ae build -v` names it,
+`[cache] runtime: <path> (built)` the first time and `(hit)` after. Measured
+on Windows, a try and catch program and then a second, different one, each a
+first build in a fresh build cache except for the runtime:
+
+| compiler | first program | second program |
+|---|---|---|
+| GCC (MSYS2), linking libaether.a | 0.43 to 0.46 s | 0.43 to 0.46 s |
+| `AE_CC="zig cc"` (UCRT), runtime from source | 2.1 s, with zig's own object cache warm (about 20 s cold) | 0.67 s |
+| WinLibs GCC 14.2 UCRT, runtime from source | 29.3 s | 0.43 s |
+| GCC (MSYS2) `--trace`, runtime from source | 28.1 s | 0.37 s |
+
+Before the runtime was cached, every new program paid the first column. The
+cache does not make the fallback free: it is paid once for each compiler, set
+of flags and state of the sources. `ae run` (`-O0 -g`) and `ae build` (`-O2`)
+each build one, so do `--emit=lib`, `--trace` and every other set of `[build]
+cflags`; an edit to a runtime or std C source builds another (an edit to the
+program does not); and the cache's size cap can evict one, which the next
+build makes again. Editing and rebuilding a program is a hit after its first
+build.
+
+The compilers this reaches on Windows are any not on the archive's C runtime
+and mingw-w64: `zig cc`; MSYS2's UCRT64 GCC, MSYS2's default environment,
+against the MINGW64 (msvcrt) archive the releases ship; and the WinLibs GCC
+that `ae` downloads when no gcc is on PATH, GCC 14.2.0 on UCRT. Its zip is
+checked against a pinned SHA-256 before it is unpacked.
+
+`ae cflags --libs` names the archive as it is and asks no compiler anything: a
+build that links `libaether.a` with a compiler of its own reads
+`libaether.crt` and compares it with what that compiler targets
+(install-layout.md), as `ae` does.
 
 The same-OS, cross-arch cell is then a one-liner. On an x86_64 Linux host with
 a cross-gcc installed:

@@ -1740,8 +1740,10 @@ static int try_emit_scoped_slice_free(CodeGenerator* gen, ASTNode* deferred) {
     if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
     const char* name = deferred->annotation + plen;
     print_indent(gen);
-    fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
-            "aether_slice_release(&%s);\n", name, name);
+    /* #3787: forgotten only when its value was journaled (`<name>_j`,
+     * emit_slice_temp_set_close), and the token cleared with it. */
+    fprintf(gen->output, "/* deferred */ aether_unwind_forget_tok(%s_j, (const void*)&%s); %s_j = 0; "
+            "aether_slice_release(&%s);\n", name, name, name, name);
     return 1;
 }
 
@@ -1918,7 +1920,10 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
                 mode == DEFER_TRY ? " (try)" : mode == DEFER_CATCH ? " (catch)" : "");
         gen->indent_level++;
         const char* jctx = mode == DEFER_ALWAYS ? user_defer_ctx(deferred) : NULL;
-        if (jctx) print_line(gen, "aether_unwind_forget((const void*)%s);", jctx);
+        /* #3787: only an entry the registration wrote is forgotten. */
+        if (jctx)
+            print_line(gen, "aether_unwind_forget_tok(%s, (const void*)%s);",
+                       user_defer_token(deferred), jctx);
         enter_scope(gen);
         generate_statement(gen, deferred);
         exit_scope(gen);
@@ -2696,6 +2701,38 @@ int is_c_reserved_word(const char* name) {
            function-like macros, so a user `major(seg: string)` was rewritten
            by the preprocessor and did not compile. */
         "major", "minor", "makedev",
+        /* #3806: <stdatomic.h>, which every generated program includes. Its
+           generic functions are function-like macros, so a user
+           `atomic_load(p: ptr) -> int` was rewritten by the preprocessor
+           ("expected identifier before '__extension__'"); its types and
+           memory_order constants are names a function or variable cannot
+           take either. An imported module's function hid this, its C name
+           carrying the module's prefix; `ae pad --verify`, which compiles a
+           module alone, did not. */
+        "atomic_init", "atomic_load", "atomic_load_explicit", "atomic_store",
+        "atomic_store_explicit", "atomic_exchange", "atomic_exchange_explicit",
+        "atomic_compare_exchange_strong", "atomic_compare_exchange_strong_explicit",
+        "atomic_compare_exchange_weak", "atomic_compare_exchange_weak_explicit",
+        "atomic_fetch_add", "atomic_fetch_add_explicit", "atomic_fetch_sub",
+        "atomic_fetch_sub_explicit", "atomic_fetch_or", "atomic_fetch_or_explicit",
+        "atomic_fetch_xor", "atomic_fetch_xor_explicit", "atomic_fetch_and",
+        "atomic_fetch_and_explicit", "atomic_flag_test_and_set",
+        "atomic_flag_test_and_set_explicit", "atomic_flag_clear",
+        "atomic_flag_clear_explicit", "atomic_thread_fence", "atomic_signal_fence",
+        "atomic_is_lock_free", "kill_dependency",
+        "atomic_flag", "atomic_bool", "atomic_char", "atomic_schar", "atomic_uchar",
+        "atomic_short", "atomic_ushort", "atomic_int", "atomic_uint", "atomic_long",
+        "atomic_ulong", "atomic_llong", "atomic_ullong", "atomic_char16_t",
+        "atomic_char32_t", "atomic_wchar_t", "atomic_int_least8_t",
+        "atomic_uint_least8_t", "atomic_int_least16_t", "atomic_uint_least16_t",
+        "atomic_int_least32_t", "atomic_uint_least32_t", "atomic_int_least64_t",
+        "atomic_uint_least64_t", "atomic_int_fast8_t", "atomic_uint_fast8_t",
+        "atomic_int_fast16_t", "atomic_uint_fast16_t", "atomic_int_fast32_t",
+        "atomic_uint_fast32_t", "atomic_int_fast64_t", "atomic_uint_fast64_t",
+        "atomic_intptr_t", "atomic_uintptr_t", "atomic_size_t", "atomic_ptrdiff_t",
+        "atomic_intmax_t", "atomic_uintmax_t", "memory_order", "memory_order_relaxed",
+        "memory_order_consume", "memory_order_acquire", "memory_order_release",
+        "memory_order_acq_rel", "memory_order_seq_cst",
         NULL
     };
     static const char** sorted = NULL;
@@ -2821,6 +2858,15 @@ static int is_c_header_macro_name(const char* name) {
     for (int i = 0; macros[i]; i++) {
         if (strcmp(name, macros[i]) == 0) return 1;
     }
+    /* #3806: the <stdatomic.h> names is_c_reserved_word lists. A local
+     * spelled `memory_order_relaxed` shadowed the enum constant the
+     * runtime's atomic macros pass, and one spelled `atomic_int` the type
+     * they declare, so code after it in the same scope compiled against
+     * the user's variable. */
+    if ((strncmp(name, "atomic_", 7) == 0 || strncmp(name, "memory_order", 12) == 0 ||
+         strcmp(name, "kill_dependency") == 0) &&
+        is_c_reserved_word(name))
+        return 1;
     return 0;
 }
 
@@ -3165,6 +3211,12 @@ static const char* get_abi_type(Type* type) {
          * --emit=csrc header does not get the layout, so those prototypes
          * are left out of the header (emit_lib_alias_stubs). */
         case TYPE_STRUCT: return type->struct_name;
+        /* #3808: these crossed as the int32_t a NULL fell back to, which a
+         * C enum is and the others are not: a bit set is a 64-bit word and
+         * was cut to 32 bits, a bitstruct is its backing word. */
+        case TYPE_ENUM:   return "int32_t";
+        case TYPE_BITSET: return "uint64_t";
+        case TYPE_BITSTRUCT: return get_abi_type(type->element_type);
         default:          return NULL;
     }
 }
@@ -3276,6 +3328,17 @@ static int lib_fn_signature(CodeGenerator* gen, ASTNode* fn, LibSig* sig, const 
     }
     if (sig->result && sig->result->kind == TYPE_TUPLE) {
         *why = "tuple";
+        return 0;
+    }
+    /* #3808: a result of a type the ABI does not carry (a slice, an
+     * optional, a sum, an actor reference) is refused as a parameter of one
+     * is. Decided here, so the alias, the catalog's record of it and the
+     * function's linkage (lib_fn_is_local) agree: decided in the alias
+     * emitter alone, the catalog advertised a c_symbol that did not exist.
+     * An untyped result keeps the int32_t fallback. */
+    if (sig->result && sig->result->kind != TYPE_UNKNOWN && sig->result->kind != TYPE_VOID &&
+        !get_abi_type(sig->result)) {
+        *why = "result";
         return 0;
     }
     return 1;
@@ -3779,6 +3842,20 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         const char* ret_abi = result && result->kind == TYPE_STRING ? "const void*"
                                                                     : get_abi_type(result);
         int returns_value = result != NULL;
+        if (!ok && strcmp(why, "result") == 0) {
+            /* #3808: lib_fn_signature refused the result type. */
+            const char* msg = aether_internf(
+                     "function '%s' returns a type that isn't representable in the --emit=lib ABI; "
+                     "skipping alias stub", fn->value);
+            AetherError w = {NULL, NULL, fn->line, fn->column, msg,
+                             "return int, long, uint64, float, bool, byte, string, ptr, a *Struct, a "
+                             "struct by value, or a fn(...) -> R function pointer from public API "
+                             "functions; a slice crosses as a ptr and its length",
+                             NULL, AETHER_ERR_NONE};
+            aether_warning_report(&w);
+            lib_sig_free(&sig);
+            continue;
+        }
         if (!ok) {
             const char* msg = "";
             msg = aether_internf(
@@ -9994,10 +10071,40 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * release never touches the journal: a value may be held by several
      * places, and the journal knows places, not values. */
     print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
-    print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
+    print_line(gen, "extern int aether_unwind_track(const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_track_place(const void*, const void*, AetherUnwindFree);");
     print_line(gen, "extern int aether_unwind_track_owned_place(const void*, void (*)(void*));");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
+    /* #3787: a journal token, one per place the journal may name. 1: the
+     * place was journaled, and its exit forgets it. 0: it was not, because
+     * a defer's registration found no live frame, or a slice place's value
+     * carries no count (a drain would have nothing to give back), and a
+     * store may still journal that place. -1: a slice place's counted value
+     * found no live frame, and the place is not asked again. The forget
+     * runs only on 1. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void aether_unwind_forget_tok(int tok, const void* p) {");
+    print_line(gen, "    if (tok > 0) aether_unwind_forget(p);");
+    print_line(gen, "}");
+    /* The slice's own mark says whether it holds a reference (R1, #3568):
+     * a counted buffer's slices carry AETHER_SLICE_MADE, a counted string's
+     * bytes AETHER_SLICE_STRING, and a view of memory no count covers
+     * neither, so aether_slice_release gives back nothing for it. Such a
+     * value is not journaled: the drain's release would do nothing. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int aether_slice_journal(const void* entry, AetherSlice v, AetherUnwindFree fn) {");
+    print_line(gen, "    if (!(v.flags & (AETHER_SLICE_MADE | AETHER_SLICE_STRING))) return 0;");
+    print_line(gen, "    return aether_unwind_track(entry, fn) ? 1 : -1;");
+    print_line(gen, "}");
+    /* A store into a slice place journaled by its mark: the place is
+     * journaled when the value it is given is the first counted one. A
+     * token of -1 was refused for want of a frame, and the frame depth a
+     * place's stores run at is the one its declaration ran at (a store in a
+     * `try` the declaration is outside keeps the place journaled from its
+     * declaration, slice_place_journals_by_mark), so it is not asked again. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AetherSlice aether_slice_set_journal(AetherSlice* p, AetherSlice v, int* tok, const void* entry, AetherUnwindFree fn) {");
+    print_line(gen, "    aether_slice_release(p);");
+    print_line(gen, "    if (!*tok) *tok = aether_slice_journal(entry, v, fn);");
+    print_line(gen, "    return v;");
+    print_line(gen, "}");
     print_line(gen, "extern void aether_teardown(void*);");
     /* Is `s` a counted AetherString, the one shape string_release frees?
      * The same byte-by-byte probe as aether_heap_str_free below. */

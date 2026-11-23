@@ -1257,6 +1257,7 @@ char* fs_readlink_raw(const char* path) {
  * `prefix`, atomically (mkdtemp — no TOCTOU race). Returns the created path
  * (a counted string the caller owns) or NULL on failure. */
 char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
+    errno = 0; /* fs.make_temp_*'s error reads errno: only this call's (#3817) */
     if (!dir) dir = "/tmp";
     if (!prefix) prefix = "ae";
     char* made_out = NULL;
@@ -1284,6 +1285,7 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
  * The fd is closed here — the caller writes via the returned path, matching
  * mktemp(1). */
 char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
+    errno = 0; /* fs.make_temp_*'s error reads errno: only this call's (#3817) */
     if (!dir) dir = "/tmp";
     if (!prefix) prefix = "ae";
     char* made_out = NULL;
@@ -1540,7 +1542,21 @@ char* fs_readlink_raw(const char* path) {
  * These used to be NULL stubs — that is why make_temp_dir/make_temp_file failed
  * on every Windows target: the real bodies lived under `#ifndef _WIN32` and the
  * Windows build only ever saw "return NULL". */
+/* errno for a Win32 error, as the CRT's own calls set it: the reason
+ * fs_error_message renders (#3817: the temp functions left errno 0, so
+ * their error said no more than that they failed). */
+static void fs_win_set_errno(DWORD err) {
+    switch (err) {
+        case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
+        case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: errno = EACCES; break;
+        case ERROR_NOT_SAME_DEVICE: errno = EXDEV; break;
+        case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: errno = EEXIST; break;
+        case ERROR_DISK_FULL: errno = ENOSPC; break;
+        default: errno = EIO; break;
+    }
+}
 char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
+    errno = 0; /* fs.make_temp_*'s error reads errno: only this call's (#3817) */
     if (!dir) dir = ".";
     if (!prefix) prefix = "ae";
     char* made_out = NULL;
@@ -1551,7 +1567,10 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
      * file->dir idiom). Retry to close the tiny unlink/mkdir race. */
     for (int attempt = 0; attempt < 64; attempt++) {
         char out[MAX_PATH];
-        if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
+        if (GetTempFileNameA(dir, prefix, 0, out) == 0) {
+            fs_win_set_errno(GetLastError());
+            return NULL;
+        }
         DeleteFileA(out);
         if (_mkdir(out) == 0) return (char*)string_new(out);
         /* name got taken between delete and mkdir — try a fresh one */
@@ -1559,6 +1578,7 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     return NULL;
 }
 char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
+    errno = 0; /* fs.make_temp_*'s error reads errno: only this call's (#3817) */
     if (!dir) dir = ".";
     if (!prefix) prefix = "ae";
     char* made_out = NULL;
@@ -1566,7 +1586,10 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
     char out[MAX_PATH];
     /* uUnique=0 => the file is created here, atomically; mktemp(1)'s contract. */
-    if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
+    if (GetTempFileNameA(dir, prefix, 0, out) == 0) {
+        fs_win_set_errno(GetLastError());
+        return NULL;
+    }
     return (char*)string_new(out);
 }
 /* 1 when `path` is a link itself, not what it points at: the directory
@@ -1702,14 +1725,7 @@ static int aether_fs_rename_over(const char* from, const char* to) {
     aether_caps_free(wf, fb);
     aether_caps_free(wt, tb);
     if (ok) return 0;
-    switch (err) {
-        case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
-        case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: errno = EACCES; break;
-        case ERROR_NOT_SAME_DEVICE: errno = EXDEV; break;
-        case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: errno = EEXIST; break;
-        case ERROR_DISK_FULL: errno = ENOSPC; break;
-        default: errno = EIO; break;
-    }
+    fs_win_set_errno(err);
     return -1;
 #else
     return rename(from, to);

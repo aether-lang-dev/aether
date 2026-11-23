@@ -949,7 +949,8 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
 
 /* Runs a command string: split by ae_split_command, then spawned.
  * quiet=0: show all output, 1: hide stdout and stderr, 2: hide stdout only
- * (keep stderr for warnings), 3: stdout to the file `capture`. */
+ * (keep stderr for warnings), 3: stdout to the file `capture`, 4: stdout and
+ * stderr both to the file `capture` (a compiler's diagnostics, to read). */
 static int run_command(const char* cmd_str, int quiet, const char* capture) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
     char** argv = ae_split_command(cmd_str, NULL);
@@ -1004,9 +1005,10 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
     } else if (quiet == 2) {
         // Hide stdout but keep stderr (so gcc warnings are visible)
         posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-    } else if (quiet == 3 && capture) {
+    } else if ((quiet == 3 || quiet == 4) && capture) {
         posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, capture,
                                          O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (quiet == 4) posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
     }
 
     pid_t pid;
@@ -1342,11 +1344,19 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
         int nul = _open("nul", _O_WRONLY);
         if (nul >= 0) { _dup2(nul, 1); _close(nul); }
     }
-    if (quiet == 3 && capture) {
+    if ((quiet == 3 || quiet == 4) && capture) {
         fflush(stdout);
         saved_stdout = _dup(1);
         int fd = _open(capture, _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE);
-        if (fd >= 0) { _dup2(fd, 1); _close(fd); }
+        if (fd >= 0) {
+            _dup2(fd, 1);
+            if (quiet == 4) {
+                fflush(stderr);
+                saved_stderr = _dup(2);
+                _dup2(fd, 2);
+            }
+            _close(fd);
+        }
     }
     if (quiet == 1) {
         fflush(stderr);
@@ -1482,6 +1492,13 @@ static const char* compile_log_path(char* buf, size_t size) {
 int run_cmd_capture_stdout(const char* cmd, const char* path) {
     if (!path || !path[0]) return run_command(cmd, 2, NULL);   /* nowhere to capture to */
     return run_command(cmd, 3, path);
+}
+
+/* Both stdout and stderr of `cmd` into the file `path`, for a caller that
+ * reads the diagnostics before deciding what to say (#3806). */
+int run_cmd_capture_all(const char* cmd, const char* path) {
+    if (!path || !path[0]) return run_command(cmd, 0, NULL);
+    return run_command(cmd, 4, path);
 }
 
 /* Print a captured stdout log to stderr, so it interleaves with the
@@ -1768,10 +1785,9 @@ void mkdirs(const char* path) {
 
 // Stream-copy src → dst, preserving the source file's permission bits
 // so executables stay executable and libs stay non-executable. Returns
-// 1 on success, 0 on any I/O failure. Used by the build cache to
-// materialise a cached binary at the user-requested output path (and
-// the inverse to store a freshly built binary in the cache slot).
-static int copy_file(const char* src, const char* dst) {
+// 1 on success, 0 on any I/O failure. Rewrites dst in place: copy_file
+// below is what callers use.
+static int copy_file_in_place(const char* src, const char* dst) {
     FILE* in = fopen(src, "rb");
     if (!in) return 0;
     FILE* out = fopen(dst, "wb");
@@ -1794,6 +1810,79 @@ static int copy_file(const char* src, const char* dst) {
     }
 #endif
     return ok;
+}
+
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
+// src copied to dst as a new file: into a temporary beside dst, created
+// exclusively, then renamed over it (#3801). Rewritten in place, a program
+// that had run kept its inode with new bytes, and macOS killed the next run
+// of it (SIGKILL, exit 137) though its bytes and signature were fine: the
+// build cache materialises a cached binary over the previous one at every
+// hit. Used for every file ae writes from another (a cached binary, a
+// shared library, a DLL beside a program, a package's files), so none is
+// rewritten under a reader. A symlinked destination is written through,
+// as before, and where the rename cannot be made (a running program on
+// Windows, a directory that takes no new file) the copy is made in place,
+// which is what those cases did before. Returns 1 on success.
+static int copy_file(const char* src, const char* dst) {
+#ifndef _WIN32
+    struct stat lst;
+    if (lstat(dst, &lst) == 0 && S_ISLNK(lst.st_mode)) return copy_file_in_place(src, dst);
+#else
+    /* A symlink or junction destination (a reparse point): written through,
+     * as on POSIX; MoveFileEx would replace the link itself. */
+    DWORD dattr = GetFileAttributesA(dst);
+    if (dattr != INVALID_FILE_ATTRIBUTES && (dattr & FILE_ATTRIBUTE_REPARSE_POINT))
+        return copy_file_in_place(src, dst);
+#endif
+    size_t need = strlen(dst) + 48;
+    char* tmp = (char*)malloc(need);
+    if (!tmp) return copy_file_in_place(src, dst);
+    static unsigned seq = 0;
+    int fd = -1;
+    for (int tries = 0; tries < 100 && fd < 0; tries++) {
+        snprintf(tmp, need, "%s.ae-tmp-%ld-%u", dst, (long)getpid(), seq++);
+        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0700);
+        if (fd < 0 && errno != EEXIST) break;
+    }
+    if (fd >= 0) {
+        /* Written through the descriptor the exclusive create gave, never
+         * reopened by name: in a directory others may write, the name could
+         * be made a symlink between the create and a reopen, and the copy
+         * (and the mode) would land in the file it points at. */
+        int ok = 1;
+#ifndef _WIN32
+        struct stat sst;
+        if (stat(src, &sst) == 0 && fchmod(fd, sst.st_mode & 07777) != 0) ok = 0;
+#endif
+        FILE* out = ok ? fdopen(fd, "wb") : NULL;
+        FILE* in = out ? fopen(src, "rb") : NULL;
+        if (!out || !in) ok = 0;
+        if (ok) {
+            char buf[8192];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+                if (fwrite(buf, 1, n, out) != n) { ok = 0; break; }
+            }
+            if (ferror(in)) ok = 0;
+        }
+        if (in) fclose(in);
+        if (out) {
+            if (fclose(out) != 0) ok = 0;
+        } else {
+            close(fd);
+        }
+        if (ok && ae_replace_file(tmp, dst) == 0) {
+            free(tmp);
+            return 1;
+        }
+        remove(tmp);
+    }
+    free(tmp);
+    return copy_file_in_place(src, dst);
 }
 
 static char* get_basename(const char* path) {
@@ -3716,13 +3805,78 @@ const char* c_backend_env_override(void) {
     return NULL;
 }
 
+/* Whether compiler `cc` takes `flags` (a leading space, as the build lines
+ * carry them): `text` is compiled with them, and when that fails, compiled
+ * again without them and with AE_PROBE_ANY defined (the control). A refusal
+ * is a failing probe whose control passes; a control that fails as well
+ * says nothing about the flags, only that this form of compile does not run
+ * on `cc`.
+ *
+ * #3810: so each form is tried in turn. -fsyntax-only first, as it writes
+ * nothing; then -c into an object in the private temp directory, for a
+ * driver that cannot check without writing: `zig cc` adds -c and its own
+ * output path to every clang command and reads the object back from its
+ * cache, so under -fsyntax-only, where clang writes none, every compile
+ * failed with "FileNotFound", flags or not. That read as a refusal, and a
+ * program nested past 256 brackets did not build with AE_CC="zig cc".
+ * When no form tells, the answer is -1 ("cannot tell") for this process and
+ * nothing is remembered; each caller says what that means for it.
+ *
+ * #3600: an answer that is told is remembered in the cache directory by
+ * the compiler's identity, under the question asked (`flags` and `text`:
+ * #3813's probe of the C runtime passes no flags, and two trees ask about
+ * two runtimes), so later builds compile nothing. `name` names the probe's
+ * files (`<name>.c`, `<name>.o`); the -v log shows each command, by that
+ * name. 1 takes, 0 refuses, -1 cannot tell. */
+static int cc_probe_takes(const char* cc, const char* flags, const char* name, const char* text) {
+    char* question = ae_strdup_printf("%s\n%s", flags, text);
+    if (!question) return -1;
+    int known = cache_probe_memo_get(cc, question);
+    if (known >= 0) { free(question); return known; }
+    char file[200], probe_c[1100], probe_o[1100];
+    snprintf(file, sizeof(file), "%s.c", name);
+    probe_o[0] = '\0';
+    FILE* f =ae_private_temp_path(probe_c, sizeof(probe_c), file)   /* #3745 */
+              ? fopen(probe_c, "w") : NULL;
+    snprintf(file, sizeof(file), "%s.o", name);
+    if (!f || !ae_private_temp_path(probe_o, sizeof(probe_o), file)) {
+        if (f) { fclose(f); remove(probe_c); }
+        free(question);
+        return -1;
+    }
+    fputs(text, f);
+    fclose(f);
+    int answer = -1;
+    for (int form = 0; form < 2 && answer < 0; form++) {
+        char* out = form == 0 ? ae_strdup_printf(" -fsyntax-only")
+                              : ae_strdup_printf(" -c -o \"%s\"", probe_o);
+        char* probe = out ? ae_strdup_printf("%s%s%s \"%s\"", cc, flags, out, probe_c) : NULL;
+        if (probe && run_cmd_quiet(probe) == 0) {
+            answer = 1;
+        } else {
+            char* control = out ? ae_strdup_printf("%s -DAE_PROBE_ANY%s \"%s\"", cc, out, probe_c)
+                                : NULL;
+            if (control && run_cmd_quiet(control) == 0) answer = 0;
+            free(control);
+        }
+        free(probe);
+        free(out);
+        remove(probe_o);
+    }
+    remove(probe_c);
+    if (answer >= 0) cache_probe_memo_put(cc, question, answer);
+    free(question);
+    return answer;
+}
+
 /* #3574: " -fbracket-depth=N" when compiler `cc` takes it (Clang, Apple's
  * included), else "" (GCC refuses an option it does not know, and sets no
  * such limit). Blocks nest in the C as deep as in the source, and Clang
  * refuses C nested past 256 brackets unless told otherwise, so a program
  * the parser takes did not build there (AETHER_CLANG_DEPTH_CFLAGS says
  * what the number is). `cc` is asked once per process, by compiling an
- * empty file with the option. */
+ * empty file with the option (cc_probe_takes, which remembers the answer
+ * per compiler). */
 static const char* bracket_depth_flags(const char* cc) {
     static char* asked = NULL;
     static const char* answer = "";
@@ -3731,35 +3885,206 @@ static const char* bracket_depth_flags(const char* cc) {
     free(asked);
     asked = strdup(cc);
     answer = "";
-    /* #3600: and once per compiler, not once per build: the answer is kept
-     * in the cache directory by the compiler's identity. */
-    int known = cache_probe_memo_get(cc, AETHER_CLANG_DEPTH_CFLAGS);
-    if (known >= 0) {
-        if (known) answer = AETHER_CLANG_DEPTH_CFLAGS;
-        return answer;
-    }
-    char probe_c[1100];
-    if (!ae_private_temp_path(probe_c, sizeof(probe_c), "ae_bracket_probe.c")) return answer;   /* #3745 */
-    FILE* f = fopen(probe_c, "w");
-    if (!f) return answer;
-    fputs("int ae_bracket_probe;\n", f);
-    fclose(f);
-    char* probe = ae_strdup_printf("%s%s -fsyntax-only \"%s\"", cc, AETHER_CLANG_DEPTH_CFLAGS,
-                                   probe_c);
-    int takes = probe && run_cmd_quiet(probe) == 0;
-    if (takes) answer = AETHER_CLANG_DEPTH_CFLAGS;
-    free(probe);
-    /* A refusal is remembered only when the same compile without the flag
-     * passes: a compiler that could not run at all said nothing about it. */
-    int settled = takes;
-    if (!takes) {
-        char* control = ae_strdup_printf("%s -fsyntax-only \"%s\"", cc, probe_c);
-        settled = control && run_cmd_quiet(control) == 0;
-        free(control);
-    }
-    if (settled) cache_probe_memo_put(cc, AETHER_CLANG_DEPTH_CFLAGS, takes);
-    remove(probe_c);
+    if (cc_probe_takes(cc, AETHER_CLANG_DEPTH_CFLAGS, "ae_bracket_probe",
+                       "int ae_bracket_probe;\n") == 1)
+        answer = AETHER_CLANG_DEPTH_CFLAGS;
     return answer;
+}
+
+/* #3779: GCC caps how far inlining may grow one translation unit, at
+ * inline-unit-growth percent of the unit (40 by default). The cap is sized
+ * for a C file of ordinary length, and aetherc emits a whole program, its
+ * modules and std included, as one unit: once a large program's inlining has
+ * grown it 40%, GCC refuses every later candidate in it, hot or not. In
+ * aephysics' joint grid that left the small maths of the solvers (a
+ * rotation, a quaternion product, a 3x3 solve, each emitted static inline)
+ * as real calls, `--param inline-unit-growth limit reached` on 2,671 call
+ * sites, and a step 38% slower than with the cap raised. The budget is
+ * AETHER_GCC_INLINE_UNIT_GROWTH percent, chosen by measurement (see
+ * docs/build-system.md, "The inlining budget and GCC").
+ *
+ * GCC only: Clang has no such unit cap, and warns of a --param it does not
+ * use. The compiler is asked once (and the answer kept by its identity, as
+ * bracket_depth_flags keeps its own) whether it is GCC and takes the option.
+ * Optimising builds only: -O0 inlines nothing, and --size asks for bytes,
+ * which the default cap already weighs. A `--param inline-unit-growth=` the
+ * user names, in the cflags or in the $AE_CC / $CC command, means none from
+ * ae (see the check below). It changes the binary, and the build cache key reads it
+ * through ae's own content hash: the number is compiled into ae. */
+#define AETHER_GCC_INLINE_UNIT_GROWTH 100
+#define AETHER_GCC_INLINE_CFLAGS " --param inline-unit-growth=" AE_DEPTH_TEXT(AETHER_GCC_INLINE_UNIT_GROWTH)
+static const char* gcc_inline_budget_flags(const char* cc, bool optimize) {
+    static char* asked = NULL;
+    static const char* answer = "";
+    if (!optimize || g_coverage || g_size || !cc || !*cc) return "";
+    /* A budget the user names wins, wherever it sits. In the cflags it would
+     * win anyway, coming after this one; in the $AE_CC / $CC command it sits
+     * ahead of every flag, and `AE_CC="gcc --param inline-unit-growth=50"`
+     * got 100. So when either names one, ae gives none. */
+    if (strstr(cc, "inline-unit-growth") || strstr(get_cflags(), "inline-unit-growth"))
+        return "";
+    if (asked && strcmp(asked, cc) == 0) return answer;
+    free(asked);
+    asked = strdup(cc);
+    answer = "";
+    /* Clang defines __GNUC__ too, and so does a compiler built on it (icx,
+     * zig cc): __clang__ tells them apart. The control compile defines
+     * AE_PROBE_ANY, so it passes on any compiler. */
+    if (cc_probe_takes(cc, AETHER_GCC_INLINE_CFLAGS, "ae_inline_probe",
+                       "#if !defined(AE_PROBE_ANY) && (!defined(__GNUC__) || defined(__clang__))\n"
+                       "#error not GCC\n"
+                       "#endif\n"
+                       "int ae_inline_probe;\n") == 1)
+        answer = AETHER_GCC_INLINE_CFLAGS;
+    return answer;
+}
+
+static char* ae_read_file(const char* path, long* out_len);
+
+/* The C runtime runtime/aether_crt_id.h names for compiler `cc`, as the
+ * record spells it ("msvcrt mingw-w64 15", "glibc"), into `out`, by
+ * preprocessing `header`; "" when it names none or the compiler cannot be
+ * run. For the -v line only. */
+static void crt_name_of(const char* cc, const char* flags, const char* header, char* out,
+                        size_t outsz) {
+    out[0] = '\0';
+    char src[1100], got[1100];
+    if (!ae_private_temp_path(src, sizeof(src), "ae_crt_name.c") ||
+        !ae_private_temp_path(got, sizeof(got), "ae_crt_name.out")) return;
+    FILE* f = fopen(src, "w");
+    if (!f) return;
+    fprintf(f, "%s\n#ifdef AETHER_CRT_NAME\nAETHER_CRT_RECORD AETHER_CRT_NAME\n#endif\n"
+               "#ifdef AETHER_CRT_MINGW_MAJOR\nAETHER_CRT_MINGW AETHER_CRT_MINGW_MAJOR\n#endif\n",
+            header);
+    fclose(f);
+    char* cmd = ae_strdup_printf("%s%s -E -P \"%s\"", cc, flags, src);
+    if (cmd && run_cmd_capture_stdout(cmd, got) == 0) {
+        FILE* g = fopen(got, "r");
+        /* A C runtime's name ("msvcrt", "glibc") and a mingw-w64 major are
+         * short; the precisions say how short, so a line of the compiler's
+         * output is never copied whole into them. */
+        char line[256], name[64] = "", mingw[32] = "";
+        while (g && fgets(line, sizeof(line), g)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (strncmp(line, "AETHER_CRT_RECORD ", 18) == 0)
+                snprintf(name, sizeof(name), "%.63s", line + 18);
+            else if (strncmp(line, "AETHER_CRT_MINGW ", 17) == 0)
+                snprintf(mingw, sizeof(mingw), "%.31s", line + 17);
+        }
+        if (g) fclose(g);
+        if (name[0] && mingw[0]) snprintf(out, outsz, "%s mingw-w64 %s", name, mingw);
+        else snprintf(out, outsz, "%s", name);
+    }
+    free(cmd);
+    remove(src);
+    remove(got);
+}
+
+/* #3813: a prebuilt libaether.a is linked only when its C runtime is the one
+ * compiler `cc` builds against. The archive is compiled against one C
+ * runtime's headers and imports that runtime's symbols: MinGW GCC's msvcrt
+ * headers declare _setjmp as an msvcrt import, and AE_CC="zig cc", which
+ * links UCRT, failed on "undefined symbol: __declspec(dllimport) _setjmp" as
+ * soon as a program used try; two C runtimes in one program disagree on FILE,
+ * errno and the heap besides. On Windows the mingw-w64 major counts too: an
+ * archive MSYS2's mingw-w64 15 built imports _strtof_l, which mingw-w64 12
+ * (WinLibs GCC 14.2, msvcrt like it) does not provide.
+ *
+ * `make` records the archive's runtime beside it (libaether.crt, from
+ * runtime/aether_crt_id.h): the name on the first line, `mingw-w64 <major>`
+ * on the second where there is one. The compiler is asked, through the same
+ * header, whether it targets that runtime (and that mingw-w64), with
+ * cc_probe_takes, the answer remembered by its identity. On a mismatch the
+ * archive is not linked and the runtime is compiled from source with `cc`,
+ * as a --trace build does (#1333), and cached for it (ae_cached_runtime).
+ *
+ * The archive is linked as before when there is nothing to compare: an
+ * archive with no record (one an older tree built, or a platform with one C
+ * runtime), no header to ask with, or a compiler that cannot be asked. */
+static void archive_crt_check(const char* cc) {
+    static char* asked = NULL;
+    static int matches = 1;
+    if (!tc.has_lib || !cc || !*cc) return;
+    if (!(asked && strcmp(asked, cc) == 0)) {
+        free(asked);
+        asked = strdup(cc);
+        matches = 1;
+        char lib_dir[sizeof(tc.lib)];
+        snprintf(lib_dir, sizeof(lib_dir), "%s", tc.lib);
+        char* slash = strrchr(lib_dir, '/');
+        char* bslash = strrchr(lib_dir, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        if (slash) *slash = '\0';
+        char* rec_path = ae_path_printf("%s/libaether.crt", lib_dir);
+        char* rec = rec_path ? ae_read_file(rec_path, NULL) : NULL;
+        free(rec_path);
+        char name[64] = "";
+        int mingw = -1;   /* the second line's major, -1 when there is none */
+        if (rec) {
+            size_t n = strcspn(rec, "\r\n");
+            int ok = n > 0 && n < sizeof(name);
+            for (size_t i = 0; ok && i < n; i++)
+                ok = (rec[i] >= 'a' && rec[i] <= 'z') || (rec[i] >= '0' && rec[i] <= '9') ||
+                     rec[i] == '_';
+            if (ok) snprintf(name, sizeof(name), "%.*s", (int)n, rec);
+            const char* second = rec + n;
+            while (*second == '\r' || *second == '\n') second++;
+            unsigned major = 0;
+            char tail = 0;
+            if (ok && sscanf(second, "mingw-w64 %u%c", &major, &tail) >= 1 &&
+                (tail == 0 || tail == '\r' || tail == '\n') && major < 1000)
+                mingw = (int)major;
+            free(rec);
+        }
+        char* hdr_path = name[0] ? ae_path_printf("%s/runtime/aether_crt_id.h", tc.src_root) : NULL;
+        char* header = hdr_path ? ae_read_file(hdr_path, NULL) : NULL;
+        free(hdr_path);
+        char mingw_check[200] = "";
+        if (mingw >= 0)
+            snprintf(mingw_check, sizeof(mingw_check),
+                     "#if !defined(AE_PROBE_ANY) && "
+                     "(!defined(AETHER_CRT_MINGW_MAJOR) || AETHER_CRT_MINGW_MAJOR != %d)\n"
+                     "#error another mingw-w64 than the archive's\n#endif\n", mingw);
+        char* text = header ? ae_strdup_printf("%s\n#if !defined(AE_PROBE_ANY) && "
+                                               "!defined(AETHER_CRT_IS_%s)\n"
+                                               "#error another C runtime than the archive's\n"
+                                               "#endif\n%sint ae_crt_probe;\n",
+                                               header, name, mingw_check)
+                            : NULL;
+        /* With the build's own cflags: `-mcrtdll=ucrt`, `--target` or
+         * `--sysroot` in them change the C runtime the compiler builds
+         * against, so the question asked without them is about another one.
+         * They are part of the question, so of the remembered answer too. */
+        const char* user = get_cflags();
+        char* flags = user[0] ? ae_strdup_printf(" %s", user) : ae_strdup_printf("%s", "");
+        int told = text && flags ? cc_probe_takes(cc, flags, "ae_crt_probe", text) : -1;
+        char ours[100];
+        if (mingw >= 0) snprintf(ours, sizeof(ours), "%s mingw-w64 %d", name, mingw);
+        else snprintf(ours, sizeof(ours), "%s", name);
+        if (told == 0) {
+            matches = 0;
+            if (tc.verbose) {
+                char theirs[128]; /* crt_name_of: a name of 63 and a major of 31 */
+                crt_name_of(cc, flags, header, theirs, sizeof(theirs));
+                fprintf(stderr, "[toolchain] libaether.a is %s; %s targets %s: the runtime is "
+                                "compiled from source\n",
+                        ours, cc, theirs[0] ? theirs : "another C runtime");
+            }
+        } else if (tc.verbose && text) {
+            /* Said either way, so a log tells a match from a compiler that
+             * could not be asked. */
+            if (told == 1)
+                fprintf(stderr, "[toolchain] libaether.a is %s; %s targets the same: the "
+                                "archive is linked\n", ours, cc);
+            else
+                fprintf(stderr, "[toolchain] libaether.a is %s; %s could not be asked which C "
+                                "runtime it targets: the archive is linked\n", ours, cc);
+        }
+        free(flags);
+        free(text);
+        free(header);
+    }
+    if (!matches) tc.has_lib = false;
 }
 
 #ifndef _WIN32
@@ -3780,10 +4105,21 @@ static const char* posix_driven_cc(void) {
 // --------------------------------------------------------------------------
 #ifdef _WIN32
 
-// Pinned WinLibs release — GCC 14.2.0 UCRT, x86-64, no LLVM (~250 MB).
-// Update WINLIBS_TAG + WINLIBS_ZIP together when upgrading.
+// Pinned WinLibs release: GCC 14.2.0 UCRT, x86-64, no LLVM (~250 MB).
+// Update WINLIBS_TAG, WINLIBS_ZIP and WINLIBS_SHA256 together when upgrading.
+//
+// UCRT, while the Windows releases' libaether.a is msvcrt (MSYS2 MINGW64):
+// ae compiles the runtime from source for it (archive_crt_check, #3813). The
+// msvcrt build of this GCC is no better: its mingw-w64 (12) has no
+// _strtof_l import, which an archive MSYS2's mingw-w64 (15) built references,
+// so it fails the link where UCRT builds from source and runs.
+//
+// WINLIBS_SHA256 is the .sha256 WinLibs publishes beside the zip, pinned
+// here and checked in-process before the zip is opened: the compiler it
+// holds builds every program on this machine.
 #define WINLIBS_TAG "14.2.0posix-12.0.0-ucrt-r3"
 #define WINLIBS_ZIP "winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64ucrt-12.0.0-r3.zip"
+#define WINLIBS_SHA256 "88868d745b807f083a117ff69348d8bc021ad7389aa503379dbed1866efcaeb9"
 #define WINLIBS_URL \
     "https://github.com/brechtsanders/winlibs_mingw/releases/download/" \
     WINLIBS_TAG "/" WINLIBS_ZIP
@@ -3888,14 +4224,43 @@ static bool find_gcc_windows(bool may_download) {
     fprintf(ps,
         "$ProgressPreference = 'SilentlyContinue'\n"
         "Write-Host '[ae] Downloading GCC...'\n"
-        "Invoke-WebRequest -Uri '%s' -OutFile '%s'\n"
+        "Invoke-WebRequest -Uri '%s' -OutFile '%s'\n",
+        WINLIBS_URL, zip_path);
+    fclose(ps);
+
+    {
+        char run_ps[2048];
+        snprintf(run_ps, sizeof(run_ps),
+            "powershell -NoProfile -ExecutionPolicy Bypass -File \"%s\"", ps_path);
+        int ret = system(run_ps);
+        remove(ps_path);
+        if (ret != 0) goto fail;
+    }
+    /* The pinned digest, before anything is unpacked (see WINLIBS_SHA256). */
+    {
+        char got_hex[65] = "";
+        if (ae_sha256_file_hex(zip_path, got_hex) != 0 || strcmp(got_hex, WINLIBS_SHA256) != 0) {
+            fprintf(stderr, "[ae] %s does not have the pinned SHA-256 (got %s, want %s); "
+                            "not installing it.\n",
+                    WINLIBS_ZIP, got_hex[0] ? got_hex : "none", WINLIBS_SHA256);
+            remove(zip_path);
+            goto fail;
+        }
+    }
+    ps = fopen(ps_path, "w");
+    if (!ps) {
+        fprintf(stderr, "[ae] Cannot write installer script to %s\n", tools_dir);
+        remove(zip_path);
+        goto fail;
+    }
+    fprintf(ps,
+        "$ProgressPreference = 'SilentlyContinue'\n"
         "Write-Host '[ae] Extracting...'\n"
         "Expand-Archive -Path '%s' -DestinationPath '%s' -Force\n"
         "Remove-Item -Path '%s' -Force\n"
         "Write-Host '[ae] GCC ready.'\n",
-        WINLIBS_URL, zip_path, zip_path, tools_dir, zip_path);
+        zip_path, tools_dir, zip_path);
     fclose(ps);
-
     {
         char run_ps[2048];
         snprintf(run_ps, sizeof(run_ps),
@@ -5165,6 +5530,111 @@ static char* ae_precompile_runtime_srcs(const char* cc, const char* cflags, cons
     return ok ? list : NULL;
 }
 
+/* The archiver that goes with compiler `cc`, as a command (malloc'd), or NULL
+ * when there is none to be had. `zig cc` is zig's clang, and its archiver is
+ * `zig ar`: asked for one, zig's clang names whatever `ar` PATH holds (on one
+ * Windows box, another toolchain's). Any other compiler names its own with
+ * -print-prog-name=ar, as GCC gives the ar of its binutils. */
+static char* runtime_archiver(const char* cc) {
+    /* The first word, without quotes, and where the second one starts. */
+    const char* p = cc;
+    while (*p == ' ') p++;
+    char first[1100];
+    size_t n = 0;
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"' && n + 1 < sizeof(first)) first[n++] = *p++;
+        if (*p == '"') p++;
+    } else {
+        while (*p && *p != ' ' && n + 1 < sizeof(first)) first[n++] = *p++;
+    }
+    first[n] = '\0';
+    while (*p == ' ') p++;
+    const char* base = first;
+    for (const char* q = first; *q; q++)
+        if (*q == '/' || *q == '\\') base = q + 1;
+    if ((strcmp(base, "zig") == 0 || strcmp(base, "zig.exe") == 0 ||
+         strcmp(base, "ZIG.EXE") == 0) &&
+        strncmp(p, "cc", 2) == 0 && (p[2] == ' ' || p[2] == '\0'))
+        return ae_strdup_printf("\"%s\" ar", first);
+
+    char out_path[1100];
+    if (!ae_private_temp_path(out_path, sizeof(out_path), "ae_ar_name.out")) return NULL;
+    char* cmd = ae_strdup_printf("%s -print-prog-name=ar", cc);
+    char line[1100] = "";
+    if (cmd && run_cmd_capture_stdout(cmd, out_path) == 0) {
+        FILE* f = fopen(out_path, "r");
+        if (f) {
+            if (!fgets(line, sizeof(line), f)) line[0] = '\0';
+            fclose(f);
+        }
+    }
+    free(cmd);
+    remove(out_path);
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strchr(line, '/') || strchr(line, '\\'))
+        return path_exists(line) ? ae_strdup_printf("\"%s\"", line) : NULL;
+    return strcmp(line, "ar") == 0 ? ae_strdup_printf("ar") : NULL;
+}
+
+/* #3813: what a build without libaether.a links for the runtime: an
+ * archive of it in the build cache, compiled once per compiler and flags
+ * and reused by every later program, else the objects of this build, else
+ * NULL (the link command compiles the sources, as before).
+ *
+ * The fallback compiled the 119 runtime and std sources for every new
+ * program: 10 to 47 s a first build, where linking libaether.a takes about
+ * two. The archive is keyed by cache_runtime_key (the compiler's identity,
+ * the flags, the sources' content, the tree), so a hit is the runtime these
+ * sources, flags and compiler make, and --trace has its own. It is made the
+ * way every cache slot is: `ar rcs` into `<slot>.tmp.<pid>`, then
+ * cache_publish, which leaves a slot another build published first alone,
+ * so two first builds at once each link a whole archive. An archive links
+ * as libaether.a does: the members a program needs, and no others. */
+static char* ae_cached_runtime(const char* cc, const char* rt_cflags) {
+    unsigned long long key = cache_runtime_key(cc, rt_cflags, tc.runtime_srcs);
+    if (key) init_cache_dir();
+    if (!key || !s_cache_dir[0])
+        return ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
+    char slot[700];
+    snprintf(slot, sizeof(slot), "%s/rt-%016llx.a", s_cache_dir, key);
+    if (path_exists(slot)) {
+        cache_touch(slot);
+        if (tc.verbose) fprintf(stderr, "[cache] runtime: %s (hit)\n", slot);
+        return ae_strdup_printf("\"%s\"", slot);
+    }
+    char* objs = ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
+    if (!objs) return NULL;
+    char* ar = runtime_archiver(cc);
+    if (!ar) {
+        if (tc.verbose) fprintf(stderr, "[cache] runtime: no archiver for %s; not cached\n", cc);
+        return objs;
+    }
+    char tmp[800];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", slot, (int)getpid());
+    char* cmd = ae_strdup_printf("%s rcs \"%s\" %s", ar, tmp, objs);
+    int made = cmd && run_cmd_quiet(cmd) == 0 && path_exists(tmp);
+    free(cmd);
+    free(ar);
+    if (!made) {
+        remove(tmp);
+        if (tc.verbose) fprintf(stderr, "[cache] runtime: the archive could not be made; not cached\n");
+        return objs;
+    }
+    char* link;
+    if (cache_publish(tmp, slot) == 0) {
+        cache_enforce_limit(slot, 0);
+        link = ae_strdup_printf("\"%s\"", slot);
+        if (tc.verbose) fprintf(stderr, "[cache] runtime: %s (built)\n", slot);
+    } else {
+        /* A cache that takes no publish: this build links its own. */
+        link = ae_strdup_printf("\"%s\"", tmp);
+    }
+    if (!link) return objs;
+    free(objs);
+    return link;
+}
+
 /* Source fallback (no libaether.a): the defines that compile the vendored
  * engines from the MANIFEST sources instead of trusting this box to have the
  * libraries the toolchain's build box had. PCRE2 (#1389) turns
@@ -5271,6 +5741,35 @@ static void freebsd_casper_libs(char* out, size_t size) {
 }
 #endif
 
+/* #3812: the flags generated C is compiled with by compiler `cc`, malloc'd
+ * (NULL, unsaid, when memory runs out): the optimisation level and the
+ * language (-fwrapv), the GCC inlining budget, the hardening defines, the
+ * user's cflags after those so theirs win, and what follows them on every
+ * line (the AVX stack workaround on Windows, --trace, Clang's bracket
+ * depth). The executable's compile step and --emit=obj both take them from
+ * here; the object was compiled with none of them, so signed overflow was
+ * undefined in the object and defined in the executable.
+ *
+ * The POSIX line carries -pipe, and must carry -Wformat as opt_flags does:
+ * the -pipe path once hardcoded its own string and dropped it, so the C
+ * compiler's printf-family checks never ran on a normal build (#1252).
+ * Coverage, profile and size builds take opt_flags' string as it is. */
+static char* generated_c_compile_flags(const char* cc, bool optimize, const char* user_cflags) {
+#ifdef _WIN32
+    const char* base_opt = opt_flags(optimize);
+    const char* avx = win_avx_stack_flags(user_cflags);
+#else
+    const char* base_opt = (g_coverage || g_profile || g_size)
+                          ? opt_flags(optimize)
+                          : (optimize ? "-O2 -pipe -Wformat" AETHER_WRAP_CFLAGS
+                                      : "-O0 -g -pipe -Wformat" AETHER_WRAP_CFLAGS);
+    const char* avx = "";
+#endif
+    return ae_strdup_printf("%s%s%s%s%s%s%s%s", base_opt, gcc_inline_budget_flags(cc, optimize),
+                            harden_cflags(optimize), user_cflags[0] ? " " : "", user_cflags,
+                            avx, g_trace ? " -DAETHER_TRACE" : "", bracket_depth_flags(cc));
+}
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -5330,6 +5829,9 @@ void build_gcc_cmd(char* cmd, size_t size,
         set_failing_cmd(cmd, size);  // will fail; error already printed
         return;
     }
+    /* Before anything below reads tc.has_lib: the archive is linked only
+     * when its C runtime is this compiler's (#3813). */
+    archive_crt_check(s_gcc_cmd);
     // Windows (MinGW): no -pthread (Win32 threads via aether_thread.h), no -lm (CRT).
     // -lws2_32 is required for Winsock2 (aether_http/net always compiled into runtime).
     // -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt are required when OpenSSL
@@ -5412,7 +5914,6 @@ void build_gcc_cmd(char* cmd, size_t size,
     /* The source fallback compiles the vendored libfyaml (above). */
     if (!tc.has_lib) yaml_libs = "";
     char* opt;   /* the flags, with user cflags of any length (#2534) */
-    const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* --emit=lib: a DLL. -shared, and --export-all-symbols (#993) because
      * GCC's auto-export switches off the moment any symbol carries an
      * explicit __declspec(dllexport) (an --extra shim, say), and the
@@ -5435,16 +5936,12 @@ void build_gcc_cmd(char* cmd, size_t size,
          * std.http.script_gateway could not reach a script's
          * aether_script_handle. Strong here too, for the same one-TU reason. */
         ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_WEAK_DEF= -DAETHER_NO_LIB_MAIN " : "";
-    if (user_cflags[0])
-        opt = ae_strdup_printf("-static %s%s%s%s %s%s%s%s", emit_lib_flags, opt_flags(optimize),
-                               harden_cflags(optimize), harden_ldflags(), user_cflags,
-                               win_avx_stack_flags(user_cflags), trace_def,
-                               bracket_depth_flags(s_gcc_cmd));
-    else
-        opt = ae_strdup_printf("-static %s%s%s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
-                               harden_cflags(optimize), harden_ldflags(),
-                               win_avx_stack_flags(""), trace_def,
-                               bracket_depth_flags(s_gcc_cmd));
+    /* The link side, then the compile flags --emit=obj compiles with too. */
+    char* compile_flags = generated_c_compile_flags(s_gcc_cmd, optimize, user_cflags);
+    opt = compile_flags ? ae_strdup_printf("-static %s%s %s", emit_lib_flags, harden_ldflags(),
+                                           compile_flags)
+                        : NULL;
+    free(compile_flags);
     if (!opt) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
         set_failing_cmd(cmd, size);
@@ -5508,7 +6005,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     } else {
         if (!ae_runtime_srcs_ready()) { free(opt); set_failing_cmd(cmd, size); return; }
-        /* #2757: the runtime sources compiled to objects in parallel, when
+        /* The runtime archive this compiler and these flags made before (#3813),
+         * else (#2757) the runtime sources compiled to objects in parallel, when
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
         if (!g_emit_obj && !g_emit_csrc) {
@@ -5516,7 +6014,7 @@ void build_gcc_cmd(char* cmd, size_t size,
              * any other include directory (see ae_vendored_src_defs). */
             char* rt_cflags = ae_strdup_printf("%s %s %s %s", vendored_src_defs, opt,
                                                tc.include_flags, ae_includes);
-            if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(s_gcc_cmd, rt_cflags, tc.runtime_srcs);
+            if (rt_cflags) rt_objs = ae_cached_runtime(s_gcc_cmd, rt_cflags);
             free(rt_cflags);
         }
         /* Order matters, same as the POSIX branch: the host-bridge .a
@@ -5576,6 +6074,9 @@ void build_gcc_cmd(char* cmd, size_t size,
             return;
         }
     }
+    /* Before anything below reads tc.has_lib: the archive is linked only
+     * when its C runtime is this compiler's (#3813). */
+    archive_crt_check(cc);
 #ifdef __APPLE__
     default_macos_deployment_target();
 #endif
@@ -5616,22 +6117,6 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* emit_lib_flags = (g_emit_lib && !g_emit_exe) ? "-fPIC -shared -DAETHER_NO_LIB_MAIN " : "";
 #endif
-    // Coverage builds skip -pipe — gcov works fine with it, but it
-    // adds nothing when -O0 -g is already forced. Keeping the flag
-    // string short helps the cmd-buffer size budget.
-    //
-    // -Wformat must be present here too: the -pipe path is the mainline
-    // (non-static) build, and it previously hardcoded the opt string inline,
-    // dropping the -Wformat that opt_flags() carries. Without it the C
-    // compiler's printf-family format checks (mapped to the .ae source via
-    // #line) never run on a normal `ae build` — regressing #1252. Keep this in
-    // sync with opt_flags(); user cflags still append after, so -Wno-format
-    // remains an opt-out.
-    const char* base_opt = (g_coverage || g_profile || g_size)
-                          ? opt_flags(optimize)
-                          : (optimize ? "-O2 -pipe -Wformat" AETHER_WRAP_CFLAGS
-                                      : "-O0 -g -pipe -Wformat" AETHER_WRAP_CFLAGS);
-    const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* The link-side flags ride in the same blob: gcc accepts -Wl,... anywhere
      * on the line, and threading them through four separate link-command
      * format strings would be four places to forget. */
@@ -5663,14 +6148,12 @@ void build_gcc_cmd(char* cmd, size_t size,
 #endif
     const char* size_link = (g_size && !g_emit_obj && !g_emit_csrc)
                             ? size_link_flags : "";
-    if (user_cflags[0])
-        opt = ae_strdup_printf("%s%s%s%s%s%s %s%s%s", emit_lib_flags, base_opt,
-                               harden_cflags(optimize), harden_link, harden_pie, size_link,
-                               user_cflags, trace_def, bracket_depth_flags(cc));
-    else
-        opt = ae_strdup_printf("%s%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
-                               harden_cflags(optimize), harden_link, harden_pie, size_link,
-                               trace_def, bracket_depth_flags(cc));
+    /* The link side, then the compile flags --emit=obj compiles with too. */
+    char* compile_flags = generated_c_compile_flags(cc, optimize, user_cflags);
+    opt = compile_flags ? ae_strdup_printf("%s%s%s%s %s", emit_lib_flags, harden_link, harden_pie,
+                                           size_link, compile_flags)
+                        : NULL;
+    free(compile_flags);
     if (!opt) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
         set_failing_cmd(cmd, size);
@@ -5808,7 +6291,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     } else {
         if (!ae_runtime_srcs_ready()) { free(opt); set_failing_cmd(cmd, size); return; }
-        /* #2757: the runtime sources compiled to objects in parallel, when
+        /* The runtime archive this compiler and these flags made before (#3813),
+         * else (#2757) the runtime sources compiled to objects in parallel, when
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
         if (!g_emit_obj && !g_emit_csrc) {
@@ -5817,7 +6301,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             char* rt_cflags = ae_strdup_printf("%s %s %s %s %s", vendored_src_defs, opt,
                                                tc.include_flags, ae_includes,
                                                macos_homebrew_flags(0));
-            if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
+            if (rt_cflags) rt_objs = ae_cached_runtime(cc, rt_cflags);
             free(rt_cflags);
         }
         // Order matters: host-bridge .a files reference runtime
@@ -5864,6 +6348,42 @@ void build_syntax_check_cmd(char* cmd, size_t size, const char* c_file, const ch
                      bracket_depth_flags(cc), AETHER_REQUIRED_DEFINES, get_cflags(),
                      tc.include_flags, ae_includes, c_file, extra ? extra : "");
     if (w >= (int)size) cmd_too_long(cmd, size, w);
+}
+
+/* #3812: the command that compiles `c_file` to the object `obj_file` for
+ * --emit=obj: the C compiler and the compile flags the executable's compile
+ * step uses (generated_c_compile_flags), the include paths, and none of the
+ * link arguments. The compiler is the one a native build drives: on Windows
+ * $AE_CC / $CC, then PATH, then the WinLibs download, checked as every
+ * other build checks it; on POSIX $AE_CC / $CC (a command prefix, the
+ * program and any flags, so not quoted whole, #2545), else gcc, else cc.
+ * 0, said, when no command can be made. */
+static int build_obj_compile_cmd(char* cmd, size_t size, const char* c_file,
+                                 const char* obj_file, bool optimize) {
+#ifdef _WIN32
+    if (!ensure_gcc_windows()) return 0;
+    const char* cc = s_gcc_cmd;
+#else
+    const char* cc = c_backend_env_override();
+    if (!cc) cc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
+#endif
+    const char* includes = get_aether_include_flags(c_file);   /* #1986 */
+    if (!includes) return 0;   /* out of memory, said */
+    char* flags = generated_c_compile_flags(cc, optimize, get_cflags());
+    if (!flags) {
+        fprintf(stderr, "Error: out of memory building the compiler command.\n");
+        return 0;
+    }
+    int w = snprintf(cmd, size, "%s -c %s %s %s \"%s\" -o \"%s\"", cc, flags,
+                     tc.include_flags ? tc.include_flags : "", includes, c_file, obj_file);
+    free(flags);
+    if (w >= (int)size) {
+        /* The include list has no length limit (#2536); a cut command would
+         * compile without the directories past the cut. */
+        cmd_too_long(cmd, size, w);
+        return 0;
+    }
+    return 1;
 }
 
 /* The runtime sources of a wasm build, as emcc arguments: each path
@@ -11126,34 +11646,13 @@ static int cmd_build(int argc, char** argv) {
                    "cross target.\n", target);
             return 0;
         }
-        /* The compiler as a command line names it. $AE_CC / $CC is a
-         * command prefix, the program and then any flags, so it is not
-         * quoted whole (#2545): `"gcc -m32"` named no program. */
-#ifdef _WIN32
-        /* The compiler every other native Windows build uses ($AE_CC /
-         * $CC, then PATH, then the WinLibs download), checked the same
-         * way. `command -v` is a POSIX shell builtin: through cmd.exe it
-         * printed "El sistema no puede encontrar la ruta especificada" and
-         * failed, so this path fell back to a bare `cc` that only an MSYS2
-         * shell has. */
-        if (!ensure_gcc_windows()) return 1;
-        const char* objcc = s_gcc_cmd;
-#else
-        const char* objcc = c_backend_env_override();
-        if (!objcc)
-            objcc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
-#endif
-        const char* obj_includes = get_aether_include_flags(c_file);   /* #1986 */
-        if (!obj_includes) return 1;   /* out of memory, said */
-        int ow = snprintf(cmd, sizeof(cmd), "%s -c %s %s \"%s\" -o \"%s\"",
-                          objcc, tc.include_flags ? tc.include_flags : "",
-                          obj_includes, c_file, obj_file);
-        if (ow >= (int)sizeof(cmd)) {
-            /* The include list has no length limit now (#2536); a cut
-             * command would compile without the directories past the cut. */
-            cmd_too_long(cmd, sizeof(cmd), ow);
-            return 1;
-        }
+        /* The compiler a native build drives, with the compile flags the
+         * executable's compile step uses (#3812). On Windows that is the
+         * compiler every other native build uses: `command -v` is a POSIX
+         * shell builtin, and through cmd.exe it printed "El sistema no puede
+         * encontrar la ruta especificada" and failed, so this path once fell
+         * back to a bare `cc` that only an MSYS2 shell has. */
+        if (!build_obj_compile_cmd(cmd, sizeof(cmd), c_file, obj_file, !quick)) return 1;
         if (tc.verbose) fprintf(stderr, "ae: %s\n", cmd);
         int orc = run_cmd(cmd);
         if (orc != 0) {
