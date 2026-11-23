@@ -196,7 +196,7 @@ if [ "$crt" = msvcrt ]; then
     printf 'main() {\n    try {\n        panic("boom")\n    } catch e {\n        println("caught ${e}")\n    }\n}\n' > "$TMP/mcrt/catch.ae"
     printf '[build]\ncflags = "-mcrtdll=ucrt"\n' > "$TMP/mcrt/aether.toml"
     if ! (cd "$TMP/mcrt" && "$AE" build -v --quick catch.ae -o mcrt) > "$TMP/mcrt.log" 2>&1; then
-        grep -i "error" "$TMP/mcrt.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        tail -15 "$TMP/mcrt.log" | cut -c1-200 | sed 's/^/        /'
         fail "the build with cflags -mcrtdll=ucrt, on the runtime compiled from source, failed"
     elif [ "$("$TMP/mcrt/mcrt" | tr -d '\r')" != "caught boom" ]; then
         fail "the program built with -mcrtdll=ucrt did not print 'caught boom'"
@@ -217,7 +217,7 @@ if [ -n "$crt" ]; then
     elif [ "$mine" != "$built_by" ]; then
         echo "  [SKIP] $NAME: step 2d: the C compiler here ($mine) is not the one that built the archive ($built_by)"
     elif ! (cd "$TMP" && AETHER_CACHE_DIR="$TMP/cache_own" "$AE" build -v hello.ae -o own) > "$TMP/own.log" 2>&1; then
-        grep -i "error" "$TMP/own.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        tail -15 "$TMP/own.log" | cut -c1-200 | sed 's/^/        /'
         fail "the cold build with the archive's own compiler failed"
     elif grep -q "ae_crt_probe" "$TMP/own.log"; then
         fail "on a cold cache the archive's own compiler was asked which C runtime it targets: $(grep ae_crt_probe "$TMP/own.log" | head -1 | cut -c1-160)"
@@ -269,7 +269,7 @@ if [ -n "$crt" ] && [ -n "$REAL_CC" ]; then
         MUTE="$TMP/mute/gcc"
     fi
     if ! (cd "$TMP" && CC="$MUTE" AETHER_CACHE_DIR="$TMP/cache_mute" "$AE" build -v hello.ae -o mute) > "$TMP/mute1.log" 2>&1; then
-        grep -i "error" "$TMP/mute1.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        tail -15 "$TMP/mute1.log" | cut -c1-200 | sed 's/^/        /'
         fail "the build with a compiler that cannot be asked failed"
     elif ! grep -q "could not be asked which C runtime it targets: the archive is linked" "$TMP/mute1.log"; then
         fail "-v does not say the compiler could not be asked: $(decided mute1.log)"
@@ -290,7 +290,7 @@ zig="$(find_zig "$ROOT")"
 if [ -n "$zig" ]; then
     printf 'main() {\n    try {\n        panic("boom")\n    } catch e {\n        println("caught ${e}")\n    }\n}\n' > "$TMP/catch.ae"
     if ! (cd "$TMP" && AE_CC="$zig cc" "$AE" build -v catch.ae -o catch) > "$TMP/zig.log" 2>&1; then
-        grep -i "error" "$TMP/zig.log" | head -3 | cut -c1-200 | sed 's/^/        /'
+        tail -15 "$TMP/zig.log" | cut -c1-200 | sed 's/^/        /'
         fail "AE_CC=\"zig cc\" did not build a program that panics and catches it"
     elif [ "$("$TMP/catch" | tr -d '\r')" != "caught boom" ]; then
         fail "the program built with AE_CC=\"zig cc\" did not print 'caught boom'"
