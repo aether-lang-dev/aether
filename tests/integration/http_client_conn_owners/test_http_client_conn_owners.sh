@@ -42,12 +42,15 @@ cc -I"$ROOT/tests/lib" "$SCRIPT_DIR/conn_auth_upstream.c" -o "$TMPDIR/upstream" 
 
 # A fresh upstream per program, so connection ordinals start at 1 for each.
 start_upstream() {
-    "$TMPDIR/upstream" > "$TMPDIR/port.txt" 2>/dev/null &
+    # A port file of its own each time: reusing one, the previous upstream's
+    # port could be read before the new process truncated it.
+    PORT_FILE="$TMPDIR/port.$1.txt"
+    "$TMPDIR/upstream" > "$PORT_FILE" 2>/dev/null &
     UP_PID=$!
     PORT=""
     i=0
     while [ "$i" -lt 100 ]; do
-        PORT="$(head -n1 "$TMPDIR/port.txt" 2>/dev/null)"
+        PORT="$(head -n1 "$PORT_FILE" 2>/dev/null)"
         [ -n "$PORT" ] && break
         sleep 0.05
         i=$((i + 1))
@@ -56,7 +59,7 @@ start_upstream() {
 }
 
 for prog in anonymous owners proxy; do
-    start_upstream
+    start_upstream "$prog"
     OUT="$(UPSTREAM_PORT="$PORT" AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/$prog.ae" 2>&1)"
     stop_server "$UP_PID"
     UP_PID=""
