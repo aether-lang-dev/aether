@@ -162,7 +162,8 @@ tbody tr:hover { background: #1c2128; }
       <strong>CPU s</strong>: Median CPU seconds (user + system) per run.<br>
       <strong>Latency</strong>: Nanoseconds per message (lower is better). Inverse of throughput.<br>
       <strong>Memory</strong>: Peak resident set size in megabytes, the median of the runs. Includes runtime overhead (JVM ≈ 50 to 100 MB, BEAM ≈ 60 MB, native ≈ 1 to 5 MB). n/a where it cannot be measured.<br>
-      <strong>Relative</strong>: Percentage of the fastest language's throughput. 100% = fastest, 50% = half as fast. The bar visualizes this.<br>
+      <strong>Tier</strong> and <strong>#</strong>: languages are ranked within their tier (FAIRNESS.md, "Two tiers"). <em>Runtime</em>: the language schedules its own units and owns their mailboxes (unbounded, any sender, failure isolation): Aether, Go, Erlang, Elixir, Pony. <em>Threads + queue</em>: OS threads joined by a queue from the standard library, or the suite's single-producer single-consumer ring where the standard library has none (C, C++, Rust, Zig, Java, Scala). That tier is the floor a runtime is read against, not its competition: on counting, for instance, it measures a hand-written two-thread ring against actor systems.<br>
+      <strong>Relative</strong>: Percentage of the fastest throughput in the row's own tier. 100% = fastest of its tier, 50% = half as fast. The bar visualizes this.<br>
       <strong>CV%</strong>: Coefficient of variation (standard deviation ÷ mean × 100). Measures run-to-run stability: <span class="cv-good">●&lt;5%</span> stable, <span class="cv-ok">●5 to 15%</span> moderate variance, <span class="cv-bad">●&gt;15%</span> noisy (thermal throttling, OS scheduling).<br>
       <strong>Range</strong>: Minimum and maximum throughput observed across all runs. Wider range = less predictable.<br>
       <strong>Efficiency</strong>: Throughput divided by memory (M msg/s per MB). Higher means more work done per unit of memory. Favors lightweight runtimes.<br>
@@ -192,10 +193,18 @@ const PAT = {
 // A measurement the runner could not take is null in the JSON.
 const known = v => typeof v === 'number' && v > 0;
 
+// The two tiers (FAIRNESS.md, "Two tiers"): runtimes schedule their own units
+// and own their mailboxes; the threads tier is OS threads joined by a queue,
+// the floor the runtimes are read against. Ranks and Relative are within a
+// tier. Results written before the runner recorded a tier fall back to this.
+const RUNTIME_LANGS = ['Aether','Go','Elixir','Erlang','Pony'];
+const tierOf = (lang, b) => (b && b.tier) || (RUNTIME_LANGS.includes(lang) ? 'runtime' : 'threads');
+const TIER_LABEL = { runtime:'Runtime', threads:'Threads + queue' };
+
 let data = {};
 let cur = 'ping_pong';
 let charts = {};
-let sortCol = 3; // default sort: throughput
+let sortCol = 2; // default sort: tier, then throughput within it
 let sortAsc = false;
 
 // Load
@@ -263,13 +272,20 @@ function render() {
   const benchs = langs.map(l => d.benchmarks[l]);
   const ae = d.benchmarks['Aether'];
   const top = benchs[0];
-  const aeRank = langs.indexOf('Aether') + 1;
   const nRuns = d.runs_per_benchmark || (top?.runs?.length) || 1;
   const nWarm = d.warmup_runs || 0;
 
+  // Aether is ranked among the runtimes; its place overall is shown beside.
+  const runtimes = langs.filter(l => tierOf(l, d.benchmarks[l]) === 'runtime');
+  const threads = langs.filter(l => tierOf(l, d.benchmarks[l]) === 'threads');
+  const aeRank = runtimes.indexOf('Aether') + 1;
+  const aeOverall = langs.indexOf('Aether') + 1;
+  const topRt = d.benchmarks[runtimes[0]];
+  const topTh = d.benchmarks[threads[0]];
+
   const mps = v => ((v?.msg_per_sec||0)/1e6);
   const aeMps = mps(ae);
-  const topMps = mps(top);
+  const topMps = mps(topRt);
 
   // Header meta
   document.getElementById('header-meta').textContent =
@@ -280,7 +296,7 @@ function render() {
     <div class="summary-item">
       <div class="summary-label">Aether Rank</div>
       <div class="summary-value" style="color:${aeRank===1?'var(--accent)':'var(--text-primary)'}">#${aeRank}</div>
-      <div class="summary-detail">of ${langs.length} languages</div>
+      <div class="summary-detail">of ${runtimes.length} runtimes · #${aeOverall} of ${langs.length} overall</div>
     </div>
     <div class="summary-item">
       <div class="summary-label">Throughput</div>
@@ -288,9 +304,9 @@ function render() {
       <div class="summary-detail">${ae?.ns_per_msg||0} ns/msg latency</div>
     </div>
     <div class="summary-item">
-      <div class="summary-label">vs Fastest</div>
+      <div class="summary-label">vs Fastest Runtime</div>
       <div class="summary-value">${aeRank===1?'1st':((aeMps/topMps*100).toFixed(0)+'%')}</div>
-      <div class="summary-detail">${aeRank===1?'Aether is the fastest':`${langs[0]} at ${topMps.toFixed(1)}M/s`}</div>
+      <div class="summary-detail">${aeRank===1?'Aether is the fastest runtime':`${runtimes[0]} at ${topMps.toFixed(1)}M/s`}${topTh?` · threads floor: ${threads[0]} ${mps(topTh).toFixed(1)}M/s`:''}</div>
     </div>
     <div class="summary-item">
       <div class="summary-label">Per CPU-second</div>
@@ -304,8 +320,8 @@ function render() {
     </div>
     <div class="summary-item">
       <div class="summary-label">Spread</div>
-      <div class="summary-value">${(topMps/(mps(benchs[benchs.length-1])||0.01)).toFixed(0)}×</div>
-      <div class="summary-detail">fastest vs slowest</div>
+      <div class="summary-value">${(topMps/(mps(d.benchmarks[runtimes[runtimes.length-1]])||0.01)).toFixed(0)}×</div>
+      <div class="summary-detail">fastest vs slowest runtime</div>
     </div>
   `;
 
@@ -331,7 +347,7 @@ function render() {
     `Sorted by ${COLS[sortCol]} · Click headers to re-sort`;
 }
 
-const COLS = ['#','Language','Runtime','Throughput','Per CPU-s','Latency','CPU s','Memory','Relative','CV%','Range','Efficiency','Toolchain'];
+const COLS = ['#','Language','Tier','Runtime','Throughput','Per CPU-s','Latency','CPU s','Memory','Relative','CV%','Range','Efficiency','Toolchain'];
 
 function getSorted(d) {
   const langs = Object.keys(d.benchmarks);
@@ -380,7 +396,12 @@ function renderCharts(langs, benchs) {
 }
 
 function renderTable(langs, benchs, d) {
-  const topMps = benchs[0]?.msg_per_sec || 1;
+  // Relative is against the fastest of the row's own tier.
+  const topOf = {};
+  langs.forEach((l,i) => {
+    const t = tierOf(l, benchs[i]);
+    topOf[t] = Math.max(topOf[t] || 0, benchs[i].msg_per_sec || 0);
+  });
 
   // Build sortable header
   document.getElementById('thead').innerHTML = '<tr>' + COLS.map((c,i) =>
@@ -395,26 +416,35 @@ function renderTable(langs, benchs, d) {
     const mem = known(b.memory_mb) ? b.memory_mb : 0;
     const perCpu = known(b.msg_per_cpu_sec) ? b.msg_per_cpu_sec/1e6 : 0;
     const cpuS = known(b.cpu_seconds) ? b.cpu_seconds : 0;
-    const pct = topMps > 0 ? (b.msg_per_sec||0)/topMps*100 : 0;
+    const tier = tierOf(lang, b);
+    const pct = topOf[tier] > 0 ? (b.msg_per_sec||0)/topOf[tier]*100 : 0;
     const cv = parseFloat(b.cv_pct) || 0;
     const eff = mem > 0 ? mpsVal/mem : 0;
     const minM = b.min_mps ? b.min_mps/1e6 : mpsVal;
     const maxM = b.max_mps ? b.max_mps/1e6 : mpsVal;
-    return { lang, b, rank:idx+1, mpsVal, perCpu, lat, cpuS, mem, pct, cv, eff, minM, maxM };
+    return { lang, b, tier, rank:idx+1, mpsVal, perCpu, lat, cpuS, mem, pct, cv, eff, minM, maxM };
   });
 
-  // Sort by selected column
-  const getVal = (r,col) => [r.rank, r.lang, r.b.runtime||'', r.mpsVal, r.perCpu, r.lat, r.cpuS, r.mem, r.pct, r.cv, r.maxM-r.minM, r.eff, r.b.toolchain||''][col];
+  // Sort by selected column; the tier column keeps runtimes first and
+  // throughput inside each tier.
+  const tierKey = r => (r.tier === 'runtime' ? 0 : 1);
+  const getVal = (r,col) => [r.rank, r.lang, tierKey(r), r.b.runtime||'', r.mpsVal, r.perCpu, r.lat, r.cpuS, r.mem, r.pct, r.cv, r.maxM-r.minM, r.eff, r.b.toolchain||''][col];
   rows.sort((a,b) => {
+    if (sortCol === 2) {
+      const t = sortAsc ? tierKey(b) - tierKey(a) : tierKey(a) - tierKey(b);
+      return t !== 0 ? t : b.mpsVal - a.mpsVal;
+    }
     let va = getVal(a,sortCol), vb = getVal(b,sortCol);
     if (typeof va === 'string') return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
     return sortAsc ? va-vb : vb-va;
   });
 
-  // Re-rank after sort by throughput for display
-  const byThroughput = [...rows].sort((a,b) => b.mpsVal - a.mpsVal);
+  // Ranked by throughput within each tier
   const rankMap = {};
-  byThroughput.forEach((r,i) => rankMap[r.lang] = i+1);
+  ['runtime','threads'].forEach(t => {
+    rows.filter(r => r.tier === t).sort((a,b) => b.mpsVal - a.mpsVal)
+        .forEach((r,i) => rankMap[r.lang] = i+1);
+  });
 
   const tbody = document.getElementById('tbody');
   tbody.innerHTML = rows.map(r => {
@@ -428,6 +458,7 @@ function renderTable(langs, benchs, d) {
     return `<tr>
       <td><span class="rank ${rc}">${rank}</span></td>
       <td><span class="lang ${isW?'winner':''}">${r.lang}</span></td>
+      <td><span class="runtime">${TIER_LABEL[r.tier]}</span></td>
       <td><span class="runtime">${r.b.runtime||'—'}</span></td>
       <td class="mono ${isW?'winner':''}">${r.mpsVal.toFixed(2)} M/s</td>
       <td class="mono">${r.perCpu>0?r.perCpu.toFixed(2)+' M':'n/a'}</td>
@@ -445,7 +476,7 @@ function renderTable(langs, benchs, d) {
 
 function resort(col) {
   if (sortCol === col) { sortAsc = !sortAsc; }
-  else { sortCol = col; sortAsc = col <= 2; } // text cols default asc, numeric desc
+  else { sortCol = col; sortAsc = col <= 1 || col === 3; } // text cols default asc, numeric desc
   render();
 }
 

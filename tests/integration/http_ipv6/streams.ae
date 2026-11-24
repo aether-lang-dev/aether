@@ -144,6 +144,15 @@ main() {
 
     check_host(scheme, ws_scheme, "[::1]", port)
     check_host(scheme, ws_scheme, "127.0.0.1", port)
+    // Stopped before the exit: exit runs OpenSSL's exit-time cleanup, which
+    // frees its global lock, and a pool worker still closing the last
+    // connection took that lock under it (a data race on the TSan lane). The
+    // drain stops the server and waits for the requests in flight; a parked
+    // keep-alive connection is closed after it, by the server's own teardown
+    // (the lot closed, the pool's workers joined), which ends the Server
+    // actor's Serve. wait_for_idle() waits for that.
+    _ = http.server_shutdown_graceful(tinyweb.http_server(server), 5s)
+    wait_for_idle()
     println("PASS")
     exit(0)
 }

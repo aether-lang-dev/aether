@@ -35,17 +35,27 @@ fail=0
 # --- the invariant, read from the source -----------------------------------
 # The barrier both schedulers step inside lives in its own header since
 # #2974; the callers that take and clear the lock stay in the scheduler.
+# Since #3858 it is three functions: the panic path's work (aether_step_unwound),
+# the single step (aether_step_barrier) and the run of steps
+# (aether_step_barrier_run), so all three are read here, from the first to
+# the end of the header.
 src="$ROOT/runtime/scheduler/multicore_scheduler.c"
 barrier="$ROOT/runtime/actors/aether_step_barrier.h"
-body="$(awk '/^static inline void aether_step_barrier/,/^}/' "$barrier")"
+body="$(awk '/^static AETHER_STEP_COLD void aether_step_unwound/,/^#endif/' "$barrier")"
 # An invariant read out of a source file has to prove it read the right
 # thing first: if the function is renamed and this extracts nothing, the
 # check below would pass forever while guarding nothing at all.
-if ! printf '%s\n' "$body" | grep -q 'aether_fire_death_hook'; then
-    echo "  [FAIL] actor_panic_step_lock: could not find aether_step_barrier's panic path in $barrier"
-    echo "         (the function was renamed or moved -- this check is guarding nothing until it is repointed)"
-    fail=1
-fi
+# All three must be in the range: one moved above aether_step_unwound would
+# fall outside it and go unchecked.
+for want in 'aether_fire_death_hook' \
+            '^static inline void aether_step_barrier(' \
+            '^static inline int aether_step_barrier_run('; do
+    if ! printf '%s\n' "$body" | grep -q "$want"; then
+        echo "  [FAIL] actor_panic_step_lock: the barrier read from $barrier lacks '$want'"
+        echo "         (a function was renamed or moved -- this check is guarding nothing until it is repointed)"
+        fail=1
+    fi
+done
 if printf '%s\n' "$body" | grep -q 'atomic_flag_clear_explicit(&actor->step_lock'; then
     echo "  [FAIL] actor_panic_step_lock: aether_step_barrier releases a step_lock it never acquired"
     echo "         every call site takes the lock before calling and clears it after;"

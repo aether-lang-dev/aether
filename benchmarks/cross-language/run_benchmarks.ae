@@ -80,6 +80,23 @@ lang_dir(i: int) -> string {
     }
 }
 
+// Which kind of entry a language makes here (FAIRNESS.md, "Two tiers"):
+// "runtime", a language that schedules its own units and owns their mailboxes
+// (unbounded, any sender), or "threads", OS threads joined by a queue its
+// standard library or the suite's own SPSC ring provides. The dashboard ranks
+// a language within its tier; the threads tier is the floor the runtimes are
+// read against, not their competition.
+lang_tier(i: int) -> string {
+    return match i {
+        0 -> "runtime" // Aether
+        3 -> "runtime" // Go
+        7 -> "runtime" // Elixir
+        8 -> "runtime" // Erlang
+        9 -> "runtime" // Pony
+        _ -> "threads" // C, C++, Rust, Java, Zig, Scala
+    }
+}
+
 java_class(pattern: string) -> string {
     return match pattern {
         "ping_pong" -> "PingPong"
@@ -327,6 +344,7 @@ run_lang(i: int, pattern: string, cfg: Settings) -> string {
 
     flags = json_escape(sh_text("cd ${dir} && make -s flags 2>/dev/null"))
     j = "    \"${name}\": {\n"
+    j = "${j}      \"tier\": \"${lang_tier(i)}\",\n"
     j = "${j}      \"runtime\": \"${lang_runtime(i)}\",\n"
     j = "${j}      \"toolchain\": \"${lang_version(i)}\",\n"
     j = "${j}      \"build_flags\": \"${flags}\",\n"

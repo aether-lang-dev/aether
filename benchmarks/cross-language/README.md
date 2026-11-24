@@ -38,6 +38,8 @@ Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`v
 
 All 11 languages implement all 5 patterns, 55 in total.
 
+They make two kinds of entry, and each is ranked only against its own kind (`FAIRNESS.md`, "Two tiers"): **runtimes** (Aether, Go, Erlang, Elixir, Pony), which schedule their own units and own their unbounded mailboxes, and **threads + queue** (C, C++, Rust, Zig, Java, Scala), OS threads joined by a queue. The second tier is the floor a runtime is read against, not its competition.
+
 See [FAIRNESS.md](FAIRNESS.md) for the rules the suite holds itself to and the
 audits that produced them. In short: standard library only, the same number of
 concurrency units and the same sequential work in every implementation, rates
@@ -65,7 +67,7 @@ would use, fixed by the shape of the work rather than picked per pattern.
 | **Latency** (ns/msg) | Nanoseconds per message |
 | **CPU s** | CPU time of a run |
 | **Memory** (MB) | Peak resident set size (RSS) |
-| **Relative** (%) | Percentage of the fastest language |
+| **Relative** (%) | Percentage of the fastest language of the same tier |
 | **CV%** | Coefficient of variation, the run-to-run stability. Standard statistical bands drive the colour coding: low, moderate or high variance, whatever the language |
 | **Range** | Minimum and maximum throughput across the runs |
 | **Efficiency** | Throughput per MB of memory |
@@ -122,7 +124,8 @@ See [config.md](config.md) for the toolchains each language needs.
 
 After running, open `http://localhost:8080` for an interactive dashboard:
 
-- **Summary**: Aether rank, throughput, efficiency, spread
+- **Summary**: Aether's rank among the runtimes (and overall), throughput, efficiency, spread
+- **Tiers**: each row's tier; ranks and Relative are within it
 - **Charts**: Throughput and memory bar charts
 - **Sortable table**: Click any column header: throughput, latency, memory, CV%, efficiency
 - **Pattern tabs**: Switch between all 5 patterns
