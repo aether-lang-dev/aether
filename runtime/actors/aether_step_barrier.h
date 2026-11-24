@@ -230,59 +230,15 @@ static inline void aether_step_finalize(ActorBase* actor, void (*finalize)(Actor
     }
 }
 
-static inline void aether_step_barrier(ActorBase* actor,
-                                       void (*finalize)(ActorBase*),
-                                       void (*fail_slot)(void* slot, int why),
-                                       void (*after_step)(ActorBase*)) {
-    AetherStepAside aside;
-    aether_step_put_aside(&aside);
-
-    /* The try frame, with the executions running on the thread put aside
-     * in the same look at its block (aether_unwind.c). */
-    AetherJmpFrame* f = aether_step_push(&aside.execs, &aside.hid);
-    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
-        g_aether_in_actor_step = 1;
-        g_aether_current_actor_id = actor->id;
-        AETHER_TRACE_EVENT(AE_TRACE_STEP_BEGIN, actor->id, -1, -1);
-        actor->step(actor);
-        AETHER_TRACE_EVENT(AE_TRACE_STEP_END, actor->id, -1, -1);
-        g_aether_in_actor_step = 0;
-        g_aether_current_actor_id = -1;
-        aether_try_pop();
-        /* The handler is done; what follows is still the step's, in its
-         * context, and gives the context back last (#3416). */
-        void* unanswered = g_current_reply_slot;
-        g_current_reply_slot = NULL;
-        /* A handler that took an ask and returned without replying: no
-         * reply can come, since a reply answers the ask its own step took.
-         * Its asker learns that now, not at its timeout. */
-        if (unanswered) fail_slot(unanswered, AETHER_ASK_NO_REPLY);
-        /* Ended while the handler ran (#2974): its stop(), or a kill or a
-         * linked actor's death from elsewhere, takes effect now that the
-         * handler has returned, so no Down is sent while it runs. Its drops
-         * are the actor's code, run as on its own thread, where no handler
-         * is running; the finalize is contained, so nothing leaves it with
-         * the context put aside. A release ends it by its own path. */
-        int ended = atomic_load_explicit(&actor->dead, memory_order_acquire);
-        if (unlikely(ended != 0)) {
-            if (!(ended & AETHER_ACTOR_RELEASED)) {
-                g_current_step_actor = NULL;
-                aether_step_finalize(actor, finalize);
-            }
-        } else if (after_step) {
-            after_step(actor);
-        }
-        aether_step_give_back(&aside);
-        return;
-    }
-
-    // Unwound via panic or signal.
-    const char* reason = f->reason;
-    void (*reason_release)(const void*) = f->reason_release;
-    g_aether_in_actor_step = 0;
-    g_aether_current_actor_id = -1;
-    aether_try_pop();
-
+/* What a step's panic leaves to do once its frame is popped (#3858: shared
+ * by the single step and the run, so the two paths cannot drift apart). The
+ * context is still put aside in `aside`, and is given back last. Out of
+ * line: a panic is the cold path of every step. */
+static AETHER_STEP_COLD void aether_step_unwound(ActorBase* actor, const char* reason,
+                                                 void (*reason_release)(const void*),
+                                                 AetherStepAside* aside,
+                                                 void (*finalize)(ActorBase*),
+                                                 void (*fail_slot)(void* slot, int why)) {
     // A bit, not a store: a release may be setting its own bit meanwhile.
     // The reason is the panic's unless something ended the actor first.
     aether_actor_claim_end(actor, aether_panic_reason_text(reason), AETHER_ACTOR_PANICKED);
@@ -342,7 +298,163 @@ static inline void aether_step_barrier(ActorBase* actor,
     /* A heap-built panic message (aether_panic_owned) belongs to whoever
      * caught it, here this barrier. The hook has seen it; release it. */
     if (reason_release) reason_release(reason);
-    aether_step_give_back(&aside);
+    aether_step_give_back(aside);
+}
+
+static inline void aether_step_barrier(ActorBase* actor,
+                                       void (*finalize)(ActorBase*),
+                                       void (*fail_slot)(void* slot, int why),
+                                       void (*after_step)(ActorBase*)) {
+    AetherStepAside aside;
+    aether_step_put_aside(&aside);
+
+    /* The try frame, with the executions running on the thread put aside
+     * in the same look at its block (aether_unwind.c). */
+    AetherJmpFrame* f = aether_step_push(&aside.execs, &aside.hid);
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        g_aether_in_actor_step = 1;
+        g_aether_current_actor_id = actor->id;
+        AETHER_TRACE_EVENT(AE_TRACE_STEP_BEGIN, actor->id, -1, -1);
+        actor->step(actor);
+        AETHER_TRACE_EVENT(AE_TRACE_STEP_END, actor->id, -1, -1);
+        g_aether_in_actor_step = 0;
+        g_aether_current_actor_id = -1;
+        aether_try_pop();
+        /* The handler is done; what follows is still the step's, in its
+         * context, and gives the context back last (#3416). */
+        void* unanswered = g_current_reply_slot;
+        g_current_reply_slot = NULL;
+        /* A handler that took an ask and returned without replying: no
+         * reply can come, since a reply answers the ask its own step took.
+         * Its asker learns that now, not at its timeout. */
+        if (unanswered) fail_slot(unanswered, AETHER_ASK_NO_REPLY);
+        /* Ended while the handler ran (#2974): its stop(), or a kill or a
+         * linked actor's death from elsewhere, takes effect now that the
+         * handler has returned, so no Down is sent while it runs. Its drops
+         * are the actor's code, run as on its own thread, where no handler
+         * is running; the finalize is contained, so nothing leaves it with
+         * the context put aside. A release ends it by its own path. */
+        int ended = atomic_load_explicit(&actor->dead, memory_order_acquire);
+        if (unlikely(ended != 0)) {
+            if (!(ended & AETHER_ACTOR_RELEASED)) {
+                g_current_step_actor = NULL;
+                aether_step_finalize(actor, finalize);
+            }
+        } else if (after_step) {
+            after_step(actor);
+        }
+        aether_step_give_back(&aside);
+        return;
+    }
+
+    // Unwound via panic or signal.
+    const char* reason = f->reason;
+    void (*reason_release)(const void*) = f->reason_release;
+    g_aether_in_actor_step = 0;
+    g_aether_current_actor_id = -1;
+    aether_try_pop();
+    aether_step_unwound(actor, reason, reason_release, &aside, finalize, fail_slot);
+}
+
+/* A run of steps of one actor (#3858): up to `max` steps, each exactly the
+ * step aether_step_barrier makes (its own try frame and sigsetjmp, its
+ * handler, its unanswered ask failed, its death finalized or its after-step
+ * work), with the context put aside once before the first and given back
+ * once after the last. Returns how many steps ran.
+ *
+ * Each step keeps its own frame: aether_try_pop moves a frame's journal to
+ * its parent, so two steps sharing one would let a panic in the second
+ * unwind what the first kept. Only the put-aside and give-back are shared,
+ * and only while the step would have put nothing aside of its own: the run
+ * takes the next step when the caps word has none of its step bits (no
+ * spawn capture, account or sandbox level anywhere), the frame push put no
+ * executions aside (aside.hid still 0), the actor did not end, and `more`
+ * says the caller would step it again (asked only when the mailbox holds a
+ * message, so a run of one pays no call for it). Otherwise the run ends and the
+ * context is given back, as after a single step; the caller's next step
+ * takes the whole barrier.
+ *
+ * Between two steps of a run the thread's step context is what it is in a
+ * single step between the handler's end and the give-back: no ask in hand,
+ * not in a step, and the step actor the last step's handler set; each step's
+ * generated code sets its own step actor and reply slot as it starts. A
+ * panic in any step ends the run on the single step's panic path, with the
+ * context given back there.
+ *
+ * A panic in a step can only longjmp to that step's own sigsetjmp (the
+ * earlier steps' frames are popped), and nothing changes `n` or `f` between
+ * a step's sigsetjmp and its end, so the panic path reads the values its own
+ * step began with, as the file's opening comment says of the put-aside.
+ * Both are volatile all the same, for a compiler that would keep them in a
+ * register across the loop: it costs a load and a store per step. */
+static inline int aether_step_barrier_run(ActorBase* actor,
+                                          void (*finalize)(ActorBase*),
+                                          void (*fail_slot)(void* slot, int why),
+                                          void (*after_step)(ActorBase*),
+                                          int (*more)(ActorBase*, void*), void* more_ctx,
+                                          int max) {
+    AetherStepAside aside;
+    aether_step_put_aside(&aside);
+    volatile int n = 0;
+
+  next_step:;
+    /* The try frame, with the executions running on the thread put aside
+     * in the same look at its block (aether_unwind.c). */
+    AetherJmpFrame* volatile f = aether_step_push(&aside.execs, &aside.hid);
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        g_aether_in_actor_step = 1;
+        g_aether_current_actor_id = actor->id;
+        AETHER_TRACE_EVENT(AE_TRACE_STEP_BEGIN, actor->id, -1, -1);
+        actor->step(actor);
+        AETHER_TRACE_EVENT(AE_TRACE_STEP_END, actor->id, -1, -1);
+        g_aether_in_actor_step = 0;
+        g_aether_current_actor_id = -1;
+        aether_try_pop();
+        /* The handler is done; what follows is still the step's, in its
+         * context, and gives the context back last (#3416). */
+        void* unanswered = g_current_reply_slot;
+        g_current_reply_slot = NULL;
+        /* A handler that took an ask and returned without replying: no
+         * reply can come, since a reply answers the ask its own step took.
+         * Its asker learns that now, not at its timeout. */
+        if (unanswered) fail_slot(unanswered, AETHER_ASK_NO_REPLY);
+        /* Ended while the handler ran (#2974): its stop(), or a kill or a
+         * linked actor's death from elsewhere, takes effect now that the
+         * handler has returned, so no Down is sent while it runs. Its drops
+         * are the actor's code, run as on its own thread, where no handler
+         * is running; the finalize is contained, so nothing leaves it with
+         * the context put aside. A release ends it by its own path. */
+        int ended = atomic_load_explicit(&actor->dead, memory_order_acquire);
+        if (unlikely(ended != 0)) {
+            if (!(ended & AETHER_ACTOR_RELEASED)) {
+                g_current_step_actor = NULL;
+                aether_step_finalize(actor, finalize);
+            }
+        } else if (after_step) {
+            after_step(actor);
+        }
+        n = n + 1;
+        /* The next step shares this put-aside only when it would have put
+         * nothing aside itself (see above); the caps word is read again, as
+         * the next single step's put-aside would read it. */
+        if (n < max && ended == 0 &&
+            atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
+            aside.hid == 0 &&
+            (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_STEP_BITS) == 0 &&
+            more(actor, more_ctx))
+            goto next_step;
+        aether_step_give_back(&aside);
+        return n;
+    }
+
+    // Unwound via panic or signal.
+    const char* reason = f->reason;
+    void (*reason_release)(const void*) = f->reason_release;
+    g_aether_in_actor_step = 0;
+    g_aether_current_actor_id = -1;
+    aether_try_pop();
+    aether_step_unwound(actor, reason, reason_release, &aside, finalize, fail_slot);
+    return n + 1;
 }
 
 #endif /* AETHER_STEP_BARRIER_H */

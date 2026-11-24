@@ -1,0 +1,91 @@
+// A panic in the middle of a run of steps (#3858).
+//
+// A core that steps one actor many times in a row (making room in its full
+// mailbox, or draining a backlog) puts the step context aside once for the
+// run instead of once per step; every step keeps its own try frame. A burst
+// from main to one actor is such a run. This checks that a panic partway
+// through one behaves as a panic in a single step did: the steps before it
+// ran, none after it, the actor's later messages are dropped, and the core
+// goes on stepping other actors with their asks answered, round after round.
+
+import std.sync
+
+extern exit(code: int)
+
+var g_hits: ptr = null
+
+message Hit { k: int }
+message Count {}
+
+// Counts its hits; panics on the one numbered `fatal`.
+actor Victim {
+    state fatal = 0
+    receive {
+        Hit(k) -> {
+            sync.atomic_add(g_hits, 1)
+            if k == fatal {
+                panic("victim hit ${k}")
+            }
+        }
+    }
+}
+
+actor Survivor {
+    state hits = 0
+    receive {
+        Hit(k) -> { hits = hits + 1 }
+        Count() -> { reply hits }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a panic in the middle of a run of steps (#3858) ===")
+    g_hits = sync.atomic_new(0)
+    fails = 0
+    int burst = 2000
+    int fatal = 300
+
+    int round = 0
+    while (round < 3) {
+        sync.atomic_store(g_hits, 0)
+        // Both on one core: the survivor runs on the core whose run panicked.
+        v = spawn(Victim(), core: 0)
+        v.fatal = fatal
+        s = spawn(Survivor(), core: 0)
+
+        i = 1
+        while (i <= burst) {
+            v ! Hit { k: i }
+            i = i + 1
+        }
+        wait_for_idle()
+        long hits = sync.atomic_load(g_hits)
+        fails = fails + check("round ${round}: the victim ran ${hits} steps, the panic at ${fatal}", hits == fatal)
+
+        i = 1
+        while (i <= burst) {
+            s ! Hit { k: i }
+            i = i + 1
+        }
+        int counted = s ? Count {}
+        fails = fails + check("round ${round}: the survivor counted ${counted} of ${burst}", counted == burst)
+        wait_for_idle()
+        round = round + 1
+    }
+
+    sync.atomic_free(g_hits)
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}
