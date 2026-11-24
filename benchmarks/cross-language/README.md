@@ -53,7 +53,9 @@ would use, fixed by the shape of the work rather than picked per pattern.
 ### Statistical approach
 
 - Each benchmark runs **5 times** (`BENCH_RUNS=N`) after **1 warmup run**
-  (`BENCH_WARMUP=N`), the same for every language
+  (`BENCH_WARMUP=N`), the same for every language. Skynet runs **25 times**
+  (`BENCH_SKYNET_RUNS=N`): one run takes about 0.3 ms, short enough that a
+  median of five is mostly scheduling jitter (#3868)
 - The **median** of the timed runs is reported, with the minimum, the maximum
   and the coefficient of variation (sample standard deviation over the mean)
 - Every run's value is stored in the results JSON

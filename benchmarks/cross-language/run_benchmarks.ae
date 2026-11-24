@@ -399,12 +399,21 @@ main() {
     if env_r != 0 { runs = atoi(env_r) }
     env_w = getenv("BENCH_WARMUP")
     if env_w != 0 { warmup = atoi(env_w) }
+    // Skynet gets more timed runs (#3868): one run creates 1,111 units in
+    // about 0.3 ms, short enough that scheduling jitter outweighs speed
+    // (cv 14-27% in five runs), so its median is taken over 25. The same
+    // count for every language, as every other setting (FAIRNESS.md); never
+    // fewer than BENCH_RUNS.
+    skynet_runs = 25
+    env_sr = getenv("BENCH_SKYNET_RUNS")
+    if env_sr != 0 { skynet_runs = atoi(env_sr) }
     env_m = getenv("BENCHMARK_MESSAGES")
     if env_m != 0 { msgs = atoi(env_m) }
     if runs < 1 {
         println("ERROR: BENCH_RUNS must be at least 1")
         exit(1)
     }
+    if skynet_runs < runs { skynet_runs = runs }
     only_langs = ""
     env_l = getenv("BENCH_LANGS")
     if env_l != 0 { only_langs = string.to_lower(env_l) }
@@ -461,8 +470,6 @@ main() {
     }
     arch = sh_text("uname -m")
 
-    cfg = Settings { runs: runs, warmup: warmup, msgs: msgs, time_cmd: time_cmd, is_mac: is_mac }
-
     _mk, _mks = sh_run("mkdir -p build")
     io_write_file("build/problems.txt", "")
 
@@ -470,7 +477,7 @@ main() {
     println("  Aether Cross-Language Benchmark Suite")
     println("============================================")
     println("  Messages: ${msgs}")
-    println("  Runs: ${runs} (median), warmup: ${warmup} for every language")
+    println("  Runs: ${runs} (median; skynet ${skynet_runs}), warmup: ${warmup} for every language")
     println("  ${measure_note}")
     println("")
 
@@ -486,11 +493,15 @@ main() {
         println("  Running: ${pattern}")
         println("============================================")
 
+        pruns = runs
+        if pattern == "skynet" { pruns = skynet_runs }
+        pcfg = Settings { runs: pruns, warmup: warmup, msgs: msgs, time_cmd: time_cmd, is_mac: is_mac }
+
         ts = sh_text("date -u +\"%Y-%m-%dT%H:%M:%SZ\"")
         json = "{\n  \"timestamp\": \"${ts}\",\n"
         json = "${json}  \"pattern\": \"${pattern}\",\n"
         json = "${json}  \"messages\": ${msgs},\n"
-        json = "${json}  \"runs_per_benchmark\": ${runs},\n"
+        json = "${json}  \"runs_per_benchmark\": ${pruns},\n"
         json = "${json}  \"warmup_runs\": ${warmup},\n"
         json = "${json}  \"description\": \"${pattern_description(pattern)}\",\n"
         json = "${json}  \"measurement\": \"${json_escape(measure_note)}\",\n"
@@ -508,7 +519,7 @@ main() {
                 li = li + 1
                 continue
             }
-            res = run_lang(li, pattern, cfg)
+            res = run_lang(li, pattern, pcfg)
             // A missing third-party toolchain is a fair skip; a missing or
             // wrong Aether is not. A results file that omits Aether while
             // listing ten other languages reads as a complete comparison.

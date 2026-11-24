@@ -17,18 +17,26 @@ exports(
     math_floor_f32, math_ceil_f32, math_pow_f32, math_exp_f32
 )
 
+@c_include("aether_math_inline.h")
+// #3852: the scalar functions below marked @c_import are `static inline` in
+// that header, so `math.sqrt(x)` is the operation itself rather than a call
+// into libaether.a the C compiler cannot see through. The same bodies are
+// exported under the math_* names for C and for modules that declare them
+// themselves. @c_import: the header's definition is the only declaration of
+// these names in the program.
+
 // Basic operations (int/float variants)
-extern math_abs_int(x: int) -> int
-extern math_abs_float(x: float) -> float
-extern math_min_int(a: int, b: int) -> int
-extern math_max_int(a: int, b: int) -> int
-extern math_min_float(a: float, b: float) -> float
-extern math_max_float(a: float, b: float) -> float
-extern math_clamp_int(x: int, min: int, max: int) -> int
-extern math_clamp_float(x: float, min: float, max: float) -> float
+@extern("aether_math_abs_int_inline") math_abs_int(x: int) -> int @c_import
+@extern("aether_math_abs_float_inline") math_abs_float(x: float) -> float @c_import
+@extern("aether_math_min_int_inline") math_min_int(a: int, b: int) -> int @c_import
+@extern("aether_math_max_int_inline") math_max_int(a: int, b: int) -> int @c_import
+@extern("aether_math_min_float_inline") math_min_float(a: float, b: float) -> float @c_import
+@extern("aether_math_max_float_inline") math_max_float(a: float, b: float) -> float @c_import
+@extern("aether_math_clamp_int_inline") math_clamp_int(x: int, min: int, max: int) -> int @c_import
+@extern("aether_math_clamp_float_inline") math_clamp_float(x: float, min: float, max: float) -> float @c_import
 
 // Advanced math
-extern math_sqrt(x: float) -> float
+@extern("aether_math_sqrt_inline") math_sqrt(x: float) -> float @c_import
 extern math_pow(base: float, exp: float) -> float
 extern math_sin(x: float) -> float
 extern math_cos(x: float) -> float
@@ -37,9 +45,9 @@ extern math_asin(x: float) -> float
 extern math_acos(x: float) -> float
 extern math_atan(x: float) -> float
 extern math_atan2(y: float, x: float) -> float
-extern math_floor(x: float) -> float
-extern math_ceil(x: float) -> float
-extern math_round(x: float) -> float
+@extern("aether_math_floor_inline") math_floor(x: float) -> float @c_import
+@extern("aether_math_ceil_inline") math_ceil(x: float) -> float @c_import
+@extern("aether_math_round_inline") math_round(x: float) -> float @c_import
 // Rounds half-to-EVEN and returns an integer directly (math_round rounds
 // half-away-from-zero and returns a float you must then cast).
 extern math_lrint(x: float) -> long
@@ -51,17 +59,17 @@ extern math_exp(x: float) -> float
 // fminf, ...): an f32 argument stays a C float and the result is f32, so
 // `math.sqrt_f32(dot(v, v))` in an f32 pipeline is one float sqrt. The
 // double functions above take an f32 too, but widen it and return float.
-extern math_sqrt_f32(x: f32) -> f32
-extern math_abs_f32(x: f32) -> f32
-extern math_min_f32(a: f32, b: f32) -> f32
-extern math_max_f32(a: f32, b: f32) -> f32
-extern math_clamp_f32(x: f32, min: f32, max: f32) -> f32
+@extern("aether_math_sqrt_f32_inline") math_sqrt_f32(x: f32) -> f32 @c_import
+@extern("aether_math_abs_f32_inline") math_abs_f32(x: f32) -> f32 @c_import
+@extern("aether_math_min_f32_inline") math_min_f32(a: f32, b: f32) -> f32 @c_import
+@extern("aether_math_max_f32_inline") math_max_f32(a: f32, b: f32) -> f32 @c_import
+@extern("aether_math_clamp_f32_inline") math_clamp_f32(x: f32, min: f32, max: f32) -> f32 @c_import
 extern math_sin_f32(x: f32) -> f32
 extern math_cos_f32(x: f32) -> f32
 extern math_tan_f32(x: f32) -> f32
 extern math_atan2_f32(y: f32, x: f32) -> f32
-extern math_floor_f32(x: f32) -> f32
-extern math_ceil_f32(x: f32) -> f32
+@extern("aether_math_floor_f32_inline") math_floor_f32(x: f32) -> f32 @c_import
+@extern("aether_math_ceil_f32_inline") math_ceil_f32(x: f32) -> f32 @c_import
 extern math_pow_f32(base: f32, exp: f32) -> f32
 extern math_exp_f32(x: f32) -> f32
 

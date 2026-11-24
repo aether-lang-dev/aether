@@ -1,0 +1,65 @@
+// std.math's scalar functions come from aether_math_inline.h (#3852): the
+// program calls the header's static inline bodies, not libaether.a. The
+// exported math_* functions are the same bodies, so the values must be the
+// ones the out-of-line functions gave. This pins the semantics the header
+// must keep:
+//
+// - min/max return the non-NaN operand whichever side the NaN is on (fmin,
+//   fmax), not what a `<` pick would;
+// - abs_int(INT_MIN) is INT_MIN, Aether's int wrapping as in Java and Go;
+// - round is half away from zero, floor/ceil as libm's;
+// - the f32 forms the same, in single precision.
+import std.math
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    zero = 0.0
+    nan = zero / zero
+    if nan == nan { fail("setup: 0/0 is not NaN") }
+
+    // min/max with a NaN on either side give the other operand.
+    if math.min_float(nan, 1.0) != 1.0 { fail("min_float(NaN, 1)") }
+    if math.min_float(1.0, nan) != 1.0 { fail("min_float(1, NaN)") }
+    if math.max_float(nan, 2.0) != 2.0 { fail("max_float(NaN, 2)") }
+    if math.max_float(2.0, nan) != 2.0 { fail("max_float(2, NaN)") }
+    if math.min_float(-1.5, 3.0) != -1.5 { fail("min_float(-1.5, 3)") }
+    if math.max_float(-1.5, 3.0) != 3.0 { fail("max_float(-1.5, 3)") }
+
+    // Integer forms, INT_MIN included.
+    int_min = -2147483647 - 1
+    if math.abs_int(int_min) != int_min { fail("abs_int(INT_MIN) = ${math.abs_int(int_min)}") }
+    if math.abs_int(-7) != 7 { fail("abs_int(-7)") }
+    if math.min_int(3, -4) != -4 { fail("min_int") }
+    if math.max_int(3, -4) != 3 { fail("max_int") }
+    if math.clamp_int(12, 0, 10) != 10 { fail("clamp_int high") }
+    if math.clamp_int(-3, 0, 10) != 0 { fail("clamp_int low") }
+    if math.clamp_float(0.5, 1.0, 2.0) != 1.0 { fail("clamp_float") }
+
+    // sqrt, abs, rounding.
+    if math.sqrt(2.25) != 1.5 { fail("sqrt(2.25) = ${math.sqrt(2.25)}") }
+    if math.sqrt(-1.0) == math.sqrt(-1.0) { fail("sqrt(-1) is not NaN") }
+    if math.abs_float(-0.25) != 0.25 { fail("abs_float") }
+    if math.floor(-2.5) != -3.0 { fail("floor(-2.5)") }
+    if math.ceil(-2.5) != -2.0 { fail("ceil(-2.5)") }
+    if math.round(2.5) != 3.0 { fail("round(2.5) = ${math.round(2.5)}, half away from zero") }
+    if math.round(-2.5) != -3.0 { fail("round(-2.5) = ${math.round(-2.5)}") }
+
+    // Single precision.
+    f = 2.25 as f32
+    if math.sqrt_f32(f) != 1.5 as f32 { fail("sqrt_f32") }
+    if math.abs_f32(-f) != f { fail("abs_f32") }
+    nf = nan as f32
+    if math.min_f32(nf, f) != f { fail("min_f32(NaN, x)") }
+    if math.max_f32(f, nf) != f { fail("max_f32(x, NaN)") }
+    if math.clamp_f32(f, 0.0 as f32, 1.0 as f32) != 1.0 as f32 { fail("clamp_f32") }
+    if math.floor_f32(-f) != -3.0 as f32 { fail("floor_f32") }
+    if math.ceil_f32(-f) != -2.0 as f32 { fail("ceil_f32") }
+
+    println("PASS: math scalars from the inline header")
+}

@@ -1,4 +1,5 @@
 #include "aether_math.h"
+#include "aether_math_inline.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -11,66 +12,60 @@
 // unsigned arithmetic, where that is defined: `-x` overflowed, which C
 // leaves undefined.
 int math_abs_int(int x) {
-    return x < 0 ? (int)(0u - (unsigned)x) : x;
+    return aether_math_abs_int_inline(x);
 }
 
 double math_abs_float(double x) {
-    return fabs(x);
+    return aether_math_abs_float_inline(x);
 }
 
 int math_min_int(int a, int b) {
-    return a < b ? a : b;
+    return aether_math_min_int_inline(a, b);
 }
 
 int math_max_int(int a, int b) {
-    return a > b ? a : b;
+    return aether_math_max_int_inline(a, b);
 }
 
 // fmin/fmax: when one side is NaN the other is returned, whichever side it
 // is on. A `<` pick returned b for min(NaN, 1) but NaN for min(1, NaN).
 double math_min_float(double a, double b) {
-    return fmin(a, b);
+    return aether_math_min_float_inline(a, b);
 }
 
 double math_max_float(double a, double b) {
-    return fmax(a, b);
+    return aether_math_max_float_inline(a, b);
 }
 
 int math_clamp_int(int x, int min, int max) {
-    if (x < min) return min;
-    if (x > max) return max;
-    return x;
+    return aether_math_clamp_int_inline(x, min, max);
 }
 
 double math_clamp_float(double x, double min, double max) {
-    if (x < min) return min;
-    if (x > max) return max;
-    return x;
+    return aether_math_clamp_float_inline(x, min, max);
 }
 
 // Advanced math
 double math_sqrt(double x) {
-    return sqrt(x);
+    return aether_math_sqrt_inline(x);
 }
 
 // Single precision (#2151). fminf/fmaxf rather than a `<` pick: they
 // return the non-NaN operand when one side is NaN, as the double
 // versions below do through fmin/fmax.
-float math_sqrt_f32(float x) { return sqrtf(x); }
-float math_abs_f32(float x) { return fabsf(x); }
-float math_min_f32(float a, float b) { return fminf(a, b); }
-float math_max_f32(float a, float b) { return fmaxf(a, b); }
+float math_sqrt_f32(float x) { return aether_math_sqrt_f32_inline(x); }
+float math_abs_f32(float x) { return aether_math_abs_f32_inline(x); }
+float math_min_f32(float a, float b) { return aether_math_min_f32_inline(a, b); }
+float math_max_f32(float a, float b) { return aether_math_max_f32_inline(a, b); }
 float math_clamp_f32(float x, float min, float max) {
-    if (x < min) return min;
-    if (x > max) return max;
-    return x;
+    return aether_math_clamp_f32_inline(x, min, max);
 }
 float math_sin_f32(float x) { return sinf(x); }
 float math_cos_f32(float x) { return cosf(x); }
 float math_tan_f32(float x) { return tanf(x); }
 float math_atan2_f32(float y, float x) { return atan2f(y, x); }
-float math_floor_f32(float x) { return floorf(x); }
-float math_ceil_f32(float x) { return ceilf(x); }
+float math_floor_f32(float x) { return aether_math_floor_f32_inline(x); }
+float math_ceil_f32(float x) { return aether_math_ceil_f32_inline(x); }
 float math_pow_f32(float base, float exp) { return powf(base, exp); }
 float math_exp_f32(float x) { return expf(x); }
 
@@ -107,15 +102,15 @@ double math_atan2(double y, double x) {
 }
 
 double math_floor(double x) {
-    return floor(x);
+    return aether_math_floor_inline(x);
 }
 
 double math_ceil(double x) {
-    return ceil(x);
+    return aether_math_ceil_inline(x);
 }
 
 double math_round(double x) {
-    return round(x);
+    return aether_math_round_inline(x);
 }
 
 /* Round to nearest and return an INTEGER type, unlike math_round which rounds
