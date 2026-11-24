@@ -66,6 +66,37 @@ would use, so that the suite adds no unfairness of its own.
     occupies. Each language's wait strategy is written down below, and the
     results carry each run's CPU time and the messages per CPU-second beside
     the wall-clock rate, so that cost is visible rather than hidden.
+12. **Rank like with like.** A language is ranked within its tier (below),
+    never in one list of all eleven.
+
+## Two tiers
+
+Rules 1 and 10 give each language its standard library and its expert's
+technique, and that makes two kinds of entry, which do different work for
+the same message count:
+
+- **Runtimes**: Aether, Go, Erlang, Elixir and Pony schedule their own units
+  and own their mailboxes. A mailbox takes any sender and has no bound (Go's
+  channels are bounded, 1,024 here), a unit can move between cores, and a
+  failing one is isolated. That is the work a message costs in them.
+- **Threads + queue**: C, C++, Rust and Zig have no actors in their standard
+  libraries, so each unit is an OS thread and each mailbox the suite's
+  bounded single-producer, single-consumer ring (`c/mailbox.h` and its
+  ports): two atomic operations a message, a sender that waits when 1,024 are
+  queued, nothing else. Java and Scala are OS threads with
+  `java.util.concurrent` queues.
+
+On counting the difference is the whole result: one sender, one receiver and
+an increment, so the row measures the hand-off itself, and a two-thread ring
+is close to the least that can cost (about 4 ns a message on an Apple M5
+Pro, against 15 for the fastest runtime). Ranked in one list, a runtime is
+read as losing to Rust's actors, which Rust's standard library does not have.
+
+So the dashboard ranks within each tier, and the Relative column and the
+summary are against the fastest of the row's tier (`lang_tier` in
+`run_benchmarks.ae` writes each language's tier into the results). The
+threads tier stays on the page as the floor the runtimes are read against,
+not as their competition. The rules above hold in both tiers unchanged.
 
 ## Techniques
 
