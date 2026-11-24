@@ -702,6 +702,14 @@ const char* module_leaf_of_file(const char* path, char* buf, size_t cap) {
     return buf;
 }
 
+/* Does `import <module> (*)` bind `name`? What the module exports (all
+ * of it when it lists no exports), apart from a leading-underscore name,
+ * which is private either way. */
+int module_glob_binds(AetherModule* module, const char* name) {
+    if (!module || !name || !name[0] || name[0] == '_') return 0;
+    return module->export_count == 0 || module_exports_symbol(module, name);
+}
+
 int module_is_exported(AetherModule* module, const char* symbol) {
     if (!module) return 0;
 
@@ -3214,6 +3222,16 @@ static void rename_refs_before_binding_in(ASTNode* scope, const char* prefix,
     names_free(&bound);
 }
 
+/* Is `name`, in a body renamed under `prefix`, a module-level `var` the
+ * rename binds? One of `consts`, the module's own when the body is the
+ * module's, the imported ones when it is an importer's: a `var` the module
+ * keeps private is no cell of an importer's, whose `text = ...` or loop
+ * variable `text` is its own local (it was written to the module's cell,
+ * through `import m (*)`, as a write in the module's own body is). */
+static int bound_module_var(const char* prefix, const ModuleNames* consts, const char* name) {
+    return names_has(consts, name) && name_is_module_global_var(prefix, name);
+}
+
 // Recursively rename intra-module function calls and constant references in a cloned AST.
 // local_names/local_count: names bound in the enclosing function (params + locals) that shadow constants.
 static void rename_intra_module_refs(ASTNode* node, const char* prefix,
@@ -3256,7 +3274,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         node->children[0]->type == AST_IDENTIFIER && node->children[0]->value &&
         names_has(funcs, node->children[0]->value) &&
         !names_has(consts, node->children[0]->value) &&
-        !name_is_module_global_var(prefix, node->children[0]->value) &&
+        !bound_module_var(prefix, consts, node->children[0]->value) &&
         !names_has(locals, node->children[0]->value)) {
         AetherModule* self = module_find_by_namespace(prefix);
         if (self && self->name && module_sees_namespace(self->name, node->children[0]->value) &&
@@ -3293,7 +3311,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * and above, but the call kept the bare name and the checker then
          * reported "Undefined function". A local of that name shadows it. */
         if (!renamed && !names_has(locals, node->value) &&
-            name_is_module_global_var(prefix, node->value)) {
+            bound_module_var(prefix, consts, node->value)) {
             char* prefixed = mod_strf("%s_%s", prefix, node->value);
             free(node->value);
             node->value = prefixed;
@@ -3308,7 +3326,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         const char* dot = renamed ? NULL : strchr(node->value, '.');
         if (dot && dot != node->value && !strchr(dot + 1, '.')) {
             char* recv = mod_strf("%.*s", (int)(dot - node->value), node->value);
-            if (!names_has(locals, recv) && name_is_module_global_var(prefix, recv)) {
+            if (!names_has(locals, recv) && bound_module_var(prefix, consts, recv)) {
                 char* prefixed = mod_strf("%s_%s%s", prefix, recv, dot);
                 free(node->value);
                 node->value = prefixed;
@@ -3328,7 +3346,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * `const` lowers to a `#define`, and a `name = expr` against it is a real
      * shadowing local that must stay local. */
     if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_ASSIGNMENT) &&
-        node->value && name_is_module_global_var(prefix, node->value)) {
+        node->value && bound_module_var(prefix, consts, node->value)) {
         char* prefixed = mod_strf("%s_%s", prefix, node->value);
         free(node->value);
         node->value = prefixed;
@@ -3400,7 +3418,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
             ModuleNames own = {0};
             for (int i = 0; i < clo.count; i++) {
                 if (!names_has(locals, clo.names[i]) &&
-                    !name_is_module_global_var(prefix, clo.names[i]))
+                    !bound_module_var(prefix, consts, clo.names[i]))
                     names_add(&own, clo.names[i]);
             }
             rename_refs_before_binding_in(node, prefix, funcs, &own);
@@ -3411,7 +3429,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         }
         ModuleNames kept = {0};
         for (int i = 0; i < clo.count; i++) {
-            if (!name_is_module_global_var(prefix, clo.names[i])) names_add(&kept, clo.names[i]);
+            if (!bound_module_var(prefix, consts, clo.names[i])) names_add(&kept, clo.names[i]);
         }
         names_free(&clo);
         for (int i = 0; i < node->child_count; i++) {
@@ -3443,7 +3461,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * global_var, so it's correctly retained. */
         ModuleNames kept = {0};
         for (int i = 0; i < nested.count; i++) {
-            if (!name_is_module_global_var(prefix, nested.names[i])) names_add(&kept, nested.names[i]);
+            if (!bound_module_var(prefix, consts, nested.names[i])) names_add(&kept, nested.names[i]);
         }
         names_free(&nested);
         rename_refs_before_binding_in(node, prefix, funcs, &kept);
@@ -4131,8 +4149,9 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
 
         if (is_glob) {
             // #896: the glob selection is M's whole export surface. Take every
-            // func/const M defines (skipping leading-underscore privates, the
-            // same privacy rule the typecheck-time glob expansion applies) so
+            // func/const M exports (module_glob_binds: what its `exports` list
+            // names, and never a leading-underscore private -- the same rule
+            // the typecheck-time glob expansion applies) so
             // a bare `clean(...)` in M's merged body is rewritten to the
             // prefixed `fs_clean(...)` the transitive pass pulls in — exactly
             // what the selective and qualified forms already get.
@@ -4143,13 +4162,13 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
             // `<M>_<name>` before this runs; this keeps M's own externs, which
             // keep their bare name, from being rewritten to the glob's.
             for (int k = 0; k < sub_func_count; k++) {
-                if (sub_func_names[k] && sub_func_names[k][0] != '_' &&
+                if (module_glob_binds(sub_mod, sub_func_names[k]) &&
                     !module_defines_own_name(mod_ast, sub_func_names[k])) {
                     names_add(&sel_funcs, sub_func_names[k]);
                 }
             }
             for (int k = 0; k < sub_const_count; k++) {
-                if (sub_const_names[k] && sub_const_names[k][0] != '_' &&
+                if (module_glob_binds(sub_mod, sub_const_names[k]) &&
                     !module_defines_own_name(mod_ast, sub_const_names[k])) {
                     names_add(&sel_consts, sub_const_names[k]);
                 }
@@ -4169,7 +4188,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                 if (strncmp(ext->value, sub_ns, sub_ns_len) != 0 ||
                     ext->value[sub_ns_len] != '_') continue;
                 const char* tail = ext->value + sub_ns_len + 1;
-                if (!*tail || tail[0] == '_') continue;
+                if (!module_glob_binds(sub_mod, tail)) continue;
                 if (module_defines_own_name(mod_ast, tail)) continue;
                 if (names_has(&sel_funcs, tail)) continue;
                 names_add(&sel_funcs, tail);
@@ -5399,6 +5418,10 @@ void module_merge_into_program(ASTNode* program) {
             for (int k = 0; k < mod_const_count; k++) {
                 const char* cn = mod_const_names[k];
                 if (!cn || cn[0] == '_' || module_defines_own_name(program, cn)) continue;
+                /* Only what the module exports, as the checker binds it:
+                 * a private `var text` renamed the importer's own loop
+                 * variable `text` to the module's cell. */
+                if (!module_glob_binds(mod, cn)) continue;
                 names_add(&sel_consts, cn);
             }
         }

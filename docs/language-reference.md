@@ -4221,6 +4221,11 @@ This is Aether's spelling for what other languages call "unqualified
 import" (Rust's `use mod::*;`, Java's `import static mod.*`, Python's
 `from mod import *`).
 
+In a module with an `exports (…)` list, public means listed: a function,
+constant or module-level `var` the list leaves out is not bound by the
+glob, so a local, loop variable or parameter of the importer spelt like
+one is the importer's own, never the module's cell.
+
 ```aether
 import std.math (*)
 

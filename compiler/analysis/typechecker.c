@@ -8362,6 +8362,11 @@ static int typecheck_program_checked(ASTNode* program) {
                 if (sym->name[ns_len] != '_') continue;
                 const char* tail = sym->name + ns_len + 1;
                 if (!*tail || *tail == '_') continue;  // private / malformed
+                /* A glob binds what the module exports, as `ns.name`
+                 * reaches it: a module's private `var text` was bound
+                 * too, and an importer's own loop variable or local
+                 * `text` became the module's cell. */
+                if (is_export_blocked(ns, tail)) continue;
                 if (glob_count >= glob_cap) {
                     glob_cap = glob_cap == 0 ? 16 : glob_cap * 2;
                     glob_names = (const char**)aether_xrealloc(

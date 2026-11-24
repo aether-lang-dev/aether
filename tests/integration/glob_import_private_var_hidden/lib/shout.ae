@@ -1,0 +1,11 @@
+// A module that glob-imports textlib and has a local named like textlib's
+// private `var text`: the local is its own, not textlib's cell.
+import textlib(*)
+
+exports(shout)
+
+shout(t: string) -> string {
+    text = "${t}!"
+    record(text)
+    return text
+}

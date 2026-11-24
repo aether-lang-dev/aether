@@ -1,0 +1,18 @@
+// A module with private module-level `var`s. A glob import brings in what
+// the module exports; its private vars are not visible to the importer.
+exports(record, count, LIMIT)
+
+const LIMIT = 10
+
+var size: int = 0
+var text: string[] = []
+
+record(t: string) -> int {
+    text.push(t)
+    size = text.len
+    return size
+}
+
+count() -> int {
+    return text.len
+}
