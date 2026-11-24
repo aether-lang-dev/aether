@@ -1,0 +1,12 @@
+import fontlib(*)
+
+const f = Font { face: "mono", size: 2 }
+
+main() {
+    g = Font { face: "serif", size: 3 }
+    println(f.size)
+    println(g.size)
+    h = make_font("sans", 4)
+    println(h.size)
+    println(font_size(h))
+}

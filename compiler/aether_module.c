@@ -3227,6 +3227,25 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * called `f` turned it into `<prefix>_f`, a member T does not have). */
     if (node->type == AST_OFFSETOF) return;
 
+    /* A struct literal's field initialiser (`Font { size: 2 }`) and a
+     * struct pattern's field (`Font{ size: s }`) are AST_ASSIGNMENTs whose
+     * value is the FIELD's name, never a variable: the module-var write
+     * rename below took `size: 2` for a write to a module's `var size` and
+     * the C named a field `<prefix>_size` the struct does not have. Only
+     * the initialiser (or sub-pattern) is renamed. */
+    if (node->type == AST_STRUCT_LITERAL || node->type == AST_PATTERN_STRUCT) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* c = node->children[i];
+            if (c && c->type == AST_ASSIGNMENT) {
+                for (int j = 0; j < c->child_count; j++)
+                    rename_intra_module_refs(c->children[j], prefix, funcs, consts, locals);
+            } else {
+                rename_intra_module_refs(c, prefix, funcs, consts, locals);
+            }
+        }
+        return;
+    }
+
     /* #3088: in `ns.member`, a namespace the module imports is that module,
      * whatever function of its own the module names `ns`: a function has
      * no fields, as the checker reads it (value_hides_namespace). Renamed
