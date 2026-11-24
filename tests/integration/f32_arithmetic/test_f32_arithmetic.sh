@@ -90,7 +90,8 @@ if [ "$got" != "1.5 4 0 2.5 10" ]; then
     fail=1
 fi
 "$AETHERC" "$tmp/m.ae" "$tmp/m.c" >/dev/null 2>&1
-if ! grep -q "float r = (math_sqrt_f32(v) \* 0.5f)" "$tmp/m.c"; then
+# The call is std.math's inline sqrt_f32 since #3852 (aether_math_inline.h).
+if ! grep -q "float r = (aether_math_sqrt_f32_inline(v) \* 0.5f)" "$tmp/m.c"; then
     echo "  [FAIL] f32_arithmetic: math.sqrt_f32 result is not a float local"
     fail=1
 fi
