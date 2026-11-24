@@ -1092,7 +1092,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         // A message disarms the timeout; its handling's end arms it again.
         print_line(gen, "self->_aether_base.last_activity_ns = 0;");
     }
-    print_line(gen, "aether_reply_slot_set(msg._reply_slot);");
+    /* The ask in hand. Only a step barrier calls a step, and it starts every
+     * step with no ask in hand (aether_step_put_aside, and the end of each
+     * step of a run), so a message with no reply slot (every send that is
+     * not an ask) leaves it as it is and skips the call, an out-of-line one
+     * with a thread-local lookup in it (#3863). */
+    print_line(gen, "if (msg._reply_slot) aether_reply_slot_set(msg._reply_slot);");
     print_line(gen, "");
     
     if (pattern_count > 0) {
