@@ -36,6 +36,7 @@ The runner reads its settings from the environment:
 | `BENCHMARK_MESSAGES` | 1000000 | Messages per run (skynet: leaves) |
 | `BENCH_RUNS` | 5 | Timed runs per language and pattern; the median is reported |
 | `BENCH_WARMUP` | 1 | Discarded runs before them, the same for every language |
+| `BENCH_SKYNET_RUNS` | 25 | Timed runs for skynet, whose run is about 0.3 ms (#3868); never fewer than `BENCH_RUNS` |
 | `BENCH_LANGS` | all | Languages to run, comma-separated (`aether,c,rust`) |
 | `BENCH_PATTERNS` | all | Patterns to run, comma-separated (`ping_pong,skynet`) |
 | `BENCH_STRICT` | 0 | 1: exit 1 if any selected language does not build or is wrong (the CI job) |
