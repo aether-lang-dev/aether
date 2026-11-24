@@ -14,6 +14,45 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.944.0]
+
+### Changed
+
+- **The cross-language skynet takes its median over 25 runs (#3868).**
+  One skynet run creates 1,111 units in about 0.3 ms, short enough that a
+  median of five runs was mostly scheduling jitter (cv 14-27%, Pony's lead
+  inside it). The runner now times skynet 25 times for every language
+  (`BENCH_SKYNET_RUNS`, never fewer than `BENCH_RUNS`) and records the
+  count in the results; the other patterns keep five.
+
+### Performance
+
+- **std.math's scalar functions are inline (#3852).** `math.sqrt`,
+  `abs`, `min`, `max`, `clamp`, `floor`, `ceil`, `round` and their f32
+  forms were calls into libaether.a the C compiler could not see through,
+  each calling libm in turn. They now come from `aether_math_inline.h`
+  through `@c_include`, as std.string's reads do (#3836), using the
+  compiler's builtins on GCC and clang (no `<math.h>` in the program) and
+  libm's names elsewhere; the exported `math_*` functions are the same
+  bodies, and the values are unchanged (NaN handling of min/max,
+  `abs_int(INT_MIN)`, half-away rounding: `test_math_inline_scalars`). A
+  loop of sqrt, floor, min and abs went from 2.38 to 1.98 ns an iteration.
+  Transcendental functions stay out of line. On x86-64 MinGW `math.sqrt`
+  is now `sqrtsd`, correctly rounded, where the CRT's x87 sqrt rounded
+  twice (#3027): a result there may differ from before by one ulp, toward
+  the correct one.
+
+- **A slice's release is inline again for a view (#3853).** The release a
+  slice gets where it dies (a local's scope exit, a store, an unwind) is
+  `static inline`, but it carried the string release, the buffer's free and
+  its element drops, so the compiler left the whole release out of line: a
+  call per place for what is, for a view (`ptr as T[]`, a slice of a
+  slice), one test of its marks. The counted path that frees or touches a
+  published count now sits in a cold helper; the uncounted test and the
+  common counted case (a reference that is not the last) stay inline.
+  bench-core on an Apple M5 Pro: `slice_view_returned` 0.86 to 0.22 ns,
+  `slice_view_bound` 3.34 to 3.15 ns; the ownership rows unchanged.
+
 ## [0.943.0]
 
 ### Performance
