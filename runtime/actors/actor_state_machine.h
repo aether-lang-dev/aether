@@ -217,19 +217,33 @@ static inline int AETHER_HOT mailbox_receive_batch(
     return received;
 }
 
+/* The core's delivery puts a run of one actor's messages in with this
+ * (#3858), so it keeps what mailbox_send keeps: the producer guard of a
+ * debug build and the profile's count, by message. */
 static inline int AETHER_HOT mailbox_send_batch(
     Mailbox* AETHER_RESTRICT mbox,
     const Message* AETHER_RESTRICT msgs,
     int count)
 {
+    PROFILE_START();
     int have = atomic_load_explicit(&mbox->count, memory_order_relaxed);
     int sent = MAILBOX_SIZE - have < count ? MAILBOX_SIZE - have : count;
-    if (sent < 0) sent = 0;
+    if (sent <= 0) return 0;
+#ifdef AETHER_DEBUG_MAILBOX
+    // SPSC assertion: detect concurrent producers, as mailbox_send does
+    if (unlikely(atomic_flag_test_and_set_explicit(&mbox->_send_guard, memory_order_acquire))) {
+        fprintf(stderr, "CONCURRENT mailbox_send_batch! count=%d tail=%d\n", have, mbox->tail);
+    }
+#endif
     for (int i = 0; i < sent; i++) {
         mbox->messages[mbox->tail] = msgs[i];
         mbox->tail = (mbox->tail + 1) & MAILBOX_MASK;  // Fast power-of-2 masking
     }
-    if (sent > 0) atomic_store_explicit(&mbox->count, have + sent, memory_order_release);
+    atomic_store_explicit(&mbox->count, have + sent, memory_order_release);
+#ifdef AETHER_DEBUG_MAILBOX
+    atomic_flag_clear_explicit(&mbox->_send_guard, memory_order_release);
+#endif
+    PROFILE_END_BATCH_SEND(0, sent);
     return sent;
 }
 
