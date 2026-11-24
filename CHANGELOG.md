@@ -14,6 +14,56 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.942.0]
+
+### Changed
+
+- **The cross-language benchmark ranks a language within its tier, not in
+  one list of eleven (FAIRNESS.md rule 12, "Two tiers").** Under the suite's
+  rules C, C++, Rust and Zig are OS threads joined by the suite's bounded
+  single-producer ring, and Java and Scala threads with
+  `java.util.concurrent` queues, while Aether, Go, Erlang, Elixir and Pony
+  are runtimes with unbounded mailboxes, scheduling and failure isolation.
+  On counting the single list read as "Aether 5th" behind a hand-written
+  two-thread ring; among the runtimes it is first. The runner writes each
+  language's `tier` into the results, and the dashboard ranks, computes
+  Relative and Spread, and summarizes Aether within the tier, with the
+  threads tier shown as the floor and Aether's place overall beside its
+  rank. Results written before this have no `tier` and are placed by name.
+
+### Performance
+
+- **A core stepping one actor many times in a row puts its step context
+  aside once for the run, not once per message (#3858).** A burst to one
+  actor fills its mailbox, and the core makes room by stepping it, eight
+  messages at a time; each step paid the whole barrier: the reply slot, the
+  step actor and the in-step flags saved and restored, the caps word read,
+  on macOS a `_tlv_get_addr` call for each. Those runs, and the drain of a
+  backlog after delivery, now share one put-aside and one give-back. Each
+  message keeps its own try frame and `sigsetjmp`, its unanswered ask, its
+  death check and its after-step work, so a panic ends the run exactly as it
+  ended a single step; and a run goes on only while the step would have put
+  nothing aside itself (no spawn capture, account or sandbox level, no
+  execution running on the thread). A single step (a send's, a ping-pong's)
+  is the barrier it was. The core also puts a run of one actor's messages
+  into its mailbox as many at once as fit, with one store of the count,
+  where it stored it once per message, when nothing waits in the actor's
+  overflow. The cross-language counting benchmark (one actor, messages from
+  main; Apple M5 Pro, median of 15 interleaved runs) went from 55.3 to 73.3 M
+  msg/s; bench-core's `fanin_main_burst` from 16.4-17.0 to 12.5-13.3 ns/msg
+  and `fanin_8_actors` from 69.0-69.7 to 61.2-64.8, the send, ask and
+  ping-pong rows unchanged.
+
+- **A generated actor step makes no reply-slot call for a message that is
+  not an ask (#3863).** Every step called the runtime's
+  `aether_reply_slot_set(msg._reply_slot)`, out of line (a thread-local does
+  not cross the generated-code boundary safely on MinGW, #1751) and with a
+  thread-local lookup in it, to store NULL over the NULL every step barrier
+  starts a step with. A send now skips it; an ask sets its slot as before.
+  Code generated before still runs on this runtime and the other way round.
+  Cross-language counting on an Apple M5 Pro: +2.4 to +5.8% in two
+  interleaved rounds.
+
 ## [0.941.0]
 
 ### Fixed
