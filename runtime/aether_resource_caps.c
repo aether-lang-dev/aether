@@ -647,13 +647,19 @@ static AetherExecAccount* slot_take(const void* p) {
 }
 
 /* Under the lock: `bytes` charged to `a` and its ancestors, or to none of
- * them when one would pass its allowance (which is then marked tripped). */
+ * them when one would pass its allowance. Then that one is marked tripped,
+ * and so is every account from `a` up to it: the account in use had an
+ * allocation refused, as libaether.h promises its host, whichever ancestor
+ * ran out (a library that checks its own account before handing back what
+ * it built must see it). Those above it never saw the bytes. */
 static int chain_charge(AetherExecAccount* a, uint64_t bytes) {
     for (AetherExecAccount* x = a; x; x = x->parent) {
         uint64_t cur = atomic_load_explicit(&x->used, memory_order_relaxed);
         if (x->memory_bytes && (cur + bytes > x->memory_bytes || cur + bytes < cur)) {
-            for (AetherExecAccount* y = a; y != x; y = y->parent)
+            for (AetherExecAccount* y = a; y != x; y = y->parent) {
                 atomic_fetch_sub_explicit(&y->used, bytes, memory_order_relaxed);
+                atomic_fetch_or_explicit(&y->tripped, AETHER_ACCOUNT_TRIPPED_MEMORY, memory_order_relaxed);
+            }
             atomic_fetch_or_explicit(&x->tripped, AETHER_ACCOUNT_TRIPPED_MEMORY, memory_order_relaxed);
             return 0;
         }
