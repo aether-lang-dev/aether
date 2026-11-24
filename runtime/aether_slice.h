@@ -204,14 +204,28 @@ static inline void aether_slice_buf_free(AetherSliceBuf* h) {
     free(h);
 }
 
-/* The reference a place held to the buffer `s` views, given back; the last
- * frees the buffer. An uncounted slice gives back nothing. */
-static inline void aether_slice_unref(AetherSlice s) {
+/* aether_slice_unref's counted path, out of its callers (#3853): a release
+ * is inlined at every place a slice dies (a local's scope exit, a store, an
+ * unwind), and most of them hold a view (`ptr as T[]`, a parameter, a
+ * slice of a slice), which gives back nothing. With the counted path
+ * inline, the string release and the buffer's free with its element drops
+ * came too, and the compiler left the whole release out of line, a call per
+ * place for two flag tests. Marked as AETHER_SLICE_FAIL's helpers are:
+ * cold on GCC and clang, which keeps it out of its callers, and noinline
+ * on cl.exe, which has no cold. */
+#if defined(__GNUC__) || defined(__clang__)
+#define AETHER_SLICE_COLD_PATH static inline __attribute__((cold))
+#elif defined(_MSC_VER)
+#define AETHER_SLICE_COLD_PATH static __inline __declspec(noinline)
+#else
+#define AETHER_SLICE_COLD_PATH static inline
+#endif
+
+AETHER_SLICE_COLD_PATH void aether_slice_unref_counted(AetherSlice s) {
     if (s.flags & AETHER_SLICE_STRING) {
         string_release(aether_slice_string_of(s));
         return;
     }
-    if (!(s.flags & AETHER_SLICE_MADE)) return;
     AetherSliceBuf* h = aether_slice_buf(s);
     int rc = aether_count_load(&h->refs);
     if (rc & AETHER_SLICE_SHARED_BIT) {
@@ -220,6 +234,25 @@ static inline void aether_slice_unref(AetherSlice s) {
     }
     h->refs = rc - 1;
     if (rc <= 1) aether_slice_buf_free(h);
+}
+
+/* The reference a place held to the buffer `s` views, given back; the last
+ * frees the buffer. Inline: an uncounted slice, which gives back nothing,
+ * and the common counted case, a reference of an unpublished buffer that is
+ * not the last (a view of a counted buffer, stored again in a loop), a load
+ * and a store. Out of line: a string's release, a published count, and the
+ * last reference, which frees. */
+static inline void aether_slice_unref(AetherSlice s) {
+    if (!(s.flags & (AETHER_SLICE_STRING | AETHER_SLICE_MADE))) return;
+    if (!(s.flags & AETHER_SLICE_STRING)) {
+        AetherSliceBuf* h = aether_slice_buf(s);
+        int rc = aether_count_load(&h->refs);
+        if (!(rc & AETHER_SLICE_SHARED_BIT) && rc > 1) {
+            h->refs = rc - 1;
+            return;
+        }
+    }
+    aether_slice_unref_counted(s);
 }
 
 /* `s` is reachable from other threads from here on (a module `var`, a
