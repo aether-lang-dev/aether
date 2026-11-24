@@ -4926,6 +4926,41 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
     }
 }
 
+/* `cnt` messages, counted and routed to core `c` already, into its foreign
+ * channel, all of them (#3860). A channel with room for part of them takes
+ * that part, and the rest waits for the core to drain it, under the channel's
+ * lock, spinning and yielding as send_through_core's foreign path does for
+ * one message: the core is told first, so it is not asleep on a full
+ * channel. They were sent one at a time after a partial batch, each given
+ * back its counts, counted again and routed again, the channel's lock taken
+ * and the core told for each, with a yield every 1000 spins: a sender that
+ * outruns one consumer lived in that path. The counts the batch made hold
+ * each actor where it was routed (move_begin waits for them), so the core
+ * read once is still its core. */
+static void enqueue_foreign_batch(int c, void** actors, Message* msgs, int cnt) {
+    pthread_mutex_lock(&schedulers[c].foreign_lock);
+    int done = queue_enqueue_batch(&schedulers[c].from_queues[MAX_CORES], actors, msgs, cnt);
+    if (unlikely(done < cnt)) {
+        sched_wake(&schedulers[c]);
+        int retries = 0;
+        while (done < cnt) {
+            int got = queue_enqueue_batch(&schedulers[c].from_queues[MAX_CORES],
+                                          actors + done, msgs + done, cnt - done);
+            done += got;
+            if (got > 0) continue;
+            if (++retries % 1000 == 0) aether_sched_yield();
+            AETHER_PAUSE();
+        }
+    }
+    pthread_mutex_unlock(&schedulers[c].foreign_lock);
+    // A core that went idle and parked between two batches is told, as
+    // every other enqueue tells it (#3087). It was not: it slept on the
+    // batch until its timed wait ran out, so a fan-out from main (a
+    // fork-join's workers) stalled for a park timeout at every gap longer
+    // than the idle spin, and on Windows for at least a 15.6 ms tick.
+    sched_wake(&schedulers[c]);
+}
+
 static void batch_send_out(void) {
     if (!g_batch_buffer || g_batch_buffer->count == 0) return;
 
@@ -4995,6 +5030,35 @@ static void batch_send_out(void) {
         by_core[tc]++;
     }
 
+    // Batch send is always called from main thread (current_core_id = -1),
+    // so it uses the non-scheduler channel (from_queues[MAX_CORES]), under
+    // its lock, since a foreign thread may be writing it too (#2083). Each
+    // core's messages are counted sent before the core can take them, as
+    // every send is (count_pending_messages relies on it, #3464): counted
+    // after, a core that handled the batch while this thread waited on
+    // another core's lock made the handled count pass the sent count.
+
+    // One core takes the whole batch (a burst to one actor, the actors of
+    // one core): its messages go in from the buffer as they stand, in their
+    // order, with no sorted copy of them (#3860). The actors are copied as
+    // the channel's void* entries; the messages are the buffer's own.
+    int only = -1;
+    for (int c = 0; c < num_cores; c++) {
+        if (by_core[c] == 0) continue;
+        if (by_core[c] == count) only = c;
+        break;
+    }
+    if (only >= 0) {
+        void* actors[BATCH_SEND_SIZE];
+        for (int i = 0; i < count; i++) actors[i] = g_batch_buffer->actors[i];
+        atomic_fetch_add_explicit(&main_thread_sent, (uint64_t)count, memory_order_relaxed);
+        enqueue_foreign_batch(only, actors, g_batch_buffer->messages, count);
+        foreign_send_leave();
+        g_batch_buffer->count = 0;
+        memset(g_batch_buffer->by_core, 0, sizeof(g_batch_buffer->by_core));
+        return;
+    }
+
     // === PHASE 2: Compute offsets for radix sort by core ===
     int offsets[MAX_CORES] = {0};
     int offset = 0;
@@ -5015,8 +5079,6 @@ static void batch_send_out(void) {
         sorted_actors[pos] = g_batch_buffer->actors[i];
         sorted_msgs[pos] = g_batch_buffer->messages[i];
     }
-    // Copied out: the buffer is empty before the overflow fallback below
-    // sends, which flushes a pending batch first.
     g_batch_buffer->count = 0;
     memset(g_batch_buffer->by_core, 0, sizeof(g_batch_buffer->by_core));
 
@@ -5025,40 +5087,8 @@ static void batch_send_out(void) {
         int start = offsets[c];
         int cnt = by_core[c];
         if (cnt == 0) continue;
-
-        // Counted before the core can take them, as every send is
-        // (count_pending_messages relies on it, #3464): counted after, a
-        // core that handled the batch while this thread waited on another
-        // core's lock made the handled count pass the sent count.
         atomic_fetch_add_explicit(&main_thread_sent, (uint64_t)cnt, memory_order_relaxed);
-
-        // Batch send is always called from main thread (current_core_id = -1),
-        // so use the non-scheduler SPSC channel (from_queues[MAX_CORES]) —
-        // under its lock, since a foreign thread may be writing it too
-        // (#2083).
-        pthread_mutex_lock(&schedulers[c].foreign_lock);
-        int enqueued = queue_enqueue_batch(
-            &schedulers[c].from_queues[MAX_CORES],
-            &sorted_actors[start],
-            &sorted_msgs[start],
-            cnt
-        );
-        pthread_mutex_unlock(&schedulers[c].foreign_lock);
-
-        // Fallback for overflow (rare) - scheduler_send_remote handles its own counting,
-        // the message in flight included, so this batch's counts are given back first.
-        for (int j = enqueued; j < cnt; j++) {
-            inflight_leave((ActorBase*)sorted_actors[start + j], 1);
-            atomic_fetch_sub_explicit(&main_thread_sent, 1, memory_order_relaxed);
-            send_remote_admitted(sorted_actors[start + j], sorted_msgs[start + j], -1);
-        }
-
-        // A core that went idle and parked between two batches is told, as
-        // every other enqueue tells it (#3087). It was not: it slept on the
-        // batch until its timed wait ran out, so a fan-out from main (a
-        // fork-join's workers) stalled for a park timeout at every gap longer
-        // than the idle spin, and on Windows for at least a 15.6 ms tick.
-        if (enqueued > 0) sched_wake(&schedulers[c]);
+        enqueue_foreign_batch(c, &sorted_actors[start], &sorted_msgs[start], cnt);
     }
 
     foreign_send_leave();
