@@ -410,3 +410,5 @@ tests/integration/http_server_h2_drain_host/
 tests/integration/tcp_deadline_cancel/
 # shadowed.ae is an E0301 fixture; test_glob_import_local_named_like_fn.sh runs both.
 tests/integration/glob_import_local_named_like_fn/
+# mylib.ae is a library (no main) the driver cross-builds for macOS; test_cross_macos_dylib_identity.sh runs it.
+tests/integration/cross_macos_dylib_identity/

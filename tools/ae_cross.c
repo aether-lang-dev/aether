@@ -219,9 +219,52 @@ static bool cross_target_is_wasi(const char* ztriple) {
 }
 
 /* True when `triple` (a cross_target_to_zig result) names an Apple target that
- * must be driven by the Xcode toolchain rather than zig. */
-bool cross_target_is_apple(const char* triple) {
+ * must be driven by the Xcode toolchain rather than zig: the clang iOS triples
+ * cross_ios_triple composes, which are the only ones spelled "-apple-". */
+bool cross_target_uses_xcode(const char* triple) {
     return triple && strstr(triple, "-apple-") != NULL;
+}
+
+/* True when `triple` names ANY Apple platform, so the artifact is Mach-O and
+ * links as one (-dynamiclib, an install name, Apple ld's strip spellings),
+ * whichever driver builds it. Every spelling counts: zig's macOS triples are
+ * `aarch64-macos-none` and carry no "-apple-", and taking only "-apple-" sent
+ * a macOS dylib linked on Linux or FreeBSD through the ELF arm with no install
+ * name, so zig recorded the -o path as its id. Both zig (`-macos`, `-ios`) and
+ * clang (`-apple-`, `-darwin`) forms, and the other Apple OS names, so a
+ * triple added later is not missed the same way. */
+bool cross_target_is_apple(const char* triple) {
+    if (!triple) return false;
+    static const char* const spellings[] = {
+        "-apple-", "-macos", "-darwin", "-ios", "-tvos", "-watchos",
+        "-visionos", "-xros",
+    };
+    for (size_t i = 0; i < sizeof(spellings) / sizeof(spellings[0]); i++)
+        if (strstr(triple, spellings[i])) return true;
+    return false;
+}
+
+/* The macOS deployment minimum a zig macOS cross build is stamped with
+ * (LC_BUILD_VERSION minos). Named explicitly because zig's default is its own
+ * newest supported release (15.0 for zig 0.16/0.17), not the host's and not
+ * anything ae chose: a library built that way refused to load on anything
+ * older. 13.0 (Ventura) is the documented floor (docs/build-system.md): an
+ * explicit choice that reaches back further than zig's default, and the one a
+ * Swift package declaring `.macOS(.v13)` can link.
+ * AETHER_MACOS_MIN overrides it, as AETHER_IOS_MIN does for iOS; only digits
+ * and dots are taken, since the value goes into the compiler's -target. */
+#define CROSS_MACOS_MIN_DEFAULT "13.0"
+static const char* cross_macos_min(void) {
+    const char* v = getenv("AETHER_MACOS_MIN");
+    if (!v || !*v) return CROSS_MACOS_MIN_DEFAULT;
+    for (const char* c = v; *c; c++) {
+        if (!((*c >= '0' && *c <= '9') || *c == '.')) {
+            fprintf(stderr, "Warning: ignoring AETHER_MACOS_MIN=%s (want a version "
+                            "like 13.0); using %s\n", v, CROSS_MACOS_MIN_DEFAULT);
+            return CROSS_MACOS_MIN_DEFAULT;
+        }
+    }
+    return v;
 }
 
 /* Resolve an SDK name to its filesystem root via `xcrun --show-sdk-path`.
@@ -277,7 +320,7 @@ int cross_target_os_arch(const char* t, const char** os, const char** arch) {
 }
 
 const char* cross_apple_sdk(const char* triple) {
-    if (!cross_target_is_apple(triple)) return NULL;
+    if (!cross_target_uses_xcode(triple)) return NULL;
     /* Catalyst is checked first: its triple carries "-ios" like the device
      * arm, but it builds against the macOS SDK. Testing "-simulator" or
      * "-ios" ahead of it would send it to the wrong SDK and fail the link
@@ -299,7 +342,7 @@ const char* cross_apple_sdk(const char* triple) {
  * Returns false (having printed the reason) if the Apple SDK cannot be found. */
 static bool cross_toolchain(const char* ztriple, char* cc_out, size_t cc_sz,
                             char* ar_out, size_t ar_sz) {
-    if (cross_target_is_apple(ztriple)) {
+    if (cross_target_uses_xcode(ztriple)) {
         const char* sdk = cross_apple_sdk(ztriple);
         char sysroot[2048];
         if (!cross_apple_sdk_path(sdk, sysroot, sizeof(sysroot))) {
@@ -315,7 +358,16 @@ static bool cross_toolchain(const char* ztriple, char* cc_out, size_t cc_sz,
         if (ar_out) snprintf(ar_out, ar_sz, "xcrun --sdk %s ar", sdk);
         return true;
     }
-    snprintf(cc_out, cc_sz, "zig cc -target %s", ztriple);
+    /* A zig macOS triple gets its deployment minimum spelled into it
+     * (`aarch64-macos.13.0-none`), which is how zig stamps minos. */
+    const char* macos = strstr(ztriple, "-macos-");
+    if (macos) {
+        snprintf(cc_out, cc_sz, "zig cc -target %.*s-macos.%s-%s",
+                 (int)(macos - ztriple), ztriple, cross_macos_min(),
+                 macos + strlen("-macos-"));
+    } else {
+        snprintf(cc_out, cc_sz, "zig cc -target %s", ztriple);
+    }
     if (ar_out) snprintf(ar_out, ar_sz, "zig ar");
     return true;
 }
@@ -773,7 +825,7 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
      * miniaudio (always compiled into the runtime) must fall back to its null
      * backend or ANY macos cross-compile fails. */
     char feature_defs[512] = AETHER_REQUIRED_DEFINES;
-    if (strstr(ztriple, "macos") || strstr(ztriple, "-apple-ios")) {
+    if (cross_target_is_apple(ztriple)) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
@@ -1247,7 +1299,7 @@ int run_cross_build(const char* c_file, const char* out_file,
      * so aether_audio.c stops being valid C there and fails the compile for
      * every program, audio or not. MA_NO_COREAUDIO selects the null backend on
      * both, so std.audio reports unavailable at runtime instead. */
-    if (strstr(ztriple, "macos") || strstr(ztriple, "-apple-ios")) {
+    if (cross_target_is_apple(ztriple)) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
@@ -1779,7 +1831,10 @@ int run_cross_build(const char* c_file, const char* out_file,
              * -dynamiclib and an -install_name: without one the load command
              * records the BUILD path, and the dylib then fails to load from
              * inside an .app bundle. @rpath/<leaf> is what an Xcode "Embed
-             * Frameworks" phase expects. */
+             * Frameworks" phase expects, and what the native macOS build sets
+             * (install_name_tool -id after its link). This holds for a zig
+             * macOS link on any host: Linux and FreeBSD have no
+             * install_name_tool to fix it afterwards. */
             char apple_lib_flags[1152];
             apple_lib_flags[0] = '\0';
             if (is_apple && emit_lib) {

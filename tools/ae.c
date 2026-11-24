@@ -1481,7 +1481,7 @@ static const char* shared_lib_ext_for(const char* target) {
     const char* z = cross_target_to_zig(target);
     const char* t = z ? z : target;
     if (strstr(t, "windows")) return ".dll";
-    if (cross_target_is_apple(t) || strstr(t, "macos")) return ".dylib";
+    if (cross_target_is_apple(t)) return ".dylib";
     if (strstr(t, "wasm"))    return ".wasm";
     return ".so";
 }
@@ -12357,7 +12357,7 @@ static int cmd_build(int argc, char** argv) {
     if (is_cross) {
         // Apple targets (iOS) are driven by Xcode/xcrun rather than zig;
         // the checks below fork on this.
-        int is_apple_target = cross_target_is_apple(ztriple);
+        int is_apple_target = cross_target_uses_xcode(ztriple);
         // Cross builds produce executables or portable C source. --emit=lib /
         // --emit=both / --emit=obj would emit library-shaped C (no main) and
         // then LINK it, which the executable link rejects. Reject those up

@@ -1083,6 +1083,20 @@ an executable link is the whole increment.
 | `*-macos`, `*-ios` | `.dylib` | `-dynamiclib -install_name @rpath/<leaf>` |
 | `wasm32-*` | `.wasm` | `--no-entry --gc-sections` + `--export=` per symbol |
 
+A macOS dylib gets the same identity on every host: its `LC_ID_DYLIB` is
+`@rpath/<leaf>`, as the native macOS build sets it, so a program linked
+against it finds it through its own rpath. Every macOS cross build (library or
+executable) is stamped with an explicit deployment minimum, **macOS 13.0** by
+default rather than zig's own default (15.0); set `AETHER_MACOS_MIN` to choose
+another, as `AETHER_IOS_MIN` does for iOS:
+
+```bash
+AETHER_MACOS_MIN=14.0 ae build --target=aarch64-macos --emit=lib mylib.ae -o libmylib.dylib
+```
+
+An ELF `.so` gets no `DT_SONAME`, as on the native path: a consumer linking
+`-lmylib` records `libmylib.so`.
+
 Windows needs `--export-all-symbols` for the reason the native path documents
 (#993): GCC's auto-export heuristic switches off as soon as any symbol carries
 an explicit `__declspec(dllexport)`, and the `aether_<name>` catalog exports
