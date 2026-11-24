@@ -963,36 +963,27 @@ static inline int inbound_pending(Scheduler* sched) {
     return atomic_load_explicit(&sched->inbound, memory_order_relaxed) != 0;
 }
 
-/* Up to `max` steps of an actor with a message, as that many
- * aether_step_safe calls make them, the context put aside once for the run
- * where the barrier allows it (#3858). `more` is the calling loop's own
- * condition for stepping it again. Returns how many ran; each took a
- * message. 0 for an actor not to step. */
-static inline int aether_step_safe_run(ActorBase* actor, int (*more)(ActorBase*, void*),
-                                       void* ctx, int max) {
+/* Up to `max` steps of an alive actor with more than `above` messages, as
+ * that many aether_step_safe calls make them, the context put aside once for
+ * the run where the barrier allows it (#3858). The barrier checks the count
+ * and the death before each later step; `more`, when given, is the calling
+ * loop's condition beyond those. Returns how many ran; each took a message.
+ * 0 for an actor not to step. */
+static inline int aether_step_safe_run(ActorBase* actor, int above,
+                                       int (*more)(ActorBase*, void*), void* ctx, int max) {
     if (!actor || !actor->step) return 0;
     if (atomic_load_explicit(&actor->dead, memory_order_acquire)) return 0;
-    if (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) <= 0) return 0;
+    if (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) <= above) return 0;
     return aether_step_barrier_run(actor, actor_finalize, step_fail_slot, step_after,
-                                   more, ctx, max);
+                                   above, more, ctx, max);
 }
 
-/* The drain loop's condition (scheduler_thread): a message waiting, the
- * actor still this core's, no inbound to yield to; and alive, as
- * aether_step_safe asks. */
+/* The drain loop's condition (scheduler_thread) beyond a message waiting and
+ * the actor alive: still this core's, and no inbound to yield to. */
 static int drain_steps_again(ActorBase* actor, void* ctx) {
     Scheduler* sched = (Scheduler*)ctx;
     return !inbound_pending(sched) &&
-           atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > 0 &&
-           atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id &&
-           !atomic_load_explicit(&actor->dead, memory_order_acquire);
-}
-
-/* make_room's condition: still more than half full, and alive. */
-static int room_steps_again(ActorBase* actor, void* ctx) {
-    (void)ctx;
-    return atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > MAILBOX_SIZE / 2 &&
-           !atomic_load_explicit(&actor->dead, memory_order_acquire);
+           atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id;
 }
 
 // Try to flush deferred sends into their target from_queues.
@@ -2662,7 +2653,7 @@ static int make_room(Scheduler* sched, ActorBase* actor) {
         while (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > MAILBOX_SIZE / 2 &&
                !atomic_load_explicit(&actor->dead, memory_order_acquire)) {
             // A run of the steps this loop made, ending where it ends (#3858).
-            int took = aether_step_safe_run(actor, room_steps_again, NULL, MAILBOX_SIZE);
+            int took = aether_step_safe_run(actor, MAILBOX_SIZE / 2, NULL, NULL, MAILBOX_SIZE);
             stepped += took;
             if (!took) break;   // dead: the loop's own check ends it too
         }
@@ -3093,7 +3084,19 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             }
             int placed = i;
             while (placed < run_end) {
-                if (deliver_owned(actor, sched->coalesce_buffer.messages[placed])) {
+                // As many as fit at once, in order, with one store of the
+                // count, when nothing waits in its overflow (#3858): what
+                // deliver_owned does one message at a time. Behind an
+                // overflow, one at a time into it.
+                if (likely(actor_overflow_pending(actor) == NULL)) {
+                    int took = mailbox_send_batch(&actor->mailbox,
+                                                  &sched->coalesce_buffer.messages[placed],
+                                                  run_end - placed);
+                    if (took > 0) {
+                        placed += took;
+                        continue;
+                    }
+                } else if (deliver_owned(actor, sched->coalesce_buffer.messages[placed])) {
                     placed++;
                     continue;
                 }
@@ -3148,7 +3151,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     // steps that took a message (it counted calls, one of
                     // which could find the actor dead): the loop's entry
                     // needs a message, so it is above 0 whenever any ran.
-                    int took = aether_step_safe_run(actor, drain_steps_again, sched, 64 - steps);
+                    int took = aether_step_safe_run(actor, 0, drain_steps_again, sched, 64 - steps);
                     processed += took;
                     steps += took;
                     if (!took) break;   // dead: its finalize credits what waits

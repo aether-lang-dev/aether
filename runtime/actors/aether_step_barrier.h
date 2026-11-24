@@ -368,11 +368,13 @@ static inline void aether_step_barrier(ActorBase* actor,
  * and only while the step would have put nothing aside of its own: the run
  * takes the next step when the caps word has none of its step bits (no
  * spawn capture, account or sandbox level anywhere), the frame push put no
- * executions aside (aside.hid still 0), the actor did not end, and `more`
- * says the caller would step it again (asked only when the mailbox holds a
- * message, so a run of one pays no call for it). Otherwise the run ends and the
- * context is given back, as after a single step; the caller's next step
- * takes the whole barrier.
+ * executions aside (aside.hid still 0), the actor is alive (read again, as
+ * every step's caller reads it), its mailbox holds more than `above`
+ * messages, and `more`, when given, says the caller would step it again: the
+ * caller's own condition beyond those, asked last, so a run that ends on an
+ * empty mailbox pays no call for it. Otherwise the run ends and the context
+ * is given back, as after a single step; the caller's next step takes the
+ * whole barrier.
  *
  * Between two steps of a run the thread's step context is what it is in a
  * single step between the handler's end and the give-back: no ask in hand,
@@ -391,6 +393,7 @@ static inline int aether_step_barrier_run(ActorBase* actor,
                                           void (*finalize)(ActorBase*),
                                           void (*fail_slot)(void* slot, int why),
                                           void (*after_step)(ActorBase*),
+                                          int above,
                                           int (*more)(ActorBase*, void*), void* more_ctx,
                                           int max) {
     AetherStepAside aside;
@@ -437,11 +440,11 @@ static inline int aether_step_barrier_run(ActorBase* actor,
         /* The next step shares this put-aside only when it would have put
          * nothing aside itself (see above); the caps word is read again, as
          * the next single step's put-aside would read it. */
-        if (n < max && ended == 0 &&
-            atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
-            aside.hid == 0 &&
+        if (n < max && ended == 0 && aside.hid == 0 &&
+            atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > above &&
+            atomic_load_explicit(&actor->dead, memory_order_acquire) == 0 &&
             (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_STEP_BITS) == 0 &&
-            more(actor, more_ctx))
+            (more == NULL || more(actor, more_ctx)))
             goto next_step;
         aether_step_give_back(&aside);
         return n;

@@ -10,7 +10,11 @@
   ended a single step; and a run goes on only while the step would have put
   nothing aside itself (no spawn capture, account or sandbox level, no
   execution running on the thread). A single step (a send's, a ping-pong's)
-  is the barrier it was. The cross-language counting benchmark (one actor,
-  messages from main; Apple M5 Pro, median of 15 interleaved runs) went from
-  57.9 to 67.0 M msg/s; bench-core's `fanin_main_burst` from 16.3-17.0 to
-  14.8-15.3 ns/msg, the send and ping-pong rows unchanged.
+  is the barrier it was. The core also puts a run of one actor's messages
+  into its mailbox as many at once as fit, with one store of the count,
+  where it stored it once per message, when nothing waits in the actor's
+  overflow. The cross-language counting benchmark (one actor, messages from
+  main; Apple M5 Pro, median of 15 interleaved runs) went from 55.3 to 73.3 M
+  msg/s; bench-core's `fanin_main_burst` from 16.4-17.0 to 12.5-13.3 ns/msg
+  and `fanin_8_actors` from 69.0-69.7 to 61.2-64.8, the send, ask and
+  ping-pong rows unchanged.
