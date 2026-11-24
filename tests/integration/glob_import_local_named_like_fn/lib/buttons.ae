@@ -1,0 +1,9 @@
+// A module exporting a function the importer also uses as a local's name.
+exports(button)
+
+var text: string[] = []
+
+button(t: string) -> int {
+    text.push(t)
+    return text.len
+}

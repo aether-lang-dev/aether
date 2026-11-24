@@ -408,3 +408,5 @@ tests/integration/http_server_h2_drain_host/
 # deadline.ae runs from its driver, which also runs it with BROKEN_CANCELLER=1
 # to show the descriptor race check can fail.
 tests/integration/tcp_deadline_cancel/
+# shadowed.ae is an E0301 fixture; test_glob_import_local_named_like_fn.sh runs both.
+tests/integration/glob_import_local_named_like_fn/

@@ -5781,13 +5781,48 @@ static int prune_is_function_scope(const ASTNode* node) {
            node->type == AST_MAIN_FUNCTION;
 }
 
+/* The function the walk is in: every name it binds (`locals`), and the
+ * ones bound so far in source order (`bound`), as far as the walk can
+ * tell: a block's bindings are dropped as it ends. */
+typedef struct {
+    NameSet locals;
+    const char** bound;
+    int bound_count;
+    int bound_cap;
+} PruneScope;
+
 /* A bare (undotted) name the enclosing function binds as a local. */
-static int prune_is_local(const NameSet* locals, const char* name) {
-    return locals && !strchr(name, '.') && nameset_contains(locals, name);
+static int prune_is_local(const PruneScope* scope, const char* name) {
+    return scope && !strchr(name, '.') && nameset_contains(&scope->locals, name);
+}
+
+/* Is the local `name` bound at this point of the walk? A call spelt like a
+ * local is a call through it only from its binding on: in `button =
+ * button(t)` the call on the right comes first and is the function, as
+ * the checker resolves it (docs/language-reference.md: a new local shadows
+ * a function of that name "for the rest of its scope"). Taken for the
+ * local, the call seeded nothing and the prune dropped the function its
+ * C still called. A binding the walk cannot place (one not at the level of
+ * a block, say) counts as unbound, which only seeds more. */
+static int prune_is_bound(const PruneScope* scope, const char* name) {
+    for (int i = scope ? scope->bound_count - 1 : -1; i >= 0; i--)
+        if (strcmp(scope->bound[i], name) == 0) return 1;
+    return 0;
+}
+
+static void prune_bind(PruneScope* scope, const char* name) {
+    if (scope->bound_count >= scope->bound_cap) {
+        int new_cap = scope->bound_cap ? scope->bound_cap * 2 : 16;
+        const char** nb = realloc(scope->bound, sizeof(const char*) * (size_t)new_cap);
+        if (!nb) return;   /* unbound: seeds more, never less */
+        scope->bound = nb;
+        scope->bound_cap = new_cap;
+    }
+    scope->bound[scope->bound_count++] = name;
 }
 
 static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
-                                   const NameSet* locals, int in_dsl_block);
+                                   PruneScope* scope, int in_dsl_block);
 
 static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklist) {
     prune_collect_calls_in(node, seen, worklist, NULL, 0);
@@ -5798,8 +5833,9 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklis
  * of the enclosing function's names (#333): such a call is a reference to
  * every function it may name, a local's name included. */
 static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
-                                   const NameSet* locals, int in_dsl_block) {
+                                   PruneScope* scope, int in_dsl_block) {
     if (!node) return;
+    int bound_mark = scope ? scope->bound_count : 0;
     /* A `hide` / `seal except` list names what a block may reach; it calls
      * nothing. Walked, `seal except bytes` kept every bytes function a
      * name matched, so a seal changed what reached the C. */
@@ -5813,8 +5849,8 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
         return;
     }
     if (prune_is_function_scope(node)) {
-        NameSet own = {0};
-        prune_collect_locals(node, &own);
+        PruneScope own = {0};
+        prune_collect_locals(node, &own.locals);
         for (int i = 0; i < node->child_count; i++) {
             prune_collect_calls_in(node->children[i], seen, worklist, &own, in_dsl_block);
         }
@@ -5823,11 +5859,13 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
                 namestack_push(worklist, node->annotation);
             }
         }
-        nameset_free(&own);
+        nameset_free(&own.locals);
+        free(own.bound);
         return;
     }
     if (node->type == AST_FUNCTION_CALL && node->value &&
-        (in_dsl_block || !prune_is_local(locals, node->value))) {
+        (in_dsl_block || !prune_is_local(scope, node->value) ||
+         !prune_is_bound(scope, node->value))) {
         if (nameset_add(seen, node->value)) {
             namestack_push(worklist, node->value);
         }
@@ -5866,7 +5904,7 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
     // every identifier name is a sound over-approximation: non-function
     // names won't match any function definition and harmlessly dead-end.
     if (node->type == AST_IDENTIFIER && node->value &&
-        !prune_is_local(locals, node->value)) {
+        !prune_is_local(scope, node->value)) {
         if (nameset_add(seen, node->value)) {
             namestack_push(worklist, node->value);
         }
@@ -5913,7 +5951,15 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
         int dsl = in_dsl_block ||
                   (node->type == AST_FUNCTION_CALL && node->value &&
                    strchr(node->value, '.') && ast_is_trailing_block(c));
-        prune_collect_calls_in(c, seen, worklist, locals, dsl);
+        prune_collect_calls_in(c, seen, worklist, scope, dsl);
+    }
+    /* What the node bound inside it ends with it; a binding itself stays
+     * bound for the rest of its block (its initialiser, walked above, came
+     * before it). */
+    if (scope) {
+        scope->bound_count = bound_mark;
+        if (prune_binds_name(node) && !strchr(node->value, '.'))
+            prune_bind(scope, node->value);
     }
 }
 

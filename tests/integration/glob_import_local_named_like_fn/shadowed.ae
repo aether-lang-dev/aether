@@ -1,0 +1,7 @@
+import buttons(*)
+
+main() {
+    button = 0
+    button = button("a")
+    println(button)
+}
