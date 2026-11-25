@@ -1,0 +1,8 @@
+// A fault set, returned by the module's own function.
+fault Missing, Denied
+
+probe(k: int) -> string! {
+    if k == 1 { return "", Missing }
+    if k == 2 { return "", Denied }
+    return "found"
+}

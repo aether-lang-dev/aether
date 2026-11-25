@@ -1,0 +1,19 @@
+// Only selective imports: cmath, std.math, probe and pinger are reached
+// through them (and cmath and std.math through roots), never imported by
+// the program.
+import cmath(cmath_sine)
+import std.math(math_sin)
+import roots(root, std_root)
+import probe(probe)
+import pinger(kick)
+
+ms(x: float) -> float { return cmath_sine(root(x)) }
+std_ms(x: float) -> float { return math_sin(std_root(x)) }
+
+why(k: int) -> string {
+    v, err = probe(k)
+    if err != "" { return "${err}" }
+    return v
+}
+
+ping(n: int) { kick(n) }
