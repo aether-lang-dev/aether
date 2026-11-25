@@ -11,10 +11,12 @@
 // This program is the upstream. On a kept client connection a GET leaves an
 // upstream connection in the proxy's pool. The next GET reaches the upstream
 // on it, which closes it unanswered; the proxy sends the GET again on a
-// fresh connection, and the upstream closes that one with the request
-// unread, which resets it. The client must get 502 with a body naming the
-// reset. Through a bare proxy (the event loop on Linux and macOS) and
-// through one behind a program's middleware (the worker path). Every socket
+// fresh connection, and the upstream resets that one once the request is in
+// it (tcp.close_reset: a close with the request unread resets on Linux and
+// macOS but ends with a FIN on FreeBSD, read there as a bare close). The
+// client must get 502 with a body naming the reset. Through a bare proxy
+// (the event loop on Linux and macOS) and through one behind a program's
+// middleware (the worker path). Every socket
 // is on 127.0.0.1 and a port the kernel picks.
 
 import std.http
@@ -143,7 +145,7 @@ main() {
         first = status(read_until(k, "\r\n\r\n", 3000))
 
         // The pooled connection ends unanswered, and the retry's fresh one
-        // is closed with the request in it unread: a reset.
+        // is reset with the request in it unread.
         tcp.write(k, GET)
         _again = read_until(up, "\r\n\r\n", 3000)
         tcp.close(up)
@@ -155,7 +157,7 @@ main() {
             if !arrived {
                 how = "retry carried nothing"
             }
-            tcp.close(retry)
+            tcp.close_reset(retry)
         }
         wire = read_until(k, "reset", 3000)
         tcp.close(k)

@@ -79,6 +79,8 @@ int tcp_reset_raw(TcpSocket* sock);
 //   tcp_reset_raw is, for the pure-Aether TLS client's send.
 int tcp_send_timed_out_raw(TcpSocket* sock);
 int tcp_close(TcpSocket* sock);
+// Close with a reset (RST, SO_LINGER 0) instead of a FIN; frees the handle.
+int tcp_close_reset_raw(TcpSocket* sock);
 
 // Unix-domain stream sockets, as the same TcpSocket / TcpServer handles, so
 // every read, write, poll and close above works on them unchanged.

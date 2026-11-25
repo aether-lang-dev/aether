@@ -6,7 +6,7 @@
 
 exports(
     tcp_connect_raw, tcp_connect_buffered_raw, tcp_connect_timeout_raw, tcp_send_raw,
-    tcp_receive_raw, tcp_receive_n_raw, tcp_close,
+    tcp_receive_raw, tcp_receive_n_raw, tcp_close, tcp_close_reset_raw,
     tcp_listen_raw, tcp_listen_on_raw, tcp_accept_raw, tcp_server_close,
     tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw, tcp_set_read_buffer_raw,
     tcp_available_raw, tcp_connect_unix_raw, tcp_listen_unix_raw,
@@ -16,7 +16,7 @@ exports(
     listen, listen_on, accept, fd, server_fd,
     server_port, server_poll, set_nodelay, set_read_buffer, available, poll, poll2,
     wait_writable, write_some,
-    close_drained,
+    close_drained, close_reset,
     // Deadlines and cancellation (docs/design/tcp-tls-deadlines-and-cancellation.md)
     tcp_connect_until_raw, tcp_set_deadline_raw, tcp_deadline_raw, tcp_stop_raw,
     tcp_cancel_new_raw, tcp_cancel_raw, tcp_cancel_tripped_raw, tcp_cancel_retain_raw, tcp_cancel_free_raw,
@@ -46,6 +46,7 @@ extern tcp_send_bytes_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_send_all_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_receive_into_raw(sock: ptr, buf: ptr, cap: int) -> int
 extern tcp_close(sock: ptr) -> int
+extern tcp_close_reset_raw(sock: ptr) -> int
 extern tcp_listen_raw(port: int) -> ptr
 extern tcp_listen_on_raw(address: string, port: int) -> ptr
 extern tcp_server_port_raw(server: ptr) -> int
@@ -375,6 +376,18 @@ poll2(a: ptr, b: ptr, timeout_ms: int) -> {
     a_ready = (rc & 1) != 0
     b_ready = (rc & 2) != 0
     return a_ready, b_ready, ""
+}
+
+// Close `sock` with a reset instead of an orderly close: the peer's next
+// read or write fails with "connection reset" rather than seeing the end of
+// the stream, and anything still queued to send is dropped. Closing with
+// bytes unread resets on Linux, macOS and Windows but not on FreeBSD; this
+// resets everywhere. For a test peer that must fail a connection the hard
+// way; a plain close is tcp.close.
+close_reset(sock: ptr) {
+    if sock != null {
+        tcp_close_reset_raw(sock)
+    }
 }
 
 // Close `sock` once what the peer has already sent is read and dropped. A

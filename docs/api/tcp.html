@@ -22,6 +22,7 @@
     <li><a href="#receive_raw">receive_raw</a></li>
     <li><a href="#receive_n_raw">receive_n_raw</a></li>
     <li><a href="#close">close</a></li>
+    <li><a href="#close_reset_raw">close_reset_raw</a></li>
     <li><a href="#listen_raw">listen_raw</a></li>
     <li><a href="#listen_on_raw">listen_on_raw</a></li>
     <li><a href="#accept_raw">accept_raw</a></li>
@@ -68,6 +69,7 @@
     <li><a href="#wait_writable">wait_writable</a></li>
     <li><a href="#write_some">write_some</a></li>
     <li><a href="#close_drained">close_drained</a></li>
+    <li><a href="#close_reset">close_reset</a></li>
     <li><a href="#connect_until_raw">connect_until_raw</a></li>
     <li><a href="#set_deadline_raw">set_deadline_raw</a></li>
     <li><a href="#deadline_raw">deadline_raw</a></li>
@@ -229,6 +231,11 @@
     <div class="function" id="close" data-name="close">
       <h3 class="function-name">close <span class="kind">extern</span></h3>
       <pre class="usage"><code>close(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+    </div>
+    <div class="function" id="close_reset_raw" data-name="close_reset_raw">
+      <h3 class="function-name">close_reset_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>close_reset_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr</span></p>
     </div>
     <div class="function" id="listen_raw" data-name="listen_raw">
@@ -487,6 +494,12 @@
       <pre class="usage"><code>close_drained(sock)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr</span></p>
       <p class="doc">Close `sock` once what the peer has already sent is read and dropped. A socket closed with bytes unread ends with a reset, and a peer that gets one may discard what it had not read yet: an alert just sent, which the peer then sees as a bare close. Bounded: at most 256 KiB, and 5 ms for each more to arrive. For the close after an error the peer must still read (the pure TLS stack's, #3368); a plain close is tcp.close.</p>
+    </div>
+    <div class="function" id="close_reset" data-name="close_reset">
+      <h3 class="function-name">close_reset <span class="kind">fn</span></h3>
+      <pre class="usage"><code>close_reset(sock)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+      <p class="doc">Close `sock` with a reset instead of an orderly close: the peer's next read or write fails with &quot;connection reset&quot; rather than seeing the end of the stream, and anything still queued to send is dropped. Closing with bytes unread resets on Linux, macOS and Windows but not on FreeBSD; this resets everywhere. For a test peer that must fail a connection the hard way; a plain close is tcp.close.</p>
     </div>
     <div class="function" id="connect_until_raw" data-name="connect_until_raw">
       <h3 class="function-name">connect_until_raw <span class="kind">extern</span></h3>

@@ -26,6 +26,7 @@ int tcp_receive_into_raw(TcpSocket* s, void* b, int c) { (void)s; (void)b; (void
 int tcp_reset_raw(TcpSocket* s) { (void)s; return 0; }
 int tcp_send_timed_out_raw(TcpSocket* s) { (void)s; return 0; }
 int tcp_close(TcpSocket* s) { (void)s; return 0; }
+int tcp_close_reset_raw(TcpSocket* s) { (void)s; return 0; }
 TcpOpenResult tcp_connect_unix_raw(const char* p) {
     (void)p;
     TcpOpenResult out = { NULL, "networking disabled at build time" };
@@ -1370,6 +1371,22 @@ int tcp_close(TcpSocket* sock) {
 
     free(sock);
     return 0;
+}
+
+/* Close with a reset (RST) instead of an orderly FIN: SO_LINGER on with a
+ * zero timeout drops what is queued to send and resets the connection, so
+ * the peer's next read fails with ECONNRESET. A socket closed with bytes
+ * unread resets on Linux, macOS and Windows but closes with a FIN on
+ * FreeBSD; this resets on every platform. Frees the handle as tcp_close. */
+int tcp_close_reset_raw(TcpSocket* sock) {
+    if (!sock) return -1;
+    if (sock->fd >= 0) {
+        struct linger lg;
+        lg.l_onoff = 1;
+        lg.l_linger = 0;
+        (void)setsockopt(sock->fd, SOL_SOCKET, SO_LINGER, (const char*)&lg, sizeof(lg));
+    }
+    return tcp_close(sock);
 }
 
 /* One listener for both entry points (#2136). `address` NULL means every
