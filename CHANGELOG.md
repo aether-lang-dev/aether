@@ -14,6 +14,48 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.945.0]
+
+### Fixed
+
+- **A struct literal's field is no longer renamed after a module `var` of
+  the same name.** A module with `var size` and a struct field `size` had
+  every `Font { size: 2 }` (in its own functions, and in a file that
+  glob-imports it) lowered to a field `<module>_size` the struct does not
+  have: the merge took the field initialiser for a write to the var. The
+  field of a struct literal or a struct pattern is never a variable.
+
+- **`import m (*)` binds what `m` exports, not its private `var`s.** The
+  glob bound every name of the module, a private module-level `var text`
+  included, so an importer's own loop variable or local `text` was the
+  module's cell (`m_text = <a string>` on a `string[]`, failing in the C,
+  or a silent write to the module's state). A glob now binds only what
+  the module's `exports (…)` list names (everything, without a list), in
+  a program and in a module that glob-imports another, and a write to a
+  module `var` is renamed to the module's cell only when the import binds
+  that var.
+
+- **A local named like an imported function no longer breaks the build.**
+  After `import m (*)` (or `import m (button)`), `button = button(t)` in a
+  loop called an undeclared `m_button` in the C: the dead-code prune read
+  the right-hand call as a call through the local and dropped the
+  function. A call before the local's binding is the function again, and
+  one after it, which the checker used to take for the import as well, is
+  now E0301 "'button' is a local here, which hides the imported function
+  'm.button'", as for a program's own function (#2683).
+
+- **A macOS `--emit=lib` cross build from Linux or FreeBSD is now a loadable
+  dylib.** zig spells the macOS targets `aarch64-macos-none`, with no
+  "-apple-" in them, so the cross link took them for ELF: no install name
+  (zig recorded the `-o` build path as the dylib's id, and every program
+  linked against it failed with "Library not loaded"), GNU strip flags under
+  `--size`, and zig's default minimum of macOS 15.0. Every Apple spelling now
+  links as Mach-O: `-dynamiclib -install_name @rpath/<leaf>`, as the native
+  macOS build sets it, and Apple ld's `-x -dead_strip`. Every macOS cross build
+  is stamped with an explicit minimum, macOS 13.0 by default, overridden with
+  `AETHER_MACOS_MIN`. A Mac host had hidden the id half by rewriting it with
+  install_name_tool afterwards.
+
 ## [0.944.0]
 
 ### Changed
