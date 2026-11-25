@@ -14,6 +14,49 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.946.0]
+
+### Added
+
+- **`tcp.close_reset(sock)` closes a connection with a reset on every
+  platform.** Closing a socket with bytes unread resets the connection on
+  Linux, macOS and Windows, but FreeBSD ends it with an orderly FIN, so a
+  peer written to fail a connection the hard way could not do it there:
+  the reverse proxy's reset test saw a bare close on FreeBSD and its 502 did
+  not name the reset. `close_reset` sets `SO_LINGER` with a zero timeout and
+  closes, so the peer's next read or write fails with "connection reset"
+  wherever it runs.
+
+### Fixed
+
+- **A trailing block on a discarded call runs.** `_ = f() { ... }` emitted
+  the call alone and dropped its block without a word, while the same call
+  bound to a name ran the block with the value as its context. The discard
+  now runs the block the same way, then throws the value away, freeing a
+  fresh string.
+
+- **A module reached only through selective imports keeps its `@extern`s,
+  fault sets, messages and actors.** With `import std.math (math_sin)` and
+  `import a (sq)` in one module, `a`'s own `math.sqrt(x)` failed with E0301
+  "Undefined function"; a fault the module returned was E0300 "Undefined
+  variable", and an actor it spawned "Undefined function 'spawn_X'". A
+  module the program reaches only through other modules' imports is merged
+  by the transitive pass, which kept its own copy of the merge with only
+  functions, constants and types in it. A bare import anywhere on the path
+  merged the module directly and hid the gap. 0.944.0 made std.math's
+  `sqrt`, `floor`, `ceil`, `round`, `abs`, `min`, `max` and `clamp`
+  `@extern`s, which is what exposed it. Both passes now merge a module
+  through one function.
+
+- **A local lasts to the end of its function, and the checker says so
+  (#3872).** A local first bound in a loop or `if` body hid the function of
+  its name to the end of the function in the generated C, but the checker
+  let a call of the function after that body through, and it failed in the
+  C compiler on an undeclared `ae_local_<name>`. Such a call is now E0301,
+  as one after a binding in the function's own body was. A closure's own
+  local no longer hides the function after the closure: codegen renamed the
+  call there too, the same C failure.
+
 ## [0.945.0]
 
 ### Fixed
