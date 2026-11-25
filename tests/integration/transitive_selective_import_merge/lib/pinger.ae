@@ -1,0 +1,14 @@
+// A message and an actor, spawned by the module's own function.
+message Ping { n: int }
+
+actor Pinger {
+    receive {
+        Ping(n) -> { println("ping ${n}") }
+    }
+}
+
+kick(n: int) {
+    p = spawn(Pinger())
+    p ! Ping { n: n }
+    wait_for_idle()
+}

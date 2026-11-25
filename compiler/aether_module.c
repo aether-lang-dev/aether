@@ -4766,6 +4766,310 @@ static ASTNode* ss_clone_struct(ASTNode* program, ASTNode* decl, AetherModule* m
     return clone;
 }
 
+/* Is `decl` an `@extern("c_symbol") name(...)` of a module? Such a
+ * declaration is part of the module's public surface (#234), unlike a bare
+ * `extern` C binding, which stays private, so the merge clones it like a
+ * function. */
+static int is_c_symbol_extern(const ASTNode* decl) {
+    return decl && decl->type == AST_EXTERN_FUNCTION && decl->value && decl->annotation &&
+           strncmp(decl->annotation, "c_symbol:", 9) == 0;
+}
+
+/* The clone of module `m`'s `@extern("c_symbol") name(...)`, as
+ * `<ns>_<name>`, or NULL when the program has it already (a module reached
+ * twice must not declare it twice). The clone keeps the `c_symbol:`
+ * annotation, so codegen still forwards every call to the chosen C symbol;
+ * only the Aether-side name is namespace-prefixed, so a qualified
+ * `ns.name(...)` resolves. This is the path that makes a variadic `@extern`
+ * (std.strbuilder's `append_format`) reachable cross-module: an ordinary
+ * wrapper cannot forward a `...` tail. */
+static ASTNode* clone_c_symbol_extern(ASTNode* program, ASTNode* decl, AetherModule* m,
+                                      const char* ns) {
+    char* prefixed = mod_strf("%s_%s", ns, decl->value);
+    /* #3546: from the program's index. */
+    if (ast_decl_kinds(program, prefixed) & DECL_EXTERN) {
+        free(prefixed);
+        return NULL;
+    }
+    ASTNode* clone = clone_ast_node(decl);
+    free(clone->value);
+    clone->value = prefixed;
+    /* Merged, not the program's own (#2632 reads the mark). */
+    stamp_origin(clone, m);
+    ss_scope_node(clone, m);
+    return clone;
+}
+
+/* Merge every declaration of module `mod` (namespace `ns`) into the
+ * program at *insert_idx, advancing it: its functions and `@extern`s under
+ * their merged C names, its constants, faults and types. The one path for
+ * a direct import and a module reached only through other modules'
+ * imports: the transitive pass kept a copy of it, which lacked the
+ * `@extern`s, fault sets, messages, protocols and actors a direct import
+ * merges, so a module reached only through selective imports lost them. */
+static void merge_module_decls(ASTNode* program, AetherModule* mod, const char* ns,
+                               int* insert_idx) {
+    ASTNode* mod_ast = mod->ast;
+    MergePass pass = {0};
+    for (int j = 0; j < mod_ast->child_count; j++) {
+        ASTNode* decl = unwrap_export(mod_ast->children[j]);
+
+        if ((decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) && decl->value) {
+            // Build prefixed name: "double_it" -> "mymath_double_it",
+            // apart from an extern of the module (#2978).
+            char* prefixed = merged_function_name(ns, mod_ast, decl->value);
+
+            // Skip if already merged (e.g. from a prior non-selective
+            // import); every clause of a set is merged (#2643).
+            if (program_has_function_before(program, prefixed, &pass)) {
+                free(prefixed);
+                continue;
+            }
+
+            ASTNode* clone = clone_ast_node(decl);
+            free(clone->value);
+            clone->value = prefixed;
+            // Mark as imported so codegen emits this function with the
+            // C `static` storage class. Each translation unit that
+            // imports the same module gets its own private copy, and
+            // the linker no longer sees them as duplicate symbols
+            // when several .o files are linked together (e.g. macOS
+            // ld64, which does not support --allow-multiple-definition).
+            clone->is_imported = 1;
+            stamp_origin(clone, mod);
+            stamp_written_name(clone, ns, decl->value);   /* #2978 */
+
+            // Rename intra-module function calls and constant refs within the cloned body
+            rename_intra_module_refs(clone, ns, module_func_names(mod),
+                                     module_const_names(mod), NULL);
+            // Also rewrite bare-name calls to selectively-imported
+            // names from M's own `import X (a, b)` statements — see
+            // apply_inherited_selective_imports comment for why.
+            apply_inherited_selective_imports(clone, mod_ast);
+            ss_scope_node(clone, mod);
+
+            insert_child_at(program, clone, (*insert_idx)++);
+            merge_pass_add(&pass, clone);
+        } else if (is_c_symbol_extern(decl)) {
+            ASTNode* clone = clone_c_symbol_extern(program, decl, mod, ns);
+            if (clone) insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_CONST_DECLARATION && decl->value) {
+            /* Constants and module-level `var`s (#701) merge whatever the
+             * import selects: the module's functions read them (#1573:
+             * `import std.spec (fail)` failed with "Undefined variable
+             * 'spec_current_fw'"), and every one of its functions is now
+             * merged (#2613). */
+
+            // Skip if already merged (e.g. from a prior import of the same
+            // module, or a synthetic revisit — aether#1009). Without this
+            // the const is cloned twice → duplicate C definition.
+            char* prefixed = mod_strf("%s_%s", ns, decl->value);
+            if (program_has_const(program, prefixed)) {
+                free(prefixed);
+                continue;
+            }
+
+            // Clone and rename constants too
+            ASTNode* clone = clone_ast_node(decl);
+            free(clone->value);
+            clone->value = prefixed;
+            stamp_origin(clone, mod);
+
+            // Rename references to other module constants in the value expression
+            rename_intra_module_refs(clone, ns, module_func_names(mod),
+                                     module_const_names(mod), NULL);
+            apply_inherited_selective_imports(clone, mod_ast);
+            ss_scope_node(clone, mod);
+
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_FAULT_DEFINITION) {
+            /* #error-unification P3: a fault set imported from module `ns`.
+             * Mirror the const branch: clone the definition, prefix each
+             * member's C symbol to `<ns>_<name>` (so the member-access
+             * rewrite resolves `ns.Name` → that identifier, exactly like a
+             * const), and rewrite each member's interned string CONTENT to
+             * the qualified `"<ns>.<name>"` (so cross-module identity is
+             * unambiguous — two modules' same-named faults no longer
+             * compare equal by content). The parser/typecheck-registration/
+             * codegen stages already consume AST_FAULT_DEFINITION with this
+             * exact `<ns>_<name>` symbol / `<ns>.<name>` content contract;
+             * this branch is the piece that fulfils it. */
+            ASTNode* clone = clone_ast_node(decl);
+            int kept = 0;
+            for (int mi = 0; mi < clone->child_count; mi++) {
+                ASTNode* mem = clone->children[mi];
+                if (!mem || !mem->value) {
+                    free_ast_node(mem);
+                    continue;
+                }
+                /* Every member, whatever a selective import names: the
+                 * module's own functions may return any of them (#2613). */
+                char* sym = mod_strf("%s_%s", ns, mem->value);
+                if (program_has_fault_member(program, sym)) {
+                    free(sym);
+                    free_ast_node(mem);
+                    continue;
+                }
+                char* qualified = mod_strf("%s.%s", ns, mem->value);
+                /* Rewrite the interned content (children[0], an
+                 * AST_LITERAL) to the qualified name, then the symbol. */
+                if (mem->child_count > 0 && mem->children[0] &&
+                    mem->children[0]->value) {
+                    free(mem->children[0]->value);
+                    mem->children[0]->value = strdup(qualified);
+                }
+                free(qualified);
+                free(mem->value);
+                mem->value = sym;
+                /* Compact surviving members down over filtered/duped ones. */
+                clone->children[kept++] = mem;
+            }
+            clone->child_count = kept;
+            if (kept > 0) {
+                insert_child_at(program, clone, (*insert_idx)++);
+            } else {
+                free_ast_node(clone);
+            }
+        } else if (decl->type == AST_STRUCT_DEFINITION && decl->value) {
+            // Struct definitions from imported modules enter the
+            // consumer's program AST. Closes the cross-`import` struct
+            // visibility gap that blocked the opaque-handle pattern: a
+            // module exposing `new_slot() -> ptr` whose body does
+            // `s = raw as *Slot` failed to typecheck once imported,
+            // because the consumer's symbol table lacked `Slot`.
+            //
+            // Bypasses the selective-import filter on purpose: a
+            // function body that casts to `*Slot` cannot type-check
+            // without the struct in scope, so even
+            // `import handle (new_slot)` must pull in `Slot`.
+            //
+            // Module-scoped: merged as `<ns>_<Name>` (ss_build_table),
+            // so two modules' same-named structs are two types; the
+            // same struct reached twice is merged once, as is one
+            // identical to an earlier definition (#2129).
+            ASTNode* clone = ss_clone_struct(program, decl, mod);
+            if (!clone) continue;
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_DISTINCT_TYPE_DEF && decl->value) {
+            // #908: `type X = distinct Base` from an imported module must
+            // enter the consumer's program AST (bare name, like structs)
+            // so resolve_distinct_types learns `X` and rewrites every
+            // `expr as X` / `x as Base` reference inside the merged
+            // constructor/unwrap/builder-child functions. Without this the
+            // imported distinct stays an unresolved TYPE_STRUCT{X}
+            // placeholder: the `as` cast fails its kind check ("cannot
+            // cast X to Base") and codegen emits an unknown C type `X`.
+            // Bypasses the selective-import filter on purpose (same as
+            // structs): a merged body that casts to/from `X` cannot
+            // type-check without the def in scope.
+            if (program_has_distinct(program, decl->value)) continue;
+            ASTNode* clone = clone_ast_node(decl);
+            clone->is_imported = 1;
+            ss_scope_node(clone, mod);
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_CFN_TYPE_DEF && decl->value) {
+            // #2200: a `cfn Name(...) -> R` from an imported module enters
+            // the consumer's program AST (bare name, like distincts) so
+            // resolve_cfn_types learns `Name` and rewrites the `x: Name`
+            // annotations and `p as Name` casts inside the merged bodies.
+            // Bypasses the selective-import filter on purpose, same as
+            // structs: a merged body cannot type-check without it.
+            if (program_has_cfn(program, decl->value)) continue;
+            ASTNode* clone = clone_ast_node(decl);
+            clone->is_imported = 1;
+            ss_scope_node(clone, mod);
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_BITSTRUCT_DEFINITION && decl->value) {
+            // A `bitstruct Name : <backing> { ... }` from an imported module
+            // must enter the consumer's program AST (bare name, like structs
+            // and distinct types) so resolve_bitstruct_types registers it and
+            // codegen emits its `typedef <backing> Name;`. Without this the
+            // imported bitstruct is unknown to both passes: the `word as
+            // Name` cast in the module's own (merged) function fails its kind
+            // check, and codegen emits a prototype referencing `Name` with no
+            // typedef ("unknown type name 'Name'"). Bypasses the selective-
+            // import filter on purpose (same as structs/distincts): a merged
+            // body that casts to/reads a field of the bitstruct cannot
+            // type-check without the def in scope. Dedup by name.
+            if (program_has_bitstruct(program, decl->value)) continue;
+            ASTNode* clone = clone_ast_node(decl);
+            clone->is_imported = 1;
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_ENUM_DEFINITION && decl->value) {
+            // An `enum X { ... }` from an imported module must enter the
+            // consumer's program AST (bare name, like structs/bitstructs) so
+            // the typechecker's enum registry learns `X` (resolving `X.Member`
+            // selectors and `match` arms) and codegen emits its typedef.
+            // Without this an imported enum used by name fails: `Undefined
+            // variable 'X'` at type-check, or `unknown type name 'X'` in the
+            // emitted C. Bypasses the selective-import filter (same as
+            // structs): a merged body over the enum can't type-check without
+            // the def in scope. Dedup by name.
+            if (program_has_enum(program, decl->value)) continue;
+            ASTNode* clone = clone_ast_node(decl);
+            clone->is_imported = 1;
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_SUM_TYPE_DEF && decl->value) {
+            // A `type X = A | B | C` sum type from an imported module enters
+            // the consumer's program AST (bare name) so its variant names and
+            // typedef resolve on both the type-check and codegen sides. Same
+            // failure/fix shape as enums/structs. Dedup by name.
+            if (program_has_sum(program, decl->value)) continue;
+            ASTNode* clone = clone_ast_node(decl);
+            clone->is_imported = 1;
+            ss_scope_node(clone, mod);
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_MESSAGE_DEFINITION && decl->value) {
+            // #1006: `message X { ... }` from an imported module enters the
+            // consumer's program AST under its bare name (like structs), so
+            // `actor ! X { ... }` sends and `receive { X(..) -> }` patterns
+            // resolve, and codegen assigns X a runtime message-type id from
+            // the (per-program) message registry. Bypasses the selective-
+            // import filter on purpose: an imported actor's handlers cannot
+            // type-check without their message types in scope. Dedup by
+            // name; a different definition under the same name is a
+            // clash, reported (#2129).
+            if (definition_already_merged(program, decl, "message")) continue;
+            ASTNode* clone = clone_ast_node(decl);
+            clone->is_imported = 1;
+            ss_scope_node(clone, mod);
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_PROTOCOL_DEFINITION && decl->value) {
+            // #385: a `protocol` enters under its bare name, as the
+            // messages it names do, so an imported actor that implements
+            // it and an `actor_ref[P]` written by the importer resolve.
+            if (definition_already_merged(program, decl, "protocol")) continue;
+            ASTNode* clone = clone_ast_node(decl);
+            clone->is_imported = 1;
+            insert_child_at(program, clone, (*insert_idx)++);
+        } else if (decl->type == AST_ACTOR_DEFINITION && decl->value) {
+            // #1006: `actor X { ... }` from an imported module enters the
+            // consumer's program AST under its bare name. `spawn(X())`
+            // lowers to a `spawn_X` call and message sends reference bare
+            // message names, so the consumer needs the actor (and its
+            // messages, handled above) in scope by bare name. Bypasses the
+            // selective-import filter (same reasoning as structs/messages).
+            // Dedup by name; a second actor of the same name from another
+            // module is a clash, reported (#2129).
+            if (definition_already_merged(program, decl, "actor")) continue;
+            ASTNode* clone = clone_ast_node(decl);
+            clone->is_imported = 1;
+            stamp_origin(clone, mod);
+            // Unlike structs, an actor has a body: its receive handlers may
+            // call module-local functions or read module constants, which
+            // were cloned above under their `<ns>_` prefixed names. Rewrite
+            // those references so they resolve, exactly as function bodies do.
+            rename_intra_module_refs(clone, ns, module_func_names(mod),
+                                     module_const_names(mod), NULL);
+            apply_inherited_selective_imports(clone, mod_ast);
+            ss_scope_node(clone, mod);
+            insert_child_at(program, clone, (*insert_idx)++);
+        }
+        // Skip AST_MAIN_FUNCTION, AST_IMPORT_STATEMENT, etc.
+    }
+    merge_pass_free(&pass);
+}
+
 void module_merge_into_program(ASTNode* program) {
     if (!program || !global_module_registry) return;
     decl_index_drop(program);   /* #3546: indexed afresh for this merge */
@@ -4870,293 +5174,7 @@ void module_merge_into_program(ASTNode* program) {
         // selectively.
         inject_synthetic_bare_imports_from(program, mod_ast, &insert_idx);
 
-        MergePass pass = {0};
-        for (int j = 0; j < mod_ast->child_count; j++) {
-            ASTNode* decl = unwrap_export(mod_ast->children[j]);
-
-            if ((decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) && decl->value) {
-                // Build prefixed name: "double_it" -> "mymath_double_it",
-                // apart from an extern of the module (#2978).
-                char* prefixed = merged_function_name(ns, mod_ast, decl->value);
-
-                // Skip if already merged (e.g. from a prior non-selective
-                // import); every clause of a set is merged (#2643).
-                if (program_has_function_before(program, prefixed, &pass)) {
-                    free(prefixed);
-                    continue;
-                }
-
-                ASTNode* clone = clone_ast_node(decl);
-                free(clone->value);
-                clone->value = prefixed;
-                // Mark as imported so codegen emits this function with the
-                // C `static` storage class. Each translation unit that
-                // imports the same module gets its own private copy, and
-                // the linker no longer sees them as duplicate symbols
-                // when several .o files are linked together (e.g. macOS
-                // ld64, which does not support --allow-multiple-definition).
-                clone->is_imported = 1;
-                stamp_origin(clone, mod);
-                stamp_written_name(clone, ns, decl->value);   /* #2978 */
-
-                // Rename intra-module function calls and constant refs within the cloned body
-                rename_intra_module_refs(clone, ns, module_func_names(mod),
-                                         module_const_names(mod), NULL);
-                // Also rewrite bare-name calls to selectively-imported
-                // names from M's own `import X (a, b)` statements — see
-                // apply_inherited_selective_imports comment for why.
-                apply_inherited_selective_imports(clone, mod_ast);
-                ss_scope_node(clone, mod);
-
-                insert_child_at(program, clone, insert_idx++);
-                merge_pass_add(&pass, clone);
-            } else if (decl->type == AST_EXTERN_FUNCTION && decl->value &&
-                       decl->annotation &&
-                       strncmp(decl->annotation, "c_symbol:", 9) == 0) {
-                // `@extern("c_symbol") name(...)` declarations are part
-                // of the module's public surface (issue #234) — unlike
-                // bare `extern` C bindings, which stay private. Clone
-                // them into the consumer just like Aether-native
-                // wrappers so a qualified `module.name(...)` call
-                // resolves. The clone keeps the `c_symbol:` annotation,
-                // so codegen still forwards every call to the chosen C
-                // symbol; only the Aether-side name is namespace-
-                // prefixed. This is the path that makes a variadic
-                // `@extern` (e.g. std.strbuilder's `append_format`)
-                // reachable cross-module — an ordinary wrapper cannot
-                // forward a `...` tail.
-                char* prefixed = mod_strf("%s_%s", ns, decl->value);
-
-                // Dedup — a module imported twice must not clone the
-                // extern twice (duplicate registry entries / prototypes).
-                // #3546: from the program's index.
-                if (ast_decl_kinds(program, prefixed) & DECL_EXTERN) {
-                    free(prefixed);
-                    continue;
-                }
-
-                ASTNode* clone = clone_ast_node(decl);
-                free(clone->value);
-                clone->value = prefixed;
-                /* Merged, not the program's own (#2632 reads the mark). */
-                stamp_origin(clone, mod);
-                ss_scope_node(clone, mod);
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_CONST_DECLARATION && decl->value) {
-                /* Constants and module-level `var`s (#701) merge whatever the
-                 * import selects: the module's functions read them (#1573:
-                 * `import std.spec (fail)` failed with "Undefined variable
-                 * 'spec_current_fw'"), and every one of its functions is now
-                 * merged (#2613). */
-
-                // Skip if already merged (e.g. from a prior import of the same
-                // module, or a synthetic revisit — aether#1009). Without this
-                // the const is cloned twice → duplicate C definition.
-                char* prefixed = mod_strf("%s_%s", ns, decl->value);
-                if (program_has_const(program, prefixed)) {
-                    free(prefixed);
-                    continue;
-                }
-
-                // Clone and rename constants too
-                ASTNode* clone = clone_ast_node(decl);
-                free(clone->value);
-                clone->value = prefixed;
-                stamp_origin(clone, mod);
-
-                // Rename references to other module constants in the value expression
-                rename_intra_module_refs(clone, ns, module_func_names(mod),
-                                         module_const_names(mod), NULL);
-                apply_inherited_selective_imports(clone, mod_ast);
-                ss_scope_node(clone, mod);
-
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_FAULT_DEFINITION) {
-                /* #error-unification P3: a fault set imported from module `ns`.
-                 * Mirror the const branch: clone the definition, prefix each
-                 * member's C symbol to `<ns>_<name>` (so the member-access
-                 * rewrite resolves `ns.Name` → that identifier, exactly like a
-                 * const), and rewrite each member's interned string CONTENT to
-                 * the qualified `"<ns>.<name>"` (so cross-module identity is
-                 * unambiguous — two modules' same-named faults no longer
-                 * compare equal by content). The parser/typecheck-registration/
-                 * codegen stages already consume AST_FAULT_DEFINITION with this
-                 * exact `<ns>_<name>` symbol / `<ns>.<name>` content contract;
-                 * this branch is the piece that fulfils it. */
-                ASTNode* clone = clone_ast_node(decl);
-                int kept = 0;
-                for (int mi = 0; mi < clone->child_count; mi++) {
-                    ASTNode* mem = clone->children[mi];
-                    if (!mem || !mem->value) {
-                        free_ast_node(mem);
-                        continue;
-                    }
-                    /* Every member, whatever a selective import names: the
-                     * module's own functions may return any of them (#2613). */
-                    char* sym = mod_strf("%s_%s", ns, mem->value);
-                    if (program_has_fault_member(program, sym)) {
-                        free(sym);
-                        free_ast_node(mem);
-                        continue;
-                    }
-                    char* qualified = mod_strf("%s.%s", ns, mem->value);
-                    /* Rewrite the interned content (children[0], an
-                     * AST_LITERAL) to the qualified name, then the symbol. */
-                    if (mem->child_count > 0 && mem->children[0] &&
-                        mem->children[0]->value) {
-                        free(mem->children[0]->value);
-                        mem->children[0]->value = strdup(qualified);
-                    }
-                    free(qualified);
-                    free(mem->value);
-                    mem->value = sym;
-                    /* Compact surviving members down over filtered/duped ones. */
-                    clone->children[kept++] = mem;
-                }
-                clone->child_count = kept;
-                if (kept > 0) {
-                    insert_child_at(program, clone, insert_idx++);
-                } else {
-                    free_ast_node(clone);
-                }
-            } else if (decl->type == AST_STRUCT_DEFINITION && decl->value) {
-                // Struct definitions from imported modules enter the
-                // consumer's program AST. Closes the cross-`import` struct
-                // visibility gap that blocked the opaque-handle pattern: a
-                // module exposing `new_slot() -> ptr` whose body does
-                // `s = raw as *Slot` failed to typecheck once imported,
-                // because the consumer's symbol table lacked `Slot`.
-                //
-                // Bypasses the selective-import filter on purpose: a
-                // function body that casts to `*Slot` cannot type-check
-                // without the struct in scope, so even
-                // `import handle (new_slot)` must pull in `Slot`.
-                //
-                // Module-scoped: merged as `<ns>_<Name>` (ss_build_table),
-                // so two modules' same-named structs are two types; the
-                // same struct reached twice is merged once, as is one
-                // identical to an earlier definition (#2129).
-                ASTNode* clone = ss_clone_struct(program, decl, mod);
-                if (!clone) continue;
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_DISTINCT_TYPE_DEF && decl->value) {
-                // #908: `type X = distinct Base` from an imported module must
-                // enter the consumer's program AST (bare name, like structs)
-                // so resolve_distinct_types learns `X` and rewrites every
-                // `expr as X` / `x as Base` reference inside the merged
-                // constructor/unwrap/builder-child functions. Without this the
-                // imported distinct stays an unresolved TYPE_STRUCT{X}
-                // placeholder: the `as` cast fails its kind check ("cannot
-                // cast X to Base") and codegen emits an unknown C type `X`.
-                // Bypasses the selective-import filter on purpose (same as
-                // structs): a merged body that casts to/from `X` cannot
-                // type-check without the def in scope.
-                if (program_has_distinct(program, decl->value)) continue;
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
-                ss_scope_node(clone, mod);
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_CFN_TYPE_DEF && decl->value) {
-                // #2200: a `cfn Name(...) -> R` from an imported module enters
-                // the consumer's program AST (bare name, like distincts) so
-                // resolve_cfn_types learns `Name` and rewrites the `x: Name`
-                // annotations and `p as Name` casts inside the merged bodies.
-                // Bypasses the selective-import filter on purpose, same as
-                // structs: a merged body cannot type-check without it.
-                if (program_has_cfn(program, decl->value)) continue;
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
-                ss_scope_node(clone, mod);
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_BITSTRUCT_DEFINITION && decl->value) {
-                // A `bitstruct Name : <backing> { ... }` from an imported module
-                // must enter the consumer's program AST (bare name, like structs
-                // and distinct types) so resolve_bitstruct_types registers it and
-                // codegen emits its `typedef <backing> Name;`. Without this the
-                // imported bitstruct is unknown to both passes: the `word as
-                // Name` cast in the module's own (merged) function fails its kind
-                // check, and codegen emits a prototype referencing `Name` with no
-                // typedef ("unknown type name 'Name'"). Bypasses the selective-
-                // import filter on purpose (same as structs/distincts): a merged
-                // body that casts to/reads a field of the bitstruct cannot
-                // type-check without the def in scope. Dedup by name.
-                if (program_has_bitstruct(program, decl->value)) continue;
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_ENUM_DEFINITION && decl->value) {
-                // An `enum X { ... }` from an imported module must enter the
-                // consumer's program AST (bare name, like structs/bitstructs) so
-                // the typechecker's enum registry learns `X` (resolving `X.Member`
-                // selectors and `match` arms) and codegen emits its typedef.
-                // Without this an imported enum used by name fails: `Undefined
-                // variable 'X'` at type-check, or `unknown type name 'X'` in the
-                // emitted C. Bypasses the selective-import filter (same as
-                // structs): a merged body over the enum can't type-check without
-                // the def in scope. Dedup by name.
-                if (program_has_enum(program, decl->value)) continue;
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_SUM_TYPE_DEF && decl->value) {
-                // A `type X = A | B | C` sum type from an imported module enters
-                // the consumer's program AST (bare name) so its variant names and
-                // typedef resolve on both the type-check and codegen sides. Same
-                // failure/fix shape as enums/structs. Dedup by name.
-                if (program_has_sum(program, decl->value)) continue;
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
-                ss_scope_node(clone, mod);
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_MESSAGE_DEFINITION && decl->value) {
-                // #1006: `message X { ... }` from an imported module enters the
-                // consumer's program AST under its bare name (like structs), so
-                // `actor ! X { ... }` sends and `receive { X(..) -> }` patterns
-                // resolve, and codegen assigns X a runtime message-type id from
-                // the (per-program) message registry. Bypasses the selective-
-                // import filter on purpose: an imported actor's handlers cannot
-                // type-check without their message types in scope. Dedup by
-                // name; a different definition under the same name is a
-                // clash, reported (#2129).
-                if (definition_already_merged(program, decl, "message")) continue;
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
-                ss_scope_node(clone, mod);
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_PROTOCOL_DEFINITION && decl->value) {
-                // #385: a `protocol` enters under its bare name, as the
-                // messages it names do, so an imported actor that implements
-                // it and an `actor_ref[P]` written by the importer resolve.
-                if (definition_already_merged(program, decl, "protocol")) continue;
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
-                insert_child_at(program, clone, insert_idx++);
-            } else if (decl->type == AST_ACTOR_DEFINITION && decl->value) {
-                // #1006: `actor X { ... }` from an imported module enters the
-                // consumer's program AST under its bare name. `spawn(X())`
-                // lowers to a `spawn_X` call and message sends reference bare
-                // message names, so the consumer needs the actor (and its
-                // messages, handled above) in scope by bare name. Bypasses the
-                // selective-import filter (same reasoning as structs/messages).
-                // Dedup by name; a second actor of the same name from another
-                // module is a clash, reported (#2129).
-                if (definition_already_merged(program, decl, "actor")) continue;
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
-                stamp_origin(clone, mod);
-                // Unlike structs, an actor has a body: its receive handlers may
-                // call module-local functions or read module constants, which
-                // were cloned above under their `<ns>_` prefixed names. Rewrite
-                // those references so they resolve, exactly as function bodies do.
-                rename_intra_module_refs(clone, ns, module_func_names(mod),
-                                         module_const_names(mod), NULL);
-                apply_inherited_selective_imports(clone, mod_ast);
-                ss_scope_node(clone, mod);
-                insert_child_at(program, clone, insert_idx++);
-            }
-            // Skip AST_MAIN_FUNCTION, AST_IMPORT_STATEMENT, etc.
-        }
-        merge_pass_free(&pass);
+        merge_module_decls(program, mod, ns, &insert_idx);
     }
 
     // Transitive cross-module merge (#243). When user code does
@@ -5232,7 +5250,6 @@ void module_merge_into_program(ASTNode* program) {
             AetherModule* dep_mod = module_find(dep_path);
             if (!dep_mod || !dep_mod->ast) continue;
 
-            ASTNode* mod_ast = dep_mod->ast;
             const char* ns = module_get_namespace(dep_path);
 
             // Add a synthetic AST_IMPORT_STATEMENT for this transitive
@@ -5274,104 +5291,7 @@ void module_merge_into_program(ASTNode* program) {
                 insert_child_at(program, synth_import, insert_idx++);
             }
 
-            MergePass pass = {0};
-            for (int j = 0; j < mod_ast->child_count; j++) {
-                ASTNode* decl = unwrap_export(mod_ast->children[j]);
-                if (!decl || !decl->value) continue;
-
-                if (decl->type == AST_FUNCTION_DEFINITION ||
-                    decl->type == AST_BUILDER_FUNCTION) {
-                    char* prefixed = merged_function_name(ns, mod_ast, decl->value);
-                    /* Every clause of a set (#2643). */
-                    if (program_has_function_before(program, prefixed, &pass)) {
-                        free(prefixed);
-                        continue;
-                    }
-
-                    ASTNode* clone = clone_ast_node(decl);
-                    free(clone->value);
-                    clone->value = prefixed;
-                    clone->is_imported = 1;
-                    stamp_origin(clone, dep_mod);
-                    stamp_written_name(clone, ns, decl->value);   /* #2978 */
-
-                    rename_intra_module_refs(clone, ns, module_func_names(dep_mod),
-                                             module_const_names(dep_mod), NULL);
-                    apply_inherited_selective_imports(clone, mod_ast);
-                    ss_scope_node(clone, dep_mod);
-
-                    insert_child_at(program, clone, insert_idx++);
-                    merge_pass_add(&pass, clone);
-                } else if (decl->type == AST_CONST_DECLARATION) {
-                    char* prefixed = mod_strf("%s_%s", ns, decl->value);
-
-                    // Dedup against existing CONSTS (not functions — the old
-                    // program_has_function guard here never matched a const, so
-                    // a revisited module re-cloned it: aether#1009 exposed this
-                    // as `redefinition of 'sha2_K256'`).
-                    if (program_has_const(program, prefixed)) {
-                        free(prefixed);
-                        continue;
-                    }
-
-                    ASTNode* clone = clone_ast_node(decl);
-                    free(clone->value);
-                    clone->value = prefixed;
-                    stamp_origin(clone, dep_mod);
-
-                    rename_intra_module_refs(clone, ns, module_func_names(dep_mod),
-                                             module_const_names(dep_mod), NULL);
-                    apply_inherited_selective_imports(clone, mod_ast);
-                    ss_scope_node(clone, dep_mod);
-
-                    insert_child_at(program, clone, insert_idx++);
-                } else if (decl->type == AST_STRUCT_DEFINITION) {
-                    // Same shape as the direct-import struct merge above,
-                    // for transitively-reachable modules pulled in via the
-                    // BFS. A merged function body that casts to `*T` needs
-                    // T in scope regardless of which import edge brought
-                    // the function in.
-                    ASTNode* clone = ss_clone_struct(program, decl, dep_mod);
-                    if (!clone) continue;
-                    insert_child_at(program, clone, insert_idx++);
-                } else if (decl->type == AST_DISTINCT_TYPE_DEF && decl->value) {
-                    // #908: transitive sibling of the distinct-def merge above.
-                    if (program_has_distinct(program, decl->value)) continue;
-                    ASTNode* clone = clone_ast_node(decl);
-                    clone->is_imported = 1;
-                    ss_scope_node(clone, dep_mod);
-                    insert_child_at(program, clone, insert_idx++);
-                } else if (decl->type == AST_CFN_TYPE_DEF && decl->value) {
-                    // #2200: transitive sibling of the cfn-def merge above.
-                    if (program_has_cfn(program, decl->value)) continue;
-                    ASTNode* clone = clone_ast_node(decl);
-                    clone->is_imported = 1;
-                    ss_scope_node(clone, dep_mod);
-                    insert_child_at(program, clone, insert_idx++);
-                } else if (decl->type == AST_BITSTRUCT_DEFINITION && decl->value) {
-                    // Transitive sibling of the bitstruct merge above: a
-                    // bitstruct reached through a chain of imports must still
-                    // land in program->children so its typedef is emitted.
-                    if (program_has_bitstruct(program, decl->value)) continue;
-                    ASTNode* clone = clone_ast_node(decl);
-                    clone->is_imported = 1;
-                    insert_child_at(program, clone, insert_idx++);
-                } else if (decl->type == AST_ENUM_DEFINITION && decl->value) {
-                    // Transitive sibling of the enum merge above.
-                    if (program_has_enum(program, decl->value)) continue;
-                    ASTNode* clone = clone_ast_node(decl);
-                    clone->is_imported = 1;
-                    insert_child_at(program, clone, insert_idx++);
-                } else if (decl->type == AST_SUM_TYPE_DEF && decl->value) {
-                    // Transitive sibling of the sum-type merge above.
-                    if (program_has_sum(program, decl->value)) continue;
-                    ASTNode* clone = clone_ast_node(decl);
-                    clone->is_imported = 1;
-                    ss_scope_node(clone, dep_mod);
-                    insert_child_at(program, clone, insert_idx++);
-                }
-            }
-            merge_pass_free(&pass);
+            merge_module_decls(program, dep_mod, ns, &insert_idx);
         }
         names_free(&visited);
     }

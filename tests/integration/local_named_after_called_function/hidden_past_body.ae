@@ -1,0 +1,17 @@
+// #3872: a local first bound in a loop or branch body lasts to the end of
+// the function, so after that body it still hides the function.
+helper(s: string) -> int { return 5 }
+other(s: string) -> int { return 6 }
+
+main() {
+    for t in ["a", "b"] {
+        helper = helper(t)
+        println(helper)
+    }
+    println(helper("c"))
+    if 1 > 0 {
+        other = other("x")
+        println(other)
+    }
+    println(other("y"))
+}

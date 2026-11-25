@@ -6349,6 +6349,73 @@ static Type* g_tc_return_type = NULL;
  * hoist_scope_body, over which a hoisted local's type is joined. */
 static ASTNode* g_tc_fn_body = NULL;
 
+/* #3872: a local lasts from its binding to the end of its function, not of
+ * its block, as the language reference has it and codegen emits it (the
+ * local takes the name `ae_local_<name>` from its first binding to the end
+ * of the body). So a local first bound inside a loop or branch body hides
+ * the function of its name after that body too, where the checker's scope
+ * of it has closed. Is a local named `name` bound in `body` before `call`?
+ * The walk is codegen's: children before the node, so a binding's
+ * initializer comes before the binding, and `helper = helper(t)` calls the
+ * function. A closure's own locals are its own; a trailing block's are the
+ * function's, as codegen runs it in line. `*hit` is set on reaching `call`. */
+static int tc_subtree_has(const ASTNode* node, const ASTNode* target) {
+    if (!node) return 0;
+    if (node == target) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (tc_subtree_has(node->children[i], target)) return 1;
+    return 0;
+}
+
+static int tc_local_bound_before(ASTNode* node, const char* name, ASTNode* call, int* hit) {
+    if (!node || *hit) return 0;
+    if (node == call) { *hit = 1; return 0; }
+    /* Into a closure only when the call is in it: its locals are its own. */
+    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0) &&
+        !tc_subtree_has(node, call))
+        return 0;
+    for (int i = 0; i < node->child_count; i++) {
+        if (tc_local_bound_before(node->children[i], name, call, hit)) return 1;
+        if (*hit) return 0;
+    }
+    /* A local holding a closure is called through: the call is the
+     * local's, not a call of the hidden function. */
+    return node->type == AST_VARIABLE_DECLARATION && node->value &&
+           strcmp(node->value, name) == 0 &&
+           !(node->child_count > 0 && node->children[0] &&
+             node->children[0]->type == AST_CLOSURE) &&
+           !(node->node_type && node->node_type->kind == TYPE_FUNCTION);
+}
+
+/* The names of the locals `body` declares anywhere, kept for the body being
+ * checked, so a call names a function with no walk unless one could hide it. */
+static ASTNode* g_tc_decl_names_body = NULL;
+static StrMap g_tc_decl_names = {0};
+
+static void tc_collect_decl_names(const ASTNode* node) {
+    if (!node) return;
+    if (node->type == AST_VARIABLE_DECLARATION && node->value &&
+        !strmap_has(&g_tc_decl_names, node->value))
+        strmap_put(&g_tc_decl_names, node->value, NULL);
+    for (int i = 0; i < node->child_count; i++) tc_collect_decl_names(node->children[i]);
+}
+
+static int tc_local_hides_function(const char* name, ASTNode* call) {
+    ASTNode* body = g_tc_fn_body;
+    if (!body || !name || strchr(name, '.')) return 0;
+    if (g_tc_decl_names_body != body) {
+        strmap_free(&g_tc_decl_names);
+        memset(&g_tc_decl_names, 0, sizeof(g_tc_decl_names));
+        tc_collect_decl_names(body);
+        g_tc_decl_names_body = body;
+    }
+    /* Actor handlers and the like are checked under no body of their own:
+     * a call not in this body is not this function's. */
+    if (!strmap_has(&g_tc_decl_names, name) || !tc_subtree_has(body, call)) return 0;
+    int hit = 0;
+    return tc_local_bound_before(body, name, call, &hit);
+}
+
 /* #2733: what the `return`s being checked return from: the function, main
  * or closure whose body holds them. */
 static ASTNode* g_tc_return_owner = NULL;
@@ -8766,6 +8833,7 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
             ASTNode* saved_fn_body = g_tc_fn_body;
             ASTNode* saved_owner = g_tc_return_owner;
             g_tc_fn_body = node->child_count > 0 ? node->children[0] : NULL;
+            g_tc_decl_names_body = NULL;
             g_tc_return_owner = node;
             SymbolTable* main_table = create_symbol_table(table);
             main_table->binds_body = 1;
@@ -13695,6 +13763,7 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     ASTNode* saved_fn_body = g_tc_fn_body;
     ASTNode* saved_owner = g_tc_return_owner;
     g_tc_fn_body = body;
+    g_tc_decl_names_body = NULL;
     g_tc_return_owner = func;
     declare_if_branch_hoists(body, func_table);   /* #2186 */
     typecheck_statement(body, func_table);
@@ -22499,6 +22568,21 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 return typecheck_function_call(call, table);
             symbol = lookup_qualified_symbol(table, call->value);
         }
+    }
+
+    /* #3872: a local bound earlier in the function, in a loop or branch body
+     * the checker's scope has left, still hides the function of its name. */
+    if (symbol && symbol->is_function && call->value &&
+        tc_local_hides_function(call->value, call)) {
+        type_error_code_hint(
+            aether_internf("'%s' is a local here, which hides the function '%s'",
+                           call->value, call->value),
+            aether_internf("a local's scope starts after its initializer and lasts to the end "
+                           "of the function, past the loop or branch body it was first bound "
+                           "in, so the function cannot be called as '%s' here; give the local "
+                           "another name", call->value),
+            call->line, call->column, AETHER_ERR_UNDEFINED_FUNC);
+        return 0;
     }
 
     if (!symbol || !symbol->is_function) {

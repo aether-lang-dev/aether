@@ -1,0 +1,6 @@
+// Bare imports, qualified calls of the externs.
+import cmath
+import std.math
+
+root(x: float) -> float { return cmath.root(x) }
+std_root(x: float) -> float { return math.sqrt(x) }

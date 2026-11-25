@@ -1,0 +1,4 @@
+// `@extern("sym") name(...)`s: public, merged as `cmath_<name>`.
+exports(cmath_root, cmath_sine)
+@extern("sqrt") cmath_root(x: float) -> float
+@extern("sin") cmath_sine(x: float) -> float

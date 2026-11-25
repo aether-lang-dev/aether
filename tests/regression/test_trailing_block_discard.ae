@@ -1,0 +1,52 @@
+// A trailing block on a call whose value is thrown away, `_ = f() { ... }`,
+// runs, with the call's value as its context.
+//
+// The `_` discard emitted `(void)(f())` and never looked at the call's
+// trailing block, so the block vanished without a diagnostic. The same call
+// bound to a name always ran its block. The test checks each block ran
+// once, after the call, with the value as a context to inject, for an int
+// and for a fresh string, and for a discard nested in another's block.
+
+extern exit(code: int)
+
+var calls = 0
+var ran = 0
+var seen = 0
+
+seven(_ctx: ptr) -> int {
+    calls = calls + 1
+    return 7
+}
+named(_ctx: ptr, s: string) -> string {
+    calls = calls + 1
+    return "name ${s}"
+}
+note(_ctx: ptr) { if _ctx != null { seen = seen + 1 } }
+
+main() {
+    _ = seven() {
+        ran = ran + calls
+        note()
+    }
+    if ran != 1 {
+        println("FAIL: the int block ran to ${ran}, want once after the call (1)")
+        exit(1)
+    }
+    _ = named("x") {
+        ran = ran + 10 * calls
+        note()
+        _ = seven() {
+            ran = ran + 100 * calls
+            note()
+        }
+    }
+    if ran != 321 {
+        println("FAIL: the string and nested blocks ran to ${ran}, want 321")
+        exit(1)
+    }
+    if seen != 3 {
+        println("FAIL: a block's context was null: ${seen} of 3 had one")
+        exit(1)
+    }
+    println("ok")
+}

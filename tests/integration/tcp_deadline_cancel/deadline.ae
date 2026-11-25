@@ -216,22 +216,32 @@ main() {
             big[i] = (i * 7) & 0xFF
             i = i + 1
         }
-        _w, we = tcp.write_all(s5, big)
+        // A chunk at a time, each read back before the next goes: the
+        // peer echoes as it reads, so with all 256 KiB written first the
+        // echo fills this side's receive buffer, the peer stops reading,
+        // and the write stalls until the deadline wherever the loopback
+        // buffers hold less than that (FreeBSD under load).
+        we = ""
         got = 0
+        sent = 0
         same = true
         rb = make([]byte, 65536)
-        while got < 262144 && same {
-            n, re = tcp.read_into(s5, rb)
-            if re != "" {
-                same = false
-                println("     read: ${re}")
-            } else {
-                j = 0
-                while j < n {
-                    if rb[j] != big[got + j] { same = false }
-                    j = j + 1
+        while sent < 262144 && we == "" && same {
+            _w, we = tcp.write_all(s5, big[sent..sent + 16384])
+            sent = sent + 16384
+            while we == "" && got < sent && same {
+                n, re = tcp.read_into(s5, rb)
+                if re != "" {
+                    same = false
+                    println("     read: ${re}")
+                } else {
+                    j = 0
+                    while j < n {
+                        if rb[j] != big[got + j] { same = false }
+                        j = j + 1
+                    }
+                    got = got + n
                 }
-                got = got + n
             }
         }
         check(&t, "256 KiB echoed whole under a deadline and a cancel handle", we == "" && got == 262144 && same && tcp.stopped(s5) == "", "write [${we}], ${got} bytes back, same ${same}")

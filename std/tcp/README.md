@@ -107,7 +107,11 @@ The budget covers every address the host resolves to.
 dropped (at most 256 KiB, 5 ms for each more to arrive). A socket closed with
 bytes unread ends with a reset, and a peer that gets one may discard what it
 had not read yet, such as an alert just sent (#3465). A plain close is
-`tcp_close`.
+`tcp_close`. `close_reset(sock)` closes with a reset instead (`SO_LINGER` on,
+timeout 0): the peer's next read or write fails with "connection reset" and
+anything still queued to send is dropped, on every platform (closing with
+bytes unread resets on Linux, macOS and Windows but not on FreeBSD). For a
+test peer that must fail a connection the hard way.
 
 ```aether,fragment
 srv, err = tcp.listen_on("127.0.0.1", 0)
@@ -241,4 +245,4 @@ address is the wholly bounded dial. The TLS client takes the same pair
 `connect_until`, `set_deadline`, `deadline`, `stopped`, `cancel_new`, `cancel`, `cancelled`, `cancel_retain`, `cancel_free`, `DEADLINE_EXCEEDED`, `CANCELLED`,
 `connect`, `connect_buffered`, `connect_timeout`, `connect_unix`, `listen`, `listen_on`, `listen_unix`, `accept`, `available`, `read`, `read_n`, `read_into`,
 `write`, `write_n`, `write_slice`, `write_all`, `write_some`, `poll`, `poll2`, `wait_writable`, `server_poll`, `server_port`, `set_nodelay`,
-`set_read_buffer`, `fd`, `server_fd`, `close_drained`, `tcp_close`, `tcp_server_close`.
+`set_read_buffer`, `fd`, `server_fd`, `close_drained`, `close_reset`, `tcp_close`, `tcp_server_close`.

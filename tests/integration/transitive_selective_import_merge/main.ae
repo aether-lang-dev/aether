@@ -1,0 +1,10 @@
+import mid
+
+main() {
+    println(mid.ms(4.0))
+    println(mid.std_ms(4.0))
+    println(mid.why(1))
+    println(mid.why(2))
+    println(mid.why(0))
+    mid.ping(7)
+}
