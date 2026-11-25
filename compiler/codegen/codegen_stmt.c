@@ -10520,6 +10520,37 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      drhs->type == AST_STRING_INTERP ||
                      is_owned_string_unwrap(gen, drhs)) &&
                     is_heap_string_expr(gen, drhs);
+                /* A call with a trailing block, `_ = f() { ... }`, runs the
+                 * block with the call's value as its context, as a named
+                 * binding of it does, and the value is thrown away after.
+                 * The `(void)` cast below emitted the call alone and the
+                 * block was dropped without a word. A builder's block runs
+                 * ahead of the call, in the call's own emission. */
+                ASTNode* dblock =
+                    (drhs->type == AST_FUNCTION_CALL &&
+                     !(drhs->value && is_builder_func_reg(gen, drhs->value)))
+                        ? trailing_dsl_block(gen, drhs) : NULL;
+                TypeKind dk = drhs->node_type ? drhs->node_type->kind : TYPE_UNKNOWN;
+                if (dblock && (dk == TYPE_INT || dk == TYPE_INT64 || dk == TYPE_BOOL ||
+                               dk == TYPE_PTR || dk == TYPE_ACTOR_REF ||
+                               (dk == TYPE_STRING && !is_owned_opt_string_call(gen, drhs)))) {
+                    print_indent(gen);
+                    fprintf(gen->output, "{ %s _od = ", get_c_type(drhs->node_type));
+                    generate_expression(gen, drhs);
+                    fprintf(gen->output, ";\n");
+                    gen->indent_level++;
+                    print_indent(gen);
+                    fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)_od);\n");
+                    emit_trailing_block_body(gen, dblock);
+                    if (fresh_heap) {
+                        print_indent(gen);
+                        fprintf(gen->output, "aether_heap_str_free((void*)_od);\n");
+                    }
+                    gen->indent_level--;
+                    print_indent(gen);
+                    fprintf(gen->output, "}\n");
+                    break;
+                }
                 print_indent(gen);
                 if (is_owned_opt_string_call(gen, drhs)) {
                     /* #2750: a `string?` an Aether function handed over. */
