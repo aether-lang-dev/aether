@@ -131,6 +131,7 @@ int module_is_exported(AetherModule* module, const char* symbol);
 /* #2172: exported as `name` or as the prefixed `<leaf>_name` a qualified
  * call resolves to. What export enforcement asks. */
 int module_exports_symbol(AetherModule* module, const char* name);
+int module_glob_binds(AetherModule* module, const char* name);
 /* #924: if `module` re-exports `symbol` (lists it in `exports` but imports
  * it from elsewhere), return the module that actually defines it (resolved
  * transitively). NULL when `module` itself is the definer. */

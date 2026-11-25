@@ -8362,6 +8362,11 @@ static int typecheck_program_checked(ASTNode* program) {
                 if (sym->name[ns_len] != '_') continue;
                 const char* tail = sym->name + ns_len + 1;
                 if (!*tail || *tail == '_') continue;  // private / malformed
+                /* A glob binds what the module exports, as `ns.name`
+                 * reaches it: a module's private `var text` was bound
+                 * too, and an importer's own loop variable or local
+                 * `text` became the module's cell. */
+                if (is_export_blocked(ns, tail)) continue;
                 if (glob_count >= glob_cap) {
                     glob_cap = glob_cap == 0 ? 16 : glob_cap * 2;
                     glob_names = (const char**)aether_xrealloc(
@@ -22238,8 +22243,17 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
      * module's merged body, whose bare names are its own. */
     if (symbol && call->value && !strchr(call->value, '.') && !table->merged_from &&
         !symbol->import_bound && find_import_alias(call->value)) {
-        Symbol* aliased = lookup_qualified_symbol(table, find_import_alias(call->value));
-        if (aliased && aliased->is_function) symbol = aliased;
+        /* Not over a local or parameter of the name: from its binding on
+         * it hides the imported function, as it hides the program's own
+         * (#2683, E0301 below). Taken for the import, `button = 0` then
+         * `button = button(t)` called it, and the prune, which read the
+         * call as the local's, had dropped the function. */
+        SymbolTable* root = table;
+        while (root->parent) root = root->parent;
+        if (lookup_symbol_local(root, call->value) == symbol) {
+            Symbol* aliased = lookup_qualified_symbol(table, find_import_alias(call->value));
+            if (aliased && aliased->is_function) symbol = aliased;
+        }
     }
 
     /* #924 re-export: a `hub.fn(...)` call where hub re-exports fn from
@@ -22498,9 +22512,13 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             Symbol* fn = lookup_symbol_local(root, call->value);
             if (fn && fn->is_function) {
                 const char* hint = "";
-                error_msg = aether_internf(
-                         "'%s' is a local here, which hides the function '%s'",
-                         call->value, call->value);
+                /* An imported one is named as its module has it. */
+                const char* imported = fn->import_bound ? find_import_alias(call->value) : NULL;
+                error_msg = imported
+                    ? aether_internf("'%s' is a local here, which hides the imported function '%s'",
+                                     call->value, imported)
+                    : aether_internf("'%s' is a local here, which hides the function '%s'",
+                                     call->value, call->value);
                 hint = aether_internf(
                          "a local's scope starts after its initializer and lasts to the end "
                          "of the function, so the function cannot be called as '%s' here; "

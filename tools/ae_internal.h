@@ -353,6 +353,7 @@ void cache_depfile_path(const char* ae_file, char* out, size_t outsz);
 const char* cross_target_to_zig(const char* t);
 int cross_target_os_arch(const char* t, const char** os, const char** arch);
 bool cross_target_is_apple(const char* triple);
+bool cross_target_uses_xcode(const char* triple);
 const char* cross_apple_sdk(const char* triple);
 bool cross_uses_unsupported_module(const char* file, char* which, size_t wsz);
 /* #1648: compile one generated .c to a target-format object (zig cc -c),

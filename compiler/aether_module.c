@@ -702,6 +702,14 @@ const char* module_leaf_of_file(const char* path, char* buf, size_t cap) {
     return buf;
 }
 
+/* Does `import <module> (*)` bind `name`? What the module exports (all
+ * of it when it lists no exports), apart from a leading-underscore name,
+ * which is private either way. */
+int module_glob_binds(AetherModule* module, const char* name) {
+    if (!module || !name || !name[0] || name[0] == '_') return 0;
+    return module->export_count == 0 || module_exports_symbol(module, name);
+}
+
 int module_is_exported(AetherModule* module, const char* symbol) {
     if (!module) return 0;
 
@@ -3214,6 +3222,16 @@ static void rename_refs_before_binding_in(ASTNode* scope, const char* prefix,
     names_free(&bound);
 }
 
+/* Is `name`, in a body renamed under `prefix`, a module-level `var` the
+ * rename binds? One of `consts`, the module's own when the body is the
+ * module's, the imported ones when it is an importer's: a `var` the module
+ * keeps private is no cell of an importer's, whose `text = ...` or loop
+ * variable `text` is its own local (it was written to the module's cell,
+ * through `import m (*)`, as a write in the module's own body is). */
+static int bound_module_var(const char* prefix, const ModuleNames* consts, const char* name) {
+    return names_has(consts, name) && name_is_module_global_var(prefix, name);
+}
+
 // Recursively rename intra-module function calls and constant references in a cloned AST.
 // local_names/local_count: names bound in the enclosing function (params + locals) that shadow constants.
 static void rename_intra_module_refs(ASTNode* node, const char* prefix,
@@ -3227,6 +3245,25 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * called `f` turned it into `<prefix>_f`, a member T does not have). */
     if (node->type == AST_OFFSETOF) return;
 
+    /* A struct literal's field initialiser (`Font { size: 2 }`) and a
+     * struct pattern's field (`Font{ size: s }`) are AST_ASSIGNMENTs whose
+     * value is the FIELD's name, never a variable: the module-var write
+     * rename below took `size: 2` for a write to a module's `var size` and
+     * the C named a field `<prefix>_size` the struct does not have. Only
+     * the initialiser (or sub-pattern) is renamed. */
+    if (node->type == AST_STRUCT_LITERAL || node->type == AST_PATTERN_STRUCT) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* c = node->children[i];
+            if (c && c->type == AST_ASSIGNMENT) {
+                for (int j = 0; j < c->child_count; j++)
+                    rename_intra_module_refs(c->children[j], prefix, funcs, consts, locals);
+            } else {
+                rename_intra_module_refs(c, prefix, funcs, consts, locals);
+            }
+        }
+        return;
+    }
+
     /* #3088: in `ns.member`, a namespace the module imports is that module,
      * whatever function of its own the module names `ns`: a function has
      * no fields, as the checker reads it (value_hides_namespace). Renamed
@@ -3237,7 +3274,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         node->children[0]->type == AST_IDENTIFIER && node->children[0]->value &&
         names_has(funcs, node->children[0]->value) &&
         !names_has(consts, node->children[0]->value) &&
-        !name_is_module_global_var(prefix, node->children[0]->value) &&
+        !bound_module_var(prefix, consts, node->children[0]->value) &&
         !names_has(locals, node->children[0]->value)) {
         AetherModule* self = module_find_by_namespace(prefix);
         if (self && self->name && module_sees_namespace(self->name, node->children[0]->value) &&
@@ -3274,7 +3311,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * and above, but the call kept the bare name and the checker then
          * reported "Undefined function". A local of that name shadows it. */
         if (!renamed && !names_has(locals, node->value) &&
-            name_is_module_global_var(prefix, node->value)) {
+            bound_module_var(prefix, consts, node->value)) {
             char* prefixed = mod_strf("%s_%s", prefix, node->value);
             free(node->value);
             node->value = prefixed;
@@ -3289,7 +3326,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         const char* dot = renamed ? NULL : strchr(node->value, '.');
         if (dot && dot != node->value && !strchr(dot + 1, '.')) {
             char* recv = mod_strf("%.*s", (int)(dot - node->value), node->value);
-            if (!names_has(locals, recv) && name_is_module_global_var(prefix, recv)) {
+            if (!names_has(locals, recv) && bound_module_var(prefix, consts, recv)) {
                 char* prefixed = mod_strf("%s_%s%s", prefix, recv, dot);
                 free(node->value);
                 node->value = prefixed;
@@ -3309,7 +3346,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * `const` lowers to a `#define`, and a `name = expr` against it is a real
      * shadowing local that must stay local. */
     if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_ASSIGNMENT) &&
-        node->value && name_is_module_global_var(prefix, node->value)) {
+        node->value && bound_module_var(prefix, consts, node->value)) {
         char* prefixed = mod_strf("%s_%s", prefix, node->value);
         free(node->value);
         node->value = prefixed;
@@ -3381,7 +3418,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
             ModuleNames own = {0};
             for (int i = 0; i < clo.count; i++) {
                 if (!names_has(locals, clo.names[i]) &&
-                    !name_is_module_global_var(prefix, clo.names[i]))
+                    !bound_module_var(prefix, consts, clo.names[i]))
                     names_add(&own, clo.names[i]);
             }
             rename_refs_before_binding_in(node, prefix, funcs, &own);
@@ -3392,7 +3429,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         }
         ModuleNames kept = {0};
         for (int i = 0; i < clo.count; i++) {
-            if (!name_is_module_global_var(prefix, clo.names[i])) names_add(&kept, clo.names[i]);
+            if (!bound_module_var(prefix, consts, clo.names[i])) names_add(&kept, clo.names[i]);
         }
         names_free(&clo);
         for (int i = 0; i < node->child_count; i++) {
@@ -3424,7 +3461,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * global_var, so it's correctly retained. */
         ModuleNames kept = {0};
         for (int i = 0; i < nested.count; i++) {
-            if (!name_is_module_global_var(prefix, nested.names[i])) names_add(&kept, nested.names[i]);
+            if (!bound_module_var(prefix, consts, nested.names[i])) names_add(&kept, nested.names[i]);
         }
         names_free(&nested);
         rename_refs_before_binding_in(node, prefix, funcs, &kept);
@@ -4112,8 +4149,9 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
 
         if (is_glob) {
             // #896: the glob selection is M's whole export surface. Take every
-            // func/const M defines (skipping leading-underscore privates, the
-            // same privacy rule the typecheck-time glob expansion applies) so
+            // func/const M exports (module_glob_binds: what its `exports` list
+            // names, and never a leading-underscore private -- the same rule
+            // the typecheck-time glob expansion applies) so
             // a bare `clean(...)` in M's merged body is rewritten to the
             // prefixed `fs_clean(...)` the transitive pass pulls in — exactly
             // what the selective and qualified forms already get.
@@ -4124,13 +4162,13 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
             // `<M>_<name>` before this runs; this keeps M's own externs, which
             // keep their bare name, from being rewritten to the glob's.
             for (int k = 0; k < sub_func_count; k++) {
-                if (sub_func_names[k] && sub_func_names[k][0] != '_' &&
+                if (module_glob_binds(sub_mod, sub_func_names[k]) &&
                     !module_defines_own_name(mod_ast, sub_func_names[k])) {
                     names_add(&sel_funcs, sub_func_names[k]);
                 }
             }
             for (int k = 0; k < sub_const_count; k++) {
-                if (sub_const_names[k] && sub_const_names[k][0] != '_' &&
+                if (module_glob_binds(sub_mod, sub_const_names[k]) &&
                     !module_defines_own_name(mod_ast, sub_const_names[k])) {
                     names_add(&sel_consts, sub_const_names[k]);
                 }
@@ -4150,7 +4188,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                 if (strncmp(ext->value, sub_ns, sub_ns_len) != 0 ||
                     ext->value[sub_ns_len] != '_') continue;
                 const char* tail = ext->value + sub_ns_len + 1;
-                if (!*tail || tail[0] == '_') continue;
+                if (!module_glob_binds(sub_mod, tail)) continue;
                 if (module_defines_own_name(mod_ast, tail)) continue;
                 if (names_has(&sel_funcs, tail)) continue;
                 names_add(&sel_funcs, tail);
@@ -5380,6 +5418,10 @@ void module_merge_into_program(ASTNode* program) {
             for (int k = 0; k < mod_const_count; k++) {
                 const char* cn = mod_const_names[k];
                 if (!cn || cn[0] == '_' || module_defines_own_name(program, cn)) continue;
+                /* Only what the module exports, as the checker binds it:
+                 * a private `var text` renamed the importer's own loop
+                 * variable `text` to the module's cell. */
+                if (!module_glob_binds(mod, cn)) continue;
                 names_add(&sel_consts, cn);
             }
         }
@@ -5739,13 +5781,48 @@ static int prune_is_function_scope(const ASTNode* node) {
            node->type == AST_MAIN_FUNCTION;
 }
 
+/* The function the walk is in: every name it binds (`locals`), and the
+ * ones bound so far in source order (`bound`), as far as the walk can
+ * tell: a block's bindings are dropped as it ends. */
+typedef struct {
+    NameSet locals;
+    const char** bound;
+    int bound_count;
+    int bound_cap;
+} PruneScope;
+
 /* A bare (undotted) name the enclosing function binds as a local. */
-static int prune_is_local(const NameSet* locals, const char* name) {
-    return locals && !strchr(name, '.') && nameset_contains(locals, name);
+static int prune_is_local(const PruneScope* scope, const char* name) {
+    return scope && !strchr(name, '.') && nameset_contains(&scope->locals, name);
+}
+
+/* Is the local `name` bound at this point of the walk? A call spelt like a
+ * local is a call through it only from its binding on: in `button =
+ * button(t)` the call on the right comes first and is the function, as
+ * the checker resolves it (docs/language-reference.md: a new local shadows
+ * a function of that name "for the rest of its scope"). Taken for the
+ * local, the call seeded nothing and the prune dropped the function its
+ * C still called. A binding the walk cannot place (one not at the level of
+ * a block, say) counts as unbound, which only seeds more. */
+static int prune_is_bound(const PruneScope* scope, const char* name) {
+    for (int i = scope ? scope->bound_count - 1 : -1; i >= 0; i--)
+        if (strcmp(scope->bound[i], name) == 0) return 1;
+    return 0;
+}
+
+static void prune_bind(PruneScope* scope, const char* name) {
+    if (scope->bound_count >= scope->bound_cap) {
+        int new_cap = scope->bound_cap ? scope->bound_cap * 2 : 16;
+        const char** nb = realloc(scope->bound, sizeof(const char*) * (size_t)new_cap);
+        if (!nb) return;   /* unbound: seeds more, never less */
+        scope->bound = nb;
+        scope->bound_cap = new_cap;
+    }
+    scope->bound[scope->bound_count++] = name;
 }
 
 static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
-                                   const NameSet* locals, int in_dsl_block);
+                                   PruneScope* scope, int in_dsl_block);
 
 static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklist) {
     prune_collect_calls_in(node, seen, worklist, NULL, 0);
@@ -5756,8 +5833,9 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklis
  * of the enclosing function's names (#333): such a call is a reference to
  * every function it may name, a local's name included. */
 static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
-                                   const NameSet* locals, int in_dsl_block) {
+                                   PruneScope* scope, int in_dsl_block) {
     if (!node) return;
+    int bound_mark = scope ? scope->bound_count : 0;
     /* A `hide` / `seal except` list names what a block may reach; it calls
      * nothing. Walked, `seal except bytes` kept every bytes function a
      * name matched, so a seal changed what reached the C. */
@@ -5771,8 +5849,8 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
         return;
     }
     if (prune_is_function_scope(node)) {
-        NameSet own = {0};
-        prune_collect_locals(node, &own);
+        PruneScope own = {0};
+        prune_collect_locals(node, &own.locals);
         for (int i = 0; i < node->child_count; i++) {
             prune_collect_calls_in(node->children[i], seen, worklist, &own, in_dsl_block);
         }
@@ -5781,11 +5859,13 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
                 namestack_push(worklist, node->annotation);
             }
         }
-        nameset_free(&own);
+        nameset_free(&own.locals);
+        free(own.bound);
         return;
     }
     if (node->type == AST_FUNCTION_CALL && node->value &&
-        (in_dsl_block || !prune_is_local(locals, node->value))) {
+        (in_dsl_block || !prune_is_local(scope, node->value) ||
+         !prune_is_bound(scope, node->value))) {
         if (nameset_add(seen, node->value)) {
             namestack_push(worklist, node->value);
         }
@@ -5824,7 +5904,7 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
     // every identifier name is a sound over-approximation: non-function
     // names won't match any function definition and harmlessly dead-end.
     if (node->type == AST_IDENTIFIER && node->value &&
-        !prune_is_local(locals, node->value)) {
+        !prune_is_local(scope, node->value)) {
         if (nameset_add(seen, node->value)) {
             namestack_push(worklist, node->value);
         }
@@ -5871,7 +5951,15 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
         int dsl = in_dsl_block ||
                   (node->type == AST_FUNCTION_CALL && node->value &&
                    strchr(node->value, '.') && ast_is_trailing_block(c));
-        prune_collect_calls_in(c, seen, worklist, locals, dsl);
+        prune_collect_calls_in(c, seen, worklist, scope, dsl);
+    }
+    /* What the node bound inside it ends with it; a binding itself stays
+     * bound for the rest of its block (its initialiser, walked above, came
+     * before it). */
+    if (scope) {
+        scope->bound_count = bound_mark;
+        if (prune_binds_name(node) && !strchr(node->value, '.'))
+            prune_bind(scope, node->value);
     }
 }
 

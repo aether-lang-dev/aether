@@ -1,0 +1,6 @@
+// Library-shaped source for the macOS dylib identity test: no main, one
+// exported function.
+
+greet() -> int {
+    return 42
+}

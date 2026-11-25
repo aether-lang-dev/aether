@@ -1,0 +1,15 @@
+import textlib(*)
+import shout(*)
+
+main() {
+    for text in ["a", "b"] {
+        println(text)
+    }
+    size = 7
+    println(size)
+    println(count())
+    println(LIMIT)
+    println(record("c"))
+    println(shout("d"))
+    println(count())
+}

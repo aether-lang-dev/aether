@@ -628,6 +628,17 @@ jobs:
         # aarch64 must actually have run, not been skipped for want of qemu.
         echo "$out" | grep -q 'aarch64-linux-musl: built, ran the spec'
 
+    # A macOS dylib cross-linked on Linux: its install name and minimum are
+    # read from the Mach-O load commands. A Mac host rewrites the id after the
+    # link, so only a non-Mac host catches a cross link that left it unset.
+    - name: Cross-build a macOS dylib and check its identity
+      env:
+        AETHER_CACHE_DIR: ${{ github.workspace }}/.ci-cache/ae-cross
+      run: |
+        sh tests/integration/cross_macos_dylib_identity/test_cross_macos_dylib_identity.sh \
+          | tee "$RUNNER_TEMP/macos-dylib.out"
+        grep -q '\[PASS\]' "$RUNNER_TEMP/macos-dylib.out"
+
     - name: Save zig + SQLite cross object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'

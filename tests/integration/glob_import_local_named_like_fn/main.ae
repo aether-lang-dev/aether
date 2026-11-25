@@ -1,0 +1,8 @@
+import buttons(*)
+
+main() {
+    for t in ["a", "b"] {
+        button = button(t)
+        println(button)
+    }
+}

@@ -328,11 +328,24 @@ main() {
     r = 0
     while r < race_rounds && why == "" {
         c, ce = tcp.cancel_new()
-        if ce != "" { why = "cancel_new: ${ce}" }
-        done = sync.atomic_new(0)
+        if ce != "" {
+            why = "round ${r}: cancel_new: ${ce}"
+            break
+        }
+        // Dialled with the cancel bound and no deadline, then given the
+        // few-ms deadline once connected: the race is the deadline and the
+        // cancel against the read and the close, and a deadline that a slow
+        // or loaded host spends on the dial itself would end the round
+        // before it starts (connect_until refuses it: "deadline exceeded").
+        sock, de = tcp.connect_until("127.0.0.1", pe.port, 0, c)
+        if de != "" {
+            why = "round ${r}: dial: ${de}"
+            tcp.cancel_free(c)
+            break
+        }
         jitter = (now() % 7) as int
-        sock, de = tcp.connect_until("127.0.0.1", pe.port, now() + 3 + jitter, c)
-        if de != "" { why = "dial: ${de}" }
+        tcp.set_deadline(sock, now() + 3 + jitter, c)
+        done = sync.atomic_new(0)
         old_fd = tcp.fd(sock)
         tcp.cancel_retain(c) // the canceller's own reference
         worker.run_detached(|| {
@@ -359,21 +372,24 @@ main() {
         // Decoys open at once, taking the numbers just freed.
         d1, d1e = tcp.connect("127.0.0.1", pe.port)
         d2, d2e = tcp.connect("127.0.0.1", pe.port)
-        if d1e != "" || d2e != "" { why = "decoy dial: ${d1e} ${d2e}" }
-        if tcp.fd(d1) == old_fd || tcp.fd(d2) == old_fd { reused = reused + 1 }
         while sync.atomic_load(done) == 0 { sleep(1) }
-        // The canceller has finished: both decoys must still be what they were.
-        _w1, w1e = tcp.write(d1, "p1")
-        _w2, w2e = tcp.write(d2, "p2")
-        x1, _n1, x1e = tcp.read_n(d1, 8)
-        x2, _n2, x2e = tcp.read_n(d2, 8)
-        if w1e != "" || w2e != "" || x1e != "" || x2e != "" || x1 != "p1" || x2 != "p2" {
-            why = "round ${r}: a decoy was disturbed: [${w1e}] [${w2e}] [${x1e}] [${x2e}] [${x1}] [${x2}]"
-        } else {
-            races_ok = races_ok + 1
+        // The first thing wrong in a round is the one reported.
+        if why == "" && (d1e != "" || d2e != "") { why = "round ${r}: decoy dial: [${d1e}] [${d2e}]" }
+        if why == "" {
+            if tcp.fd(d1) == old_fd || tcp.fd(d2) == old_fd { reused = reused + 1 }
+            // The canceller has finished: both decoys must still be what they were.
+            _w1, w1e = tcp.write(d1, "p1")
+            _w2, w2e = tcp.write(d2, "p2")
+            x1, _n1, x1e = tcp.read_n(d1, 8)
+            x2, _n2, x2e = tcp.read_n(d2, 8)
+            if w1e != "" || w2e != "" || x1e != "" || x2e != "" || x1 != "p1" || x2 != "p2" {
+                why = "round ${r}: a decoy was disturbed: [${w1e}] [${w2e}] [${x1e}] [${x2e}] [${x1}] [${x2}]"
+            } else {
+                races_ok = races_ok + 1
+            }
         }
-        tcp.close(d1)
-        tcp.close(d2)
+        if d1 != null { tcp.close(d1) }
+        if d2 != null { tcp.close(d2) }
         if (r % 2) == 1 { tcp.cancel_free(c) }
         sync.atomic_free(done)
         r = r + 1

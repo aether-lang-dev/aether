@@ -1,0 +1,20 @@
+// A module whose private module-level `var` is spelt like a field of the
+// struct it exports. The field name in a struct literal (and in a field
+// read) is never a reference to that var.
+exports(Font, make_font, font_size)
+
+struct Font {
+    face: string,
+    size: int
+}
+
+var size: int = 0
+
+make_font(face: string, n: int) -> Font {
+    size = size + 1
+    return Font { face: face, size: n }
+}
+
+font_size(f: Font) -> int {
+    return f.size + size * 100
+}
