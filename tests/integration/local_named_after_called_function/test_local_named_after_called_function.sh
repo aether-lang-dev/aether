@@ -14,6 +14,13 @@
 # names that differ from the Aether one (`list.size` is `list_size`, an
 # `@extern`, a selective import). A call through the local after its binding
 # is an error that says the local hides the function.
+#
+# #3872: the local lasts to the end of its function, not of its block, as
+# codegen has it: after the loop or branch body that first bound it, the
+# call is still refused (it was accepted, and failed in the C compiler on
+# an undeclared `ae_local_helper`). A closure's own local is the closure's:
+# after the closure the function is called as before (codegen renamed the
+# call past the closure, the same C failure).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -39,5 +46,12 @@ out="$("$AE" run imported.ae 2>&1)" || { echo "$out"; fail "the importing progra
 out="$("$AE" check hidden.ae 2>&1)" && { echo "$out"; fail "a call through the local after its binding was accepted"; }
 echo "$out" | grep -q "error\[E0301\]: 'helper' is a local here, which hides the function 'helper'" ||
     { echo "$out"; fail "the call through the local is not reported as hiding the function"; }
+
+out="$("$AE" check hidden_past_body.ae 2>&1)" && { echo "$out"; fail "a call after the loop or branch that bound the local was accepted"; }
+[ "$(echo "$out" | grep -c "error\[E0301\]: '\(helper\|other\)' is a local here, which hides the function")" = 2 ] ||
+    { echo "$out"; fail "the calls after the loop and the branch are not both reported as hidden"; }
+
+out="$("$AE" run closure_local.ae 2>&1)" || { echo "$out"; fail "a call after a closure with a local of the name did not build"; }
+[ "$out" = "6 5" ] || { echo "$out"; fail "the closure's local or the function after it gave the wrong value"; }
 
 echo "  [PASS] local_named_after_called_function: the call is the function's, wherever it sits"

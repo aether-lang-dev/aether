@@ -1,0 +1,12 @@
+// #3872: a closure's local is its own, so after the closure the function
+// of its name is called as before.
+helper(s: string) -> int { return 5 }
+
+main() {
+    f = | t: string | {
+        helper = helper(t)
+        return helper + 1
+    }
+    a = f("a")
+    println("${a} ${helper("c")}")
+}

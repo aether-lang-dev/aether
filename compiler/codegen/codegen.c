@@ -6805,10 +6805,22 @@ static void scan_local_shadows(ASTNode* node, LocalShadowScan* s) {
 
 /* Rename `from` to `to` in every value node after the first binding of
  * `from`, and in calls through it. `*active` turns on at that binding,
- * after its initializer. */
+ * after its initializer.
+ *
+ * A closure's own local is its own (#3872): a binding in a closure body
+ * turns the rename on to the end of that closure only, so after it the name
+ * is the function's again, as `ae check` resolves it. A local of the
+ * function bound before the closure is renamed inside it too, captured.
+ * A trailing block runs in line, and its locals are the function's. */
 static void rename_local_after_binding(ASTNode* node, const char* from, const char* to,
                                        int* active) {
     if (!node) return;
+    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) {
+        int inner = *active;
+        for (int i = 0; i < node->child_count; i++)
+            rename_local_after_binding(node->children[i], from, to, &inner);
+        return;
+    }
     for (int i = 0; i < node->child_count; i++)
         rename_local_after_binding(node->children[i], from, to, active);
     if (!node->value || strcmp(node->value, from) != 0) return;
