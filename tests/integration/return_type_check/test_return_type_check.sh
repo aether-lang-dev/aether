@@ -314,6 +314,76 @@ main() {
 AE
 refused tuple_early_return 5:12 "narrowing return from 'capacity': its result type was inferred as int from its first \`return\`, but this \`return\` gives a 64-bit value"
 
+# A multi-value `return` with another count than the result: one value
+# first and then two, or two and then three, or three and then two. They
+# were let through and lowered to the first `return`'s shape: a tuple into
+# an int result reached the C compiler, the extra value of a longer tuple
+# was dropped (a C warning only) and a shorter one zero-filled the rest.
+cat > "$TMP/one_then_two.ae" <<'AE'
+pick(ok: int) -> {
+    if ok == 0 { return 0 }
+    return 41, 1
+}
+
+main() {
+    x = pick(1)
+    println("${x}")
+}
+AE
+refused one_then_two 3:5 "'pick' returns int (inferred from its first \`return\`), but this \`return\` gives 2 values"
+
+cat > "$TMP/two_then_three.ae" <<'AE'
+pick(ok: int) -> {
+    if ok == 0 { return 0, "" }
+    return 41, "", 3
+}
+
+main() {
+    x, e = pick(1)
+    println("${x} ${e}")
+}
+AE
+refused two_then_three 3:5 "'pick' returns (int, string) (inferred from its first \`return\`), but this \`return\` gives 3 values"
+
+cat > "$TMP/three_then_two.ae" <<'AE'
+pick(ok: int) -> {
+    if ok == 0 { return 0, 0, 0 }
+    return 41, 1
+}
+
+main() {
+    a, b, c = pick(1)
+    println("${a} ${b} ${c}")
+}
+AE
+refused three_then_two 3:5 "'pick' returns (int, int, int) (inferred from its first \`return\`), but this \`return\` gives 2 values"
+
+cat > "$TMP/written_count.ae" <<'AE'
+pick() -> (int, string) {
+    return 41, "", 3
+}
+
+main() {
+    x, e = pick()
+    println("${x} ${e}")
+}
+AE
+refused written_count 2:5 "'pick' returns (int, string), but this \`return\` gives 3 values"
+
+# An optional tuple result counts its tuple's values; `return n, n + 1`
+# into `-> (int, int)?` is tests/regression/test_optional_tuple_return.ae.
+cat > "$TMP/optional_count.ae" <<'AE'
+pick(n: int) -> (int, int)? {
+    if n > 0 { return n, n, n }
+    return none
+}
+
+main() {
+    println("${pick(1) == none}")
+}
+AE
+refused optional_count 2:16 "'pick' returns (int, int)?, but this \`return\` gives 3 values"
+
 if [ "$fails" -ne 0 ]; then
     echo "  [FAIL] return_type_check: $fails case(s)"
     exit 1

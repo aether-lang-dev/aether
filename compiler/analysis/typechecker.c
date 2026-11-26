@@ -14935,6 +14935,42 @@ static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
         return check_return_value(ret->children[0], rt->tuple_types[0], &at, table);
     }
     if (ret->child_count > 1) {
+        /* An optional tuple result (`-> (int, int)?`) takes the values as
+         * its payload; its count is the tuple's. */
+        Type* shape = rt;
+        if (rt->kind == TYPE_OPTIONAL && rt->element_type &&
+            rt->element_type->kind == TYPE_TUPLE)
+            shape = rt->element_type;
+        int shape_known = shape->kind == TYPE_TUPLE || shape->kind == TYPE_STRING ||
+                          shape->kind == TYPE_PTR || shape->kind == TYPE_BOOL ||
+                          shape->kind == TYPE_BYTE || shape->kind == TYPE_FLOAT ||
+                          shape->kind == TYPE_FLOAT32 || shape->kind == TYPE_STRUCT ||
+                          is_integer_scalar(shape->kind);
+        if (shape != rt && shape->tuple_count == ret->child_count) return 1;
+        if (shape_known &&
+            (shape->kind != TYPE_TUPLE || shape->tuple_count != ret->child_count)) {
+            /* A multi-value `return` whose count is not the result's: one
+             * value first and then two (`return 0` ... `return v, 1`), or
+             * two and then three. It was let through, and codegen built
+             * the result from the first `return`'s shape: a tuple into a
+             * scalar result reached the C compiler, and a longer tuple
+             * than the result lost its extra values (only a C warning,
+             * "excess elements in struct initializer") with no word. */
+            char want[200];
+            const char* msg = aether_internf(
+                "Type mismatch in return: %s%s%s returns %s%s, but this `return` gives %d values",
+                own->fn_name ? "'" : "", own->fn_name ? own->fn_name : "this closure",
+                own->fn_name ? "'" : "", ret_type_spell(rt, want, sizeof(want)),
+                own->inferred ? " (inferred from its first `return`)" : "",
+                ret->child_count);
+            type_error_hint(msg,
+                            own->inferred
+                                ? "give every `return` the same number of values, or write the "
+                                  "result type the function means (`-> (T, U)`)"
+                                : "return as many values as the result type has",
+                            ret->line, ret->column);
+            return 0;
+        }
         if (rt->kind != TYPE_TUPLE || rt->tuple_count != ret->child_count) return 1;
         int ok = 1;
         for (int i = 0; i < ret->child_count; i++) {
