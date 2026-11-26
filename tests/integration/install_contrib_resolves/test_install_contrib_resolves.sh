@@ -65,6 +65,8 @@ unexpected_c_files() {
         # contrib.sqlite's veneer and fetched amalgamation ship in both
         # layouts: `ae build --target` compiles them for the target (#1372).
         case "$f" in */contrib/sqlite/aether_sqlite.c|*/contrib/sqlite/amalgamation/*.c) continue ;; esac
+        # contrib.xmp's veneer and fetched libxmp source, for the same reason.
+        case "$f" in */contrib/xmp/aether_xmp.c|*/contrib/xmp/libxmp/*.c) continue ;; esac
         # aether_quickjs.c #includes the fetched QuickJS amalgamation, so no
         # @source names it; it ships with the module that needs it.
         case "$f" in */contrib/quickjs/amalgamation/*.c) continue ;; esac

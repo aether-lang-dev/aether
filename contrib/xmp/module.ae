@@ -1,0 +1,262 @@
+// contrib.xmp — a tracker-module player for std.audio, over libxmp.
+// Import with: import contrib.xmp
+//
+// Plays MOD, S3M, XM, IT, MED and the rest of the formats libxmp reads
+// (full libxmp: every loader, ProWizard and the depackers). A player renders
+// interleaved signed 16-bit stereo PCM, which std.audio plays: either the
+// whole module up front (`sound`, for std.audio's load_pcm) or block by
+// block into a std.audio stream source (`stream_open` + `pump`). There is no
+// audio output of its own; std.audio is the only backend.
+//
+// Loading:
+//   xmp.load(data, length)        -> ptr!     // module bytes (e.g. fs.read_binary)
+//   xmp.load_file(path)           -> ptr!
+//   xmp.free(p)                                // null is a no-op
+//
+// Module info (valid from load on):
+//   xmp.title(p) / xmp.format(p)  -> string   // owned copies
+//   xmp.channels(p), patterns(p), orders(p), instruments(p), samples(p) -> int
+//   xmp.duration_ms(p)            -> int      // libxmp's scan of the main sequence
+//
+// Playing:
+//   xmp.start(p, sample_rate)     -> string   // "" or why not; restarts from the top
+//   xmp.render(p, frames)         -> string!  // frames * FRAME_BYTES bytes, fewer at the end
+//   xmp.render_all(p)             -> string!  // from here to the end, looping or not
+//   xmp.seek_ms(p, ms) / xmp.set_order(p, order) -> string
+//   xmp.position_ms(p), order(p), row(p) -> int
+//   xmp.looping(p, on), xmp.is_looping(p), xmp.ended(p)
+//
+// Through std.audio:
+//   xmp.sound(p, sample_rate)               -> ptr!  // a std.audio source of the whole module
+//   xmp.stream_open(p, sample_rate, frames) -> ptr!  // a std.audio stream source
+//   xmp.pump(p, src)                        -> int!  // render into its free space
+//
+// Errors follow contrib.sqlite and std.audio: a fallible call returns
+// (value, "") or (null / "" / -1, reason), and the reason is a static string.
+//
+// Threading: a player belongs to one thread at a time and does all its work
+// in the call that asks for it. Nothing here runs on a thread of its own.
+// With a stream source the mixer thread drains the ring on its own, and the
+// program calls `pump` often enough to keep it from running dry (a ring of
+// `frames` lasts frames / sample_rate seconds; pump at least twice in that
+// time). audio.stream_underruns on the source says if it ever did run dry.
+//
+// Build: the `@link` below carries the libraries. libxmp is the source
+// pinned in libxmp.lock: `make contrib` fetches it and compiles it into
+// build/contrib/libxmp.a beside the veneer, and `ae build --target=<triple>`
+// compiles it for the target; when it cannot be fetched, `make contrib`
+// builds against the system libxmp instead. Without `make contrib` (a binary
+// release builds no contrib archives) `ae build` compiles the veneer and the
+// libxmp source shipped beside this file itself. README.md has the details.
+
+import std.audio
+import std.string
+
+// -laether_xmp is the veneer archive `make contrib` builds; -lxmp is the
+// vendored static libxmp beside it (or the system library), before -lm,
+// which its mixer needs.
+@link("-laether_xmp -lxmp -lm")
+
+exports(
+    FRAME_BYTES,
+    load, load_file, free,
+    title, format, channels, patterns, orders, instruments, samples, duration_ms,
+    start, render, render_all,
+    seek_ms, set_order, position_ms, order, row,
+    looping, is_looping, ended,
+    sound, stream_open, pump
+)
+
+// Bytes per rendered frame: two channels of signed 16-bit.
+const FRAME_BYTES = 4
+
+// ---- substrate externs (aether_xmp.c) ----
+extern aether_xmp_new() -> ptr
+extern aether_xmp_free(p: ptr)
+// `@aether`: the counted string, so its length bounds the read (#3297).
+extern aether_xmp_load_memory(p: ptr, data: @aether string, length: int) -> int
+extern aether_xmp_load_path(p: ptr, path: string) -> int
+extern aether_xmp_strerror(code: int) -> string
+extern aether_xmp_title(p: ptr) -> string @heap
+extern aether_xmp_format(p: ptr) -> string @heap
+extern aether_xmp_channels(p: ptr) -> int
+extern aether_xmp_patterns(p: ptr) -> int
+extern aether_xmp_orders(p: ptr) -> int
+extern aether_xmp_instruments(p: ptr) -> int
+extern aether_xmp_samples(p: ptr) -> int
+extern aether_xmp_duration_ms(p: ptr) -> int
+extern aether_xmp_start(p: ptr, rate: int) -> int
+extern aether_xmp_render(p: ptr, frames: int) -> int
+extern aether_xmp_render_all(p: ptr) -> int
+// The bytes the last render left, whose length render returned: a `ptr`, so
+// nothing reads it as a C string up to its first NUL.
+extern aether_xmp_buffer(p: ptr) -> ptr
+extern aether_xmp_seek_ms(p: ptr, ms: int) -> int
+extern aether_xmp_set_order(p: ptr, order: int) -> int
+extern aether_xmp_position_ms(p: ptr) -> int
+extern aether_xmp_order(p: ptr) -> int
+extern aether_xmp_row(p: ptr) -> int
+extern aether_xmp_set_looping(p: ptr, on: int) -> int
+extern aether_xmp_is_looping(p: ptr) -> int
+extern aether_xmp_ended(p: ptr) -> int
+
+// Length-aware AetherString constructor, from std.string: the PCM holds NULs.
+extern string_new_with_length(data: ptr, length: size_t) -> string @heap
+
+// ---- loading ----
+
+// Load a module from `length` bytes of `data` (fs.read_binary's shape; the
+// bytes are copied, so `data` need not outlive the player). Returns the
+// player, or (null, reason) for bytes libxmp does not recognise as a module,
+// a damaged one, or none at all. Release it with `free`.
+load(data: string, length: int) -> ptr! {
+    p = aether_xmp_new()
+    if p == null { return null, "xmp: out of memory" }
+    rc = aether_xmp_load_memory(p, data, length)
+    if rc != 0 {
+        aether_xmp_free(p)
+        return null, aether_xmp_strerror(rc)
+    }
+    return p
+}
+
+// Load a module from the file at `path`. libxmp unpacks a compressed one
+// (zip, gzip, xz, lha, PowerPacker, ...) itself.
+load_file(path: string) -> ptr! {
+    p = aether_xmp_new()
+    if p == null { return null, "xmp: out of memory" }
+    rc = aether_xmp_load_path(p, path)
+    if rc != 0 {
+        aether_xmp_free(p)
+        return null, aether_xmp_strerror(rc)
+    }
+    return p
+}
+
+// Release the player and its module. After this the pointer is invalid.
+free(p: ptr) { aether_xmp_free(p) }
+
+// ---- module info ----
+
+// The module's title as stored in it ("" when it has none).
+title(p: ptr) -> string { return aether_xmp_title(p) }
+// The format libxmp identified, e.g. "Protracker M.K." or "Fast Tracker II".
+format(p: ptr) -> string { return aether_xmp_format(p) }
+channels(p: ptr) -> int { return aether_xmp_channels(p) }
+patterns(p: ptr) -> int { return aether_xmp_patterns(p) }
+// The length of the order list (the song's sequence of patterns).
+orders(p: ptr) -> int { return aether_xmp_orders(p) }
+instruments(p: ptr) -> int { return aether_xmp_instruments(p) }
+samples(p: ptr) -> int { return aether_xmp_samples(p) }
+// How long the module plays once through, in milliseconds.
+duration_ms(p: ptr) -> int { return aether_xmp_duration_ms(p) }
+
+// ---- playing ----
+
+// Start (or restart) the player at `sample_rate` Hz (4000 to 768000), from
+// the top of the module. Returns "" or the reason.
+start(p: ptr, sample_rate: int) -> string {
+    rc = aether_xmp_start(p, sample_rate)
+    if rc != 0 { return aether_xmp_strerror(rc) }
+    return ""
+}
+
+// Render the next `frames` frames: frames * FRAME_BYTES bytes of interleaved
+// signed 16-bit stereo, std.audio's FORMAT_S16. Fewer at the end of a module
+// that is not looping, and "" once it has ended (`ended` says so). Returns
+// ("", reason) before `start` or for a block over 4,194,304 frames.
+render(p: ptr, frames: int) -> string! {
+    n = aether_xmp_render(p, frames)
+    if n < 0 { return "", aether_xmp_strerror(n) }
+    return string_new_with_length(aether_xmp_buffer(p), n)
+}
+
+// Render from where the player stands to the end of the module, once, as
+// one block: looping is held off for the call. Refused past 30 minutes.
+render_all(p: ptr) -> string! {
+    n = aether_xmp_render_all(p)
+    if n < 0 { return "", aether_xmp_strerror(n) }
+    return string_new_with_length(aether_xmp_buffer(p), n)
+}
+
+// Move playback to `ms` milliseconds into the module, to the frame.
+seek_ms(p: ptr, ms: int) -> string {
+    rc = aether_xmp_seek_ms(p, ms)
+    if rc != 0 { return aether_xmp_strerror(rc) }
+    return ""
+}
+
+// Move playback to the start of entry `order` in the order list.
+set_order(p: ptr, order: int) -> string {
+    rc = aether_xmp_set_order(p, order)
+    if rc != 0 { return aether_xmp_strerror(rc) }
+    return ""
+}
+
+// Where the next rendered frame falls in the module, in milliseconds.
+position_ms(p: ptr) -> int { return aether_xmp_position_ms(p) }
+// The order-list entry and the row of its pattern now playing.
+order(p: ptr) -> int { return aether_xmp_order(p) }
+row(p: ptr) -> int { return aether_xmp_row(p) }
+
+// Loop at the end (on) or stop there (off, the default). Turning it on
+// after the end carries on from the top.
+looping(p: ptr, on: bool) {
+    v = 0
+    if on { v = 1 }
+    _ = aether_xmp_set_looping(p, v)
+}
+is_looping(p: ptr) -> bool { return aether_xmp_is_looping(p) == 1 }
+// True once a module that is not looping has played to its end.
+ended(p: ptr) -> bool { return aether_xmp_ended(p) == 1 }
+
+// ---- through std.audio ----
+
+// Start the player at `sample_rate` and render the whole module into a
+// std.audio source (audio.load_pcm), which plays, seeks and loops like any
+// other. The player is left at the end; the source owns its own copy of the
+// PCM. Release the source with audio.unload.
+sound(p: ptr, sample_rate: int) -> ptr! {
+    err = start(p, sample_rate)
+    if err != "" { return null, err }
+    pcm, rerr = render_all(p)
+    if rerr != "" { return null, rerr }
+    n = string.length(pcm)
+    if n == 0 { return null, "xmp: the module renders no audio" }
+    src, aerr = audio.load_pcm(pcm, n, sample_rate, 2, audio.FORMAT_S16)
+    if aerr != "" { return null, aerr }
+    return src
+}
+
+// Start the player at `sample_rate` and open a std.audio stream source for
+// it holding `capacity_frames` frames, already filled by one `pump`. Play
+// it with audio.play, keep it fed with `pump`, release it with
+// audio.unload (before freeing the player or not: they are independent).
+stream_open(p: ptr, sample_rate: int, capacity_frames: int) -> ptr! {
+    err = start(p, sample_rate)
+    if err != "" { return null, err }
+    src, serr = audio.stream_open(sample_rate, 2, audio.FORMAT_S16, capacity_frames)
+    if serr != "" { return null, serr }
+    _, perr = pump(p, src)
+    if perr != "" {
+        audio.unload(src)
+        return null, perr
+    }
+    return src
+}
+
+// Render as much as `src` (from stream_open) has room for and push it in.
+// Returns the frames pushed: 0 when the ring is full, or once the module has
+// ended (`ended`), and (-1, reason) on an error. Call it from the thread
+// that owns the player, as often as the module section above says.
+pump(p: ptr, src: ptr) -> int! {
+    room = audio.stream_capacity(src) - audio.stream_queued(src)
+    if room <= 0 { return 0 }
+    pcm, err = render(p, room)
+    if err != "" { return -1, err }
+    n = string.length(pcm)
+    if n == 0 { return 0 }
+    pushed, perr = audio.stream_push(src, pcm, n)
+    if perr != "" { return -1, perr }
+    return pushed
+}

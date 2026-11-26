@@ -74,6 +74,7 @@ is absent**, a skip is normal, not an error):
 |---|---|---|
 | `sqlite` | nothing: fetches the pinned amalgamation (#1372); `libsqlite3-dev` only when offline | `scripts/fetch-sqlite-amalgamation.sh`, else `pkg-config sqlite3` / `<sqlite3.h>` |
 | `avcodec` | FFmpeg's `libavcodec`/`libavformat`/`libavutil`/`libswscale`/`libswresample` dev | `pkg-config libavcodec …` |
+| `xmp` | nothing: fetches the pinned libxmp release; `libxmp-dev` only when offline | `scripts/fetch-libxmp.sh`, else `pkg-config libxmp` / `<xmp.h>` |
 | `host_stunt`, `host_aether` | nothing (libc and the in-tree runtime) | always built |
 
 The language bridges (Lua, Python, Tcl, Perl, Ruby, JS, Go, Java and more)
@@ -220,6 +221,8 @@ looks like:
 ```
   sqlite             OK   build/contrib/libaether_sqlite.a
   avcodec            SKIP (dev library not found)
+  libxmp             OK   build/contrib/libxmp.a (libxmp 4.7.4, vendored)
+  xmp                OK   build/contrib/libaether_xmp.a
   host_aether        OK   build/contrib/libaether_host_aether.a
   host_stunt         OK   build/contrib/libaether_host_stunt.a
 ```

@@ -981,12 +981,13 @@ static int cross_link_wants(const char* link_hdr, const char* names) {
  * the right object; a miss compiles and publishes. The veneer is small and
  * is compiled per build like the runtime. */
 
-/* SQLITE_CFLAGS from the lock file, quotes stripped; "" when absent. A
+/* The `key` (SQLITE_CFLAGS=, LIBXMP_CFLAGS=) line of a lock file, quotes
+ * stripped; "" when absent. A
  * string the caller frees, NULL when out of memory (after saying so). The
  * line is read whole (#2537): one past 1 KB was cut, its closing quote went
  * with the cut so the opening one stayed in the flags, and the flags past
  * the cut never reached the compile or the cache key. */
-static char* cross_sqlite_lock_cflags(const char* lock) {
+static char* cross_lock_cflags(const char* lock, const char* key) {
     char* out = NULL;
     FILE* f = fopen(lock, "r");
     if (f) {
@@ -994,8 +995,9 @@ static char* cross_sqlite_lock_cflags(const char* lock) {
         size_t cap = 0;
         int got;
         while ((got = ae_read_line(f, &line, &cap)) > 0) {
-            if (strncmp(line, "SQLITE_CFLAGS=", 14) != 0) continue;
-            char* v = line + 14;
+            size_t kl = strlen(key);
+            if (strncmp(line, key, kl) != 0) continue;
+            char* v = line + kl;
             size_t n = strlen(v);
             while (n && (v[n-1] == '\n' || v[n-1] == '\r')) v[--n] = '\0';
             if (n >= 2 && v[0] == '"' && v[n-1] == '"') { v[n-1] = '\0'; v++; }
@@ -1112,7 +1114,7 @@ bool ae_vendored_sqlite(const char* base, const char* tag,
         return false;
     }
 
-    char* sqlite_cflags = cross_sqlite_lock_cflags(lock);
+    char* sqlite_cflags = cross_lock_cflags(lock, "SQLITE_CFLAGS=");
     if (!sqlite_cflags) return false;   /* out of memory, said */
     char cc_version[256];
     cross_compiler_version(cc_cmd, cc_version, sizeof(cc_version));
@@ -1192,6 +1194,240 @@ bool ae_vendored_sqlite(const char* base, const char* tag,
     free(cmd);
     free(prefix);
     free(sqlite_cflags);
+    return ok;
+}
+
+/* ---- contrib.xmp from the pinned libxmp source -----------------------------
+ *
+ * The same arrangement for libxmp: a program importing contrib.xmp asks for
+ * `-laether_xmp -lxmp`, and when no archive covers the target the veneer and
+ * the libxmp release scripts/fetch-libxmp.sh put in contrib/xmp/libxmp/ are
+ * compiled here. libxmp is not one TU but the list libxmp's Makefile.vc
+ * builds the full library from (sources.txt), so each source is compiled to
+ * its own cache slot, `libxmpNNN-<tag>-<key>.o`, keyed on that source and on
+ * what keys the whole set: the release checksum and source list, the
+ * compiler command and version, the flags and the lock's LIBXMP_CFLAGS. The
+ * headers come from the same checksummed release as the sources.
+ *
+ * What is appended to `link_objs` is the veneer and one archive of those
+ * objects: in `objdir` when there is one (a cross build), else in the cache
+ * under the set's key. `obj_list`, when given, gets the objects themselves,
+ * for an --emit=staticlib archive (an archive inside an archive is not
+ * searched by a linker). */
+static void cross_hex_key(AeSha256* ctx, char key[17]) {
+    unsigned char digest[32];
+    ae_sha256_final(ctx, digest);
+    for (int i = 0; i < 8; i++) snprintf(key + i * 2, 3, "%02x", digest[i]);
+}
+
+/* Run `ar rcs "<archive>"` over `objs` (quoted paths, space-separated) in
+ * batches, so no single command line grows past what a Windows shell runs. */
+static bool cross_archive_batched(const char* ar_cmd, const char* archive,
+                                  char** objs, int nobjs,
+                                  char** cmd, size_t* cmd_cap) {
+    remove(archive);
+    for (int i = 0; i < nobjs; ) {
+        if (!cross_cmd_fmt(cmd, cmd_cap, "%s rcs \"%s\"", ar_cmd, archive)) return false;
+        for (int j = 0; j < 24 && i < nobjs; j++, i++) {
+            size_t used = strlen(*cmd);
+            if (!cross_buf_reserve(cmd, cmd_cap, used + strlen(objs[i]) + 4)) return false;
+            snprintf(*cmd + used, *cmd_cap - used, " \"%s\"", objs[i]);
+        }
+        if (run_cmd_show_warnings(*cmd) != 0) return false;
+    }
+    return true;
+}
+
+bool ae_vendored_xmp(const char* base, const char* tag,
+                     const char* cc_cmd, const char* ar_cmd, const char* flags,
+                     const char* objdir,
+                     char* link_objs, size_t link_sz,
+                     char** obj_list, size_t* obj_cap) {
+    char dir[1200], list[1300], rec[1300], lock[1200], veneer[1200], str_h[1200], inc[1300];
+    snprintf(dir, sizeof(dir), "%s/contrib/xmp/libxmp", base);
+    snprintf(list, sizeof(list), "%s/sources.txt", dir);
+    snprintf(rec, sizeof(rec), "%s/.sha256", dir);
+    snprintf(inc, sizeof(inc), "%s/include", dir);
+    snprintf(lock, sizeof(lock), "%s/contrib/xmp/libxmp.lock", base);
+    snprintf(veneer, sizeof(veneer), "%s/contrib/xmp/aether_xmp.c", base);
+    snprintf(str_h, sizeof(str_h), "%s/std/string/aether_string.h", base);
+    if (!path_exists(list) || !path_exists(veneer)) {
+        fprintf(stderr,
+            "Error: contrib.xmp needs libxmp built for %s, and neither source is here.\n"
+            "  The pinned libxmp source is not in %s. In a source tree, fetch it with:\n"
+            "    scripts/fetch-libxmp.sh\n"
+            "  or build libaether_xmp.a + libxmp.a (`make contrib`; for a cross\n"
+            "  target, stage them in a CROSSBUILD_SYSROOT, aether-crossbuild).\n",
+            tag, dir);
+        return false;
+    }
+
+    /* The source list, one path per line, relative to `dir`. */
+    char* srcs[512];
+    int nsrc = 0;
+    {
+        FILE* f = fopen(list, "r");
+        if (!f) { fprintf(stderr, "Error: cannot read %s\n", list); return false; }
+        char* line = NULL;
+        size_t cap = 0;
+        int got;
+        while ((got = ae_read_line(f, &line, &cap)) > 0) {
+            size_t n = strlen(line);
+            while (n && (line[n-1] == '\n' || line[n-1] == '\r' || line[n-1] == ' ')) line[--n] = '\0';
+            if (!n) continue;
+            if (nsrc == (int)(sizeof(srcs) / sizeof(srcs[0]))) { got = -2; break; }
+            if (!(srcs[nsrc] = strdup(line))) { got = -1; break; }
+            nsrc++;
+        }
+        free(line);
+        fclose(f);
+        if (got < 0 || nsrc == 0) {
+            for (int i = 0; i < nsrc; i++) free(srcs[i]);
+            fprintf(stderr, "Error: %s is %s.\n", list,
+                    got == -2 ? "longer than this toolchain expects" :
+                    nsrc == 0 ? "empty" : "unreadable (out of memory)");
+            return false;
+        }
+    }
+
+    char* xmp_cflags = cross_lock_cflags(lock, "LIBXMP_CFLAGS=");
+    char cc_version[256];
+    cross_compiler_version(cc_cmd, cc_version, sizeof(cc_version));
+
+    AeSha256 ctx;
+    char key[17];
+    ae_sha256_init(&ctx);
+    cross_sha256_update_file(&ctx, rec);
+    cross_sha256_update_file(&ctx, list);
+    cross_sha256_update_str(&ctx, tag);
+    cross_sha256_update_str(&ctx, cc_cmd);
+    cross_sha256_update_str(&ctx, cc_version);
+    cross_sha256_update_str(&ctx, flags);
+    cross_sha256_update_str(&ctx, xmp_cflags ? xmp_cflags : "");
+    cross_hex_key(&ctx, key);
+
+    init_cache_dir();
+    char* cmd = NULL;
+    char* prefix = NULL;
+    size_t cmd_cap = 0, prefix_cap = 0;
+    char* objs[512] = { 0 };
+    bool ok = false;
+    char archive[1600], veneer_obj[1600];
+    do {
+        if (!xmp_cflags) break;   /* out of memory, said */
+        /* The archive of the whole set, when the cache has it, is all a
+         * native build needs. */
+        bool have_archive = false;
+        if (objdir) {
+            snprintf(archive, sizeof(archive), "%s/libxmp.a", objdir);
+        } else {
+            snprintf(archive, sizeof(archive), "%s/libxmp-%s-%s.a", s_cache_dir, tag, key);
+            if (path_exists(archive)) { cache_touch(archive); have_archive = true; }
+        }
+        bool need_objs = !have_archive || obj_list;
+        if (need_objs) {
+            if (!cross_cmd_fmt(&prefix, &prefix_cap, "%s %s -w %s -I\"%s\"",
+                               cc_cmd, flags, xmp_cflags, inc)) {
+                fprintf(stderr, "Error: out of memory building the libxmp compile command.\n");
+                break;
+            }
+            bool said = false, failed = false;
+            for (int i = 0; i < nsrc; i++) {
+                char src[1600], stem[32], okey[17];
+                snprintf(src, sizeof(src), "%s/%s", dir, srcs[i]);
+                snprintf(stem, sizeof(stem), "libxmp%03d", i);
+                ae_sha256_init(&ctx);
+                cross_sha256_update_str(&ctx, key);
+                cross_sha256_update_str(&ctx, srcs[i]);
+                cross_sha256_update_file(&ctx, src);
+                cross_hex_key(&ctx, okey);
+                char slot[1400];
+                snprintf(slot, sizeof(slot), "%s/%s-%s-%s.o", s_cache_dir, stem, tag, okey);
+                if (!said && !path_exists(slot)) {
+                    fprintf(stderr, "Compiling libxmp for %s (%d sources, cached for later builds)...\n",
+                            tag, nsrc);
+                    said = true;
+                }
+                char obj[1600];
+                if (!vendored_cached_obj(stem, tag, okey, prefix, src, &cmd, &cmd_cap,
+                                         obj, sizeof(obj)) ||
+                    !(objs[i] = strdup(obj))) {
+                    fprintf(stderr, "Error: compiling libxmp's %s for %s failed.\n", srcs[i], tag);
+                    failed = true;
+                    break;
+                }
+            }
+            if (failed) break;
+        }
+        if (!have_archive) {
+            char tmp[1700];
+            if (objdir) snprintf(tmp, sizeof(tmp), "%s", archive);
+            else snprintf(tmp, sizeof(tmp), "%s.tmp.%d", archive, (int)getpid());
+            if (!cross_archive_batched(ar_cmd, tmp, objs, nsrc, &cmd, &cmd_cap)) {
+                fprintf(stderr, "Error: archiving libxmp for %s failed.\n", tag);
+                remove(tmp);
+                break;
+            }
+            if (!objdir) {
+                if (cache_publish(tmp, archive) == 0) cache_enforce_limit(archive, 0);
+                else snprintf(archive, sizeof(archive), "%s", tmp);
+            }
+        }
+
+        /* The veneer, against the pinned headers. */
+        if (!cross_cmd_fmt(&prefix, &prefix_cap, "%s %s %s -I\"%s\" %s",
+                           cc_cmd, flags, xmp_cflags, inc, tc_include_flags())) {
+            fprintf(stderr, "Error: out of memory building the contrib.xmp compile command.\n");
+            break;
+        }
+        bool vok;
+        if (objdir) {
+            snprintf(veneer_obj, sizeof(veneer_obj), "%s/aether_xmp.o", objdir);
+            vok = cross_cmd_fmt(&cmd, &cmd_cap, "%s -c \"%s\" -o \"%s\"", prefix, veneer, veneer_obj)
+                  && run_cmd_show_warnings(cmd) == 0;
+        } else {
+            char vkey[17];
+            ae_sha256_init(&ctx);
+            cross_sha256_update_str(&ctx, key);
+            cross_sha256_update_file(&ctx, veneer);
+            cross_sha256_update_file(&ctx, str_h);
+            cross_sha256_update_str(&ctx, prefix);
+            cross_hex_key(&ctx, vkey);
+            vok = vendored_cached_obj("aether_xmp", tag, vkey, prefix, veneer, &cmd, &cmd_cap,
+                                      veneer_obj, sizeof(veneer_obj));
+        }
+        if (!vok) {
+            fprintf(stderr, "Error: compiling contrib.xmp for %s failed.\n", tag);
+            break;
+        }
+        size_t used = strlen(link_objs);
+        int w = snprintf(link_objs + used, link_sz - used, " \"%s\" \"%s\"", veneer_obj, archive);
+        if (w < 0 || (size_t)w >= link_sz - used) {
+            fprintf(stderr, "Error: the link line has no room for contrib.xmp.\n");
+            break;
+        }
+        if (obj_list) {
+            bool grown = true;
+            size_t pos = *obj_list ? strlen(*obj_list) : 0;
+            for (int i = 0; i < nsrc && grown; i++) {
+                grown = cross_buf_reserve(obj_list, obj_cap, pos + strlen(objs[i]) + 4);
+                if (grown) pos += (size_t)snprintf(*obj_list + pos, *obj_cap - pos, " \"%s\"", objs[i]);
+            }
+            if (grown) {
+                grown = cross_buf_reserve(obj_list, obj_cap, pos + strlen(veneer_obj) + 4);
+                if (grown) snprintf(*obj_list + pos, *obj_cap - pos, " \"%s\"", veneer_obj);
+            }
+            if (!grown) {
+                fprintf(stderr, "Error: out of memory listing contrib.xmp's objects.\n");
+                break;
+            }
+        }
+        ok = true;
+    } while (0);
+    for (int i = 0; i < nsrc; i++) { free(srcs[i]); free(objs[i]); }
+    free(cmd);
+    free(prefix);
+    free(xmp_cflags);
     return ok;
 }
 
@@ -1509,6 +1745,9 @@ int run_cross_build(const char* c_file, const char* out_file,
                  * sqlite3_* references resolved by the lib that follows. */
                 { "aether_sqlite", "-laether_sqlite -lsqlite3",
                   "aether_sqlite sqlite3", "" },
+                /* contrib.xmp: the veneer, then libxmp. */
+                { "aether_xmp", "-laether_xmp -lxmp",
+                  "aether_xmp xmp", "" },
             };
             for (size_t i = 0; i < sizeof(t2) / sizeof(t2[0]); i++) {
                 snprintf(probe, sizeof(probe), "%s/lib/lib%s.a", xsr, t2[i].probe);
@@ -1546,6 +1785,14 @@ int run_cross_build(const char* c_file, const char* out_file,
         char* link_hdr = NULL;
         if (cross_read_aether_link_raw(c_file, &link_hdr) < 0) return 1;
         vendored_sqlite = cross_link_wants(link_hdr, "-laether_sqlite") != 0;
+        free(link_hdr);
+    }
+    /* contrib.xmp likewise, from the pinned libxmp source (ae_vendored_xmp). */
+    bool vendored_xmp = false;
+    if (!strstr(crossbuild_libs, "libaether_xmp.a")) {
+        char* link_hdr = NULL;
+        if (cross_read_aether_link_raw(c_file, &link_hdr) < 0) return 1;
+        vendored_xmp = cross_link_wants(link_hdr, "-laether_xmp") != 0;
         free(link_hdr);
     }
     /* std.regex needs no sysroot (#1389): when nothing above staged a real
@@ -1684,6 +1931,33 @@ int run_cross_build(const char* c_file, const char* out_file,
             }
             snprintf(objlist + obj_pos, objlist_cap - obj_pos, "%s", sqlite_objs);
             obj_pos += strlen(sqlite_objs);
+        }
+        /* 2a'. contrib.xmp from the pinned libxmp source: the veneer and
+         *      an archive of libxmp join the link; an --emit=staticlib
+         *      archive takes libxmp's objects themselves. */
+        if (vendored_xmp) {
+            char xmp_flags[4096];
+            snprintf(xmp_flags, sizeof(xmp_flags), "%s%s %s %s",
+                     sysroot_flag, lib_pic, opt, user_cflags);
+            char xmp_objs[3400] = "";
+            char* xmp_list = NULL;
+            size_t xmp_list_cap = 0;
+            bool xok = ae_vendored_xmp(base, ztriple, cc_cmd, ar_cmd, xmp_flags, objdir,
+                                       xmp_objs, sizeof(xmp_objs),
+                                       emit_staticlib ? &xmp_list : NULL,
+                                       emit_staticlib ? &xmp_list_cap : NULL);
+            if (!xok) { free(xmp_list); break; }
+            size_t cl = strlen(crossbuild_libs);
+            snprintf(crossbuild_libs + cl, sizeof(crossbuild_libs) - cl, "%s", xmp_objs);
+            const char* add = emit_staticlib && xmp_list ? xmp_list : "";
+            if (!cross_buf_reserve(&objlist, &objlist_cap, obj_pos + strlen(add) + 1)) {
+                free(xmp_list);
+                fprintf(stderr, "Error: out of memory building the cross-compile object list.\n");
+                break;
+            }
+            snprintf(objlist + obj_pos, objlist_cap - obj_pos, "%s", add);
+            obj_pos += strlen(add);
+            free(xmp_list);
         }
 
         /* Clear any stale output so the FreeBSD "output exists == linked"

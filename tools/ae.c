@@ -5986,6 +5986,92 @@ static const char* vendored_sqlite_link(const char* cc, const char* ae_link,
     return rewritten;
 }
 
+/* contrib.xmp on a toolchain with no libaether_xmp.a: the same as
+ * contrib.sqlite above. The module's @link asks for `-laether_xmp -lxmp`;
+ * a binary release ships contrib/xmp's veneer and the pinned libxmp source
+ * instead of the archives, so compile them (each object and the archive
+ * cached, ae_vendored_xmp) and link them in place of the two -l flags. A
+ * toolchain that has the archive keeps it, and so does one with no libxmp
+ * source to compile (the system-library route `make contrib` falls back to).
+ *
+ * Returns `ae_link` itself when nothing changes, else a string that lives
+ * until the next call; NULL when a compile failed (said). */
+static const char* vendored_xmp_link(const char* cc, const char* ae_link,
+                                     const char* user_cflags) {
+    static char* rewritten = NULL;
+    if (g_emit_obj || g_emit_csrc) return ae_link;          /* no link */
+    if (!link_list_has(ae_link, "-laether_xmp")) return ae_link;
+    if (tc.has_lib) {
+        char lib_dir[1024];
+        snprintf(lib_dir, sizeof(lib_dir), "%s", tc.lib);
+        char* bs = strrchr(lib_dir, '\\');
+        char* fs = strrchr(lib_dir, '/');
+        char* slash = (!bs) ? fs : (!fs) ? bs : (bs > fs ? bs : fs);
+        if (slash) *slash = '\0';
+        char a[1200];
+        snprintf(a, sizeof(a), "%s/contrib/libaether_xmp.a", lib_dir);
+        if (path_exists(a)) return ae_link;
+        snprintf(a, sizeof(a), "%s/libaether_xmp.a", lib_dir);
+        if (path_exists(a)) return ae_link;
+    }
+    char list[1200];
+    snprintf(list, sizeof(list), "%s/contrib/xmp/libxmp/sources.txt", tc.src_root);
+    if (!path_exists(list)) return ae_link;
+
+#ifdef _WIN32
+    const char* pic = "";
+#else
+    const char* pic = " -fPIC";
+#endif
+    char* flags = ae_strdup_printf("-O2%s%s%s%s", pic, gcc_relation_flags(cc),
+                                   user_cflags[0] ? " " : "", user_cflags);
+    if (!flags) {
+        fprintf(stderr, "Error: out of memory building the contrib.xmp compile command.\n");
+        return NULL;
+    }
+    /* The archiver that goes with the compiler: zig's own beside `zig cc`. */
+    const char* ar = strncmp(cc, "zig cc", 6) == 0 ? "zig ar" : "ar";
+    char objs[3400] = "";
+    bool ok = ae_vendored_xmp(tc.src_root, "host", cc, ar, flags, NULL,
+                              objs, sizeof(objs), NULL, NULL);
+    free(flags);
+    if (!ok) return NULL;
+
+    /* The veneer and the archive take -laether_xmp's place; -lxmp goes. */
+    size_t cap = strlen(ae_link) + strlen(objs) + 2;
+    char* out = malloc(cap);
+    if (!out) {
+        fprintf(stderr, "Error: out of memory building the link command.\n");
+        return NULL;
+    }
+    size_t o = 0;
+    for (const char* p = ae_link; *p; ) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        const char* e = p;
+        while (*e && *e != ' ') e++;
+        size_t n = (size_t)(e - p);
+        const char* put = p;
+        size_t put_n = n;
+        if (n == 12 && strncmp(p, "-laether_xmp", 12) == 0) {
+            put = objs[0] == ' ' ? objs + 1 : objs;
+            put_n = strlen(put);
+        } else if (n == 5 && strncmp(p, "-lxmp", 5) == 0) {
+            put_n = 0;
+        }
+        if (put_n) {
+            if (o) out[o++] = ' ';
+            memcpy(out + o, put, put_n);
+            o += put_n;
+        }
+        p = e;
+    }
+    out[o] = '\0';
+    free(rewritten);
+    rewritten = out;
+    return rewritten;
+}
+
 /* #2757: a source build (`ae build --trace`, or a toolchain with no
  * libaether.a) handed every runtime source to the one compiler command that
  * links the program, and the compiler took them one after another: about 90
@@ -6973,9 +7059,11 @@ void build_gcc_cmd(char* cmd, size_t size,
     /* See AETHER_WIN_SYSTEM_LIBS: one list, shared with `ae cflags --libs`
      * so the two cannot drift apart again. */
     const char* win_link_libs = AETHER_WIN_SYSTEM_LIBS;
-    /* contrib.sqlite with no archive here: compile it (see
-     * vendored_sqlite_link). */
+    /* contrib.sqlite and contrib.xmp with no archive here: compile them
+     * (see vendored_sqlite_link, vendored_xmp_link). */
     ae_link = vendored_sqlite_link(s_gcc_cmd, ae_link, user_cflags);
+    if (!ae_link) { free(opt); set_failing_cmd(cmd, size); return; }
+    ae_link = vendored_xmp_link(s_gcc_cmd, ae_link, user_cflags);
     if (!ae_link) { free(opt); set_failing_cmd(cmd, size); return; }
     char lib_dir[1024];
     if (tc.has_lib) {
@@ -7103,9 +7191,11 @@ void build_gcc_cmd(char* cmd, size_t size,
 #ifdef __APPLE__
     default_macos_deployment_target();
 #endif
-    /* contrib.sqlite with no archive here: compile it (see
-     * vendored_sqlite_link). */
+    /* contrib.sqlite and contrib.xmp with no archive here: compile them
+     * (see vendored_sqlite_link, vendored_xmp_link). */
     ae_link = vendored_sqlite_link(cc, ae_link, user_cflags);
+    if (!ae_link) { set_failing_cmd(cmd, size); return; }
+    ae_link = vendored_xmp_link(cc, ae_link, user_cflags);
     if (!ae_link) { set_failing_cmd(cmd, size); return; }
     char* opt;   /* the flags, with user cflags of any length (#2534) */
     // --emit=lib adds -fPIC -shared so the output is loadable via dlopen.

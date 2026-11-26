@@ -389,6 +389,18 @@ bool ae_vendored_sqlite(const char* base, const char* tag,
                         const char* objdir,
                         char* link_objs, size_t link_sz);
 
+/* contrib.xmp from the pinned libxmp source the toolchain ships: compile
+ * each of libxmp's sources (cached one slot apiece) and the veneer with
+ * `cc_cmd` for `tag`, archive libxmp with `ar_cmd` (in `objdir`, or cached
+ * when it is NULL), and append the veneer and the archive, quoted, to
+ * `link_objs`; with `obj_list`, append the objects themselves there too.
+ * False, having said why, on failure. */
+bool ae_vendored_xmp(const char* base, const char* tag,
+                     const char* cc_cmd, const char* ar_cmd, const char* flags,
+                     const char* objdir,
+                     char* link_objs, size_t link_sz,
+                     char** obj_list, size_t* obj_cap);
+
 int  run_cross_build(const char* c_file, const char* out_file,
                      bool optimize, const char* extra_files,
                      const char* ztriple, bool emit_lib, bool emit_staticlib);

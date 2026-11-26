@@ -1904,6 +1904,10 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	test -f "$$verdir/share/aether/tools/ae-fetch/main.ae" || (echo "  FAIL: the package fetcher's source is missing (#1362)"; exit 1) && \
 	test -f "$$verdir/share/aether/contrib/sqlite/amalgamation/sqlite3.c" || (echo "  FAIL: the SQLite amalgamation is missing (#1372)"; exit 1) && \
 	test -f "$$verdir/share/aether/contrib/quickjs/amalgamation/quickjs-amalgam.c" || (echo "  FAIL: the QuickJS amalgamation is missing"; exit 1) && \
+	test -f "$$verdir/share/aether/contrib/xmp/libxmp/sources.txt" || (echo "  FAIL: the libxmp source is missing"; exit 1) && \
+	test -f "$$verdir/share/aether/contrib/xmp/libxmp/src/player.c" || (echo "  FAIL: libxmp's sources were trimmed from the archive"; exit 1) && \
+	test -f "$$verdir/share/aether/contrib/xmp/libxmp/COPYING" || (echo "  FAIL: libxmp's licence is missing"; exit 1) && \
+	test -f "$$verdir/share/aether/contrib/xmp/NOTICE" || (echo "  FAIL: contrib/xmp/NOTICE is missing"; exit 1) && \
 	test -s "$$verdir/share/aether/MANIFEST" || (echo "  FAIL: share/aether/MANIFEST missing; ae cannot build from source without it"; exit 1) && \
 	shipped_specs=$$(find "$$verdir/share/aether" -type f -name 'test_*.ae' | head -5) && \
 	{ test -z "$$shipped_specs" || (echo "  FAIL: co-located specs shipped in the archive (#1584):"; echo "$$shipped_specs" | sed 's/^/        /'; exit 1); } && \
@@ -2985,6 +2989,7 @@ install: $(VERSION_HEADER) release-build ae stdlib
 # Modules covered (v1):
 #   - sqlite                    (-lsqlite3)
 #   - avcodec                   (FFmpeg's decode libraries)
+#   - xmp                       (libxmp: the pinned source, else -lxmp)
 #   - host/stunt                (the test double; dlopens libstunt)
 #   - host/aether               (fork+exec sandboxed child via LD_PRELOAD;
 #                                libc + in-tree sandbox runtime only)
@@ -3482,7 +3487,11 @@ check-extern-widths: compiler ae stdlib
 	@./$(EXTERN_WIDTHS_CHECKER) --root tests/extern_widths/fixture --expect 13 tests/extern_widths/fixture \
 	    > $(BUILD_DIR)/extern_widths/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/extern_widths/self_test.log; exit 1; }
-	@./$(EXTERN_WIDTHS_CHECKER) --exclude tests/extern_widths/fixture $(EXTERN_WIDTHS_DIRS)
+	@# contrib/xmp/libxmp is libxmp's fetched release source, which no
+	@# extern binds (contrib/xmp/aether_xmp.c does). Read as text it seems to
+	@# define stb_vorbis_* twice, but its vorbis.h renames those to
+	@# libxmp_vorbis_*, and its tempfile.h its mkstemp to libxmp_mkstemp.
+	@./$(EXTERN_WIDTHS_CHECKER) --exclude tests/extern_widths/fixture --exclude contrib/xmp/libxmp $(EXTERN_WIDTHS_DIRS)
 
 # -----------------------------------------------------------------
 # Raw calls (#3107): a std module binds C through `*_raw` externs and

@@ -585,7 +585,7 @@ jobs:
   # simply never used. Split restore/save as for the miniaudio object.
   # ============================================================
   ci-sqlite-cross:
-    name: contrib.sqlite / self-contained cross builds
+    name: contrib.sqlite + contrib.xmp / self-contained cross builds
     runs-on: ubuntu-26.04
     timeout-minutes: 30
 
@@ -605,15 +605,16 @@ jobs:
         path: |
           .zig
           .ci-cache/ae-cross
-        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
+        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock', 'contrib/xmp/libxmp.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
         restore-keys: |
-          sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock') }}-
+          sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock', 'contrib/xmp/libxmp.lock') }}-
 
-    - name: Provision zig and the SQLite amalgamation
+    - name: Provision zig, the SQLite amalgamation and the libxmp source
       run: |
         ZIG="$(./scripts/get-zig.sh "$GITHUB_WORKSPACE/.zig")"
         echo "$(dirname "$ZIG")" >> "$GITHUB_PATH"
         sh scripts/fetch-sqlite-amalgamation.sh
+        sh scripts/fetch-libxmp.sh
 
     - name: Build the toolchain
       run: make -j"$(nproc)" compiler ae stdlib
@@ -626,6 +627,17 @@ jobs:
         echo "$out"
         echo "$out" | grep -q '\[PASS\]'
         # aarch64 must actually have run, not been skipped for want of qemu.
+        echo "$out" | grep -q 'aarch64-linux-musl: built, ran the spec'
+
+    # contrib.xmp the same way: libxmp's sources compiled per target, cached
+    # in the same directory, and the module's spec run on both targets.
+    - name: Cross-build and run contrib.xmp
+      env:
+        AETHER_CACHE_DIR: ${{ github.workspace }}/.ci-cache/ae-cross
+      run: |
+        out="$(sh tests/integration/xmp_vendored_cross/test_xmp_vendored_cross.sh)"
+        echo "$out"
+        echo "$out" | grep -q '\[PASS\]'
         echo "$out" | grep -q 'aarch64-linux-musl: built, ran the spec'
 
     # A macOS dylib cross-linked on Linux: its install name and minimum are
@@ -648,7 +660,7 @@ jobs:
         path: |
           .zig
           .ci-cache/ae-cross
-        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
+        key: sqlite-xobj-${{ hashFiles('scripts/get-zig.sh', 'tools/ae_zig_pin.h', 'contrib/sqlite/amalgamation.lock', 'contrib/xmp/libxmp.lock') }}-${{ hashFiles('tools/ae_cross.c') }}
 
   ci-freebsd-native:
     name: FreeBSD / native build + unit tests
@@ -784,6 +796,18 @@ jobs:
     - name: Fetch the pinned SQLite amalgamation
       run: sh scripts/fetch-sqlite-amalgamation.sh
 
+    # contrib.xmp compiles the pinned libxmp source into build/contrib/
+    # libxmp.a the same way, fetched explicitly for the same reason.
+    - name: Fetch the pinned libxmp source
+      run: sh scripts/fetch-libxmp.sh
+
+    - name: Restore libxmp archive cache
+      id: libxmp_obj_cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .ci-cache/libxmp
+        key: libxmp-obj-ubuntu-22.04-${{ hashFiles('contrib/xmp/libxmp.lock', 'tests/scripts/contrib_build.sh') }}
+
     # The amalgamation's object costs most of a minute to compile; cache it the
     # way the miniaudio object is cached. contrib_build.sh names each object by
     # a hash of its source, compiler and flags, so a restored directory can
@@ -816,6 +840,15 @@ jobs:
       with:
         path: .ci-cache/sqlite
         key: sqlite-obj-ubuntu-22.04-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
+
+    - name: Save libxmp archive cache (merge to main, on miss only)
+      if: >-
+        github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.libxmp_obj_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .ci-cache/libxmp
+        key: libxmp-obj-ubuntu-22.04-${{ hashFiles('contrib/xmp/libxmp.lock', 'tests/scripts/contrib_build.sh') }}
 
     # A driver is installed above, so contrib/vulkan skipping here would mean
     # the GPU path silently stopped being covered. Fail instead.
@@ -1320,6 +1353,14 @@ jobs:
         path: .ci-cache/sqlite
         key: sqlite-obj-windows-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
 
+    # And contrib.xmp's libxmp archive, built from its pinned source.
+    - name: Restore libxmp archive cache
+      id: libxmp_obj_cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .ci-cache/libxmp
+        key: libxmp-obj-windows-${{ hashFiles('contrib/xmp/libxmp.lock', 'tests/scripts/contrib_build.sh') }}
+
     - name: Build and run the contrib series
       # contrib_check.sh probes for each entry's libraries with pkg-config and
       # skips the entries whose dependency is absent, so this reports what this
@@ -1368,6 +1409,15 @@ jobs:
       with:
         path: .ci-cache/sqlite
         key: sqlite-obj-windows-${{ hashFiles('contrib/sqlite/amalgamation.lock', 'tests/scripts/contrib_build.sh') }}
+
+    - name: Save libxmp archive cache (merge to main, on miss only)
+      if: >-
+        github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.libxmp_obj_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .ci-cache/libxmp
+        key: libxmp-obj-windows-${{ hashFiles('contrib/xmp/libxmp.lock', 'tests/scripts/contrib_build.sh') }}
 
     # lavapipe is installed above, so a Vulkan entry that skipped would be
     # coverage silently lost. The same assertion as the Linux leg's.

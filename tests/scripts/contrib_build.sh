@@ -4,7 +4,7 @@
 # Two modes:
 #
 # 1. Default (MODULES unset) — best-effort: probe every contrib module
-#    (sqlite, avcodec and the host bridges left here, stunt and aether). For each available dep, compile + archive.
+#    (sqlite, avcodec, xmp and the host bridges left here, stunt and aether). For each available dep, compile + archive.
 #    Skip + tally any whose dev libs aren't installed. Same shape as
 #    historical behaviour; convenient for dev boxes.
 #
@@ -26,7 +26,8 @@
 # Writes build/contrib/MANIFEST listing one line per built archive:
 #     <module>\t<archive_path>[\t<installed name>]
 # The optional third column is the name to install it under, when that is not
-# libaether_<module>.a (the vendored SQLite, which stays libsqlite3.a).
+# libaether_<module>.a (the vendored SQLite and libxmp, which stay
+# libsqlite3.a and libxmp.a).
 # `make install-contrib` reads this manifest to know what to ship.
 #
 # Called from `make contrib` (default mode) or
@@ -227,6 +228,108 @@ build_vendored_sqlite() {
     return 0
 }
 
+# --- libxmp: the pinned source, or the system library ----------------------
+# contrib.xmp prefers the libxmp release pinned in contrib/xmp/libxmp.lock,
+# compiled from the source list libxmp's Makefile.vc builds the full library
+# from (scripts/fetch-libxmp.sh writes it as sources.txt) into
+# build/contrib/libxmp.a beside the veneer. `-laether_xmp -lxmp` (the
+# module's @link) then resolves -lxmp to that archive, as -lsqlite3 resolves
+# to the vendored SQLite above, so the program needs no libxmp where it runs.
+#
+# Fetched on demand (checksum-verified, never committed). When it cannot be
+# had the veneer builds against the system libxmp; LIBXMP_SYSTEM=1 forces
+# that path.
+LIBXMP_DIR="$ROOT/contrib/xmp/libxmp"
+LIBXMP_VENDORED=""
+LIBXMP_CFLAGS=""
+xmp_requested() {
+    [ -z "${MODULES:-}" ] && return 0
+    case ",$MODULES," in *,xmp,*) return 0 ;; esac
+    return 1
+}
+if [ "${LIBXMP_SYSTEM:-}" != "1" ] && xmp_requested; then
+    if sh "$ROOT/scripts/fetch-libxmp.sh" "$LIBXMP_DIR" >/dev/null; then
+        LIBXMP_VENDORED=1
+        # shellcheck disable=SC1090
+        LIBXMP_CFLAGS="$(. "$ROOT/contrib/xmp/libxmp.lock"; printf '%s' "$LIBXMP_CFLAGS")"
+    else
+        echo "  xmp: libxmp source unavailable -- falling back to the system library" >&2
+    fi
+fi
+
+# Compile every source in sources.txt and archive them as
+# build/contrib/libxmp.a. The objects are cached as one archive in
+# $LIBXMP_OBJ_CACHE_DIR, named for everything that changes it: the fetched
+# release (its checksum), the source list, the compiler's identity, every
+# flag and the target. Compiles run in parallel, one per processor.
+LIBXMP_OBJ_CACHE_DIR="${LIBXMP_OBJ_CACHE_DIR:-$ROOT/.ci-cache/libxmp}"
+build_vendored_libxmp() {
+    local AR="$1"
+    local flags="${BASE_CFLAGS[*]} -w $LIBXMP_CFLAGS -I$LIBXMP_DIR/include"
+    local key
+    key=$( { cat "$LIBXMP_DIR/.sha256" "$LIBXMP_DIR/sources.txt"
+             $CC --version 2>/dev/null | head -1
+             printf '%s\n%s\n' "$flags" "$CONTRIB_TARGET"; } | sha256_text )
+    local cached="$LIBXMP_OBJ_CACHE_DIR/libxmp-${key:0:16}.a"
+    if [ -f "$cached" ]; then
+        cp "$cached" "$STAGE/libxmp.a"
+        printf "  %-18s cached archive %s\n" "libxmp" "${cached#"$ROOT"/}"
+    else
+        local nsrc; nsrc=$(wc -l < "$LIBXMP_DIR/sources.txt" | tr -d ' ')
+        printf "  %-18s compiling %s sources (once per input set)\n" "libxmp" "$nsrc"
+        local od="$STAGE/libxmp.objs"
+        mkdir -p "$od"
+        local jobs
+        jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+        # One compile per line of sources.txt, objects named by their index
+        # so two sources with one basename could not overwrite each other.
+        # Batches of $jobs background compiles: `wait -n` is not in the
+        # bash 3.2 macOS ships.
+        local i=0 src idx
+        while IFS= read -r src; do
+            [ -n "$src" ] || continue
+            i=$((i + 1)); idx=$(printf '%03d' "$i")
+            # shellcheck disable=SC2086
+            ( $CC "${BASE_CFLAGS[@]}" -w $LIBXMP_CFLAGS -I"$LIBXMP_DIR/include" \
+                  -c "$LIBXMP_DIR/$src" -o "$od/x$idx.o" 2>"$od/x$idx.err" ||
+              echo "$src" > "$od/x$idx.failed" ) &
+            [ $((i % jobs)) -eq 0 ] && wait
+        done < "$LIBXMP_DIR/sources.txt"
+        wait
+        cat "$od"/x*.failed > "$od/failed" 2>/dev/null || true
+        cat "$od"/x*.err > "$od/errors" 2>/dev/null || true
+        if [ -s "$od/failed" ] || [ "$(find "$od" -name 'x*.o' | wc -l | tr -d ' ')" != "$nsrc" ]; then
+            printf "  %-18s FAIL (compile)\n" "libxmp"
+            sed 's/^/      /' "$od/failed" 2>/dev/null | head -5
+            sed 's/^/      /' "$od/errors" 2>/dev/null | head -10
+            return 2
+        fi
+        # In a few batches, so no one command line grows past what a
+        # Windows shell will run.
+        local batch=()
+        local o
+        for o in "$od"/x*.o; do
+            batch+=("$o")
+            if [ "${#batch[@]}" -ge 40 ]; then
+                $AR rcs "$STAGE/libxmp.a" "${batch[@]}" || { printf "  %-18s FAIL (archive)\n" "libxmp"; return 2; }
+                batch=()
+            fi
+        done
+        if [ "${#batch[@]}" -gt 0 ]; then
+            $AR rcs "$STAGE/libxmp.a" "${batch[@]}" || { printf "  %-18s FAIL (archive)\n" "libxmp"; return 2; }
+        fi
+        rm -rf "$od"
+        mkdir -p "$LIBXMP_OBJ_CACHE_DIR"
+        cp "$STAGE/libxmp.a" "$cached.tmp.$$" && mv "$cached.tmp.$$" "$cached"
+    fi
+    publish libxmp.a
+    printf "  %-18s OK   build/contrib/libxmp.a (libxmp %s, vendored)\n" "libxmp" \
+        "$(sed -n 's/^LIBXMP_VERSION=//p' "$ROOT/contrib/xmp/libxmp.lock")"
+    # Third column: installed as libxmp.a for the module's -lxmp.
+    echo -e "libxmp\tbuild/contrib/libxmp.a\tlibxmp.a" >> "$STAGE/MANIFEST"
+    return 0
+}
+
 # probe_<module> echoes dev-include flags on stdout when the dep is
 # available. Returns 0 if available, 1 if not.
 
@@ -254,6 +357,32 @@ probe_sqlite() {
     fi
     # Fallback: header in default include path.
     if printf '#include <sqlite3.h>\nint main(){return 0;}\n' | \
+        $CC -E -xc - >/dev/null 2>&1; then
+        echo ""
+        return 0
+    fi
+    return 1
+}
+
+probe_xmp() {
+    # The vendored libxmp's header, so the veneer compiles against the libxmp
+    # it links (LIBXMP_STATIC: no dllimport on Windows), ahead of any system
+    # xmp.h.
+    if [ -n "$LIBXMP_VENDORED" ]; then
+        echo "-I$LIBXMP_DIR/include $LIBXMP_CFLAGS"
+        return 0
+    fi
+    # Cross mode: libxmp is in no target's base; "present" iff it was staged
+    # into CROSSBUILD_SYSROOT (else SKIP/FAIL, as for sqlite3).
+    if [ -n "$CROSS_MODE" ]; then
+        cross_dep_present xmp.h xmp
+        return
+    fi
+    if pkg-config --exists libxmp 2>/dev/null; then
+        pkg-config --cflags-only-I libxmp
+        return 0
+    fi
+    if printf '#include <xmp.h>\nint main(){return 0;}\n' | \
         $CC -E -xc - >/dev/null 2>&1; then
         echo ""
         return 0
@@ -308,6 +437,9 @@ cross_class() {   # <module-name> -> echoes the class token
         # it, a libsqlite3 staged in CROSSBUILD_SYSROOT does.
         sqlite)                if [ -n "$SQLITE_VENDORED" ]; then echo "vendored"
                                else echo "tier3:sqlite3.h:sqlite3"; fi ;;
+        # The same for libxmp: its pinned source, else a staged libxmp.
+        xmp)                   if [ -n "$LIBXMP_VENDORED" ]; then echo "vendored"
+                               else echo "tier3:xmp.h:xmp"; fi ;;
         # stunt's bridge has no dependency at all: it compiles like core.
         host_stunt)            echo "tier1" ;;
         # The Aether host's fork+exec body is Linux/macOS only; not
@@ -335,7 +467,10 @@ build_module() {
                 incs=""
                 ;;
             vendored)
-                incs="-I$SQLITE_AMAL_DIR"
+                case "$name" in
+                    xmp) incs="-I$LIBXMP_DIR/include $LIBXMP_CFLAGS" ;;
+                    *)   incs="-I$SQLITE_AMAL_DIR" ;;
+                esac
                 ;;
             tier3:*)
                 local hdr="${class#tier3:}"; local lib="${hdr#*:}"; hdr="${hdr%%:*}"
@@ -398,6 +533,9 @@ build_module() {
     if [ "$name" = "sqlite" ] && [ -n "$SQLITE_VENDORED" ]; then
         build_vendored_sqlite "$AR" || return 2
     fi
+    if [ "$name" = "xmp" ] && [ -n "$LIBXMP_VENDORED" ]; then
+        build_vendored_libxmp "$AR" || return 2
+    fi
     publish "libaether_$name.a"
     printf "  %-18s OK   build/contrib/libaether_%s.a\n" "$name" "$name"
     echo -e "$name\tbuild/contrib/libaether_$name.a" >> "$STAGE/MANIFEST"
@@ -406,6 +544,9 @@ build_module() {
     # does not need it is in place.
     if [ "$name" = "sqlite" ] && [ -z "$SQLITE_VENDORED" ]; then
         rm -f "$OUT/libsqlite3.a"
+    fi
+    if [ "$name" = "xmp" ] && [ -z "$LIBXMP_VENDORED" ]; then
+        rm -f "$OUT/libxmp.a"
     fi
     return 0
 }
@@ -419,6 +560,7 @@ build_module() {
 CATALOGUE=(
     "sqlite|sqlite       contrib/sqlite/aether_sqlite.c           AETHER_HAS_SQLITE  probe_sqlite"
     "avcodec|avcodec     contrib/avcodec/aether_avcodec.c         AETHER_HAS_AVCODEC probe_avcodec"
+    "xmp|xmp             contrib/xmp/aether_xmp.c                 AETHER_HAS_XMP     probe_xmp"
     "aether|host_aether  contrib/host/aether/aether_host_aether.c AETHER_HAS_AETHER_HOST probe_aether"
     "stunt|host_stunt    contrib/host/stunt/aether_host_stunt.c   AETHER_HAS_STUNT   probe_stunt"
 )

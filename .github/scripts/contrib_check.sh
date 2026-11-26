@@ -108,6 +108,13 @@ TESTS=(
   # pkg-config column: neither path needs one, and the veneer step above
   # SKIPs the entry when neither is available.
   "sqlite/roundtrip|$SQL/test_sqlite.ae||run|"
+  # xmp: the tracker-module player, built like sqlite: through the module's
+  # @link and the archives `make contrib` builds -- libxmp from the pinned
+  # source when it can be fetched, the system libxmp otherwise; the veneer
+  # step above SKIPs the entry when neither is there. Its modules are written
+  # by the test, and its std.audio half runs on the headless engine, so it
+  # needs no sound card. Leak-clean.
+  "xmp/player|contrib/xmp/test_xmp.ae||leak|"
   # templating/native: co-located spec (replaces the four
   # tests/integration/native_templating_* dirs). Pure Aether — no system
   # library, so no pkg-config column and nothing to skip on.
