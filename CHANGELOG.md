@@ -14,6 +14,40 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.947.0]
+
+### Fixed
+
+- **A call that returns several values, passed where a parameter takes one,
+  is the checker's error.** `takes(list.get(xs, 0))` or
+  `spec.expect_str(pair())`, with the multi-value call written straight into
+  the argument, passed `ae check` and failed in the C compiler ("passing
+  '_tuple_ptr_string' to parameter of incompatible type 'const char *'").
+  The same mistake through a name bound to the tuple was already refused; the
+  call form, including a UFCS receiver (`pair().takes()`), now is too (E0200),
+  naming the call and the fix: destructure it first.
+
+- **A multi-value `return` with a different count than the function's result
+  is the checker's error.** A function whose first `return` gives one value
+  and a later one two (`return 0` ... `return v, 1`), or two and then three,
+  or three and then two, was let through and lowered to the first
+  `return`'s shape: a tuple returned into an int result reached the C
+  compiler, a longer tuple silently lost its extra values (a C "excess
+  elements" warning only), and a shorter one left the rest zero. Each is now
+  E0200 at the `return`, naming the result type and how many values the
+  `return` gives; the same for a written result type (`-> (int, string)`
+  returning three values).
+
+- **`os.which` and `os.getcwd` are checked against the sandbox.** `os.which`
+  checked only `env PATH` and then looked at every candidate on it
+  unchecked, so a sandboxed caller with no file-system grant could learn
+  where any program was installed; `os.getcwd` checked nothing. Each
+  candidate `os.which` looks at is now an `fs_read` of its path (a refused
+  one reads as absent and the search goes on), and `os.getcwd` needs
+  `fs_read` on the working directory (refused, it gives ""), as
+  `fs.exists` and `fs.realpath` do. A sandbox that runs a program found
+  with `os.which` now grants `fs_read` on its directory as well.
+
 ## [0.946.0]
 
 ### Added
