@@ -217,16 +217,21 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
         sc_want="$3"
         shift 3
         SP=""
+        # Port 0: the kernel picks a free port and s_server prints it
+        # ("ACCEPT 0.0.0.0:54321"). A port computed here could be one another
+        # test held on 127.0.0.1, which s_server's wildcard bind (it sets
+        # SO_REUSEADDR) does not refuse on FreeBSD: the client then reached
+        # the other listener and the case failed as "connect failed".
         for try in 1 2 3 4 5; do
-            P=$(( 20000 + ($$ * 7 + try * 1009 + $(printf '%s' "$sc_name" | wc -c)) % 40000 ))
-            openssl s_server -4 -www -accept "$P" -naccept 1 "$@" >"$TMP/s.log" 2>&1 </dev/null &
+            openssl s_server -4 -www -accept 0 -naccept 1 "$@" >"$TMP/s.log" 2>&1 </dev/null &
             spid=$!
             PIDS="$PIDS $spid"
             w=0
             while [ "$w" -lt 100 ] && server_alive "$spid" && ! grep -q ACCEPT "$TMP/s.log" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
             if server_alive "$spid" && grep -q ACCEPT "$TMP/s.log" 2>/dev/null; then
-                SP=$P
-                break
+                SP=$(sed -n 's/^ACCEPT .*:\([0-9][0-9]*\)[^0-9]*$/\1/p' "$TMP/s.log" | head -1)
+                [ -n "$SP" ] && [ "$SP" != 0 ] && break
+                SP=""
             fi
             kill_server "$spid"
         done
