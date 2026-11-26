@@ -2091,7 +2091,7 @@ fn digits_plus_one(digits: string) -> string {
 // are `bits`.
 fn reads_back(digits: string, point: int, bits: long) -> bool {
     text = string.concat("0.", string.concat(digits, string.concat("e", string.from_int(point))))
-    v, err = string.to_double(text)
+    v, err = string.to_float(text)
     return err == "" && mem.bits_of_float(v) == bits
 }
 

@@ -133,17 +133,17 @@ test_numbers() -> int {
     f = f + check(ie != "", "to_int read 12<NUL>99")
     _l, le = string.to_long(bad)
     f = f + check(le != "", "to_long read 12<NUL>99")
-    _fl, fe = string.to_float(with_nul("1.5", "7"))
-    f = f + check(fe != "", "to_float read 1.5<NUL>7")
-    _d, de = string.to_double(with_nul("1.5", "7"))
-    f = f + check(de != "", "to_double read 1.5<NUL>7")
+    _fl, fe = string.to_f32(with_nul("1.5", "7"))
+    f = f + check(fe != "", "to_f32 read 1.5<NUL>7")
+    _d, de = string.to_float(with_nul("1.5", "7"))
+    f = f + check(de != "", "to_float read 1.5<NUL>7")
     _t, te = string.to_int(with_nul("12", ""))
     f = f + check(te != "", "to_int read 12<NUL>")
     // Plain text, and trailing whitespace, still parse.
     ok_i, oe = string.to_int(string.concat("1", "2 "))
     f = f + check(oe == "" && ok_i == 12, "to_int(\"12 \")")
-    ok_d, ode = string.to_double(string.concat("2", ".5"))
-    f = f + check(ode == "" && ok_d == 2.5, "to_double(\"2.5\")")
+    ok_d, ode = string.to_float(string.concat("2", ".5"))
+    f = f + check(ode == "" && ok_d == 2.5, "to_float(\"2.5\")")
     return f
 }
 

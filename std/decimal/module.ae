@@ -816,7 +816,7 @@ to_string_fixed_bank(d: @keep ptr, places: int) -> string {
 // The nearest binary float. Lossy by nature; for display use to_string.
 to_double(d: @keep ptr) -> float {
     s = to_string(d)
-    v, _err = string.to_double(s)
+    v, _err = string.to_float(s)
     return v
 }
 

@@ -3365,7 +3365,7 @@ _parse_number(s: string) -> (float, string) {
         if ed == 0 { return 0.0, "bad exponent" }
     }
     if i != n { return 0.0, "trailing characters" }
-    d, err = string.to_double(s)
+    d, err = string.to_float(s)
     if err != "" { return 0.0, err }
     return d, ""
 }

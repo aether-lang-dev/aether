@@ -10,7 +10,7 @@ extern exit(code: int)
 
 round_trips(x: float) -> int {
     text = string.from_double(x)
-    v, err = string.to_double(text)
+    v, err = string.to_float(text)
     if err != "" { return 0 }
     if v != x { return 0 }
     return 1

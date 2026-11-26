@@ -145,7 +145,7 @@ number_after(output: string, label: string) -> float {
             rest = string.trim(string.substring(line, at + string.length(label), string.length(line)))
             words = string.split(rest, " ")
             if string.array_size(words) > 0 {
-                v, err = string.to_double(string.array_get(words, 0))
+                v, err = string.to_float(string.array_get(words, 0))
                 if err == "" {
                     result = v
                 }
@@ -229,11 +229,11 @@ parse_cpu_seconds(output: string, is_mac: int) -> float {
                 w = string.array_get(words, k)
                 if string.length(w) > 0 {
                     if w == "user" {
-                        u, e1 = string.to_double(prev)
+                        u, e1 = string.to_float(prev)
                         if e1 == "" { user = u }
                     }
                     if w == "sys" {
-                        s, e2 = string.to_double(prev)
+                        s, e2 = string.to_float(prev)
                         if e2 == "" { sys = s }
                     }
                     prev = w
@@ -272,7 +272,7 @@ parse_peak_mb(output: string, is_mac: int) -> float {
         if string.contains(line, "maximum resident set size") == 1 {
             words = string.split(string.trim(line), " ")
             if string.array_size(words) > 0 {
-                b, err = string.to_double(string.array_get(words, 0))
+                b, err = string.to_float(string.array_get(words, 0))
                 if err == "" {
                     result = b / 1048576.0
                 }
