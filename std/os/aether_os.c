@@ -1380,6 +1380,17 @@ int os_execv(const char* prog, void* argv_list) {
 //      that's executable. Return the first hit.
 //
 // Caller owns the returned string.
+//
+// Each candidate is a metadata read of its path (whether an executable is
+// there), so it is checked under fs_read as fs.exists is: a candidate the
+// sandbox refuses reads as absent, and the search goes on to the next PATH
+// entry. Before, only PATH itself was checked, and os.which told a
+// sandboxed caller what was installed anywhere on it.
+#ifndef _WIN32
+static int which_may_see(const char* candidate) {
+    return aether_sandbox_check("fs_read", candidate);
+}
+#endif
 char* os_which(const char* name) {
     if (!name || !*name) return NULL;
     if (!aether_sandbox_check("env", "PATH")) return NULL;
@@ -1414,7 +1425,8 @@ char* os_which(const char* name) {
     // Helper: try a candidate path; return a counted copy of it if the file exists.
     // Inlined via macro since we use it in both the has-path and PATH-search branches.
     #define WIN_WHICH_TRY(candidate) do { \
-        DWORD attrs = GetFileAttributesA(candidate); \
+        DWORD attrs = aether_sandbox_check("fs_read", candidate) \
+                          ? GetFileAttributesA(candidate) : INVALID_FILE_ATTRIBUTES; \
         if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) { \
             return (char*)string_new(candidate); \
         } \
@@ -1488,7 +1500,7 @@ char* os_which(const char* name) {
     return NULL;
 #else
     if (strchr(name, '/')) {
-        if (access(name, X_OK) == 0) return (char*)string_new(name);
+        if (which_may_see(name) && access(name, X_OK) == 0) return (char*)string_new(name);
         return NULL;
     }
 
@@ -1511,13 +1523,13 @@ char* os_which(const char* name) {
                 buf[0] = '.';
                 buf[1] = '/';
                 memcpy(buf + 2, name, name_len + 1);
-                if (access(buf, X_OK) == 0) return (char*)string_new(buf);
+                if (which_may_see(buf) && access(buf, X_OK) == 0) return (char*)string_new(buf);
             }
         } else if (dirlen + 1 + name_len < sizeof(buf)) {
             memcpy(buf, p, dirlen);
             buf[dirlen] = '/';
             memcpy(buf + dirlen + 1, name, name_len + 1);
-            if (access(buf, X_OK) == 0) return (char*)string_new(buf);
+            if (which_may_see(buf) && access(buf, X_OK) == 0) return (char*)string_new(buf);
         }
         if (!end) break;
         p = end + 1;
@@ -1573,13 +1585,22 @@ int os_chdir_raw(const char* path) {
 char* os_getcwd_raw(void) {
     size_t cap = 4096;
     for (;;) {
+        /* The directory's path is checked under fs_read, as fs.realpath(".")
+         * is: a sandbox that may not read the working directory is not told
+         * where it is. It was not checked at all. */
         /* #462: gate the cwd buffer (a deep path is plugin-influenced).
          * Adopted into the returned string on success; the ERANGE retry
          * frees through the cap before doubling, so the free size matches
          * the live `cap`. */
         char* buf = (char*)aether_caps_malloc(cap);
         if (!buf) return NULL;
-        if (getcwd(buf, cap)) return (char*)string_adopt_caps_buffer(buf, strlen(buf), cap);
+        if (getcwd(buf, cap)) {
+            if (!aether_sandbox_check("fs_read", buf)) {
+                aether_caps_free(buf, cap);
+                return NULL;
+            }
+            return (char*)string_adopt_caps_buffer(buf, strlen(buf), cap);
+        }
         aether_caps_free(buf, cap);
         if (errno != ERANGE) return NULL;
         if (cap > (size_t)1 << 20) return NULL; /* 1 MiB sanity ceiling */
@@ -4997,6 +5018,12 @@ char* os_getcwd_raw(void) {
         out = NULL;
     }
     aether_caps_free(w, w_bytes);
+    /* As the POSIX one: the directory's path is checked under fs_read, and
+     * a sandbox that may not read the working directory is not told it. */
+    if (out && !aether_sandbox_check("fs_read", out->data)) {
+        string_release(out);
+        out = NULL;
+    }
     return (char*)out;
 }
 

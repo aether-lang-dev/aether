@@ -403,7 +403,9 @@ it reveals or changes, on the path as it resolves:
   `mtime`, `is_symlink`, `is_socket`, `readlink`, `realpath`, `statvfs`),
   which are refused as reads: a stat tells whether something is there, which
   is what a grant list hides. A refused metadata call reads as absent (0) or
-  as an error. **A listing is a read of the directory listed**:
+  as an error. `os.which` checks each candidate it looks at on PATH (a
+  refused one is skipped, as if it were not there), and `os.getcwd` the
+  working directory (refused, it gives ""). **A listing is a read of the directory listed**:
   `fs.list_dir(d)` needs a grant matching `d` itself (`"/data"` or
   `"/data*"`; `"/data/*"` covers what is in it, not the directory). `fs.glob`
   checks the directory it starts from, refusing the glob when that is
