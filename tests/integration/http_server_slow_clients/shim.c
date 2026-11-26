@@ -864,11 +864,39 @@ static client_sock client_connect6(int port) {
     return s;
 }
 
+/* Connections a worker-path server has closed, as its on_conn_close hook
+ * hears them: the hook runs once the address's count has gone down. */
+typedef struct { volatile long closed; } ConnCloses;
+
+static void conn_closes_hook(int64_t conn_id, void* ud) {
+    (void)conn_id;
+#ifdef _WIN32
+    InterlockedIncrement(&((ConnCloses*)ud)->closed);
+#else
+    __atomic_add_fetch(&((ConnCloses*)ud)->closed, 1, __ATOMIC_SEQ_CST);
+#endif
+}
+
+static long conn_closes_count(ConnCloses* c) {
+#ifdef _WIN32
+    return InterlockedCompareExchange(&c->closed, 0, 0);
+#else
+    return __atomic_load_n(&c->closed, __ATOMIC_SEQ_CST);
+#endif
+}
+
 /* The per-address limit, 2 here, on a server bound to `host`: two
  * connections from the address, each asking one request and kept, then a
  * third answered 503; once the first closes, a fourth is served again. On
- * ::1 the address counts by its /64. */
-static void round_per_ip_on(HttpServer* server, const char* label, int v6) {
+ * ::1 the address counts by its /64.
+ *
+ * "Once the first closes" is once the server has seen it close, which the
+ * client cannot know from its own close: a worker-path server says so
+ * through on_conn_close (`closes`), the event loop through its count of
+ * live connections (`closes` NULL). The round waited a fixed 300 ms instead, and on a
+ * loaded Windows runner the server had not always got there: a fourth 503
+ * that was the test's guess, not the server's limit. */
+static void round_per_ip_on(HttpServer* server, const char* label, int v6, ConnCloses* closes) {
     int port = http_server_port(server);
     static const char req[] = "GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n";
     client_sock held[2];
@@ -886,8 +914,21 @@ static void round_per_ip_on(HttpServer* server, const char* label, int v6) {
         third = readable(s, 3000) ? read_status(s, NULL, NULL, 0) : -1;
         client_close(s);
     }
+    /* The served connections the server has closed so far: none, the
+     * refused third never being counted. */
+    long closed_before = closes ? conn_closes_count(closes) : 0;
     if (held[0] != CLIENT_BAD) client_close(held[0]);
-    sleep_ms(300);   /* the server saw it go */
+    /* The server saw it go: its close heard, or the loop down to the one
+     * connection still held. Bounded, so a server that never notices fails
+     * the round below rather than hanging it. */
+    int64_t t_close = now_ms();
+    int seen = 0;
+    while (now_ms() - t_close < CLIENT_WAIT_MS) {
+        if (closes ? conn_closes_count(closes) > closed_before
+                   : http_server_evloop_active(server) <= 1) { seen = 1; break; }
+        sleep_ms(5);
+    }
+    int64_t close_ms = now_ms() - t_close;
     s = v6 ? client_connect6(port) : client_connect(port);
     int fourth = -1;
     if (s != CLIENT_BAD) {
@@ -896,9 +937,10 @@ static void round_per_ip_on(HttpServer* server, const char* label, int v6) {
         client_close(s);
     }
     if (held[1] != CLIENT_BAD) client_close(held[1]);
-    char note[96];
-    snprintf(note, sizeof(note), "%d served, a third %d, after one closed %d", served, third, fourth);
-    report(label, served == 2 && third == 503 && fourth == 200, 0, third, note);
+    char note[128];
+    snprintf(note, sizeof(note), "%d served, a third %d, after one closed (seen %s %lld ms) %d",
+             served, third, seen ? "after" : "NOT after", (long long)close_ms, fourth);
+    report(label, served == 2 && third == 503 && seen && fourth == 200, 0, third, note);
 }
 
 static void round_per_ip(int v6) {
@@ -911,6 +953,8 @@ static void round_per_ip(int v6) {
     if (!*err && *http_server_set_max_connections_per_ip_raw(server, 2, 129) == '\0')
         err = "a 129 bit prefix was accepted";
     if (*err) { report(label, 0, -1, -1, err); http_server_free(server); return; }
+    ConnCloses closes = { 0 };
+    http_server_on_conn_close(server, conn_closes_hook, &closes);
     int bound = v6 ? http_server_bind_raw(server, "::1", 0)
                    : http_server_bind_raw(server, "127.0.0.1", 0);
     if (bound < 0 || http_server_start_background_raw(server) < 0) {
@@ -919,7 +963,7 @@ static void round_per_ip(int v6) {
         http_server_free(server);
         return;
     }
-    round_per_ip_on(server, label, v6);
+    round_per_ip_on(server, label, v6, &closes);
     http_server_free(server);
 }
 
@@ -931,7 +975,7 @@ static void round_loop_per_ip(void) {
     Gateway g = loop_gateway(label, 0, 0);
     g_loop_per_ip = 0;
     if (!g.server) return;
-    round_per_ip_on(g.server, label, 0);
+    round_per_ip_on(g.server, label, 0, NULL);
     on_loop(g, label);
     loop_gateway_free(g);
 }
