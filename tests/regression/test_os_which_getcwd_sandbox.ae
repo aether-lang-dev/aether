@@ -57,6 +57,8 @@ main() {
         w2 = os.which(prog)
         c2 = os.getcwd()
     }
+    sandbox.free(no_fs)
+    sandbox.free(with_fs)
     if w2 != found { fail("os.which gave '${w2}' with ${bin} readable, not '${found}'") }
     if c2 != cwd { fail("os.getcwd gave '${c2}' with the directory readable, not '${cwd}'") }
 

@@ -5018,6 +5018,12 @@ char* os_getcwd_raw(void) {
         out = NULL;
     }
     aether_caps_free(w, w_bytes);
+    /* As the POSIX one: the directory's path is checked under fs_read, and
+     * a sandbox that may not read the working directory is not told it. */
+    if (out && !aether_sandbox_check("fs_read", out->data)) {
+        string_release(out);
+        out = NULL;
+    }
     return (char*)out;
 }
 
