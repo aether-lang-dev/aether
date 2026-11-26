@@ -1,0 +1,92 @@
+// Regression: `-> T! { ... }` declares a fallible function for a scalar
+// spelt as a name (`f32`, `int64`, `uint8`, `size_t`, `longdouble`, ...)
+// and for a struct, as it does for the type keywords (`float!`, `byte!`,
+// `int!`). The return-type lookahead took `-> f32!` for an expression body,
+// so the `{` after it was a top-level parse error.
+//
+// Self-asserting: prints FAIL + exits 1 on any mismatch, PASS at the end.
+
+extern exit(code: int)
+
+struct Point { x: int y: int }
+
+half(x: f32) -> f32! {
+    if x < 0.0 { return 0.0, "negative" }
+    return x / 2.0
+}
+
+wide(x: int64) -> int64! {
+    return x + 1
+}
+
+low_byte(x: uint8) -> uint8! {
+    if x == 0 { return x, "zero" }
+    return x
+}
+
+halfword(x: uint16) -> uint16! {
+    return x
+}
+
+word(x: uint32) -> uint32! {
+    return x
+}
+
+big(x: uint64) -> uint64! {
+    return x
+}
+
+count(x: size_t) -> size_t! {
+    return x
+}
+
+signed(x: int32_t) -> int32_t! {
+    return x
+}
+
+precise(x: longdouble) -> longdouble! {
+    return x
+}
+
+origin(ok: int) -> Point! {
+    if ok == 0 { return Point { x: 0, y: 0 }, "no point" }
+    return Point { x: 1, y: 2 }
+}
+
+// `!` propagation inside a named-scalar fallible.
+quarter(x: f32) -> f32! {
+    h = half(x)!
+    return half(h)!
+}
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    a = half(3.0) or 99.0
+    if a != 1.5 { fail("half(3.0) = ${a}") }
+    b = half(-1.0) or 99.0
+    if b != 99.0 { fail("half(-1.0) did not fail") }
+    if (wide(41) or 0) != 42 { fail("wide") }
+    u8 = 7 as uint8
+    if (low_byte(u8) or 0) != 7 { fail("low_byte") }
+    _z, zerr = low_byte(0 as uint8)
+    if zerr != "zero" { fail("low_byte(0) error '${zerr}'") }
+    if (halfword(7 as uint16) or 0) != 7 { fail("halfword") }
+    if (word(8 as uint32) or 0) != 8 { fail("word") }
+    if (big(9 as uint64) or 0) != 9 { fail("big") }
+    if (count(10 as size_t) or 0) != 10 { fail("count") }
+    if (signed(-11 as int32_t) or 0) != -11 { fail("signed") }
+    _l, lerr = precise(1.25 as longdouble)
+    if lerr != "" { fail("precise") }
+    p, perr = origin(1)
+    if perr != "" || p.x != 1 || p.y != 2 { fail("origin(1)") }
+    _q, qerr = origin(0)
+    if qerr != "no point" { fail("origin(0) error '${qerr}'") }
+    q = quarter(8.0) or 0.0
+    if q != 2.0 { fail("quarter(8.0) = ${q}") }
+    if (quarter(-8.0) or 5.0) != 5.0 { fail("quarter(-8.0) did not fail") }
+    println("PASS")
+}
