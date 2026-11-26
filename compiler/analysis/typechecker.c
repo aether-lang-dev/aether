@@ -3273,15 +3273,33 @@ static void reject_tuple_argument(SymbolTable* table, ASTNode* call, ASTNode* ar
         param_type->kind == TYPE_TUPLE || param_type->kind == TYPE_UNKNOWN) {
         return;
     }
-    /* Only a NAME bound to a tuple. A function passed as a value
-     * (`via_fn(pair, 2, 3)`) infers to its return type, and a call in
-     * argument position is typed by the callee's own rules. */
+    if (param_type->kind == TYPE_WILDCARD) return;
+    char spelled[256];
+    char emsg[512];
+    /* A call that returns several values, written straight into a scalar
+     * argument (`takes(list.get(xs, 0))`, `spec.expect_str(pair())`). A
+     * multi-value return is never spread over the parameters, so this is the
+     * same mistake as the bound name below, and it went through to the C
+     * compiler the same way ("passing '_tuple_ptr_string' to parameter of
+     * incompatible type 'const char *'"). */
+    if (arg->type == AST_FUNCTION_CALL) {
+        tuple_type_spell(arg_type, spelled, sizeof(spelled));
+        snprintf(emsg, sizeof(emsg),
+                 "Argument %d '%s' of '%s': expected %s, got the %s returned by "
+                 "'%s' — a multi-value return is not spread over parameters; "
+                 "destructure it first: `value, err = %s(...)`",
+                 index, param_name ? param_name : "?", call->value ? call->value : "?",
+                 type_name(param_type), spelled, arg->value ? arg->value : "?",
+                 arg->value ? arg->value : "f");
+        type_error(emsg, arg->line, arg->column);
+        return;
+    }
+    /* Otherwise only a NAME bound to a tuple. A function passed as a value
+     * (`via_fn(pair, 2, 3)`) infers to its return type. */
     if (arg->type != AST_IDENTIFIER || !arg->value) return;
     Symbol* sym = lookup_symbol(table, arg->value);
     if (!sym || sym->is_function) return;
-    char spelled[256];
     tuple_type_spell(arg_type, spelled, sizeof(spelled));
-    char emsg[512];
     snprintf(emsg, sizeof(emsg),
              "Argument %d '%s' of '%s': expected %s, got the %s tuple bound to "
              "'%s' — a multi-value return bound to one name stays a tuple; "
