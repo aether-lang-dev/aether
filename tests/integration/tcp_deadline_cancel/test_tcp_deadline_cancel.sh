@@ -37,7 +37,13 @@ case "$broken_demo:$(uname -s)" in
     0:*|*:MINGW*|*:MSYS*|*:CYGWIN*) ;;
     *)
         BROKEN_CANCELLER=1 RACE_ROUNDS=400 "$TMP/deadline" >"$TMP/broken" 2>&1
-        if grep -q '^FAIL expiry and cancel racing close.*a decoy was disturbed' "$TMP/broken"; then
+        # The broken canceller's close lands on a decoy either once it is
+        # connected (its write or read is disturbed) or while it is still
+        # dialling, when the number is already the decoy's and the dial
+        # fails ("decoy dial: [connect failed]"). Both are the check
+        # catching it; which one a run hits is timing, and a loaded host
+        # hits the second.
+        if grep -q -E '^FAIL expiry and cancel racing close.*(a decoy was disturbed|decoy dial: )' "$TMP/broken"; then
             echo "    ok: a canceller that closes by number is caught ($(grep -c . "$TMP/broken") lines)"
         else
             echo "    FAIL: the race check did not catch a canceller that closes by number"
