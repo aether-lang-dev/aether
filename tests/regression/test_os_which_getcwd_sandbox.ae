@@ -1,0 +1,64 @@
+// Regression: os.which and os.getcwd are checked against the sandbox, as
+// every other std call that tells what is at a path is (fs_read).
+//
+// os.which checked only `env PATH`, then stat'ed each candidate unchecked,
+// so a sandboxed caller with no file-system grant learned where any program
+// on PATH was installed. os.getcwd checked nothing, and told the caller the
+// path of a directory it was not allowed to read. Now a candidate the
+// sandbox refuses reads as absent (the search goes on), and getcwd gives ""
+// unless the working directory may be read. With the grants, both give what
+// they give outside a sandbox.
+
+import std.os
+import std.path
+import std.sandbox
+
+extern exit(code: int)
+
+fn fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    prog = "sh"
+    found = os.which(prog)
+    if found == "" {
+        prog = "cmd"
+        found = os.which(prog)
+    }
+    if found == "" { fail("no sh or cmd on PATH to look up") }
+    cwd = os.getcwd()
+    if cwd == "" { fail("os.getcwd gave nothing outside a sandbox") }
+    bin = path.dirname(found)
+
+    no_fs = sandbox.new("no-fs") {
+        grant_env("PATH")
+        grant_env("PATHEXT")
+    }
+    w1 = "unset"
+    c1 = "unset"
+    sandbox.enforce(no_fs) callback {
+        w1 = os.which(prog)
+        c1 = os.getcwd()
+    }
+    if w1 != "" { fail("os.which found '${w1}' with no fs_read grant") }
+    if c1 != "" { fail("os.getcwd told '${c1}' with no fs_read grant") }
+
+    with_fs = sandbox.new("with-fs") {
+        grant_env("PATH")
+        grant_env("PATHEXT")
+        grant_fs_read("${bin}/*")
+        grant_fs_read(cwd)
+    }
+    w2 = ""
+    c2 = ""
+    sandbox.enforce(with_fs) callback {
+        w2 = os.which(prog)
+        c2 = os.getcwd()
+    }
+    if w2 != found { fail("os.which gave '${w2}' with ${bin} readable, not '${found}'") }
+    if c2 != cwd { fail("os.getcwd gave '${c2}' with the directory readable, not '${cwd}'") }
+
+    println("PASS: os.which and os.getcwd follow the fs_read grants")
+}
