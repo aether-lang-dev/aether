@@ -1,8 +1,9 @@
-// Regression (#2472): string.to_double and string.to_float read the C99
+// Regression (#2472): string.to_float and string.to_f32 read the C99
 // "inf" / "infinity" / "nan" spellings, in any case and with a sign, on
 // every platform. string.from_double writes "Infinity", "-Infinity" and
 // "NaN", and on Windows (msvcrt's _strtod_l) none of them read back:
-// to_double(from_double(1.0 / 0.0)) failed with "invalid double".
+// to_double(from_double(1.0 / 0.0)), now to_float, failed with "invalid
+// double".
 import std.mem
 import std.string
 
@@ -31,14 +32,14 @@ matches(v: float, want: int) -> int {
 
 accept(s: string, want: int) -> int {
     fails = 0
-    d, derr = string.to_double(s)
+    d, derr = string.to_float(s)
     if derr != "" || matches(d, want) != 1 {
-        println("  FAIL to_double(\"${s}\"): ${d} err='${derr}'")
+        println("  FAIL to_float(\"${s}\"): ${d} err='${derr}'")
         fails = fails + 1
     }
-    f, ferr = string.to_float(s)
+    f, ferr = string.to_f32(s)
     if ferr != "" || matches(f, want) != 1 {
-        println("  FAIL to_float(\"${s}\"): ${f} err='${ferr}'")
+        println("  FAIL to_f32(\"${s}\"): ${f} err='${ferr}'")
         fails = fails + 1
     }
     return fails
@@ -46,14 +47,14 @@ accept(s: string, want: int) -> int {
 
 reject(s: string) -> int {
     fails = 0
-    _d, derr = string.to_double(s)
+    _d, derr = string.to_float(s)
     if derr == "" {
-        println("  FAIL to_double(\"${s}\") should error")
+        println("  FAIL to_float(\"${s}\") should error")
         fails = fails + 1
     }
-    _f, ferr = string.to_float(s)
+    _f, ferr = string.to_f32(s)
     if ferr == "" {
-        println("  FAIL to_float(\"${s}\") should error")
+        println("  FAIL to_f32(\"${s}\") should error")
         fails = fails + 1
     }
     return fails
@@ -61,7 +62,7 @@ reject(s: string) -> int {
 
 roundtrip(bits: long, want: int) -> int {
     text = string.from_double(mem.float_from_bits(bits))
-    v, err = string.to_double(text)
+    v, err = string.to_float(text)
     if err != "" || matches(v, want) != 1 {
         println("  FAIL round-trip of \"${text}\": ${v} err='${err}'")
         return 1
@@ -70,7 +71,7 @@ roundtrip(bits: long, want: int) -> int {
 }
 
 main() {
-    println("=== to_double / to_float: inf and nan spellings ===")
+    println("=== to_float / to_f32: inf and nan spellings ===")
     fails = 0
 
     // from_double's own output reads back.
@@ -117,10 +118,10 @@ main() {
     fails = fails + reject("i nf")
 
     // Ordinary numbers are untouched.
-    one, oerr = string.to_double("1.5")
-    if oerr != "" || one != 1.5 { println("  FAIL to_double(\"1.5\")"); fails = fails + 1 }
-    big, berr = string.to_double("1e999")
-    if berr == "" { println("  FAIL to_double(\"1e999\") overflow accepted as ${big}"); fails = fails + 1 }
+    one, oerr = string.to_float("1.5")
+    if oerr != "" || one != 1.5 { println("  FAIL to_float(\"1.5\")"); fails = fails + 1 }
+    big, berr = string.to_float("1e999")
+    if berr == "" { println("  FAIL to_float(\"1e999\") overflow accepted as ${big}"); fails = fails + 1 }
 
     if fails > 0 {
         println("FAIL: ${fails} checks failed")

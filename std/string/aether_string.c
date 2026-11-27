@@ -1576,7 +1576,7 @@ AetherString* string_from_float(double value) {
 }
 
 // Deterministic double-to-decimal text conversion paired with
-// string_to_double_raw. Seventeen significant decimal digits are sufficient
+// string_to_float_raw. Seventeen significant decimal digits are sufficient
 // to recover every finite IEEE-754 binary64 value exactly. This is deliberately
 // round-trip-safe rather than shortest-round-trip formatting.
 AetherString* string_from_double(double value) {
@@ -1598,7 +1598,7 @@ AetherString* string_from_double(double value) {
         }
     }
 
-    // This is MACHINE text — it round-trips through string_to_double, goes
+    // This is MACHINE text — it round-trips through string_to_float, goes
     // into JSON, config files and onto sockets — so the decimal separator must
     // be '.' whatever locale the process is in. aether_c_snprintf_double pins
     // the conversion to the C locale rather than reformatting afterwards.
@@ -1824,27 +1824,10 @@ int string_to_long_raw(const void* str, long long* out_value) {
     return 1;
 }
 
-int string_to_float_raw(const void* str, float* out_value) {
-    const char* data = str_data(str);
-    if (!str || !data[0] || !out_value) return 0;
-
-    char* endptr;
-    errno = 0;
-    // Locale-pinned: strtof obeys LC_NUMERIC, which would reject "3.14"
-    // outright under a comma-decimal locale. See aether_locale_num.h.
-    float val = aether_c_strtof(data, &endptr);
-
-    if (endptr == data || (errno == ERANGE && (val == HUGE_VALF || val == -HUGE_VALF))) {
-        return 0;
-    }
-
-    if (!parsed_to_end(str, data, endptr)) return 0;
-
-    *out_value = val;
-    return 1;
-}
-
-int string_to_double_raw(const void* str, double* out_value) {
+// Aether's `float` is 64-bit (C double), so to_float parses with strtod,
+// correctly rounded to binary64. (It once parsed with strtof and widened the
+// 32-bit result: to_float("0.1") read back as 0.10000000149011612.)
+int string_to_float_raw(const void* str, double* out_value) {
     const char* data = str_data(str);
     if (!str || !data[0] || !out_value) return 0;
 
@@ -1856,6 +1839,29 @@ int string_to_double_raw(const void* str, double* out_value) {
     double val = aether_c_strtod(data, &endptr);
 
     if (endptr == data || (errno == ERANGE && (val == HUGE_VAL || val == -HUGE_VAL))) {
+        return 0;
+    }
+
+    if (!parsed_to_end(str, data, endptr)) return 0;
+
+    *out_value = val;
+    return 1;
+}
+
+// The 32-bit parse behind string.to_f32: strtof, rounded once, straight to
+// binary32 (rounding through double first would land on a float tie and
+// round again).
+int string_to_f32_raw(const void* str, float* out_value) {
+    const char* data = str_data(str);
+    if (!str || !data[0] || !out_value) return 0;
+
+    char* endptr;
+    errno = 0;
+    // Locale-pinned: strtof obeys LC_NUMERIC, which would reject "3.14"
+    // outright under a comma-decimal locale. See aether_locale_num.h.
+    float val = aether_c_strtof(data, &endptr);
+
+    if (endptr == data || (errno == ERANGE && (val == HUGE_VALF || val == -HUGE_VALF))) {
         return 0;
     }
 
@@ -1895,23 +1901,23 @@ long long string_get_int_radix(const void* s, int radix) {
     long long v = 0; string_to_int_radix_raw(s, radix, &v); return v;
 }
 int string_try_float(const void* s) {
-    float v; return string_to_float_raw(s, &v);
+    double v; return string_to_float_raw(s, &v);
 }
-// Returns double, not float: Aether's `float` type is 64-bit (it lowers
-// to C `double`), so the extern `string_get_float -> float` expects a
-// 64-bit return. Returning a 32-bit C `float` here left Aether reading
-// the result register as a double → garbage (e.g. to_float("2.5") came
-// back 5.3e-315). We still parse at float precision (to_float's contract;
-// use to_double for full precision), then widen for the ABI.
+// Aether's `float` lowers to C `double`: parsed and returned at 64 bits.
 double string_get_float(const void* s) {
-    float v = 0.0f; string_to_float_raw(s, &v); return (double)v;
+    double v = 0.0; string_to_float_raw(s, &v); return v;
 }
-int string_try_double(const void* s) {
-    double v; return string_to_double_raw(s, &v);
+int string_try_f32(const void* s) {
+    float v; return string_to_f32_raw(s, &v);
 }
-double string_get_double(const void* s) {
-    double v = 0.0; string_to_double_raw(s, &v); return v;
+// Aether's `f32` lowers to C `float`.
+float string_get_f32(const void* s) {
+    float v = 0.0f; string_to_f32_raw(s, &v); return v;
 }
+// TODO: delete once nothing in the aether-lang-dev org's repos or in
+// friends-and-family repos uses them. The old names of the 64-bit parse.
+int string_try_double(const void* s) { return string_try_float(s); }
+double string_get_double(const void* s) { return string_get_float(s); }
 
 // Printf-style string formatting
 AetherString* string_format(const char* fmt, ...) {

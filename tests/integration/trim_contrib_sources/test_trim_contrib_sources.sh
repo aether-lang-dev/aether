@@ -4,6 +4,7 @@
 # every .c and .m goes, except a file a module.ae in the tree names with
 # @source (contrib.vulkan.vk names one a directory up), contrib.sqlite's
 # veneer and fetched amalgamation (`ae build --target` compiles them, #1372),
+# contrib.xmp's veneer and fetched libxmp source (the same, for libxmp),
 # and, when asked, the contrib/host/<lang>/aether_host_<lang>.c bridges. Run
 # on a tree built here, so it needs no install and no toolchain.
 set -eu
@@ -34,6 +35,13 @@ make_tree() {
     : > "$1/sqlite/amalgamation/sqlite3.c"
     : > "$1/sqlite/amalgamation/sqlite3.h"
     : > "$1/sqlite/scratch.c"
+    # contrib.xmp: the veneer and the fetched libxmp source, nested.
+    mkdir -p "$1/xmp/libxmp/src/loaders"
+    printf '// links libaether_xmp.a\n' > "$1/xmp/module.ae"
+    : > "$1/xmp/aether_xmp.c"
+    : > "$1/xmp/libxmp/src/player.c"
+    : > "$1/xmp/libxmp/src/loaders/mod_load.c"
+    : > "$1/xmp/scratch.c"
     printf '// links libaether_tinyweb.a\n' > "$1/tinyweb/module.ae"
     : > "$1/tinyweb/ws_handshake.c"
     # A package whose C file is @source'd from a sibling .ae, not module.ae
@@ -68,6 +76,9 @@ gone    "$TMP/contrib/tinyweb/ws_handshake.c"        "keep-host: an archived mod
 present "$TMP/contrib/sqlite/aether_sqlite.c"        "keep-host: contrib.sqlite's veneer, for --target"
 present "$TMP/contrib/sqlite/amalgamation/sqlite3.c" "keep-host: the SQLite amalgamation, for --target"
 gone    "$TMP/contrib/sqlite/scratch.c"              "keep-host: only the veneer is kept in sqlite/"
+present "$TMP/contrib/xmp/aether_xmp.c"              "keep-host: contrib.xmp's veneer, for --target"
+present "$TMP/contrib/xmp/libxmp/src/loaders/mod_load.c" "keep-host: the libxmp source, for --target"
+gone    "$TMP/contrib/xmp/scratch.c"                 "keep-host: only the veneer is kept in xmp/"
 
 # --- install-contrib: archives carry the bridges, so they go too ------------
 make_tree "$TMP/contrib"
@@ -78,6 +89,7 @@ gone    "$TMP/contrib/host/stunt/aether_host_stunt.c"    "no-flag: host bridge"
 gone    "$TMP/contrib/tinyweb/ws_handshake.c"        "no-flag: archived module's source"
 present "$TMP/contrib/sqlite/aether_sqlite.c"        "no-flag: contrib.sqlite's veneer, for --target"
 present "$TMP/contrib/sqlite/amalgamation/sqlite3.c" "no-flag: the SQLite amalgamation, for --target"
+present "$TMP/contrib/xmp/libxmp/src/player.c"       "no-flag: the libxmp source, for --target"
 
 # --- the one contrib.vulkan.vk needs: "../aether_vulkan.c" alone -----------
 make_tree "$TMP/contrib"

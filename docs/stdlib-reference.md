@@ -85,7 +85,7 @@ header comment is the authoritative description.
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 15 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 18 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.stream` | Credit-windowed streams between actors: memory stays bounded however fast the producer is. | 11 | [guide](../std/stream/README.md) · [source](../std/stream/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 101 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 104 | [full section](#strings-stdstring) |
 | `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
@@ -940,12 +940,13 @@ For a `split_once`-style operation (find the first `sep` in `s`, return the halv
 - `string.from_int_radix(value, radix)` → `string` - Inverse of `to_int_radix`. Render `value` in base `radix` (`[2, 36]`); empty string on invalid radix; `'-'` prefix for negatives. Pair with `pad_start` for fixed-width hex bytes.
 - `string.pad_start(s, total_width, pad_char)` → `string` - Prepend `pad_char` (single-byte char code, e.g. `48` for `'0'`, `32` for `' '`) until `s` reaches `total_width`. Returns a fresh copy if `s` is already long enough (no truncation).
 - `string.pad_end(s, total_width, pad_char)` → `string` - Append-side variant of `pad_start`. Useful for columnar text output.
-- `string.to_float(s)` → `(float, string)` - Parse float
-- `string.to_double(s)` → `(float, string)` - Parse double
+- `string.to_float(s)` → `(float, string)` - Parse a 64-bit float (C double), correctly rounded
+- `string.to_f32(s)` → `(f32, string)` - Parse a 32-bit float (C float), rounded once as `strtof` does; past the f32 range is an overflow error
+- `string.to_double(s)` → `(float, string)` - The same parse as `to_float`, kept for now and slated for deletion; use `to_float`
 
-Each returns `(value, "")` on success or `(0, "invalid ...")` on parse failure. Except for `to_int_radix` (above), they handle leading whitespace, sign, trailing whitespace; reject trailing non-whitespace. `to_float` and `to_double` also read `inf`, `infinity` and `nan` in any case and with a sign, on every platform, so `from_double`'s `Infinity`, `-Infinity` and `NaN` round-trip, and C99 hexadecimal constants such as `0x1.8p3`, correctly rounded to the result type.
+Each returns `(value, "")` on success or `(0, "invalid ...")` on parse failure. Except for `to_int_radix` (above), they handle leading whitespace, sign, trailing whitespace; reject trailing non-whitespace. `to_float` and `to_f32` also read `inf`, `infinity` and `nan` in any case and with a sign, on every platform, so `from_double`'s `Infinity`, `-Infinity` and `NaN` round-trip, and C99 hexadecimal constants such as `0x1.8p3`, correctly rounded to the result type.
 
-Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_raw`, `string_to_float_raw`, `string_to_double_raw` for callers who need to distinguish zero from parse failure without a tuple destructure.
+Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_raw`, `string_to_float_raw` (a `float` slot) and `string_to_f32_raw` (an `f32` slot) for callers who need to distinguish zero from parse failure without a tuple destructure.
 
 **Memory:**
 - `string.retain(str)` - Increment reference count

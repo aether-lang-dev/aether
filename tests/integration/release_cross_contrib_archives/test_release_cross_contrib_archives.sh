@@ -1,6 +1,7 @@
 #!/bin/sh
 # The FreeBSD release ships contrib.sqlite's archives, as Linux's and macOS's
-# do: lib/contrib/libaether_sqlite.a and libsqlite3.a, built for FreeBSD.
+# do: lib/contrib/libaether_sqlite.a and libsqlite3.a, built for FreeBSD (and
+# contrib.xmp's, libaether_xmp.a and libxmp.a, the same way).
 #
 # Until 2026-11 the FreeBSD leg staged its archive without them (a native
 # stage builds them for the machine it runs on, and the FreeBSD release is
@@ -73,15 +74,15 @@ trap 'rm -rf "$TMP" || true' EXIT
 rel="$TMP/release"
 if ! sh "$ROOT/scripts/stage-release.sh" "$bin" "$rel" --contrib-target x86_64-freebsd.15.0 \
         > "$TMP/stage.log" 2>&1; then
-    if grep -q "fetch-sqlite" "$TMP/stage.log"; then
-        echo "  [SKIP] $NAME: the SQLite amalgamation could not be fetched (offline?)"
+    if grep -q -E "fetch-(sqlite|libxmp)" "$TMP/stage.log"; then
+        echo "  [SKIP] $NAME: the SQLite amalgamation or libxmp could not be fetched (offline?)"
         exit 0
     fi
     echo "  [FAIL] $NAME: scripts/stage-release.sh --contrib-target failed"
     tail -12 "$TMP/stage.log" | sed 's/^/        /'
     exit 1
 fi
-for a in libaether_sqlite.a libsqlite3.a; do
+for a in libaether_sqlite.a libsqlite3.a libaether_xmp.a libxmp.a; do
     [ -f "$rel/lib/contrib/$a" ] || { echo "  [FAIL] $NAME: no lib/contrib/$a"; exit 1; }
     x="$TMP/x.$a"
     mkdir -p "$x"
@@ -94,4 +95,4 @@ for a in libaether_sqlite.a libsqlite3.a; do
         esac
     done
 done
-echo "  [PASS] $NAME: the FreeBSD stage ships lib/contrib/libaether_sqlite.a and libsqlite3.a, for x86-64 FreeBSD"
+echo "  [PASS] $NAME: the FreeBSD stage ships lib/contrib/libaether_sqlite.a, libsqlite3.a, libaether_xmp.a and libxmp.a, for x86-64 FreeBSD"

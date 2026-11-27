@@ -1311,7 +1311,7 @@ _parse_number(p: *Parser) -> ptr {
 
     if is_float == 1 {
         l = model.new_literal(model.L_FLOAT)
-        (l as *Literal).fval = string.get_double(num_str)
+        (l as *Literal).fval = string.get_float(num_str)
         return l
     }
 

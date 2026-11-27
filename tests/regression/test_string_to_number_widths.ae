@@ -8,10 +8,12 @@
 //   2. to_float returned garbage (e.g. 5.3e-315 for "2.5") — the C
 //      string_get_float returned a 32-bit `float` while Aether's `float`
 //      is 64-bit (lowers to C double), so the result register was read
-//      as a double. Fixed by returning `(double)v` from string_get_float.
+//      as a double. Fixed by returning a double from string_get_float
+//      (which now parses at 64 bits too); to_f32 is the 32-bit parse and
+//      returns a real C float, Aether's `f32`.
 //
-// to_int and to_double were already correct; covered here so the whole
-// family is pinned.
+// to_int and the 64-bit parse were already correct; covered here so the
+// whole family is pinned.
 
 import std.string
 
@@ -42,17 +44,17 @@ main() {
     if i1 != 1000000 { fail("to_int wrong: ${i1}") }
     println("  PASS: to_int")
 
-    // to_float: must not read a 32-bit float as a 64-bit double.
-    f1, fe = string.to_float("2.5")
-    if fe != "" { fail("to_float err: ${fe}") }
-    if f1 != 2.5 { fail("to_float garbage for 2.5: ${f1}") }
-    println("  PASS: to_float")
+    // to_f32: must not read a 32-bit float as a 64-bit double.
+    f1, fe = string.to_f32("2.5")
+    if fe != "" { fail("to_f32 err: ${fe}") }
+    if f1 != 2.5 { fail("to_f32 garbage for 2.5: ${f1}") }
+    println("  PASS: to_f32")
 
-    // to_double: full-precision path.
-    d1, de = string.to_double("2.5")
-    if de != "" { fail("to_double err: ${de}") }
-    if d1 != 2.5 { fail("to_double wrong: ${d1}") }
-    println("  PASS: to_double")
+    // to_float: full-precision path.
+    d1, de = string.to_float("2.5")
+    if de != "" { fail("to_float err: ${de}") }
+    if d1 != 2.5 { fail("to_float wrong: ${d1}") }
+    println("  PASS: to_float")
 
     // Error paths still report invalid input.
     _, be = string.to_long("not-a-number")

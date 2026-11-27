@@ -1,0 +1,4 @@
+zig 0.16.0 (scripts/get-zig.sh) and the fetched libxmp source
+(scripts/fetch-libxmp.sh). Each target compiles the runtime and, on a cold
+cache, libxmp's 179 sources, so this runs in CI's ci-sqlite-cross job rather
+than the default sweep.

@@ -1509,7 +1509,7 @@ shortest_digits(mag: float) -> (string, int) {
             }
         }
         cand = string.concat(string.concat(string.concat("0.", head), "e"), string.from_int(hd))
-        back, _berr = string.to_double(cand)
+        back, _berr = string.to_float(cand)
         if back == mag {
             // Drop trailing zeros; they carry no digits.
             hn = string_length(head)
@@ -1571,7 +1571,7 @@ ruby_float_text(v: float) -> string {
 
 // A decimal result, printed through Float as Liquid prints it.
 ddecimal_out(neg: int, m: string, scale: int) -> string {
-    d, derr = string.to_double(dtext(neg, m, scale))
+    d, derr = string.to_float(dtext(neg, m, scale))
     if derr != "" {
         // Beyond a double's range: Ruby's to_f gives Infinity for a value
         // too large and zero for one too small, each with its sign.

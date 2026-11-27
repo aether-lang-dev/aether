@@ -14,7 +14,8 @@
 #
 # The release tree is staged by scripts/stage-release.sh, the script every
 # release.yml leg packs, so this checks what ships. It fetches the SQLite and
-# QuickJS amalgamations (a no-op when they are already in the tree); offline,
+# QuickJS amalgamations and the libxmp source (a no-op when they are already
+# in the tree); offline,
 # with neither there, the test skips. contrib.avcodec is checked where
 # FFmpeg's development libraries are installed, except on Windows (below).
 # sweep-timeout: 900
@@ -39,7 +40,7 @@ trap 'rm -rf "$TMP" || true' EXIT
 rel="$TMP/release"
 
 if ! sh "$ROOT/scripts/stage-release.sh" "$ROOT/build" "$rel" --contrib-archives > "$TMP/stage.log" 2>&1; then
-    if grep -q -E "fetch-(sqlite|quickjs)" "$TMP/stage.log"; then
+    if grep -q -E "fetch-(sqlite|quickjs|libxmp)" "$TMP/stage.log"; then
         echo "  [SKIP] $NAME: the amalgamations could not be fetched (offline?)"
         exit 0
     fi
@@ -53,13 +54,14 @@ fi
 # is the runtime's Windows --emit=obj entry point). aeb's own link names
 # `-laether_sqlite -lsqlite3` and never compiles contrib source, so a release
 # without them failed `library 'aether_sqlite' not found` for sae and LisMusic.
-for a in libaether_sqlite.a libsqlite3.a; do
+for a in libaether_sqlite.a libsqlite3.a libaether_xmp.a libxmp.a; do
     [ -f "$rel/lib/contrib/$a" ] || {
         echo "  [FAIL] $NAME: the staged release has no lib/contrib/$a"
         exit 1; }
 done
 others=$(find "$rel" \( -name 'libaether_*.a' ! -name libaether_main.a ! -name libaether_sqlite.a \
-                       -o -name 'libsqlite3.a' -path '*' ! -path "$rel/lib/contrib/*" \) )
+                       ! -name libaether_xmp.a \
+                       -o \( -name 'libsqlite3.a' -o -name 'libxmp.a' \) ! -path "$rel/lib/contrib/*" \) )
 if [ -n "$others" ]; then
     echo "  [FAIL] $NAME: unexpected contrib archives in the staged release:"
     echo "$others" | sed 's/^/        /'
@@ -112,6 +114,27 @@ main() {
     sqlite.close(db)
 }' "sqlite=42"
 mv "$TMP/amalgamation.away" "$rel/share/aether/contrib/sqlite/amalgamation"
+
+# contrib.xmp the same two ways: compiled from the libxmp source the release
+# ships, then with that source gone, from the shipped archives. Bytes that
+# are no module go through every one of libxmp's loaders before the refusal.
+XMP_PROG='import contrib.xmp
+import std.string
+main() {
+    junk = ""
+    i = 0
+    while i < 64 {
+        junk = string.concat(junk, "not a tracker module, only text. ")
+        i = i + 1
+    }
+    p, err = xmp.load(junk, string.length(junk))
+    if p == null { println("xmp=${err}") }
+}'
+XMP_WANT="xmp=xmp: not a module format libxmp recognises"
+check xmp "$XMP_PROG" "$XMP_WANT"
+mv "$rel/share/aether/contrib/xmp/libxmp" "$TMP/libxmp.away"
+check xmp_archives "$XMP_PROG" "$XMP_WANT"
+mv "$TMP/libxmp.away" "$rel/share/aether/contrib/xmp/libxmp"
 
 # Linked the way aeb links (no `ae build`): the emitted C, libaether.a and the
 # module's own @link flags, with only -L lib and -L lib/contrib.
@@ -173,5 +196,5 @@ main() {
 fi
 
 [ "$fails" -eq 0 ] || exit 1
-echo "  [PASS] $NAME: contrib.sqlite, jq and i18n.collate build and run from a staged release"
+echo "  [PASS] $NAME: contrib.sqlite, xmp, jq and i18n.collate build and run from a staged release"
 exit 0

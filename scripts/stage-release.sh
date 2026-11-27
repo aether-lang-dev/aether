@@ -13,12 +13,13 @@
 # --module-artifacts runs <aetherc> to precompile the installed std modules
 # (#1746); a cross-build, whose aetherc cannot run here, leaves it out and its
 # imports parse the sources.
-# --contrib-archives builds contrib.sqlite's veneer and the vendored SQLite
-# for the machine running this script and ships them as lib/contrib/
-# libaether_sqlite.a and libsqlite3.a (the dev layout's build/contrib, which
+# --contrib-archives builds contrib.sqlite's veneer and the vendored SQLite,
+# and contrib.xmp's veneer and the vendored libxmp, for the machine running
+# this script and ships them as lib/contrib/libaether_sqlite.a, libsqlite3.a,
+# libaether_xmp.a and libxmp.a (the dev layout's build/contrib, which
 # `ae build` and aeb's own link both put on -L). Only a NATIVE stage may pass
 # it: a cross-build's archives would be for the wrong machine.
-# --contrib-target <triple> builds the same two archives for a cross-built
+# --contrib-target <triple> builds the same four archives for a cross-built
 # release instead, with `zig cc -target <triple>` (zig on PATH, and for a
 # FreeBSD triple the base sysroot in AETHER_SYSROOT, as the cross-build
 # itself takes them), -fPIC like the native ones, and checks each object is
@@ -111,6 +112,10 @@ sh scripts/fetch-sqlite-amalgamation.sh >/dev/null
 # The same for contrib.quickjs: its pinned amalgamation ships, because
 # aether_quickjs.c compiles it into every program that imports the module.
 sh scripts/fetch-quickjs-amalgamation.sh >/dev/null
+# And contrib.xmp's pinned libxmp source, which `ae build` (and
+# `ae build --target`) compiles when no libaether_xmp.a is there; its
+# licence (COPYING) ships beside it, with contrib/xmp/NOTICE.
+sh scripts/fetch-libxmp.sh >/dev/null
 cp -r contrib "$out/share/aether/"
 c="$out/share/aether/contrib"
 find "$c" -type d \( -name tests -o -name benchmarks \) -prune -exec rm -rf {} +
@@ -121,13 +126,16 @@ sh .github/scripts/trim_contrib_sources.sh "$c" --keep-host-bridges
     echo "$0: the SQLite amalgamation is missing from the staged contrib" >&2; exit 1; }
 [ -f "$c/quickjs/amalgamation/quickjs-amalgam.c" ] || {
     echo "$0: the QuickJS amalgamation is missing from the staged contrib" >&2; exit 1; }
+[ -f "$c/xmp/libxmp/src/player.c" ] && [ -f "$c/xmp/libxmp/COPYING" ] || {
+    echo "$0: the libxmp source or its licence is missing from the staged contrib" >&2; exit 1; }
 
 # Compiled module artifacts (#1746), made by the aetherc this release ships.
 if [ -n "$modules_aetherc" ]; then
     sh scripts/build_module_artifacts.sh "$modules_aetherc" . "$out/lib/aether/modules"
 fi
 
-# The contrib.sqlite archives (#1372). A program linked without `ae build`
+# The contrib.sqlite and contrib.xmp archives (#1372). A program linked
+# without `ae build`
 # (aeb's orchestrator link, an aether.toml link_flags list) names
 # `-laether_sqlite -lsqlite3` itself and reads no source, so a release that
 # ships only the source (above) fails it with "library 'aether_sqlite' not
@@ -136,11 +144,12 @@ fi
 # (see the header).
 if [ -n "$contrib_archives" ]; then
     cdir="$(mktemp -d)"
-    if ! CONTRIB_TARGET="$contrib_target" MODULES=sqlite CONTRIB_OUT="$cdir" \
+    if ! CONTRIB_TARGET="$contrib_target" MODULES=sqlite,xmp CONTRIB_OUT="$cdir" \
             bash tests/scripts/contrib_build.sh >"$cdir/build.log" 2>&1 \
-       || [ ! -f "$cdir/libaether_sqlite.a" ] || [ ! -f "$cdir/libsqlite3.a" ]; then
+       || [ ! -f "$cdir/libaether_sqlite.a" ] || [ ! -f "$cdir/libsqlite3.a" ] \
+       || [ ! -f "$cdir/libaether_xmp.a" ] || [ ! -f "$cdir/libxmp.a" ]; then
         sed 's/^/    /' "$cdir/build.log" >&2
-        echo "$0: could not build the contrib.sqlite archives${contrib_target:+ for $contrib_target} (the vendored libsqlite3.a is required)" >&2
+        echo "$0: could not build the contrib.sqlite and contrib.xmp archives${contrib_target:+ for $contrib_target} (the vendored libsqlite3.a and libxmp.a are required)" >&2
         rm -rf "$cdir"; exit 1
     fi
     # A cross stage's archives must hold objects for the target: contrib_build
@@ -155,7 +164,7 @@ if [ -n "$contrib_archives" ]; then
             aarch64-*)       want="ELF 64-bit LSB relocatable, ARM aarch64" ;;
             *)               want="ELF" ;;
         esac
-        for a in libaether_sqlite.a libsqlite3.a; do
+        for a in libaether_sqlite.a libsqlite3.a libaether_xmp.a libxmp.a; do
             xd="$cdir/x.$a"
             mkdir -p "$xd"
             (cd "$xd" && zig ar x "$cdir/$a") || { echo "$0: cannot unpack $a" >&2; rm -rf "$cdir"; exit 1; }
@@ -169,7 +178,8 @@ if [ -n "$contrib_archives" ]; then
         done
     fi
     mkdir -p "$out/lib/contrib"
-    cp "$cdir/libaether_sqlite.a" "$cdir/libsqlite3.a" "$out/lib/contrib/"
+    cp "$cdir/libaether_sqlite.a" "$cdir/libsqlite3.a" \
+       "$cdir/libaether_xmp.a" "$cdir/libxmp.a" "$out/lib/contrib/"
     rm -rf "$cdir"
 fi
 

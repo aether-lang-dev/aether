@@ -356,7 +356,7 @@ _lex_number(lx: *Lexer) {
         }
     }
     text = string.substring_n(_src(lx), lx.len, start, lx.pos)
-    d, err = string.to_double(text)
+    d, err = string.to_float(text)
     if err != "" {
         // Out of double range: 1e1000 overflows to infinity (which prints as
         // the largest double, as in jq), 1e-1000 underflows to zero.

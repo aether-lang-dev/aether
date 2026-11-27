@@ -121,7 +121,7 @@ record_rows(t: ptr, best: ptr, out: string) {
         if string.starts_with(line, "row ") != 0 {
             parts = string.split(line, " ")
             if string.array_size(parts) == 4 {
-                v, err = string.to_double(string.array_get(parts, 2))
+                v, err = string.to_float(string.array_get(parts, 2))
                 if err == "" {
                     record(t, best, string.array_get(parts, 1), string.array_get(parts, 3), v)
                 }
@@ -144,7 +144,7 @@ record_phases(t: ptr, best: ptr, out: string, prefix: string) {
         if string.starts_with(line, "phase ") != 0 {
             parts = string.split(line, " ")
             if string.array_size(parts) >= 3 {
-                v, err = string.to_double(string.array_get(parts, 2))
+                v, err = string.to_float(string.array_get(parts, 2))
                 if err == "" {
                     record(t, best, "${prefix}${string.array_get(parts, 1)}", "ms", v)
                 }

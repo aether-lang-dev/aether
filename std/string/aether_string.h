@@ -295,7 +295,7 @@ AetherString* string_from_long(long long value);
 // — see the .c-side comment for the full diagnosis.
 AetherString* string_from_float(double value);
 // Lossless, deterministic double-to-decimal text conversion pairing with
-// `string.to_double`. Round-trips every finite IEEE-754 binary64 value,
+// `string.to_float`. Round-trips every finite IEEE-754 binary64 value,
 // and normalizes special values.
 AetherString* string_from_double(double value);
 
@@ -319,8 +319,8 @@ AetherString* string_pad_end(const void* s, int total_width, int pad_char);
 // (`string.to_int`, etc.) which return `(value, error)` tuples.
 int string_to_int_raw(const void* str, int* out_value);
 int string_to_long_raw(const void* str, long long* out_value);  // 64-bit slot (Windows `long` is 32-bit)
-int string_to_float_raw(const void* str, float* out_value);
-int string_to_double_raw(const void* str, double* out_value);
+int string_to_float_raw(const void* str, double* out_value);  // 64-bit: Aether `float` is C double
+int string_to_f32_raw(const void* str, float* out_value);       // 32-bit: Aether `f32` is C float
 
 // Base-N parse, radix in 2..36. Out-slot is `long long*` for LLP64
 // safety, matching string_to_long_raw. Accepts exactly an optional '-',
@@ -339,6 +339,11 @@ int       string_try_long(const void* s);
 long long string_get_long(const void* s);  // 64-bit on every platform
 int    string_try_float(const void* s);
 double string_get_float(const void* s);  // 64-bit: Aether `float` lowers to C double
+int    string_try_f32(const void* s);
+float  string_get_f32(const void* s);    // 32-bit: Aether `f32` lowers to C float
+// TODO: delete once nothing in the aether-lang-dev org's repos or in
+// friends-and-family repos uses them: string_try_float / string_get_float
+// under their old names, for std.string's to_double.
 int    string_try_double(const void* s);
 double string_get_double(const void* s);
 // Base-N split-return — same shape as try_long/get_long, with a radix

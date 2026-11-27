@@ -1,0 +1,30 @@
+# The libxmp source contrib.xmp compiles (full libxmp: the player, every
+# loader, ProWizard and the depackers; not libxmp-lite).
+#
+# Not committed: scripts/fetch-libxmp.sh downloads LIBXMP_URL (libxmp's own
+# GitHub release tarball), refuses it unless its SHA-256 is LIBXMP_SHA256,
+# and extracts include/, src/ and the licence into contrib/xmp/libxmp/
+# (gitignored), with sources.txt: the C files libxmp's Makefile.vc compiles
+# (OBJS, PROWIZ_OBJS and DEPACKER_OBJS), one per line. `make contrib`, CI and
+# release packaging run it; release archives ship the extracted files, so an
+# installed toolchain never needs the network.
+#
+# LIBXMP_SHA256 is the checksum libxmp publishes in the release notes for the
+# tag (and GitHub records for the asset), so the pin can be audited against
+# the upstream listing.
+#
+# LIBXMP_CFLAGS is the one flag set, used for the native archive
+# (tests/scripts/contrib_build.sh) and the per-target cross archive (ae build
+# --target). It is part of both cache keys, so changing it recompiles.
+# LIBXMP_STATIC: a static library (no dllimport/dllexport on Windows). No
+# HAVE_* flags: libxmp then never spawns a helper program (HAVE_POPEN and
+# friends), never calls the process-wide umask (HAVE_UMASK), and uses its
+# own mkstemp (O_EXCL, mode 0600; tempfile.h names it libxmp_mkstemp, so it
+# never stands in for the C library's), the configuration Makefile.vc builds.
+#
+# To bump: change the four values, run the fetch script, and update the
+# version in contrib/xmp/README.md.
+LIBXMP_VERSION=4.7.4
+LIBXMP_URL=https://github.com/libxmp/libxmp/releases/download/libxmp-4.7.4/libxmp-4.7.4.tar.gz
+LIBXMP_SHA256=a25583aa3b031c78ba0b4e83387fa596fb05742622e60f60d1540ee2af79b8d9
+LIBXMP_CFLAGS="-DLIBXMP_STATIC"

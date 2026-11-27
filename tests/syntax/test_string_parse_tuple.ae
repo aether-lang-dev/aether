@@ -1,4 +1,4 @@
-// Test: string.to_int/to_long/to_float/to_double Go-style wrappers.
+// Test: string.to_int/to_long/to_f32/to_float Go-style wrappers.
 // Replaces the out-parameter pattern (`string_to_int(s, &out)`) with
 // native tuple destructuring.
 
@@ -41,24 +41,24 @@ main() {
         exit(1)
     }
 
-    // to_float success
-    f, ferr = string.to_float("3.14")
+    // to_f32 success
+    f, ferr = string.to_f32("3.14")
     if ferr != "" {
-        println("FAIL: to_float(3.14) errored: ${ferr}")
+        println("FAIL: to_f32(3.14) errored: ${ferr}")
         exit(1)
     }
 
-    // to_float failure
-    _, ferr2 = string.to_float("not a number")
+    // to_f32 failure
+    _, ferr2 = string.to_f32("not a number")
     if ferr2 == "" {
-        println("FAIL: to_float should error on bad input")
+        println("FAIL: to_f32 should error on bad input")
         exit(1)
     }
 
-    // to_double success
-    d, derr = string.to_double("2.71828")
+    // to_float success
+    d, derr = string.to_float("2.71828")
     if derr != "" {
-        println("FAIL: to_double errored: ${derr}")
+        println("FAIL: to_float errored: ${derr}")
         exit(1)
     }
 

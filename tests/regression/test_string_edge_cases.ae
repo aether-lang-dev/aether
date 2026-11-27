@@ -170,8 +170,8 @@ main() {
         print("  FAIL\n"); exit(1)
     }
 
-    print("\nTest 15: to_double on scientific notation\n")
-    v, e15 = string.to_double("1.5e3")
+    print("\nTest 15: to_float on scientific notation\n")
+    v, e15 = string.to_float("1.5e3")
     if e15 != "" {
         print("  FAIL: should accept 1.5e3\n"); exit(1)
     }
