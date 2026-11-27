@@ -85,6 +85,7 @@
     <li><a href="#to_long_raw">to_long_raw</a></li>
     <li><a href="#to_float_raw">to_float_raw</a></li>
     <li><a href="#to_f32_raw">to_f32_raw</a></li>
+    <li><a href="#to_double_raw">to_double_raw</a></li>
     <li><a href="#try_int">try_int</a></li>
     <li><a href="#get_int">get_int</a></li>
     <li><a href="#try_long">try_long</a></li>
@@ -603,6 +604,12 @@
       <h3 class="function-name">to_f32_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>to_f32_raw(str, out_value) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">str: string, out_value: ptr</span></p>
+    </div>
+    <div class="function" id="to_double_raw" data-name="to_double_raw">
+      <h3 class="function-name">to_double_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>to_double_raw(str, out_value) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">str: string, out_value: ptr</span></p>
+      <p class="doc">TODO: delete string_to_double_raw once nothing in the aether-lang-dev org's repos or in friends-and-family repos calls it; it is string_to_float_raw under its old name, the same 8-byte `float` slot.</p>
     </div>
     <div class="function" id="try_int" data-name="try_int">
       <h3 class="function-name">try_int <span class="kind">extern</span></h3>
