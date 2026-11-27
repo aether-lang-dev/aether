@@ -1,7 +1,7 @@
 # std.ipc
 
 A channel to the parent process: a report pipe, or a two-way socket that
-can also pass open file descriptors.
+can also pass open file descriptors, and shared memory passed over it.
 
 When a program is spawned by `std.os`, it may inherit an extra descriptor
 that its parent holds the other end of. `std.ipc` finds it and reads,
@@ -331,6 +331,87 @@ gone is an error, not SIGPIPE.
 It works on Windows too (anonymous pipes, handed back as binary CRT
 descriptors), which is why a host that has to run there uses it.
 
+## Shared buffers
+
+Bulk data, a frame of pixels say, is cheaper shared than sent: one side
+makes a buffer, passes its descriptor over a socket channel, the other maps
+it, and from then on both read and write the same memory, while the channel
+carries only short messages saying what changed.
+
+- `shared_buffer(size) -> (buf, err)` makes a zeroed buffer of `size` bytes,
+  mapped for reading and writing, with a close-on-exec descriptor.
+- `shared_buffer_fd(buf) -> int` is that descriptor, to pass with `send_fd`;
+  the buffer keeps it, and `shared_buffer_free` closes it. `-1` for a
+  buffer `shared_buffer_map` made.
+- `shared_buffer_map(fd, size) -> (buf, err)` maps a buffer whose descriptor
+  arrived (`recv`, `recv_fd`). `size` must be the size it was made with,
+  checked against the descriptor (`fstat`): a mismatch is an error, as is a
+  closed or invalid descriptor, or one that is not shared memory (a socket,
+  a pipe). The descriptor stays the caller's: close it once mapped.
+- `shared_buffer_map_readonly(fd, size) -> (buf, err)` maps it read-only on
+  this side. The descriptor still lets whoever holds it write, so it is a
+  guard against this side's own mistakes, not a boundary.
+- `shared_buffer_length(buf) -> int` is its size.
+- `shared_buffer_view(buf) -> byte[]` is its bytes, as a bounded slice whose
+  index is checked; `shared_buffer_read_view(buf) -> byte[]` the same,
+  read-only (the only view of a read-only mapping: `shared_buffer_view`
+  panics for one). A view is valid until `shared_buffer_free` and owns
+  nothing, so `free` of it is refused.
+- `shared_buffer_free(buf)` unmaps the buffer (and closes its descriptor, on
+  the side that made it). The other side's mapping stays.
+
+Each buffer is a handle of its own; nothing is kept in the module. Nothing
+orders the two sides' accesses either: write, then say so over the channel,
+and read only after hearing it.
+
+```aether,fragment
+import std.ipc
+import std.io
+
+// The parent: one buffer for the life of the child, passed once.
+buf, err = ipc.shared_buffer(640 * 480 * 3)
+if err == "" {
+    ipc.send_fd(ch, ipc.shared_buffer_fd(buf), "921600")
+    pixels = ipc.shared_buffer_view(buf)
+    // Each frame: the child writes into the buffer and says so.
+    note, ferr = ipc.read_frame(ch, 64)        // "frame 1 ready"
+    if ferr == "" {
+        first = pixels[0]
+        ipc.write_frame(ch, "ack")
+    }
+    ipc.shared_buffer_free(buf)
+}
+
+// The child: map what arrived, then write frames into it.
+size_text, fd, rerr = ipc.recv(ch, 64)
+mine, merr = ipc.shared_buffer_map(fd, 921600)
+io.fd_close(fd)
+```
+
+How it is made:
+
+- **Linux, FreeBSD 13 and later, NetBSD:** an anonymous `memfd`, its size
+  sealed once set (`F_SEAL_SHRINK`, `F_SEAL_GROW`, `F_SEAL_SEAL`), so no
+  holder of the descriptor can shrink it under another's mapping (an access
+  past the end of a shrunk object is a `SIGBUS`), and on Linux 6.3 and later
+  sealed non-executable (`MFD_NOEXEC_SEAL`). Sealing is always on and not a
+  choice: an unsealed buffer would only add a way to crash the other side.
+- **macOS, OpenBSD and other POSIX systems:** `shm_open` under a random
+  name, created exclusively and unlinked at once, so no name is left behind
+  for anything else to open. Such an object cannot be sealed, and macOS
+  keeps its size to whole pages (16 KiB on Apple silicon), so there the size
+  check tells sizes apart to the page. FreeBSD before `memfd_create`:
+  `shm_open(SHM_ANON)`.
+- **Windows**, and builds without processes: every call returns an error
+  saying it is unsupported, since std.ipc passes no descriptors there.
+
+No grant is needed to make or map a buffer, inside a sandbox or out: the
+memory is anonymous and reaches no file, socket or program, as `malloc`'s
+does. `memfd_create` is called through libc, not `syscall()`, which the
+sandbox preload holds to a native grant. A child under
+`sandbox.spawn_socket` with no grants maps a buffer it is passed and makes
+one of its own (`tests/integration/std_ipc_shared_buffer`).
+
 ## Descriptors only go down
 
 A descriptor travels from the parent to a child, never the other way. The
@@ -395,7 +476,7 @@ bounds how many descriptors one message is looked at for.
   return a `not a pipe` error rather than guess. `os.run_socket`,
   `os.socketpair`, `send_fd`, `recv_fd` and `recv` report that they are
   unsupported; Windows passes handles with `DuplicateHandle`, a different
-  shape.
+  shape. So are the shared buffers, which travel as descriptors.
 - **Builds without a filesystem** (WASM, embedded): every function
   exists and reports that it is unavailable.
 
@@ -408,5 +489,8 @@ does: passing descriptors hands out authority.
 `send_fd`, `recv_fd`, `recv`, `write_frame`, `read_frame`,
 `read_frame_timeout`, `wait_readable`, `wait_writable`, `write_some`,
 `frame_writer`, `frame_writer_put`, `frame_writer_flush`,
-`frame_writer_pending`, `frame_writer_free`, and the constants
+`frame_writer_pending`, `frame_writer_free`, `shared_buffer`,
+`shared_buffer_fd`, `shared_buffer_map`, `shared_buffer_map_readonly`,
+`shared_buffer_length`, `shared_buffer_view`, `shared_buffer_read_view`,
+`shared_buffer_free`, and the constants
 `TIMED_OUT_BETWEEN_FRAMES` and `TIMED_OUT_INSIDE_FRAME`.

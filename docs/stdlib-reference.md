@@ -44,7 +44,7 @@ header comment is the authoritative description.
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 48 | [full section](#io-stdio) |
-| `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors. | 40 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
+| `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors and shared memory. | 55 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 52 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
@@ -3251,6 +3251,11 @@ main() {
 - `ipc.read_frame(ch, max)` → `(string, string)` - One whole frame; a header announcing more than `max` is an error and nothing is buffered. End of stream is an error, so `("", "")` is an empty frame
 - `ipc.read_frame_timeout(ch, max, timeout_ms)` → `(string, string)` - `read_frame` with a deadline over the whole frame (on Windows, with a timeout that is not negative, only on an anonymous pipe such as `os.run_stdio`'s, to within about a timer tick). A timeout is `ipc.TIMED_OUT_BETWEEN_FRAMES` when no byte of a frame had arrived (the stream is still usable) or `ipc.TIMED_OUT_INSIDE_FRAME` when one had (close the channel)
 - `ipc.wait_readable(ch, timeout_ms)` → `(int, string)` - `poll`: 1 when a read will not block (a closed peer included), 0 on a timeout. On Windows only on an anonymous pipe such as `os.run_stdio`'s (`PeekNamedPipe`, polled to within about a timer tick); any other descriptor there is a `not a pipe` error
+- `ipc.shared_buffer(size)` → `(ptr, string)` - A zeroed buffer of `size` bytes two processes can map: anonymous memory (a size-sealed memfd on Linux and FreeBSD, an unlinked `shm_open` object on macOS), with a close-on-exec descriptor to pass with `send_fd`. No grant needed. Unsupported on Windows
+- `ipc.shared_buffer_map(fd, size)` / `ipc.shared_buffer_map_readonly(fd, size)` → `(ptr, string)` - Map a buffer from a received descriptor; `size` is checked against it (`fstat`), and a mismatch, a closed descriptor or one that is not shared memory is an error. The descriptor stays the caller's
+- `ipc.shared_buffer_fd(buf)` → `int`, `ipc.shared_buffer_length(buf)` → `int` - Its descriptor (`-1` on a mapping) and its size
+- `ipc.shared_buffer_view(buf)` / `ipc.shared_buffer_read_view(buf)` → `byte[]` - Its bytes as a bounded slice, writable or read-only (a read-only mapping has only the latter), valid until `shared_buffer_free`
+- `ipc.shared_buffer_free(buf)` - Unmap it, and close its descriptor on the side that made it
 
 ### Signal numbers (`std.signal`)
 

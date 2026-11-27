@@ -1592,3 +1592,271 @@ const char* ipc_frame_writer_flush_raw(void* p, int timeout_ms) {
     return "";
 }
 #endif /* AETHER_HAS_FILESYSTEM */
+
+/* ---- Shared buffers ----
+ *
+ * A block of memory two processes map at once, so bulk data crosses between
+ * them without going through the socket: one side creates it, passes its
+ * descriptor over a socket channel (send_fd), and each side maps it. Each
+ * buffer is its own handle, holding the mapping (and, on the side that made
+ * it, the descriptor); nothing about a buffer lives in the module.
+ *
+ * Linux, FreeBSD and NetBSD: an anonymous memfd, close-on-exec, its size
+ * sealed once set (F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL), so no holder
+ * of the descriptor can shrink it under a mapping and make that mapping
+ * fault. On Linux 6.3 and later it is also made non-executable
+ * (MFD_NOEXEC_SEAL), so the descriptor cannot be run as a program. macOS,
+ * OpenBSD and other POSIX systems: shm_open under a random name, unlinked at
+ * once, so no name stays behind and nothing else can open it; such an object
+ * cannot be sealed. FreeBSD before memfd_create: shm_open(SHM_ANON).
+ *
+ * No grant: the memory is anonymous, reaching no file, socket or program.
+ * memfd_create is called through libc's wrapper, not syscall(), which the
+ * sandbox preload holds to a native grant for a raw call.
+ *
+ * Windows and builds without processes: every call says it is unsupported
+ * (std.ipc passes no descriptors there). */
+
+typedef struct { void* _0; const char* _1; } _tuple_ptr_string_ipc;
+
+static _tuple_ptr_string_ipc ipc_shared_failed(const char* err) {
+    _tuple_ptr_string_ipc out = { NULL, err };
+    return out;
+}
+
+#if AETHER_HAS_FILESYSTEM && AETHER_HAS_PROCESS && !defined(_WIN32) && !defined(__wasi__)
+
+#include <limits.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+#if defined(__linux__)
+/* glibc declares memfd_create only under _GNU_SOURCE; the symbol is there
+ * from 2.27, musl's from 1.1.20. */
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#define MFD_ALLOW_SEALING 0x0002U
+int memfd_create(const char* name, unsigned int flags);
+#endif
+#ifndef MFD_NOEXEC_SEAL
+#define MFD_NOEXEC_SEAL 0x0008U
+#endif
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS (1024 + 9)
+#define F_GET_SEALS (1024 + 10)
+#endif
+#ifndef F_SEAL_SEAL
+#define F_SEAL_SEAL   0x0001
+#define F_SEAL_SHRINK 0x0002
+#define F_SEAL_GROW   0x0004
+#endif
+#endif
+
+#if defined(MFD_CLOEXEC) && defined(F_ADD_SEALS) && !defined(__ANDROID__)
+#define IPC_SHARED_MEMFD 1
+#else
+#define IPC_SHARED_MEMFD 0
+#endif
+
+typedef struct {
+    unsigned char* data;   /* the mapping */
+    size_t len;            /* the bytes the buffer holds */
+    size_t map_len;        /* the bytes mapped (len, page-rounded on macOS) */
+    int fd;                /* the creator's descriptor; -1 on a mapping */
+    int readonly;
+} IpcSharedBuffer;
+
+/* The size the object takes for `n` bytes: macOS rounds a shm object up to
+ * a page (fstat says so), everywhere else it is exactly `n`. */
+static size_t ipc_shared_object_size(size_t n) {
+#if defined(__APPLE__)
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) page = 4096;
+    return (n + (size_t)page - 1) / (size_t)page * (size_t)page;
+#else
+    return n;
+#endif
+}
+
+#if !IPC_SHARED_MEMFD && !defined(SHM_ANON)
+/* shm_open under a name nobody can guess, created exclusively and unlinked
+ * at once; at most 31 characters (macOS refuses longer, PSHMNAMLEN). */
+static int ipc_shared_shm_anon(void) {
+    for (int attempt = 0; attempt < 64; attempt++) {
+        unsigned long long r;
+#if defined(__APPLE__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__FreeBSD__)
+        r = ((unsigned long long)arc4random() << 32) | arc4random();
+#else
+        int u = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        if (u < 0) return -1;
+        ssize_t got = read(u, &r, sizeof r);
+        close(u);
+        if (got != (ssize_t)sizeof r) { errno = EIO; return -1; }
+#endif
+        char name[32];
+        snprintf(name, sizeof name, "/aei%x_%016llx", (unsigned)getpid() & 0xffffffu, r);
+        int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (fd >= 0) {
+            shm_unlink(name);
+            int fl = fcntl(fd, F_GETFD);
+            if (fl < 0 || fcntl(fd, F_SETFD, fl | FD_CLOEXEC) < 0) {
+                int e = errno;
+                close(fd);
+                errno = e;
+                return -1;
+            }
+            return fd;
+        }
+        if (errno != EEXIST) return -1;
+    }
+    errno = EEXIST;
+    return -1;
+}
+#endif
+
+/* A fresh anonymous object, close-on-exec, of size 0. `sealable` is set
+ * when its size can be sealed. -1 with errno set. */
+static int ipc_shared_anon(int* sealable) {
+    *sealable = 0;
+#if IPC_SHARED_MEMFD
+#if defined(__linux__)
+    int fd = memfd_create("aether-ipc-shared", MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL);
+    if (fd < 0 && errno == EINVAL)   /* before Linux 6.3: no MFD_NOEXEC_SEAL */
+        fd = memfd_create("aether-ipc-shared", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+#else
+    int fd = memfd_create("aether-ipc-shared", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+#endif
+    if (fd >= 0) *sealable = 1;
+    return fd;
+#elif defined(SHM_ANON)
+    return shm_open(SHM_ANON, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+#else
+    return ipc_shared_shm_anon();
+#endif
+}
+
+_tuple_ptr_string_ipc ipc_shared_buffer_new_raw(int size) {
+    if (size <= 0) return ipc_shared_failed("ipc.shared_buffer: the size must be at least 1 byte");
+    int sealable = 0;
+    int fd = ipc_shared_anon(&sealable);
+    if (fd < 0) return ipc_shared_failed(ipc_errno_msg("ipc.shared_buffer: cannot create it", errno));
+    if (ftruncate(fd, (off_t)size) != 0) {
+        int e = errno;
+        close(fd);
+        return ipc_shared_failed(ipc_errno_msg("ipc.shared_buffer: cannot size it", e));
+    }
+#if IPC_SHARED_MEMFD
+    if (sealable && fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) != 0) {
+        int e = errno;
+        close(fd);
+        return ipc_shared_failed(ipc_errno_msg("ipc.shared_buffer: cannot seal its size", e));
+    }
+#endif
+    size_t map_len = ipc_shared_object_size((size_t)size);
+    void* mem = mmap(NULL, map_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mem == MAP_FAILED) {
+        int e = errno;
+        close(fd);
+        return ipc_shared_failed(ipc_errno_msg("ipc.shared_buffer: cannot map it", e));
+    }
+    IpcSharedBuffer* b = (IpcSharedBuffer*)malloc(sizeof *b);
+    if (!b) {
+        munmap(mem, map_len);
+        close(fd);
+        return ipc_shared_failed("ipc.shared_buffer: out of memory");
+    }
+    b->data = (unsigned char*)mem;
+    b->len = (size_t)size;
+    b->map_len = map_len;
+    b->fd = fd;
+    b->readonly = 0;
+    _tuple_ptr_string_ipc out = { b, "" };
+    return out;
+}
+
+_tuple_ptr_string_ipc ipc_shared_buffer_map_raw(int fd, int size, int readonly) {
+    const char* what = readonly ? "ipc.shared_buffer_map_readonly" : "ipc.shared_buffer_map";
+    char text[96];
+    if (fd < 0) {
+        snprintf(text, sizeof text, "no descriptor (%d)", fd);
+        return ipc_shared_failed(ipc_msg(what, text));
+    }
+    if (size <= 0) return ipc_shared_failed(ipc_msg(what, "the size must be at least 1 byte"));
+    struct stat st;
+    if (fstat(fd, &st) != 0) return ipc_shared_failed(ipc_errno_msg(what, errno));
+    /* macOS reports a shm object as neither a file nor anything below, so
+     * what is refused is what cannot be shared memory. */
+    if (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode) || S_ISDIR(st.st_mode) ||
+        S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode))
+        return ipc_shared_failed(ipc_msg(what, "the descriptor is not shared memory"));
+    size_t map_len = ipc_shared_object_size((size_t)size);
+    if (st.st_size < 0 || (unsigned long long)st.st_size != (unsigned long long)map_len) {
+        snprintf(text, sizeof text, "the buffer holds %lld bytes, not %d",
+                 (long long)st.st_size, size);
+        return ipc_shared_failed(ipc_msg(what, text));
+    }
+    void* mem = mmap(NULL, map_len, readonly ? PROT_READ : (PROT_READ | PROT_WRITE),
+                     MAP_SHARED, fd, 0);
+    if (mem == MAP_FAILED) return ipc_shared_failed(ipc_errno_msg(what, errno));
+    IpcSharedBuffer* b = (IpcSharedBuffer*)malloc(sizeof *b);
+    if (!b) {
+        munmap(mem, map_len);
+        return ipc_shared_failed(ipc_msg(what, "out of memory"));
+    }
+    b->data = (unsigned char*)mem;
+    b->len = (size_t)size;
+    b->map_len = map_len;
+    b->fd = -1;
+    b->readonly = readonly ? 1 : 0;
+    _tuple_ptr_string_ipc out = { b, "" };
+    return out;
+}
+
+int ipc_shared_buffer_fd_raw(void* p) {
+    return p ? ((IpcSharedBuffer*)p)->fd : -1;
+}
+
+int ipc_shared_buffer_length_raw(void* p) {
+    return p ? (int)((IpcSharedBuffer*)p)->len : 0;
+}
+
+void* ipc_shared_buffer_data_raw(void* p) {
+    return p ? ((IpcSharedBuffer*)p)->data : NULL;
+}
+
+int ipc_shared_buffer_readonly_raw(void* p) {
+    return p ? ((IpcSharedBuffer*)p)->readonly : 0;
+}
+
+void ipc_shared_buffer_free_raw(void* p) {
+    IpcSharedBuffer* b = (IpcSharedBuffer*)p;
+    if (!b) return;
+    munmap(b->data, b->map_len);
+    if (b->fd >= 0) close(b->fd);
+    free(b);
+}
+
+#else /* no descriptor passing: Windows, WASI, builds without processes */
+
+#if defined(_WIN32)
+#define IPC_SHARED_UNSUPPORTED "unsupported on Windows (std.ipc passes no descriptors there)"
+#else
+#define IPC_SHARED_UNSUPPORTED "unavailable in this build"
+#endif
+
+_tuple_ptr_string_ipc ipc_shared_buffer_new_raw(int size) {
+    (void)size;
+    return ipc_shared_failed("ipc.shared_buffer: " IPC_SHARED_UNSUPPORTED);
+}
+_tuple_ptr_string_ipc ipc_shared_buffer_map_raw(int fd, int size, int readonly) {
+    (void)fd; (void)size;
+    return ipc_shared_failed(readonly ? "ipc.shared_buffer_map_readonly: " IPC_SHARED_UNSUPPORTED
+                                      : "ipc.shared_buffer_map: " IPC_SHARED_UNSUPPORTED);
+}
+int ipc_shared_buffer_fd_raw(void* p) { (void)p; return -1; }
+int ipc_shared_buffer_length_raw(void* p) { (void)p; return 0; }
+void* ipc_shared_buffer_data_raw(void* p) { (void)p; return NULL; }
+int ipc_shared_buffer_readonly_raw(void* p) { (void)p; return 0; }
+void ipc_shared_buffer_free_raw(void* p) { (void)p; }
+
+#endif
