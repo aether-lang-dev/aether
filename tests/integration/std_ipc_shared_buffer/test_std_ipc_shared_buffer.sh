@@ -46,6 +46,15 @@ if [ "$(uname -s)" != Linux ]; then
     echo "  [SKIP] std_ipc_shared_buffer: sandbox.spawn_socket contains a child on Linux only"
     exit 0
 fi
+# Under the ASan sweep the child is an ASan program confined through the
+# sandbox's preload library, which ASan refuses to start under (its runtime
+# not first), and the sandbox gives it none of the sweep's ASAN_OPTIONS; the
+# same reason tests/ae_sweep_prune_asan.txt leaves the sandbox tests out
+# (SANDBOX). The buffer itself was held to ASan above.
+if [ "${AETHER_SANITIZER:-}" = asan ]; then
+    echo "  [SKIP] std_ipc_shared_buffer: sandboxed: an ASan child does not start under the sandbox's preload"
+    exit 0
+fi
 if [ ! -f "$ROOT/build/libaether_sandbox.so" ]; then
     echo "  [SKIP] std_ipc_shared_buffer: build/libaether_sandbox.so not built"
     exit 0
