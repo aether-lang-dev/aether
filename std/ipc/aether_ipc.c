@@ -1609,6 +1609,8 @@ const char* ipc_frame_writer_flush_raw(void* p, int timeout_ms) {
  * OpenBSD and other POSIX systems: shm_open under a random name, unlinked at
  * once, so no name stays behind and nothing else can open it; such an object
  * cannot be sealed. FreeBSD before memfd_create: shm_open(SHM_ANON).
+ * Android: a memfd from API 30; before it a buffer cannot be made (bionic
+ * has neither memfd_create nor shm_open), though one received is mapped.
  *
  * No grant: the memory is anonymous, reaching no file, socket or program.
  * memfd_create is called through libc's wrapper, not syscall(), which the
@@ -1652,7 +1654,8 @@ int memfd_create(const char* name, unsigned int flags);
 #endif
 #endif
 
-#if defined(MFD_CLOEXEC) && defined(F_ADD_SEALS) && !defined(__ANDROID__)
+/* Bionic has memfd_create from API 30, and no shm_open at all. */
+#if defined(MFD_CLOEXEC) && defined(F_ADD_SEALS) && (!defined(__ANDROID__) || __ANDROID_API__ >= 30)
 #define IPC_SHARED_MEMFD 1
 #else
 #define IPC_SHARED_MEMFD 0
@@ -1678,7 +1681,7 @@ static size_t ipc_shared_object_size(size_t n) {
 #endif
 }
 
-#if !IPC_SHARED_MEMFD && !defined(SHM_ANON)
+#if !IPC_SHARED_MEMFD && !defined(SHM_ANON) && !defined(__ANDROID__)
 /* shm_open under a name nobody can guess, created exclusively and unlinked
  * at once; at most 31 characters (macOS refuses longer, PSHMNAMLEN). */
 static int ipc_shared_shm_anon(void) {
@@ -1730,6 +1733,9 @@ static int ipc_shared_anon(int* sealable) {
     return fd;
 #elif defined(SHM_ANON)
     return shm_open(SHM_ANON, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+#elif defined(__ANDROID__)
+    errno = ENOSYS;   /* before API 30: no memfd_create, and bionic has no shm_open */
+    return -1;
 #else
     return ipc_shared_shm_anon();
 #endif

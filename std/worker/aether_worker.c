@@ -229,8 +229,9 @@ static void run_job(WorkerJob* job) {
  * on it is immediate. Finished threads are joined at the next launch (the
  * list stays as long as the number of own threads still running) and at
  * process exit, from an atexit handler. A thread still inside its job at exit
- * is left alone: a detached job may block for good, and waiting on it would
- * hang the exit, so it ends with the process, as before. Under g_lock. */
+ * is detached then, not waited on: a detached job may block for good, and
+ * waiting on it would hang the exit, so it ends with the process, as before.
+ * Under g_lock. */
 typedef struct OwnThread {
     pthread_t         th;
     atomic_int        done;
@@ -273,8 +274,15 @@ static void own_reap(void) {
     }
 }
 
+/* At exit: join what has finished, and detach what is still inside its
+ * job, which ends with the process. Its OwnThread stays allocated: the
+ * thread still writes `done` into it. */
 static void own_reap_at_exit(void) {
     own_reap();
+    pthread_mutex_lock(&g_lock);
+    for (OwnThread* t = g_own; t; t = t->next) pthread_detach(t->th);
+    g_own = NULL;
+    pthread_mutex_unlock(&g_lock);
 }
 
 /* Start `job` on a thread of its own. 0 on success, else the job is still
