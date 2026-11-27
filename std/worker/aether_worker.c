@@ -245,7 +245,11 @@ static int        g_own_atexit = 0;
 static void* worker_entry(void* arg) {
     OwnThread* t = (OwnThread*)arg;
     run_job(t->job);
-    atomic_store(&t->done, 1);   /* last touch: t belongs to the reaper now */
+    /* Last touch: t belongs to the reaper now. Under g_lock, so a fork
+     * (which holds it) sees each thread either still in its job or done. */
+    pthread_mutex_lock(&g_lock);
+    atomic_store(&t->done, 1);
+    pthread_mutex_unlock(&g_lock);
     return NULL;
 }
 
@@ -285,6 +289,36 @@ static void own_reap_at_exit(void) {
     pthread_mutex_unlock(&g_lock);
 }
 
+/* Across a fork: a thread that has finished but is not yet joined would
+ * come into the child as a joinable thread nobody joins, which a child that
+ * exits without exec (one whose exec failed) is left holding. So the fork is
+ * made under g_lock with every done thread joined first; a done thread has
+ * only its return left, so each join is immediate, and since a thread marks
+ * itself done under g_lock, none can finish between the joins and the fork.
+ * The child has none of the threads still in their jobs, only the list's
+ * copy, which it forgets: they are not its to join or detach. */
+#if !defined(_WIN32)
+static void own_fork_prepare(void) {
+    pthread_mutex_lock(&g_lock);
+    OwnThread** pp = &g_own;
+    while (*pp) {
+        OwnThread* t = *pp;
+        if (atomic_load(&t->done)) {
+            *pp = t->next;
+            pthread_join(t->th, NULL);
+            free(t);
+        } else {
+            pp = &t->next;
+        }
+    }
+}
+static void own_fork_parent(void) { pthread_mutex_unlock(&g_lock); }
+static void own_fork_child(void) {
+    g_own = NULL;   /* the parent's threads, not here; their nodes stay the parent's */
+    pthread_mutex_unlock(&g_lock);
+}
+#endif
+
 /* Start `job` on a thread of its own. 0 on success, else the job is still
  * the caller's. */
 static int own_spawn(WorkerJob* job) {
@@ -297,6 +331,9 @@ static int own_spawn(WorkerJob* job) {
     if (!g_own_atexit) {
         g_own_atexit = 1;
         atexit(own_reap_at_exit);
+#if !defined(_WIN32)
+        pthread_atfork(own_fork_prepare, own_fork_parent, own_fork_child);
+#endif
     }
     /* Listed before it starts, so the reaper never misses it; the thread
      * reads only t->job until it sets done, and t->th is written here,
