@@ -1918,6 +1918,7 @@ float string_get_f32(const void* s) {
 // friends-and-family repos uses them. The old names of the 64-bit parse.
 int string_try_double(const void* s) { return string_try_float(s); }
 double string_get_double(const void* s) { return string_get_float(s); }
+int string_to_double_raw(const void* str, double* out_value) { return string_to_float_raw(str, out_value); }
 
 // Printf-style string formatting
 AetherString* string_format(const char* fmt, ...) {

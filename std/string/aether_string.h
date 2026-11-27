@@ -343,9 +343,11 @@ int    string_try_f32(const void* s);
 float  string_get_f32(const void* s);    // 32-bit: Aether `f32` lowers to C float
 // TODO: delete once nothing in the aether-lang-dev org's repos or in
 // friends-and-family repos uses them: string_try_float / string_get_float
-// under their old names, for std.string's to_double.
+// under their old names, for std.string's to_double, and
+// string_to_float_raw as string_to_double_raw.
 int    string_try_double(const void* s);
 double string_get_double(const void* s);
+int    string_to_double_raw(const void* str, double* out_value);  // string_to_float_raw's old name
 // Base-N split-return — same shape as try_long/get_long, with a radix
 // parameter (2..36). 64-bit out-slot; safe across LLP64.
 int       string_try_int_radix(const void* s, int radix);
