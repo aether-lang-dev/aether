@@ -39,7 +39,7 @@ Aether has two entirely separate needs, and PR #1429 accidentally straddled them
 
 | | **Machine text** | **Human text** |
 |---|---|---|
-| Users | `string.from_double`, `string.to_double`, JSON, config files, wire protocols, `${}` interpolation | `std.number` (Phase 4 of #863) |
+| Users | `string.from_double`, `string.to_float`, JSON, config files, wire protocols, `${}` interpolation | `std.number` (Phase 4 of #863) |
 | Correct decimal point | **always `.`** | whatever the locale says |
 | Correct grouping | **never** | locale-defined |
 | Depends on `LC_NUMERIC` | **must not** | must, via explicit locale argument |
@@ -173,7 +173,7 @@ nothing worth preserving. Concretely this means:
   `#else` so it cannot be mistaken for the fallback we rejected.
 - **No opt-in flag, no legacy mode.** The old post-hoc block at `aether_string.c:847-860` is
   deleted outright, not gated.
-- **Behaviour changes are allowed to be visible.** `string.to_double("3.14")` starts succeeding
+- **Behaviour changes are allowed to be visible.** `string.to_float("3.14")` (then `to_double`) starts succeeding
   under `de_DE.UTF-8` where it used to fail; JSON output changes separator in those locales. Both
   are the fix, not a regression. Document them in the CHANGELOG as fixes, not as breaking changes.
 - Free rein to change the internal C signatures (`runtime/aether_runtime_types.c:98`'s `atof` →

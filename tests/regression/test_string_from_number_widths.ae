@@ -90,7 +90,7 @@ main() {
     }
     println("  PASS: from_float 1.0 / 3.14 / 0.0001 / 0.0 / -2.5")
 
-    // ---- Round-trip: from_float -> to_double should be ~identity --
+    // ---- Round-trip: from_float -> to_float should be ~identity --
     //
     // The strongest cross-check: emit then parse a high-precision
     // double and verify it's within tolerance. Pre-fix this would
@@ -102,14 +102,14 @@ main() {
     // round-trip tolerance is "within %g's truncation noise" rather
     // than "byte-exact." If we ever switch to %.17g, tighten this.
     s = string.from_float(3.14159265358979)
-    v, err = string.to_double(s)
-    if eq(err, "") != 1 { fail("to_double on round-trip: err=${err}") }
+    v, err = string.to_float(s)
+    if eq(err, "") != 1 { fail("to_float on round-trip: err=${err}") }
     diff = v - 3.14159265358979
     if diff < 0.0 { diff = 0.0 - diff }
     if diff > 0.0001 {
         fail("round-trip drift: 3.14159265358979 -> '${s}' -> ${v} (diff=${diff})")
     }
-    println("  PASS: from_float -> to_double round-trips 3.14159265358979 within %g precision")
+    println("  PASS: from_float -> to_float round-trips 3.14159265358979 within %g precision")
 
     // ---- Round-trip: from_long -> to_long for 2^40 ---------------
     //

@@ -14,7 +14,7 @@
 // program starts in the "C" locale, so a standalone Aether binary is safe by
 // default — but an Aether library embedded in a host that has called
 // setlocale(LC_ALL, "") (GTK, PHP, countless C/C++ apps) inherits that host's
-// locale, and then string.to_double("3.14") FAILS to parse under any
+// locale, and then string.to_float("3.14") FAILS to parse under any
 // comma-decimal locale. Fixing that by calling setlocale ourselves is not an
 // option: it is process-global, it is not ours to change as a library, and
 // Aether runs its own threads (actors, scheduler, worker pool, HTTP accept

@@ -4,7 +4,7 @@ import std.string
 check_roundtrip(bits: long) -> int {
     value = mem.float_from_bits(bits)
     text = string.from_double(value)
-    parsed, err = string.to_double(text)
+    parsed, err = string.to_float(text)
     parsed_bits = mem.bits_of_float(parsed)
 
     ok = 1

@@ -14,6 +14,47 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.948.0]
+
+### Added
+
+- **`contrib.xmp`: a tracker-module player for std.audio.** `import
+  contrib.xmp` loads MOD, S3M, XM, IT, MED and the other formats libxmp
+  reads (full libxmp: every loader, ProWizard and the depackers), from bytes
+  or a path, reports the title, format, channels, patterns, orders and
+  duration, and renders interleaved 16-bit stereo PCM with seeking, order
+  jumps and looping. `xmp.sound` renders a whole module into a std.audio
+  source (`load_pcm`); `xmp.stream_open` and `xmp.pump` feed a std.audio
+  stream source block by block. std.audio stays the only audio output. Each
+  player carries its own libxmp context, and nothing in the module runs on a
+  thread of its own. libxmp 4.7.4 is pinned by URL and SHA-256 in
+  `contrib/xmp/libxmp.lock` and fetched by `scripts/fetch-libxmp.sh`, never
+  committed; `make contrib` compiles it from the source list libxmp's
+  Makefile.vc builds into `build/contrib/libxmp.a`, `ae build --target`
+  compiles it for the target, a binary release ships the source (with
+  libxmp's MIT licence, and `contrib/xmp/NOTICE`) and the archives, and the
+  system libxmp is the fallback when the source cannot be fetched.
+
+### Changed
+
+- **`string.to_float` parses to 64 bits, correctly rounded; `to_double`
+  stays for now as the same function, slated for deletion.** Aether's `float`
+  is 64-bit (C `double`), but `to_float` parsed with `strtof` and widened the
+  32-bit result, so it returned about seven significant digits dressed as a
+  double: `to_float("0.1")` gave 0.10000000149011612 and
+  `to_float("16777217")` gave 16777216. It now parses with `strtod`,
+  correctly rounded to binary64, with the syntax `to_double` accepted
+  (hexadecimal constants, `inf`/`nan` spellings, the same errors), and
+  `from_double`'s text reads back to the same bits; `string_to_float_raw` now
+  writes a `double`. `to_double` (and the externs `string_try_double` /
+  `string_get_double`) now call the same parse; they are kept until nothing
+  in the aether-lang-dev org's repos or in friends-and-family repos uses
+  them, then deleted, so move callers to `to_float`. The extern
+  `string_to_double_raw` is removed. The new
+  `string.to_f32(s) -> (f32, string)` is the 32-bit parse: `strtof`, rounded
+  once, returning a real `f32`, with the f32 range's overflow an error
+  (externs `string_to_f32_raw`, `string_try_f32`, `string_get_f32`).
+
 ## [0.947.0]
 
 ### Fixed

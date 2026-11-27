@@ -14,7 +14,7 @@
 // called setlocale) does to us for real.
 //
 // The bug this pins: under a comma-decimal locale, bare strtod("3.14") stops
-// at the '.', so string.to_double REJECTED valid input and every fractional
+// at the '.', so string.to_float REJECTED valid input and every fractional
 // number in a JSON document failed to parse.
 //
 // SKIPs visibly when no comma-decimal locale is installed. To run it for real
@@ -105,11 +105,11 @@ check_interp_ld(value: longdouble, expected: string, label: string) -> int {
 // wrong magnitude — bare strtod under a comma locale stops at the '.' and
 // yields 3.0 for "3.14", which an error check alone would miss.
 check_parse_as(text: string, expected: string, label: string) -> int {
-    value, err = string.to_double(text)
+    value, err = string.to_float(text)
     ok = 1
     if err != "" {
         ok = 0
-        println("  FAIL ${label}: to_double(\"${text}\") errored: ${err}")
+        println("  FAIL ${label}: to_float(\"${text}\") errored: ${err}")
     }
     string.free(err)
 
@@ -265,13 +265,13 @@ main() {
 
     // Parse side — this is the half that was entirely unprotected and which
     // FAILED outright before the fix.
-    fails = fails + check_parse("3.1400000000000001", "to_double(3.14...)")
-    fails = fails + check_parse("0.5", "to_double(0.5)")
-    fails = fails + check_parse("-2.5", "to_double(-2.5)")
+    fails = fails + check_parse("3.1400000000000001", "to_float(3.14...)")
+    fails = fails + check_parse("0.5", "to_float(0.5)")
+    fails = fails + check_parse("-2.5", "to_float(-2.5)")
     // Exponent form parses to the same value but re-emits as plain digits
     // under %.17g, so compare against the canonical spelling rather than the
     // input.
-    fails = fails + check_parse_as("1.5e10", "15000000000", "to_double(1.5e10)")
+    fails = fails + check_parse_as("1.5e10", "15000000000", "to_float(1.5e10)")
 
     // JSON in both directions (RFC 8259 conformance).
     fails = fails + check_json_roundtrip()

@@ -135,3 +135,6 @@ compiler/aether_frontend_id.h
 # Fetched by scripts/fetch-quickjs-amalgamation.sh; pinned in
 # contrib/quickjs/amalgamation.lock, never committed.
 /contrib/quickjs/amalgamation/
+# Fetched by scripts/fetch-libxmp.sh; pinned in contrib/xmp/libxmp.lock,
+# never committed.
+/contrib/xmp/libxmp/

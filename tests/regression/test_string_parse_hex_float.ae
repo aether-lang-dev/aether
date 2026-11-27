@@ -1,7 +1,7 @@
-// Regression (#2508): string.to_double and string.to_float read C99
+// Regression (#2508): string.to_float and string.to_f32 read C99
 // hexadecimal floating constants ("0x1.8p3") the same on every platform,
 // correctly rounded to the result type. glibc and UCRT parse them, but on
-// Windows with msvcrt (MINGW64) to_double("0x1p3") failed: _strtod_l read the
+// Windows with msvcrt (MINGW64) to_float("0x1p3") failed: _strtod_l read the
 // "0" and stopped, leaving "x1p3" as trailing garbage.
 import std.mem
 import std.string
@@ -10,17 +10,6 @@ extern exit(code: int)
 
 // The double's bits must be exactly `want`.
 dbl(s: string, want: long) -> int {
-    v, err = string.to_double(s)
-    if err != "" || mem.bits_of_float(v) != want {
-        got = string.from_int_radix(mem.bits_of_float(v), 16)
-        println("  FAIL to_double(\"${s}\"): bits ${got} err='${err}'")
-        return 1
-    }
-    return 0
-}
-
-// to_float's result, widened to double, must have exactly the bits `want`.
-flt(s: string, want: long) -> int {
     v, err = string.to_float(s)
     if err != "" || mem.bits_of_float(v) != want {
         got = string.from_int_radix(mem.bits_of_float(v), 16)
@@ -30,16 +19,18 @@ flt(s: string, want: long) -> int {
     return 0
 }
 
-dbl_err(s: string) -> int {
-    v, err = string.to_double(s)
-    if err == "" {
-        println("  FAIL to_double(\"${s}\") should error, got ${v}")
+// to_f32's result, widened to double, must have exactly the bits `want`.
+flt(s: string, want: long) -> int {
+    v, err = string.to_f32(s)
+    if err != "" || mem.bits_of_float(v) != want {
+        got = string.from_int_radix(mem.bits_of_float(v), 16)
+        println("  FAIL to_f32(\"${s}\"): bits ${got} err='${err}'")
         return 1
     }
     return 0
 }
 
-flt_err(s: string) -> int {
+dbl_err(s: string) -> int {
     v, err = string.to_float(s)
     if err == "" {
         println("  FAIL to_float(\"${s}\") should error, got ${v}")
@@ -48,8 +39,17 @@ flt_err(s: string) -> int {
     return 0
 }
 
+flt_err(s: string) -> int {
+    v, err = string.to_f32(s)
+    if err == "" {
+        println("  FAIL to_f32(\"${s}\") should error, got ${v}")
+        return 1
+    }
+    return 0
+}
+
 main() {
-    println("=== to_double / to_float: hexadecimal floating constants ===")
+    println("=== to_float / to_f32: hexadecimal floating constants ===")
     fails = 0
 
     // The forms: either case, sign, optional point and exponent.
@@ -103,7 +103,7 @@ main() {
     fails = fails + dbl_err("0x1q")
     fails = fails + dbl_err("0x 1")
 
-    // to_float rounds the exact value to float directly. 1 + 2^-24 + 2^-60
+    // to_f32 rounds the exact value to float directly. 1 + 2^-24 + 2^-60
     // is just above a float tie: through double it would first become the
     // tie 1 + 2^-24 and then round to even, 1.0.
     fails = fails + flt("0x1p3", 0x4020000000000000)

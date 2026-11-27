@@ -1,0 +1,460 @@
+// contrib.xmp tests. Every module played here is written by the test itself,
+// byte by byte, from the format's own layout: a four-channel ProTracker MOD
+// and a two-channel Fast Tracker II XM, each one looping square-wave sample
+// playing for the first half of the song and silenced for the second. The
+// assertions are on the rendered PCM: sound where a note plays, silence
+// where none does, the length the song's speed and tempo give it, and where
+// seeking and looping put playback. The std.audio half runs on std.audio's
+// headless engine, so no sound card is involved.
+
+import std.audio
+import std.bytes
+import std.fs
+import std.spec
+import std.string
+import contrib.xmp
+
+const RATE = 44100
+// Both songs: speed 6, 125 BPM, so a row is 6 ticks of 20 ms, and 16 rows
+// (two 8-row patterns in the MOD, one 16-row pattern in the XM).
+const SONG_MS = 1920
+// Where the note stops: the start of the second half.
+const HALF_MS = 960
+
+put_text(b: ptr, at: int, s: string) {
+    i = 0
+    while i < string.length(s) {
+        bytes.set(b, at + i, string.char_at(s, i) & 255)
+        i = i + 1
+    }
+}
+
+// A ProTracker M.K. module: 31 sample slots (one used), two orders, two
+// patterns of 64 rows by 4 channels. Sample 1 is a 64-byte square wave
+// looped whole. Pattern 0 plays C-2 on channel 0 at row 0 and breaks to the
+// next order at row 7; pattern 1 sets channel 0's volume to 0 at row 0 and
+// breaks at row 7. So 16 rows of song: 8 sounding, 8 silent.
+make_mod() -> (string, int) {
+    smp_len = 64
+    total = 1084 + 2 * 1024 + smp_len
+    b = bytes.new(total)
+    i = 0
+    while i < total {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    put_text(b, 0, "aether xmp test")
+    // Sample 1's header at 20: name, then length in words, finetune,
+    // volume, loop start and loop length in words.
+    put_text(b, 20, "square")
+    bytes.set_be16(b, 42, smp_len / 2)
+    bytes.set(b, 44, 0)
+    bytes.set(b, 45, 64)
+    bytes.set_be16(b, 46, 0)
+    bytes.set_be16(b, 48, smp_len / 2)
+    // Slots 2..31: no sample, loop length 1 word (the "no loop" mark).
+    s = 1
+    while s < 31 {
+        bytes.set_be16(b, 20 + s * 30 + 28, 1)
+        s = s + 1
+    }
+    bytes.set(b, 950, 2) // song length: two orders
+    bytes.set(b, 951, 127) // restart byte
+    bytes.set(b, 952, 0) // order 0: pattern 0
+    bytes.set(b, 953, 1) // order 1: pattern 1
+    put_text(b, 1080, "M.K.")
+    // A cell is 4 bytes: sample high nibble | period high nibble, period
+    // low byte, sample low nibble << 4 | effect, effect parameter. Rows are
+    // 16 bytes (4 channels).
+    p0 = 1084
+    bytes.set(b, p0 + 0, (428 >> 8) & 15) // C-2, period 428, sample 1
+    bytes.set(b, p0 + 1, 428 & 255)
+    bytes.set(b, p0 + 2, (1 << 4) | 0)
+    bytes.set(b, p0 + 7 * 16 + 2, 13) // row 7: D00, pattern break
+    p1 = 1084 + 1024
+    bytes.set(b, p1 + 2, 12) // row 0: C00, volume 0
+    bytes.set(b, p1 + 7 * 16 + 2, 13) // row 7: D00
+    // The square wave, signed 8-bit.
+    d = 1084 + 2 * 1024
+    k = 0
+    while k < smp_len {
+        v = 64
+        if k >= smp_len / 2 { v = 256 - 64 }
+        bytes.set(b, d + k, v)
+        k = k + 1
+    }
+    return bytes.finish(b, total), total
+}
+
+// A Fast Tracker II module (version 0x0104): 2 channels, one 16-row
+// pattern, one instrument with one 8-bit sample, the same looped square
+// wave. Row 0 plays C-4 with instrument 1; row 8 is a key-off, which with
+// the volume envelope off silences the note at once.
+make_xm() -> (string, int) {
+    rows = 16
+    chans = 2
+    pat_data = rows * chans * 5
+    smp_len = 64
+    inst_size = 263
+    total = 336 + 9 + pat_data + inst_size + 40 + smp_len
+    b = bytes.new(total)
+    i = 0
+    while i < total {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    put_text(b, 0, "Extended Module: ")
+    put_text(b, 17, "aether xm test")
+    bytes.set(b, 37, 26)
+    put_text(b, 38, "aether")
+    bytes.set_le16(b, 58, 260) // version 0x0104
+    bytes.set_le32(b, 60, 276) // header size, from offset 60
+    bytes.set_le16(b, 64, 1) // song length
+    bytes.set_le16(b, 66, 0) // restart position
+    bytes.set_le16(b, 68, chans)
+    bytes.set_le16(b, 70, 1) // patterns
+    bytes.set_le16(b, 72, 1) // instruments
+    bytes.set_le16(b, 74, 1) // linear frequency table
+    bytes.set_le16(b, 76, 6) // speed
+    bytes.set_le16(b, 78, 125) // BPM
+    // Order table at 80: order 0 is pattern 0 (already zero).
+    // Pattern 0 at 336, unpacked: 5 bytes per cell (note, instrument,
+    // volume column, effect, parameter).
+    p = 336
+    bytes.set_le32(b, p, 9)
+    bytes.set(b, p + 4, 0)
+    bytes.set_le16(b, p + 5, rows)
+    bytes.set_le16(b, p + 7, pat_data)
+    cells = p + 9
+    bytes.set(b, cells + 0, 49) // row 0, channel 0: C-4
+    bytes.set(b, cells + 1, 1) // instrument 1
+    bytes.set(b, cells + 8 * chans * 5, 97) // row 8, channel 0: key off
+    // Instrument 1: header size, name, type, sample count, then (for a
+    // sample-bearing instrument) the sample header size, keymap, envelopes
+    // (left off) and the rest of its 263 bytes.
+    ins = cells + pat_data
+    bytes.set_le32(b, ins, inst_size)
+    put_text(b, ins + 4, "square")
+    bytes.set_le16(b, ins + 27, 1)
+    bytes.set_le32(b, ins + 29, 40)
+    // Sample header: length, loop start, loop length (bytes), volume,
+    // finetune, type (1: forward loop), panning, relative note, reserved,
+    // name.
+    sh = ins + inst_size
+    bytes.set_le32(b, sh, smp_len)
+    bytes.set_le32(b, sh + 4, 0)
+    bytes.set_le32(b, sh + 8, smp_len)
+    bytes.set(b, sh + 12, 64)
+    bytes.set(b, sh + 14, 1)
+    bytes.set(b, sh + 15, 128)
+    put_text(b, sh + 18, "square")
+    // Sample data, delta-coded: +64 then a step down to -64 halfway.
+    d = sh + 40
+    bytes.set(b, d, 64)
+    bytes.set(b, d + smp_len / 2, 128) // -128 as a byte: 64 -> -64
+    return bytes.finish(b, total), total
+}
+
+// The largest absolute sample over frames [from, to) of interleaved 16-bit
+// stereo PCM, both channels.
+peak(pcm: string, n: int, from: int, to: int) -> int {
+    frames = n / 4
+    if to > frames { to = frames }
+    best = 0
+    f = from
+    while f < to {
+        c = 0
+        while c < 2 {
+            at = f * 4 + c * 2
+            lo = string.char_at_n(pcm, n, at) & 255
+            hi = string.char_at_n(pcm, n, at + 1) & 255
+            v = lo | (hi << 8)
+            if v >= 32768 { v = 65536 - v }
+            if v > best { best = v }
+            c = c + 1
+        }
+        f = f + 1
+    }
+    return best
+}
+
+ms_frames(ms: int) -> int { return ms * RATE / 1000 }
+
+// Renders from where the player stands to the end in blocks of `block`
+// frames, the way a caller feeding a device does, and returns it all.
+render_blocks(p: ptr, block: int) -> (string, int) {
+    cap = ms_frames(10000) * 4
+    out = bytes.new(cap)
+    total = 0
+    while true {
+        pcm, err = xmp.render(p, block)
+        if err != "" { return bytes.finish(out, 0), -1 }
+        n = string.length(pcm)
+        if n == 0 { break }
+        if total + n > cap { return bytes.finish(out, total), -2 }
+        _ = bytes.copy_from_string(out, total, pcm, n)
+        total = total + n
+    }
+    return bytes.finish(out, total), total
+}
+
+main() {
+    fw = spec.init()
+    mod, mod_n = make_mod()
+    xm, xm_n = make_xm()
+
+    spec.describe(fw, "xmp: loading and module info") {
+        spec.it(fw, "reads a ProTracker MOD from memory") callback {
+            p, err = xmp.load(mod, mod_n)
+            spec.assert_str_eq(err, "", "loads")
+            spec.assert_not_null(p, "a player")
+            spec.assert_str_eq(xmp.title(p), "aether xmp test", "title")
+            spec.assert_contains(xmp.format(p), "M.K.", "format names the M.K. signature")
+            spec.assert_eq(xmp.channels(p), 4, "channels")
+            spec.assert_eq(xmp.patterns(p), 2, "patterns")
+            spec.assert_eq(xmp.orders(p), 2, "orders")
+            spec.assert_eq(xmp.samples(p), 31, "sample slots")
+            spec.assert_eq(xmp.duration_ms(p), SONG_MS, "16 rows at speed 6, 125 BPM")
+            xmp.free(p)
+        }
+        spec.it(fw, "reads a Fast Tracker II XM from memory") callback {
+            p, err = xmp.load(xm, xm_n)
+            spec.assert_str_eq(err, "", "loads")
+            spec.assert_str_eq(xmp.title(p), "aether xm test", "title")
+            // libxmp names an XM's format after the tracker field.
+            spec.assert_str_eq(xmp.format(p), "aether XM 1.04", "format")
+            spec.assert_eq(xmp.channels(p), 2, "channels")
+            // The one pattern, plus the empty one libxmp's XM loader adds
+            // for orders that name a missing pattern.
+            spec.assert_eq(xmp.patterns(p), 2, "patterns")
+            spec.assert_eq(xmp.orders(p), 1, "orders")
+            spec.assert_eq(xmp.instruments(p), 1, "instruments")
+            spec.assert_eq(xmp.duration_ms(p), SONG_MS, "duration")
+            xmp.free(p)
+        }
+        spec.it(fw, "reads a module from a file") callback {
+            dir, derr = fs.make_temp_dir("", "xmp")
+            spec.assert_str_eq(derr, "", "temp dir")
+            path = "${dir}/song.mod"
+            spec.assert_str_eq(fs.write(path, mod), "", "written")
+            p, err = xmp.load_file(path)
+            spec.assert_str_eq(err, "", "loads from the path")
+            spec.assert_eq(xmp.channels(p), 4, "the same module")
+            xmp.free(p)
+            spec.assert_str_eq(fs.remove_tree(dir), "", "cleaned up")
+        }
+    }
+
+    spec.describe(fw, "xmp: refusals") {
+        spec.it(fw, "refuses bytes that are not a module") callback {
+            junk = bytes.new(4096)
+            i = 0
+            while i < 4096 {
+                bytes.set(junk, i, (i * 37 + 11) & 255)
+                i = i + 1
+            }
+            data = bytes.finish(junk, 4096)
+            p, err = xmp.load(data, 4096)
+            spec.assert_null(p, "no player")
+            spec.assert_contains(err, "xmp:", "says why")
+        }
+        spec.it(fw, "refuses empty input") callback {
+            p, err = xmp.load("", 0)
+            spec.assert_null(p, "no player")
+            spec.assert_contains(err, "not a module format", "says why")
+        }
+        spec.it(fw, "refuses a truncated module") callback {
+            p, err = xmp.load(mod, 1084)
+            spec.assert_null(p, "no player")
+            spec.assert_err(err, "says why")
+        }
+        spec.it(fw, "reads no further than the bytes it was given") callback {
+            // A length past the end of the string is held to the string.
+            p, err = xmp.load(mod, mod_n * 4)
+            spec.assert_str_eq(err, "", "loads the module that is there")
+            spec.assert_eq(xmp.channels(p), 4, "the same module")
+            xmp.free(p)
+        }
+        spec.it(fw, "refuses a path that is not there") callback {
+            p, err = xmp.load_file("/nonexistent/aether/xmp/none.mod")
+            spec.assert_null(p, "no player")
+            spec.assert_err(err, "says why")
+        }
+        spec.it(fw, "refuses render and seek before start, and a bad rate") callback {
+            p, _ = xmp.load(mod, mod_n)
+            pcm, err = xmp.render(p, 100)
+            spec.assert_eq(string.length(pcm), 0, "no audio")
+            spec.assert_contains(err, "state", "render before start")
+            spec.assert_err(xmp.seek_ms(p, 10), "seek before start")
+            spec.assert_err(xmp.start(p, 100), "100 Hz refused")
+            spec.assert_str_eq(xmp.start(p, RATE), "", "then a real rate starts")
+            _, berr = xmp.render(p, 5000000)
+            spec.assert_err(berr, "a block past the limit is refused")
+            xmp.free(p)
+        }
+        spec.it(fw, "free accepts null") callback {
+            xmp.free(null)
+        }
+    }
+
+    spec.describe(fw, "xmp: rendering") {
+        spec.it(fw, "renders the MOD: sound, then silence, then the end") callback {
+            p, _ = xmp.load(mod, mod_n)
+            spec.assert_str_eq(xmp.start(p, RATE), "", "starts")
+            pcm, n = render_blocks(p, 1024)
+            spec.assert_true(n > 0, "renders")
+            frames = n / 4
+            // The song is 1920 ms; libxmp's frames are whole ticks, so the
+            // total is exact to the frame.
+            spec.assert_eq(frames, ms_frames(SONG_MS), "length is the song's")
+            spec.assert_true(peak(pcm, n, ms_frames(20), ms_frames(900)) > 1000, "the note sounds")
+            spec.assert_eq(peak(pcm, n, ms_frames(HALF_MS + 60), frames), 0, "volume 0 is silence")
+            spec.assert_true(xmp.ended(p), "ended")
+            again, err = xmp.render(p, 1024)
+            spec.assert_str_eq(err, "", "rendering past the end is not an error")
+            spec.assert_eq(string.length(again), 0, "but gives nothing")
+            xmp.free(p)
+        }
+        spec.it(fw, "renders the XM: sound until the key-off, then silence") callback {
+            p, _ = xmp.load(xm, xm_n)
+            spec.assert_str_eq(xmp.start(p, RATE), "", "starts")
+            pcm, n = render_blocks(p, 4410)
+            frames = n / 4
+            spec.assert_eq(frames, ms_frames(SONG_MS), "length is the song's")
+            spec.assert_true(peak(pcm, n, ms_frames(20), ms_frames(900)) > 1000, "the note sounds")
+            spec.assert_eq(peak(pcm, n, ms_frames(HALF_MS + 60), frames), 0, "silent after the key-off")
+            xmp.free(p)
+        }
+        spec.it(fw, "render_all gives the same song in one block") callback {
+            p, _ = xmp.load(mod, mod_n)
+            _ = xmp.start(p, RATE)
+            xmp.looping(p, true)
+            pcm, err = xmp.render_all(p)
+            spec.assert_str_eq(err, "", "renders")
+            spec.assert_eq(string.length(pcm) / 4, ms_frames(SONG_MS), "once through, looping or not")
+            spec.assert_true(xmp.is_looping(p), "looping is left as it was")
+            xmp.free(p)
+        }
+    }
+
+    spec.describe(fw, "xmp: position, seeking and looping") {
+        spec.it(fw, "position follows rendering") callback {
+            p, _ = xmp.load(mod, mod_n)
+            _ = xmp.start(p, RATE)
+            spec.assert_eq(xmp.position_ms(p), 0, "at the top")
+            _, _ = xmp.render(p, ms_frames(500))
+            pos = xmp.position_ms(p)
+            spec.assert_true(pos >= 480 && pos <= 520, "about 500 ms in (got ${pos})")
+            spec.assert_eq(xmp.order(p), 0, "still in order 0")
+            xmp.free(p)
+        }
+        spec.it(fw, "seek_ms moves into the silent half, set_order back") callback {
+            p, _ = xmp.load(mod, mod_n)
+            _ = xmp.start(p, RATE)
+            // Stop mid-frame while the note sounds, so the seek has a part
+            // frame of it to throw away.
+            _, _ = xmp.render(p, ms_frames(100) + 7)
+            spec.assert_str_eq(xmp.seek_ms(p, 1200), "", "seeks")
+            pos = xmp.position_ms(p)
+            spec.assert_true(pos >= 1180 && pos <= 1220, "at 1200 ms (got ${pos})")
+            pcm, _ = xmp.render(p, ms_frames(300))
+            spec.assert_eq(xmp.order(p), 1, "in order 1")
+            spec.assert_eq(peak(pcm, string.length(pcm), 0, ms_frames(300)), 0, "silent there")
+            spec.assert_str_eq(xmp.set_order(p, 0), "", "back to order 0")
+            back, _ = xmp.render(p, ms_frames(300))
+            spec.assert_true(peak(back, string.length(back), ms_frames(20), ms_frames(300)) > 1000, "sounding again")
+            spec.assert_eq(xmp.order(p), 0, "in order 0")
+            xmp.free(p)
+        }
+        spec.it(fw, "seek_ms lands on the frame: the rest plays exactly the rest") callback {
+            p, _ = xmp.load(mod, mod_n)
+            _ = xmp.start(p, RATE)
+            _, _ = xmp.render(p, ms_frames(100) + 7)
+            // 1200 ms is a whole number of 20 ms ticks, so no rounding.
+            spec.assert_str_eq(xmp.seek_ms(p, 1200), "", "seeks")
+            _, n = render_blocks(p, 1000)
+            spec.assert_eq(n / 4, ms_frames(SONG_MS - 1200), "720 ms to the end, nothing from before the seek")
+            xmp.free(p)
+        }
+        spec.it(fw, "seeking after the end plays again") callback {
+            p, _ = xmp.load(mod, mod_n)
+            _ = xmp.start(p, RATE)
+            _, _ = render_blocks(p, 8192)
+            spec.assert_true(xmp.ended(p), "ended")
+            spec.assert_str_eq(xmp.seek_ms(p, 0), "", "seeks to the top")
+            spec.assert_false(xmp.ended(p), "no longer ended")
+            pcm, n = render_blocks(p, 8192)
+            spec.assert_eq(n / 4, ms_frames(SONG_MS), "the whole song again")
+            xmp.free(p)
+        }
+        spec.it(fw, "looping on wraps to the top instead of ending") callback {
+            p, _ = xmp.load(mod, mod_n)
+            _ = xmp.start(p, RATE)
+            xmp.looping(p, true)
+            pcm, err = xmp.render(p, ms_frames(SONG_MS + 800))
+            spec.assert_str_eq(err, "", "renders")
+            n = string.length(pcm)
+            spec.assert_eq(n / 4, ms_frames(SONG_MS + 800), "every frame asked for")
+            spec.assert_false(xmp.ended(p), "not ended")
+            spec.assert_true(peak(pcm, n, ms_frames(SONG_MS + 20), ms_frames(SONG_MS + 800)) > 1000,
+                "the note sounds again after the wrap")
+            xmp.looping(p, false)
+            _, _ = render_blocks(p, 8192)
+            spec.assert_true(xmp.ended(p), "looping off: ends at the next end")
+            xmp.free(p)
+        }
+    }
+
+    spec.describe(fw, "xmp: through std.audio") {
+        spec.it(fw, "sound() gives a std.audio source of the whole song") callback {
+            spec.assert_true(audio.open_headless(RATE, 2), "headless engine")
+            p, _ = xmp.load(mod, mod_n)
+            src, err = xmp.sound(p, RATE)
+            spec.assert_str_eq(err, "", "a source")
+            d = audio.duration_ms(src)
+            spec.assert_true(d >= SONG_MS - 1 && d <= SONG_MS + 1, "its duration is the song's (got ${d})")
+            _ = audio.play(src)
+            _ = audio.render(ms_frames(500))
+            spec.assert_true(audio.rendered_peak(0) > 0.03, "plays the note")
+            _ = audio.seek_ms(src, 1300)
+            // The mixer reads a source a block ahead: one render to drain
+            // what it read before the seek, then the silent half.
+            _ = audio.render(2048)
+            _ = audio.render(ms_frames(300))
+            spec.assert_true(audio.rendered_peak(0) < 0.0001, "and the silence")
+            audio.unload(src)
+            xmp.free(p)
+            audio.close()
+        }
+        spec.it(fw, "stream_open and pump feed a stream source block by block") callback {
+            spec.assert_true(audio.open_headless(RATE, 2), "headless engine")
+            p, _ = xmp.load(mod, mod_n)
+            src, err = xmp.stream_open(p, RATE, 8192)
+            spec.assert_str_eq(err, "", "a stream source")
+            spec.assert_eq(audio.stream_queued(src), 8192, "filled by stream_open")
+            pushed, perr = xmp.pump(p, src)
+            spec.assert_str_eq(perr, "", "pump")
+            spec.assert_eq(pushed, 0, "nothing to do while full")
+            _ = audio.play(src)
+            // Play the song through in 2048-frame steps, pumping after each.
+            loud = 0.0
+            step = 0
+            while step < 40 {
+                _ = audio.render(2048)
+                if step < 15 && audio.rendered_peak(0) > loud { loud = audio.rendered_peak(0) }
+                _, _ = xmp.pump(p, src)
+                step = step + 1
+            }
+            spec.assert_true(loud > 0.03, "the note reached the mix")
+            spec.assert_true(xmp.ended(p), "the player reached the end")
+            n, _ = xmp.pump(p, src)
+            spec.assert_eq(n, 0, "pump after the end pushes nothing")
+            spec.assert_eq_long(audio.stream_underruns(src), 0 as long, "no underrun while the song played")
+            audio.unload(src)
+            xmp.free(p)
+            audio.close()
+        }
+    }
+
+    return spec.run_summary(fw)
+}

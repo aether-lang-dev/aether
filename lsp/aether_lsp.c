@@ -368,7 +368,8 @@ void lsp_handle_completion(LSPServer* server, const char* id, const char* uri, i
         "{\"label\":\"string.to_int\",\"kind\":3,\"detail\":\"-> (int, error)\"},"
         "{\"label\":\"string.to_long\",\"kind\":3,\"detail\":\"-> (long, error)\"},"
         "{\"label\":\"string.to_float\",\"kind\":3,\"detail\":\"-> (float, error)\"},"
-        "{\"label\":\"string.to_double\",\"kind\":3,\"detail\":\"-> (double, error)\"},"
+        "{\"label\":\"string.to_f32\",\"kind\":3,\"detail\":\"-> (f32, error)\"},"
+        "{\"label\":\"string.to_double\",\"kind\":3,\"detail\":\"-> (float, error) (same as to_float; slated for deletion)\"},"
 
         /* ---- std.collections (list / map / string_list) ---- */
         "{\"label\":\"list_new\",\"kind\":3,\"detail\":\"-> ptr (ArrayList)\"},"

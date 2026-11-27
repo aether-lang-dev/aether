@@ -34,11 +34,12 @@ exports(
     string_to_cstr, string_from_int, string_from_long, string_from_float,
     string_from_double,
     string_from_int_radix, string_pad_start, string_pad_end,
-    string_to_int_raw, string_to_long_raw, string_to_float_raw, string_to_double_raw,
+    string_to_int_raw, string_to_long_raw, string_to_float_raw, string_to_f32_raw,
     string_try_int, string_get_int, string_try_long, string_get_long,
-    string_try_float, string_get_float, string_try_double, string_get_double,
+    string_try_float, string_get_float, string_try_f32, string_get_f32,
+    string_try_double, string_get_double,
     string_to_int_radix_raw, string_try_int_radix, string_get_int_radix,
-    to_int, to_long, to_float, to_double, to_int_radix,
+    to_int, to_long, to_float, to_f32, to_double, to_int_radix,
     strip_prefix, copy,
     string_format_list, format,
     string_glob_match_raw, glob_match, glob_match_pathname,
@@ -373,8 +374,10 @@ extern string_pad_end(s: string, total_width: int, pad_char: int) -> string @hea
 // Parsing — raw externs (escape hatch)
 extern string_to_int_raw(str: string, out_value: ptr) -> int
 extern string_to_long_raw(str: string, out_value: ptr) -> int
+// out_value: a `float` (8-byte double) slot for to_float_raw, an `f32`
+// (4-byte float) slot for to_f32_raw.
 extern string_to_float_raw(str: string, out_value: ptr) -> int
-extern string_to_double_raw(str: string, out_value: ptr) -> int
+extern string_to_f32_raw(str: string, out_value: ptr) -> int
 extern string_to_int_radix_raw(str: string, radix: int, out_value: ptr) -> int
 
 // Parsing — split-return helpers for the Go-style wrappers.
@@ -384,6 +387,11 @@ extern string_try_long(s: string) -> int
 extern string_get_long(s: string) -> long
 extern string_try_float(s: string) -> int
 extern string_get_float(s: string) -> float
+extern string_try_f32(s: string) -> int
+extern string_get_f32(s: string) -> f32
+// TODO: delete string_try_double and string_get_double once nothing in the
+// aether-lang-dev org's repos or in friends-and-family repos uses them; they
+// are string_try_float and string_get_float under their old names.
 extern string_try_double(s: string) -> int
 extern string_get_double(s: string) -> float
 // Base-N parse split-return. The value slot is `long` (int64) because
@@ -416,10 +424,15 @@ to_long(s: string) -> long! {
     return string_get_long(s), ""
 }
 
-// Parse a string to a float. Returns (value, "") on success,
-// (0.0, error) on invalid input. "inf", "infinity", "nan" and
-// hexadecimal constants parse on every platform, as for to_double; a hex
-// constant is rounded straight to float.
+// Parse a string to a float (64-bit, C double), correctly rounded to the
+// nearest binary64 value. Returns (value, "") on success, (0.0, error) on
+// invalid input. Leading whitespace, a sign and trailing whitespace are
+// accepted; trailing garbage, an embedded NUL and overflow are errors.
+// "inf", "infinity" and "nan" (any case, optionally signed) parse
+// identically on every platform, so the "Infinity", "-Infinity" and "NaN"
+// that from_double emits read back, and so do C99 hexadecimal constants such
+// as "0x1.8p3", correctly rounded too. from_double's text reads back to the
+// same bits. For a 32-bit value use to_f32.
 to_float(s: string) -> {
     ok = string_try_float(s)
     if ok == 0 {
@@ -428,17 +441,24 @@ to_float(s: string) -> {
     return string_get_float(s), ""
 }
 
-// Parse a string to a double. Returns (value, "") on success,
-// (0.0, error) on invalid input. "inf", "infinity" and "nan" (any case,
-// optionally signed) parse identically on every platform, so the
-// "Infinity", "-Infinity" and "NaN" that from_double emits read back, and
-// so do C99 hexadecimal constants such as "0x1.8p3" (correctly rounded).
+// TODO: delete to_double once nothing in the aether-lang-dev org's repos or
+// in friends-and-family repos calls it; use to_float, which it now is.
+// Parse a string to a float: the same correctly rounded 64-bit parse as
+// to_float, which it calls, so the two always agree.
 to_double(s: string) -> {
-    ok = string_try_double(s)
+    return to_float(s)
+}
+
+// Parse a string to an f32 (32-bit, C float), rounded once, straight to the
+// nearest binary32 value as strtof does (not through a double, which can
+// round twice). Same syntax and errors as to_float; a value past the f32
+// range is an overflow error. Returns (value, "") or (0.0, error).
+to_f32(s: string) -> (f32, string) {
+    ok = string_try_f32(s)
     if ok == 0 {
-        return 0.0, "invalid double"
+        return 0.0 as f32, "invalid f32"
     }
-    return string_get_double(s), ""
+    return string_get_f32(s), ""
 }
 
 // Base-N parse: like `to_long` but accepts a radix in [2, 36].

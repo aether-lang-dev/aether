@@ -9,6 +9,7 @@
 #     as contrib.d3d12 and contrib.metal do with theirs (#2208);
 #   - contrib/sqlite/aether_sqlite.c and the fetched SQLite amalgamation,
 #     which `ae build --target` compiles for the target (#1372);
+#   - contrib/xmp/aether_xmp.c and the fetched libxmp source, likewise;
 #   - the fetched QuickJS amalgamation, which contrib/quickjs/aether_quickjs.c
 #     (kept by its @source) #includes rather than naming with @source;
 #   - with --keep-host-bridges, contrib/host/<lang>/aether_host_<lang>.c,
@@ -71,6 +72,8 @@ find "$dir" -type f \( -name '*.c' -o -name '*.m' \) | while IFS= read -r f; do
     # foreign target, so they ship as source.
     case "$f" in
         */contrib/sqlite/aether_sqlite.c|*/contrib/sqlite/amalgamation/*.c) continue ;;
+        # The same for contrib.xmp: its veneer and the fetched libxmp source.
+        */contrib/xmp/aether_xmp.c|*/contrib/xmp/libxmp/*) continue ;;
         # aether_quickjs.c #includes the QuickJS amalgamation, so no @source
         # names it; without this it was deleted and an installed
         # contrib.quickjs could not build.
