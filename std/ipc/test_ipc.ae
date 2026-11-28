@@ -16,6 +16,7 @@ import std.io
 import std.bytes
 import std.string
 import std.list
+import std.dir
 
 // 0 when a child process inherits `fd`, as it would when the descriptor
 // is not close-on-exec: the shell's redirection from it fails otherwise.
@@ -54,6 +55,33 @@ read_fd(fd: int, n: int) -> string {
     return s
 }
 
+// Entries in this process's descriptor table, or -1 where it cannot be
+// listed (/proc/self/fd on Linux, /dev/fd elsewhere).
+open_fds() -> int {
+    path = "/proc/self/fd"
+    if fs.exists(path) == 0 { path = "/dev/fd" }
+    entries, err = dir.list(path)
+    if err != "" { return -1 }
+    n = dir.list_count(entries)
+    dir.list_free(entries)
+    return n
+}
+
+// The mappings of shared buffers this process holds, on Linux (their memfd
+// is named "aether-ipc-shared"); -1 elsewhere.
+shared_mappings() -> int {
+    if fs.exists("/proc/self/maps") == 0 { return -1 }
+    maps, err = fs.read("/proc/self/maps")
+    if err != "" { return -1 }
+    n = 0
+    at = string.index_of(maps, "aether-ipc-shared")
+    while at >= 0 {
+        n = n + 1
+        at = string.index_of_from(maps, "aether-ipc-shared", at + 1)
+    }
+    return n
+}
+
 main() {
     fw = spec.init()
     on_windows = string.equals(os.platform(), "windows")
@@ -82,6 +110,19 @@ main() {
                 spec.assert_err(werr, "ipc.wait_readable on no pipe")
                 _fd, terr = ipc.read_frame_timeout(3, 16, 10)
                 spec.assert_err(terr, "ipc.read_frame_timeout on no pipe")
+            }
+            spec.it("reports shared buffers as unsupported") callback {
+                b, berr = ipc.shared_buffer(4096)
+                spec.assert_null(b, "ipc.shared_buffer gives no buffer")
+                spec.assert_err_contains(berr, "unsupported on Windows", "ipc.shared_buffer")
+                m, merr = ipc.shared_buffer_map(3, 4096)
+                spec.assert_null(m, "ipc.shared_buffer_map gives no buffer")
+                spec.assert_err_contains(merr, "unsupported on Windows", "ipc.shared_buffer_map")
+                _r, rerr = ipc.shared_buffer_map_readonly(3, 4096)
+                spec.assert_err_contains(rerr, "unsupported on Windows", "ipc.shared_buffer_map_readonly")
+                spec.assert_eq(ipc.shared_buffer_fd(null), -1, "no descriptor")
+                spec.assert_eq(ipc.shared_buffer_length(null), 0, "no length")
+                ipc.shared_buffer_free(null)
             }
         }
         return spec.run_summary(fw)
@@ -528,6 +569,129 @@ main() {
             _n2, gerr = ipc.write_some(a, "x", 0)
             spec.assert_err_contains(gerr, "ipc.write_some", "the peer gone is an error, not SIGPIPE")
             io.fd_close(a)
+        }
+    }
+
+    spec.describe(fw, "ipc.shared_buffer") {
+        spec.it("is zeroed, sized, and close-on-exec") callback {
+            b, err = ipc.shared_buffer(10000)
+            spec.assert_ok(err, "shared_buffer")
+            spec.assert_eq(ipc.shared_buffer_length(b), 10000, "its length")
+            v = ipc.shared_buffer_view(b)
+            spec.assert_eq(v.len, 10000, "the view is bounded at its length")
+            spec.assert_eq(v[0] + v[5000] + v[9999], 0, "zeroed")
+            fd = ipc.shared_buffer_fd(b)
+            spec.assert_true(fd >= 0, "it holds a descriptor")
+            spec.assert_not_eq(child_sees_fd(fd), 0, "a child does not inherit it")
+            ipc.shared_buffer_free(b)
+        }
+
+        // Sent over a socket pair and received, as another process would:
+        // the receiver's mapping is the same memory, both ways.
+        spec.it("maps the same memory through a passed descriptor") callback {
+            b, err = ipc.shared_buffer(65536)
+            spec.assert_ok(err, "shared_buffer")
+            a, c, _ = os.socketpair()
+            spec.assert_ok(ipc.send_fd(a, ipc.shared_buffer_fd(b), "buf"), "send_fd")
+            _p, fd, rerr = ipc.recv(c, 16)
+            spec.assert_ok(rerr, "recv")
+            m, merr = ipc.shared_buffer_map(fd, 65536)
+            spec.assert_ok(merr, "shared_buffer_map")
+            io.fd_close(fd)
+            spec.assert_eq(ipc.shared_buffer_fd(m), -1, "a mapping holds no descriptor")
+            v = ipc.shared_buffer_view(b)
+            w = ipc.shared_buffer_view(m)
+            v[0] = 1
+            v[65535] = 255
+            spec.assert_eq(w[0], 1, "a write at the start shows through")
+            spec.assert_eq(w[65535], 255, "and one at the end")
+            w[100] = 77
+            spec.assert_eq(v[100], 77, "and the other way")
+            ipc.shared_buffer_free(m)
+            spec.assert_eq(v[100], 77, "the creator's mapping outlives the other")
+            io.fd_close(a)
+            io.fd_close(c)
+            ipc.shared_buffer_free(b)
+        }
+
+        spec.it("refuses a size it was not made with") callback {
+            // Whole 16 KiB pages (Apple silicon's), so macOS's rounding
+            // leaves each wrong size a different object size.
+            b, _ = ipc.shared_buffer(32768)
+            fd = ipc.shared_buffer_fd(b)
+            m, e1 = ipc.shared_buffer_map(fd, 65536)
+            spec.assert_null(m, "no mapping larger than the buffer")
+            spec.assert_err_contains(e1, "the buffer holds", "too large")
+            _m2, e2 = ipc.shared_buffer_map(fd, 16384)
+            spec.assert_err_contains(e2, "the buffer holds", "too small")
+            // macOS keeps a shm object to whole pages, so a size inside the
+            // same page is told apart only where the size is exact.
+            if string.equals(os.platform(), "darwin") == 0 {
+                _m3, e3 = ipc.shared_buffer_map(fd, 32767)
+                spec.assert_err_contains(e3, "the buffer holds 32768 bytes, not 32767", "one byte off")
+            }
+            _m4, e4 = ipc.shared_buffer_map(fd, 0)
+            spec.assert_err(e4, "a size of 0")
+            ipc.shared_buffer_free(b)
+        }
+
+        spec.it("refuses a closed, invalid or unmappable descriptor") callback {
+            _m1, e1 = ipc.shared_buffer_map(-1, 4096)
+            spec.assert_err_contains(e1, "no descriptor", "-1")
+            a, c, _ = os.socketpair()
+            io.fd_close(c)
+            _m2, e2 = ipc.shared_buffer_map(c, 4096)
+            spec.assert_err_contains(e2, "ipc.shared_buffer_map", "a closed descriptor")
+            _m3, e3 = ipc.shared_buffer_map(a, 4096)
+            spec.assert_err_contains(e3, "not shared memory", "a socket")
+            io.fd_close(a)
+        }
+
+        spec.it("refuses a size below 1") callback {
+            b, e = ipc.shared_buffer(0)
+            spec.assert_null(b, "no buffer")
+            spec.assert_err_contains(e, "at least 1 byte", "size 0")
+            _b2, e2 = ipc.shared_buffer(-5)
+            spec.assert_err(e2, "a negative size")
+        }
+
+        spec.it("maps read-only, with a read-only view") callback {
+            b, _ = ipc.shared_buffer(4096)
+            v = ipc.shared_buffer_view(b)
+            v[7] = 9
+            r, rerr = ipc.shared_buffer_map_readonly(ipc.shared_buffer_fd(b), 4096)
+            spec.assert_ok(rerr, "shared_buffer_map_readonly")
+            rv = ipc.shared_buffer_read_view(r)
+            spec.assert_eq(rv[7], 9, "it reads the buffer")
+            v[8] = 10
+            spec.assert_eq(rv[8], 10, "and sees later writes")
+            spec.assert_eq(ipc.shared_buffer_read_view(b)[7], 9, "a read view of a writable buffer")
+            ipc.shared_buffer_free(r)
+            ipc.shared_buffer_free(b)
+        }
+
+        spec.it("leaves no descriptor or mapping behind once freed") callback {
+            fds = open_fds()
+            maps = shared_mappings()
+            k = 0
+            while k < 50 {
+                b, _ = ipc.shared_buffer(65536)
+                m, _e = ipc.shared_buffer_map(ipc.shared_buffer_fd(b), 65536)
+                r, _e2 = ipc.shared_buffer_map_readonly(ipc.shared_buffer_fd(b), 65536)
+                ipc.shared_buffer_free(r)
+                ipc.shared_buffer_free(m)
+                ipc.shared_buffer_free(b)
+                k = k + 1
+            }
+            spec.assert_eq(open_fds(), fds, "the descriptor table is as it was")
+            spec.assert_eq(shared_mappings(), maps, "and so are the mappings")
+        }
+
+        spec.it("null is no buffer") callback {
+            spec.assert_eq(ipc.shared_buffer_fd(null), -1, "fd")
+            spec.assert_eq(ipc.shared_buffer_length(null), 0, "length")
+            spec.assert_eq(ipc.shared_buffer_view(null).len, 0, "view")
+            ipc.shared_buffer_free(null)
         }
     }
 

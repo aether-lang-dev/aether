@@ -36,12 +36,12 @@ main() {
     if oerr != "" { println("open w: ${oerr}"); return 1 }
     n, werr = fs.pwrite(f, string.bytes("ab\ncd\n"), 0)
     _ = fs.close(f)
-    sz, serr = fs.size(p)
+    sz, _serr = fs.size(p)
     println("pwrite ${n} ${werr} size ${sz}")
     // 2. "r" + pread reads the bytes back exactly
     g, gerr = fs.open(p, "r")
     if gerr != "" { println("open r: ${gerr}"); return 1 }
-    got, gn, perr = fs.pread(g, 16, 0)
+    got, gn, _perr = fs.pread(g, 16, 0)
     _ = fs.close(g)
     println("pread ${gn} ${got == "ab\ncd\n"}")
     // 3. a file holding CRLF and a 0x1A byte is read verbatim through "r"
@@ -72,10 +72,16 @@ pread 6 true
 crlf 6 true
 append  size 8
 wt true '
-got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/main.ae" -- "$tmp" 2>&1 | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
+# The program's stdout alone is compared. The compiler's diagnostics go to
+# stderr, kept apart and shown on a failure: filtering them out of a merged
+# stream with patterns broke on Windows, where they end in CRLF, so the blank
+# line after each warning arrived as a lone "\r" that "^$" does not match.
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/main.ae" -- "$tmp" 2>"$tmp/stderr.txt")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] fs_open_binary_mode: output differs"
     printf '%s\n' "$got" | head -8 | sed 's/^/        /'
+    echo "      stderr:"
+    head -20 "$tmp/stderr.txt" | sed 's/^/        /'
     exit 1
 fi
 echo "  [PASS] fs_open_binary_mode: fs.open handles are byte-exact through pwrite/pread and read_all; a+ appends"

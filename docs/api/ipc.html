@@ -33,6 +33,13 @@
     <li><a href="#frame_writer_flush_raw">frame_writer_flush_raw</a></li>
     <li><a href="#frame_writer_pending_raw">frame_writer_pending_raw</a></li>
     <li><a href="#frame_writer_free_raw">frame_writer_free_raw</a></li>
+    <li><a href="#shared_buffer_new_raw">shared_buffer_new_raw</a></li>
+    <li><a href="#shared_buffer_map_raw">shared_buffer_map_raw</a></li>
+    <li><a href="#shared_buffer_fd_raw">shared_buffer_fd_raw</a></li>
+    <li><a href="#shared_buffer_length_raw">shared_buffer_length_raw</a></li>
+    <li><a href="#shared_buffer_data_raw">shared_buffer_data_raw</a></li>
+    <li><a href="#shared_buffer_readonly_raw">shared_buffer_readonly_raw</a></li>
+    <li><a href="#shared_buffer_free_raw">shared_buffer_free_raw</a></li>
     <li><a href="#parent_channel">parent_channel</a></li>
     <li><a href="#parent_channel_kind">parent_channel_kind</a></li>
     <li><a href="#stdio_channel">stdio_channel</a></li>
@@ -53,6 +60,14 @@
     <li><a href="#frame_writer_flush">frame_writer_flush</a></li>
     <li><a href="#frame_writer_pending">frame_writer_pending</a></li>
     <li><a href="#frame_writer_free">frame_writer_free</a></li>
+    <li><a href="#shared_buffer">shared_buffer</a></li>
+    <li><a href="#shared_buffer_fd">shared_buffer_fd</a></li>
+    <li><a href="#shared_buffer_map">shared_buffer_map</a></li>
+    <li><a href="#shared_buffer_map_readonly">shared_buffer_map_readonly</a></li>
+    <li><a href="#shared_buffer_length">shared_buffer_length</a></li>
+    <li><a href="#shared_buffer_view">shared_buffer_view</a></li>
+    <li><a href="#shared_buffer_read_view">shared_buffer_read_view</a></li>
+    <li><a href="#shared_buffer_free">shared_buffer_free</a></li>
     <li><a href="#TIMED_OUT_BETWEEN_FRAMES">TIMED_OUT_BETWEEN_FRAMES</a></li>
     <li><a href="#TIMED_OUT_INSIDE_FRAME">TIMED_OUT_INSIDE_FRAME</a></li>
   </ul>
@@ -249,6 +264,41 @@
       <pre class="usage"><code>frame_writer_free_raw(w)</code></pre>
       <p class="signature"><span class="sig-params">w: ptr</span></p>
     </div>
+    <div class="function" id="shared_buffer_new_raw" data-name="shared_buffer_new_raw">
+      <h3 class="function-name">shared_buffer_new_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>shared_buffer_new_raw(size) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">size: int</span></p>
+    </div>
+    <div class="function" id="shared_buffer_map_raw" data-name="shared_buffer_map_raw">
+      <h3 class="function-name">shared_buffer_map_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>shared_buffer_map_raw(fd, size, readonly) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, size: int, readonly: int</span></p>
+    </div>
+    <div class="function" id="shared_buffer_fd_raw" data-name="shared_buffer_fd_raw">
+      <h3 class="function-name">shared_buffer_fd_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>shared_buffer_fd_raw(b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+    </div>
+    <div class="function" id="shared_buffer_length_raw" data-name="shared_buffer_length_raw">
+      <h3 class="function-name">shared_buffer_length_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>shared_buffer_length_raw(b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+    </div>
+    <div class="function" id="shared_buffer_data_raw" data-name="shared_buffer_data_raw">
+      <h3 class="function-name">shared_buffer_data_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>shared_buffer_data_raw(b) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+    </div>
+    <div class="function" id="shared_buffer_readonly_raw" data-name="shared_buffer_readonly_raw">
+      <h3 class="function-name">shared_buffer_readonly_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>shared_buffer_readonly_raw(b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+    </div>
+    <div class="function" id="shared_buffer_free_raw" data-name="shared_buffer_free_raw">
+      <h3 class="function-name">shared_buffer_free_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>shared_buffer_free_raw(b)</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+    </div>
     <div class="function" id="parent_channel" data-name="parent_channel">
       <h3 class="function-name">parent_channel <span class="kind">fn</span></h3>
       <pre class="usage"><code>parent_channel() <span class="arrow">-&gt;</span> int</code></pre>
@@ -365,6 +415,54 @@
       <pre class="usage"><code>frame_writer_free(w)</code></pre>
       <p class="signature"><span class="sig-params">w: ptr</span></p>
       <p class="doc">Free a frame writer and what it still has queued. The descriptor is not closed.</p>
+    </div>
+    <div class="function" id="shared_buffer" data-name="shared_buffer">
+      <h3 class="function-name">shared_buffer <span class="kind">fn</span></h3>
+      <pre class="usage"><code>shared_buffer(size) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">size: int</span></p>
+      <p class="doc">A new buffer of `size` bytes (at least 1), zeroed, mapped for reading and writing: (buf, &quot;&quot;) or (null, err). It holds a close-on-exec descriptor (shared_buffer_fd) to pass to another process. Its size cannot change: on Linux and FreeBSD the descriptor is sealed against growing and shrinking, so a process it is passed to cannot shrink it under this side's mapping. The memory is anonymous: no file, name or grant is involved.</p>
+    </div>
+    <div class="function" id="shared_buffer_fd" data-name="shared_buffer_fd">
+      <h3 class="function-name">shared_buffer_fd <span class="kind">fn</span></h3>
+      <pre class="usage"><code>shared_buffer_fd(b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">The descriptor of a buffer shared_buffer made, to pass with send_fd (the receiver gets its own; this one stays the buffer's, and shared_buffer_free closes it). -1 for a buffer shared_buffer_map made, or for null.</p>
+    </div>
+    <div class="function" id="shared_buffer_map" data-name="shared_buffer_map">
+      <h3 class="function-name">shared_buffer_map <span class="kind">fn</span></h3>
+      <pre class="usage"><code>shared_buffer_map(fd, size) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, size: int</span></p>
+      <p class="doc">Map the buffer whose descriptor `fd` arrived (recv, recv_fd), for reading and writing: (buf, &quot;&quot;) or (null, err). `size` must be the size it was made with, checked against the descriptor (fstat): a mismatch, a closed or invalid descriptor, or one that is not shared memory is an error. The descriptor stays the caller's: close it once mapped, the mapping stays.</p>
+    </div>
+    <div class="function" id="shared_buffer_map_readonly" data-name="shared_buffer_map_readonly">
+      <h3 class="function-name">shared_buffer_map_readonly <span class="kind">fn</span></h3>
+      <pre class="usage"><code>shared_buffer_map_readonly(fd, size) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, size: int</span></p>
+      <p class="doc">shared_buffer_map, mapped read-only: a store through its view panics instead of reaching the memory. Only this side's mapping is read-only; the descriptor still lets the process that holds it write.</p>
+    </div>
+    <div class="function" id="shared_buffer_length" data-name="shared_buffer_length">
+      <h3 class="function-name">shared_buffer_length <span class="kind">fn</span></h3>
+      <pre class="usage"><code>shared_buffer_length(b) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">The buffer's size in bytes; 0 for null.</p>
+    </div>
+    <div class="function" id="shared_buffer_view" data-name="shared_buffer_view">
+      <h3 class="function-name">shared_buffer_view <span class="kind">fn</span></h3>
+      <pre class="usage"><code>shared_buffer_view(b) <span class="arrow">-&gt;</span> byte[]</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">The buffer's bytes as a bounded `byte[]`, its index checked, to read and write. Valid until shared_buffer_free; it owns nothing, so `free` of it is refused. A buffer mapped with shared_buffer_map_readonly has no writable view: this panics for one (use shared_buffer_read_view). Null is the empty slice.</p>
+    </div>
+    <div class="function" id="shared_buffer_read_view" data-name="shared_buffer_read_view">
+      <h3 class="function-name">shared_buffer_read_view <span class="kind">fn</span></h3>
+      <pre class="usage"><code>shared_buffer_read_view(b) <span class="arrow">-&gt;</span> byte[]</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">The buffer's bytes as a bounded, read-only `byte[]`: a store through it is refused (at compile time where the checker sees it, else a panic). Works on any buffer, and is the only view of one mapped read-only. Same validity as shared_buffer_view.</p>
+    </div>
+    <div class="function" id="shared_buffer_free" data-name="shared_buffer_free">
+      <h3 class="function-name">shared_buffer_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>shared_buffer_free(b)</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">Unmap the buffer, and close its descriptor if shared_buffer made it. Another process's mapping of the same memory stays. Null is ignored.</p>
     </div>
     <div class="function" id="TIMED_OUT_BETWEEN_FRAMES" data-name="TIMED_OUT_BETWEEN_FRAMES">
       <h3 class="function-name">TIMED_OUT_BETWEEN_FRAMES <span class="kind">const</span></h3>

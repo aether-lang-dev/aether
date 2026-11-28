@@ -1,0 +1,95 @@
+// std.ipc shared buffers across processes. Usage:
+//
+//   host plain <child>       the child under os.run_socket
+//   host sandboxed <child>   the child under sandbox.spawn_socket, granted
+//                            nothing but reading its own directory (Linux)
+//
+// The parent makes a buffer of a 640x480 RGB frame's size, fills it, passes
+// its descriptor to the child, and reads each frame the child writes into
+// it, checking every byte, while the channel carries only short messages.
+// Prints PASS, or FAIL and a reason, and exits 0 or 1.
+
+import std.ipc
+import std.os
+import std.io
+import std.list
+import std.sandbox
+import std.string
+
+extern exit(code: int)
+
+const SIZE = 921600
+const FRAMES = 3
+
+fail(msg: string) {
+    println("FAIL ${msg}")
+    exit(1)
+}
+
+dirname(path: string) -> string {
+    i = string.length(path) - 1
+    while i > 0 && string.char_at(path, i) != 47 {
+        i = i - 1
+    }
+    return string.substring(path, 0, i)
+}
+
+main() {
+    if os.args_count() < 3 { fail("usage: host plain|sandboxed <child>") }
+    mode = os.args_get(1)
+    child = os.args_get(2)
+
+    buf, err = ipc.shared_buffer(SIZE)
+    if err != "" { fail("shared_buffer: ${err}") }
+    v = ipc.shared_buffer_view(buf)
+    i = 0
+    while i < SIZE {
+        v[i] = i % 251
+        i = i + 1
+    }
+
+    argv = list.new()
+    ch = -1
+    pid = -1
+    serr = ""
+    g = sandbox.new("shared-buffer-child") {
+    }
+    if mode == "sandboxed" {
+        sandbox.grant_fs_read(g, "${dirname(child)}/*")
+        ch, pid, serr = sandbox.spawn_socket(g, child, argv, null)
+    } else {
+        ch, pid, serr = os.run_socket(child, argv, null)
+    }
+    list.free(argv)
+    if serr != "" { fail("spawn: ${serr}") }
+
+    ferr = ipc.send_fd(ch, ipc.shared_buffer_fd(buf), "${SIZE}")
+    if ferr != "" { fail("send_fd: ${ferr}") }
+
+    n = 1
+    while n <= FRAMES {
+        msg, rerr = ipc.read_frame_timeout(ch, 256, 30000)
+        if rerr != "" { fail("frame ${n}: ${rerr}") }
+        if msg != "frame ${n} ready" { fail("the child said '${msg}'") }
+        i = 0
+        while i < SIZE {
+            if v[i] != (i * 7 + n) % 256 { fail("frame ${n}: byte ${i} is ${v[i]}") }
+            i = i + 1
+        }
+        aerr = ipc.write_frame(ch, "ack ${n}")
+        if aerr != "" { fail("ack: ${aerr}") }
+        n = n + 1
+    }
+    last, lerr = ipc.read_frame_timeout(ch, 256, 30000)
+    if lerr != "" || last != "done" { fail("the child ended with '${last}' ${lerr}") }
+    io.fd_close(ch)
+    code, werr = os.wait_pid(pid)
+    if werr != "" { fail("wait: ${werr}") }
+    if code != 0 { fail("the child exited ${code}") }
+
+    // The child's mapping is gone; this side's is still the buffer.
+    if v[SIZE - 1] != ((SIZE - 1) * 7 + FRAMES) % 256 { fail("the last frame is gone") }
+    ipc.shared_buffer_free(buf)
+    sandbox.free(g)
+    println("PASS ${mode}: ${FRAMES} frames of ${SIZE} bytes through a shared buffer")
+}

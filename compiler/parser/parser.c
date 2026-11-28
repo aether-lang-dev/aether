@@ -7264,8 +7264,14 @@ ASTNode* parse_function_definition(Parser* parser) {
                     /* #2809: an optional result type, `-> Point? { ... }`:
                      * the `?` sits between the name and the body. A `-> expr`
                      * body never puts `{` (or a contract clause) right after
-                     * a postfix `?`. */
-                    if (after_name && after_name->type == TOKEN_QUESTION) {
+                     * a postfix `?`. A fallible result, `-> f32! { ... }`
+                     * or `-> Point! { ... }`, puts `!` there the same way:
+                     * the type keywords (`float`, `byte`) took the switch's
+                     * keyword arm, but a scalar spelt as a name (`f32`,
+                     * `u8`, `i32`) or a struct fell through to the `-> expr`
+                     * path, leaving the `{` dangling. */
+                    if (after_name && (after_name->type == TOKEN_QUESTION ||
+                                       after_name->type == TOKEN_EXCLAIM)) {
                         Token* after_q = peek_ahead(parser, 2);
                         if (after_q && (after_q->type == TOKEN_LEFT_BRACE ||
                                         after_q->type == TOKEN_REQUIRES ||

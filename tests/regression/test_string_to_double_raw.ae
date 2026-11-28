@@ -1,0 +1,48 @@
+// Regression: std.string's to_double_raw is still there, the 64-bit parse
+// under its old name.
+//
+// When to_float became the correctly rounded 64-bit parse, to_double_raw
+// went: its job was to_float_raw's now. Code calling it stopped
+// compiling, while to_double, try_double and get_double had been kept for
+// that code under their old names. It is kept as they are, until nothing
+// calls it, and parses as to_float_raw does: into an 8-byte `float` slot,
+// to binary64, 1 for a number and 0 for anything else.
+
+import std.string
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    println("=== std.string to_double_raw ===")
+    slot = calloc(1, 8)
+    other = calloc(1, 8)
+
+    if string.to_double_raw("0.1", slot) != 1 { fail("to_double_raw(\"0.1\") was refused") }
+    got = (slot as float[])[0]
+    if got != 0.1 { fail("to_double_raw(\"0.1\") is ${got}, not 0.1 to 64 bits") }
+    println("  PASS: to_double_raw parses to 64 bits")
+
+    for text in ["2.5", "-1e300", "3.141592653589793", "1e-310"] {
+        a = string.to_double_raw(text, slot)
+        b = string.to_float_raw(text, other)
+        if a != b { fail("to_double_raw and to_float_raw disagree on accepting \"${text}\"") }
+        if (slot as float[])[0] != (other as float[])[0] { fail("to_double_raw(\"${text}\") is not to_float_raw's value") }
+    }
+    println("  PASS: to_double_raw is to_float_raw")
+
+    for bad in ["", "abc", "1.5x"] {
+        if string.to_double_raw(bad, slot) != 0 { fail("to_double_raw accepted \"${bad}\"") }
+    }
+    println("  PASS: to_double_raw refuses what is not a number")
+
+    free(slot)
+    free(other)
+    println("PASS")
+}

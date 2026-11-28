@@ -210,9 +210,143 @@ static void run_job(WorkerJob* job) {
 }
 
 #if AETHER_WORKER_HAS_THREADS
+/* ---- own threads: reaped, never left exiting --------------------------- */
+
+/* A job that runs on a thread of its own (run_detached, and run/submit when
+ * the pool cannot start) used to be pthread_detach'ed at launch. Its job
+ * retires (g_pending drops) while the thread still has work left: freeing
+ * the job, a lock round to wake waiters, the return through the thread
+ * trampoline and the thread's exit. A program that waits for pending() == 0
+ * and returns from main therefore exits while that thread is still exiting,
+ * and Wine crashes on that overlap (SIGSEGV in the Wine process after the
+ * program's last output, about 1 run in 1000 of
+ * tests/regression/test_worker_pool.ae). POSIX allows it, Windows' ExitProcess
+ * allows it, but no runtime should depend on how a platform settles a thread
+ * caught half way out.
+ *
+ * So each such thread is kept joinable and listed here. Its last act is to
+ * set `done`; a thread marked done has nothing left but to return, so a join
+ * on it is immediate. Finished threads are joined at the next launch (the
+ * list stays as long as the number of own threads still running) and at
+ * process exit, from an atexit handler. A thread still inside its job at exit
+ * is detached then, not waited on: a detached job may block for good, and
+ * waiting on it would hang the exit, so it ends with the process, as before.
+ * Under g_lock. */
+typedef struct OwnThread {
+    pthread_t         th;
+    atomic_int        done;
+    WorkerJob*        job;
+    struct OwnThread* next;
+} OwnThread;
+
+static OwnThread* g_own = NULL;
+static int        g_own_atexit = 0;
+
 static void* worker_entry(void* arg) {
-    run_job((WorkerJob*)arg);
+    OwnThread* t = (OwnThread*)arg;
+    run_job(t->job);
+    /* Last touch: t belongs to the reaper now. Under g_lock, so a fork
+     * (which holds it) sees each thread either still in its job or done. */
+    pthread_mutex_lock(&g_lock);
+    atomic_store(&t->done, 1);
+    pthread_mutex_unlock(&g_lock);
     return NULL;
+}
+
+/* Unlink every finished thread under the lock, then join and free them
+ * outside it. */
+static void own_reap(void) {
+    OwnThread* finished = NULL;
+    pthread_mutex_lock(&g_lock);
+    OwnThread** pp = &g_own;
+    while (*pp) {
+        OwnThread* t = *pp;
+        if (atomic_load(&t->done)) {
+            *pp = t->next;
+            t->next = finished;
+            finished = t;
+        } else {
+            pp = &t->next;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    while (finished) {
+        OwnThread* t = finished;
+        finished = t->next;
+        pthread_join(t->th, NULL);
+        free(t);
+    }
+}
+
+/* At exit: join what has finished, and detach what is still inside its
+ * job, which ends with the process. Its OwnThread stays allocated: the
+ * thread still writes `done` into it. */
+static void own_reap_at_exit(void) {
+    own_reap();
+    pthread_mutex_lock(&g_lock);
+    for (OwnThread* t = g_own; t; t = t->next) pthread_detach(t->th);
+    g_own = NULL;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* Across a fork: a thread that has finished but is not yet joined would
+ * come into the child as a joinable thread nobody joins, which a child that
+ * exits without exec (one whose exec failed) is left holding. So the fork is
+ * made under g_lock with every done thread joined first; a done thread has
+ * only its return left, so each join is immediate, and since a thread marks
+ * itself done under g_lock, none can finish between the joins and the fork.
+ * The child has none of the threads still in their jobs, only the list's
+ * copy, which it forgets: they are not its to join or detach. */
+#if !defined(_WIN32)
+static void own_fork_prepare(void) {
+    pthread_mutex_lock(&g_lock);
+    OwnThread** pp = &g_own;
+    while (*pp) {
+        OwnThread* t = *pp;
+        if (atomic_load(&t->done)) {
+            *pp = t->next;
+            pthread_join(t->th, NULL);
+            free(t);
+        } else {
+            pp = &t->next;
+        }
+    }
+}
+static void own_fork_parent(void) { pthread_mutex_unlock(&g_lock); }
+static void own_fork_child(void) {
+    g_own = NULL;   /* the parent's threads, not here; their nodes stay the parent's */
+    pthread_mutex_unlock(&g_lock);
+}
+#endif
+
+/* Start `job` on a thread of its own. 0 on success, else the job is still
+ * the caller's. */
+static int own_spawn(WorkerJob* job) {
+    own_reap();
+    OwnThread* t = (OwnThread*)calloc(1, sizeof(OwnThread));
+    if (!t) return -1;
+    t->job = job;
+    atomic_init(&t->done, 0);
+    pthread_mutex_lock(&g_lock);
+    if (!g_own_atexit) {
+        g_own_atexit = 1;
+        atexit(own_reap_at_exit);
+#if !defined(_WIN32)
+        pthread_atfork(own_fork_prepare, own_fork_parent, own_fork_child);
+#endif
+    }
+    /* Listed before it starts, so the reaper never misses it; the thread
+     * reads only t->job until it sets done, and t->th is written here,
+     * under the lock the reaper takes. */
+    if (pthread_create(&t->th, NULL, worker_entry, t) != 0) {
+        pthread_mutex_unlock(&g_lock);
+        free(t);
+        return -1;
+    }
+    t->next = g_own;
+    g_own = t;
+    pthread_mutex_unlock(&g_lock);
+    return 0;
 }
 
 /* ---- bounded pool (#1205) ---------------------------------------------- */
@@ -302,18 +436,16 @@ static int launch(AetherWorkerClosure work, AetherWorkerClosure done, int detach
 
 #if AETHER_WORKER_HAS_THREADS
     /* run() submits to the bounded pool; run_detached() (and a pool that
-     * failed to start) spawns a fresh self-reaping thread so a truly
-     * long-blocking job never starves the pool. */
+     * failed to start) gets a thread of its own, so a truly long-blocking
+     * job never starves the pool. own_spawn joins it once it is done. */
     if (!detached && pool_submit(job)) {
         return 1;
     }
-    pthread_t th;
-    if (pthread_create(&th, NULL, worker_entry, job) != 0) {
+    if (own_spawn(job) != 0) {
         atomic_fetch_sub(&g_pending, 1);
         free(job);
         return 0;
     }
-    pthread_detach(th);   /* self-reaping; we never join */
 #else
     /* Cooperative / threadless build: no off-thread execution. Run the work
      * synchronously here; the completion still flows through the poster/drain
@@ -347,11 +479,7 @@ int aether_worker_submit(AetherWorkerClosure work) {
     job->work = work;
     job->raw = 1;
     if (pool_submit(job)) return 1;
-    pthread_t th;
-    if (pthread_create(&th, NULL, worker_entry, job) == 0) {
-        pthread_detach(th);
-        return 1;
-    }
+    if (own_spawn(job) == 0) return 1;
     free(job);
     return 0;
 #else

@@ -34,7 +34,7 @@ exports(
     string_to_cstr, string_from_int, string_from_long, string_from_float,
     string_from_double,
     string_from_int_radix, string_pad_start, string_pad_end,
-    string_to_int_raw, string_to_long_raw, string_to_float_raw, string_to_f32_raw,
+    string_to_int_raw, string_to_long_raw, string_to_float_raw, string_to_f32_raw, string_to_double_raw,
     string_try_int, string_get_int, string_try_long, string_get_long,
     string_try_float, string_get_float, string_try_f32, string_get_f32,
     string_try_double, string_get_double,
@@ -378,6 +378,10 @@ extern string_to_long_raw(str: string, out_value: ptr) -> int
 // (4-byte float) slot for to_f32_raw.
 extern string_to_float_raw(str: string, out_value: ptr) -> int
 extern string_to_f32_raw(str: string, out_value: ptr) -> int
+// TODO: delete string_to_double_raw once nothing in the aether-lang-dev
+// org's repos or in friends-and-family repos calls it; it is
+// string_to_float_raw under its old name, the same 8-byte `float` slot.
+extern string_to_double_raw(str: string, out_value: ptr) -> int
 extern string_to_int_radix_raw(str: string, radix: int, out_value: ptr) -> int
 
 // Parsing — split-return helpers for the Go-style wrappers.

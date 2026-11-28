@@ -43,6 +43,14 @@
 //   frame_writer_flush(w, ms) -> string          without ever waiting
 //   frame_writer_pending(w) -> long              longer than the caller
 //   frame_writer_free(w)                         says
+//   shared_buffer(size) -> (buf, err)          memory two processes map:
+//   shared_buffer_fd(buf) -> int                 its descriptor, for send_fd
+//   shared_buffer_map(fd, size) -> (buf, err)    map a received one
+//   shared_buffer_map_readonly(fd, size)         the same, read-only here
+//   shared_buffer_length(buf) -> int             its size in bytes
+//   shared_buffer_view(buf) -> byte[]            its bytes, bounds-checked
+//   shared_buffer_read_view(buf) -> byte[]       the same, read-only
+//   shared_buffer_free(buf)                      unmap it
 //
 // (write/write_close were originally named `send`/`send_close` per the
 // design discussion; renamed because `send` is a reserved keyword in
@@ -83,10 +91,15 @@ exports(
     ipc_stdio_channel_raw, ipc_wait_writable_raw, ipc_write_some_raw,
     ipc_frame_writer_new_raw, ipc_frame_writer_put_raw, ipc_frame_writer_flush_raw,
     ipc_frame_writer_pending_raw, ipc_frame_writer_free_raw,
+    ipc_shared_buffer_new_raw, ipc_shared_buffer_map_raw, ipc_shared_buffer_fd_raw,
+    ipc_shared_buffer_length_raw, ipc_shared_buffer_data_raw, ipc_shared_buffer_readonly_raw,
+    ipc_shared_buffer_free_raw,
     parent_channel, parent_channel_kind, stdio_channel, write, write_close, read, send_fd, recv_fd,
     recv, write_frame, read_frame, read_frame_timeout, wait_readable,
     wait_writable, write_some, frame_writer, frame_writer_put, frame_writer_flush,
     frame_writer_pending, frame_writer_free,
+    shared_buffer, shared_buffer_fd, shared_buffer_map, shared_buffer_map_readonly,
+    shared_buffer_length, shared_buffer_view, shared_buffer_read_view, shared_buffer_free,
     TIMED_OUT_BETWEEN_FRAMES, TIMED_OUT_INSIDE_FRAME
 )
 
@@ -114,6 +127,13 @@ extern ipc_frame_writer_put_raw(w: ptr, data: @aether string) -> string
 extern ipc_frame_writer_flush_raw(w: ptr, timeout_ms: int) -> string
 extern ipc_frame_writer_pending_raw(w: ptr) -> long
 extern ipc_frame_writer_free_raw(w: @frees ptr)
+extern ipc_shared_buffer_new_raw(size: int) -> (ptr, string)
+extern ipc_shared_buffer_map_raw(fd: int, size: int, readonly: int) -> (ptr, string)
+extern ipc_shared_buffer_fd_raw(b: ptr) -> int
+extern ipc_shared_buffer_length_raw(b: ptr) -> int
+extern ipc_shared_buffer_data_raw(b: ptr) -> ptr
+extern ipc_shared_buffer_readonly_raw(b: ptr) -> int
+extern ipc_shared_buffer_free_raw(b: @frees ptr)
 
 // Aether-side wrappers. parent_channel returns the raw int from
 // the extern; -1 sentinel for "no parent channel."
@@ -372,4 +392,88 @@ frame_writer_pending(w: ptr) -> long {
 // closed.
 frame_writer_free(w: ptr) {
     ipc_frame_writer_free_raw(w)
+}
+
+// ---- Shared buffers ----
+// Memory two processes map at once, for bulk data that should not be copied
+// through the channel: one side makes a buffer, passes its descriptor with
+// send_fd, the other maps it, and from then on both read and write the same
+// bytes, while the channel carries only small messages saying what changed.
+// Each buffer is a handle of its own, freed with shared_buffer_free; no
+// state is kept in the module. Nothing orders the two sides' reads and
+// writes: say over the channel when a write is done, and read after that.
+
+// A new buffer of `size` bytes (at least 1), zeroed, mapped for reading and
+// writing: (buf, "") or (null, err). It holds a close-on-exec descriptor
+// (shared_buffer_fd) to pass to another process. Its size cannot change: on
+// Linux and FreeBSD the descriptor is sealed against growing and shrinking,
+// so a process it is passed to cannot shrink it under this side's mapping.
+// The memory is anonymous: no file, name or grant is involved.
+shared_buffer(size: int) -> {
+    return ipc_shared_buffer_new_raw(size)
+}
+
+// The descriptor of a buffer shared_buffer made, to pass with send_fd (the
+// receiver gets its own; this one stays the buffer's, and
+// shared_buffer_free closes it). -1 for a buffer shared_buffer_map made, or
+// for null.
+shared_buffer_fd(b: ptr) -> int {
+    return ipc_shared_buffer_fd_raw(b)
+}
+
+// Map the buffer whose descriptor `fd` arrived (recv, recv_fd), for reading
+// and writing: (buf, "") or (null, err). `size` must be the size it was made
+// with, checked against the descriptor (fstat): a mismatch, a closed or
+// invalid descriptor, or one that is not shared memory is an error. The
+// descriptor stays the caller's: close it once mapped, the mapping stays.
+shared_buffer_map(fd: int, size: int) -> {
+    return ipc_shared_buffer_map_raw(fd, size, 0)
+}
+
+// shared_buffer_map, mapped read-only: a store through its view panics
+// instead of reaching the memory. Only this side's mapping is read-only;
+// the descriptor still lets the process that holds it write.
+shared_buffer_map_readonly(fd: int, size: int) -> {
+    return ipc_shared_buffer_map_raw(fd, size, 1)
+}
+
+// The buffer's size in bytes; 0 for null.
+shared_buffer_length(b: ptr) -> int {
+    return ipc_shared_buffer_length_raw(b)
+}
+
+// The buffer's bytes as a bounded `byte[]`, its index checked, to read and
+// write. Valid until shared_buffer_free; it owns nothing, so `free` of it is
+// refused. A buffer mapped with shared_buffer_map_readonly has no writable
+// view: this panics for one (use shared_buffer_read_view). Null is the empty
+// slice.
+shared_buffer_view(b: @into ptr) -> byte[] {
+    if b == null {
+        return null
+    }
+    if ipc_shared_buffer_readonly_raw(b) != 0 {
+        panic("ipc.shared_buffer_view: the buffer is mapped read-only; read it with shared_buffer_read_view")
+    }
+    n = ipc_shared_buffer_length_raw(b)
+    // A sub-slice of the bounded view is marked as one, so free and append
+    // refuse it: the memory is a mapping, not an allocation.
+    return (ipc_shared_buffer_data_raw(b) as byte[])[0..n][0..n]
+}
+
+// The buffer's bytes as a bounded, read-only `byte[]`: a store through it is
+// refused (at compile time where the checker sees it, else a panic). Works
+// on any buffer, and is the only view of one mapped read-only. Same
+// validity as shared_buffer_view.
+shared_buffer_read_view(b: @into ptr) -> byte[] {
+    if b == null {
+        return null
+    }
+    n = ipc_shared_buffer_length_raw(b)
+    return __slice_readonly((ipc_shared_buffer_data_raw(b) as byte[])[0..n][0..n])
+}
+
+// Unmap the buffer, and close its descriptor if shared_buffer made it.
+// Another process's mapping of the same memory stays. Null is ignored.
+shared_buffer_free(b: ptr) {
+    ipc_shared_buffer_free_raw(b)
 }

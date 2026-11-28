@@ -1,0 +1,74 @@
+// The child for host.ae: given a shared buffer's descriptor over its socket
+// channel, it maps the buffer, checks what the parent wrote, then writes
+// FRAMES frames into it, sending only "frame N ready" over the channel for
+// each and waiting for the parent's "ack N". Under sandbox.spawn_socket it
+// runs with no grants at all.
+
+import std.ipc
+import std.io
+import std.string
+
+extern exit(code: int)
+
+const FRAMES = 3
+
+fail(ch: int, msg: string) {
+    ipc.write_frame(ch, "FAIL ${msg}")
+    exit(1)
+}
+
+main() {
+    ch = ipc.parent_channel()
+    if ch < 0 {
+        println("FAIL no parent channel")
+        exit(1)
+    }
+
+    payload, fd, rerr = ipc.recv(ch, 64)
+    if rerr != "" { fail(ch, "recv: ${rerr}") }
+    if fd < 0 { fail(ch, "no descriptor came") }
+    size, serr = string.to_int(payload)
+    if serr != "" { fail(ch, "size '${payload}': ${serr}") }
+
+    // The wrong size is refused before the right one maps.
+    bad, berr = ipc.shared_buffer_map(fd, size * 2)
+    if bad != null || berr == "" { fail(ch, "a mapping of twice the size was not refused") }
+
+    buf, merr = ipc.shared_buffer_map(fd, size)
+    if merr != "" { fail(ch, "map: ${merr}") }
+    io.fd_close(fd)
+    v = ipc.shared_buffer_view(buf)
+    if v.len != size { fail(ch, "view of ${v.len} bytes, not ${size}") }
+
+    i = 0
+    while i < size {
+        if v[i] != i % 251 { fail(ch, "byte ${i} is ${v[i]}, not ${i % 251}") }
+        i = i + 1
+    }
+
+    // A buffer of its own, made here: anonymous memory needs no grant.
+    own, oerr = ipc.shared_buffer(4096)
+    if oerr != "" { fail(ch, "shared_buffer in the child: ${oerr}") }
+    ov = ipc.shared_buffer_view(own)
+    ov[4095] = 1
+    ipc.shared_buffer_free(own)
+
+    n = 1
+    while n <= FRAMES {
+        i = 0
+        while i < size {
+            v[i] = (i * 7 + n) % 256
+            i = i + 1
+        }
+        werr = ipc.write_frame(ch, "frame ${n} ready")
+        if werr != "" { fail(ch, "write_frame: ${werr}") }
+        ack, aerr = ipc.read_frame(ch, 64)
+        if aerr != "" { fail(ch, "read ack: ${aerr}") }
+        if ack != "ack ${n}" { fail(ch, "ack was '${ack}'") }
+        n = n + 1
+    }
+
+    ipc.shared_buffer_free(buf)
+    ipc.write_frame(ch, "done")
+    io.fd_close(ch)
+}
