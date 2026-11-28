@@ -14,6 +14,53 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.949.0]
+
+### Added
+
+- **`std.ipc` shared buffers: memory two processes map, passed as a
+  descriptor.** `ipc.shared_buffer(size)` makes a zeroed buffer and holds its
+  close-on-exec descriptor (`shared_buffer_fd`) to pass with `ipc.send_fd`;
+  the receiver maps it with `shared_buffer_map(fd, size)` (or
+  `shared_buffer_map_readonly`), the size checked against the descriptor, and
+  both sides read and write it through a bounded `byte[]`
+  (`shared_buffer_view`, `shared_buffer_read_view`) while the channel carries
+  only short messages. Each buffer is its own handle, freed with
+  `shared_buffer_free`. Linux and FreeBSD make a memfd whose size is sealed,
+  so no holder can shrink it under another's mapping; macOS and the other
+  BSDs an `shm_open` object unlinked at once. No sandbox grant is needed: a
+  child under `sandbox.spawn_socket` with none maps and makes buffers.
+  Windows reports it unsupported, as it does descriptor passing.
+
+### Fixed
+
+- **`-> f32! { ... }` declares a fallible function, as `-> float! { ... }`
+  does.** A result type whose payload is a scalar spelt as a name (`f32`,
+  `int64`, `uint8`, `uint16`, `uint32`, `size_t`, `int32_t`, `longdouble`)
+  or a struct (`-> Point! { ... }`) was read as the start of an expression
+  body, so the `{` after it was a top-level parse error. Only the type
+  keywords (`int`, `float`, `byte`, ...) worked.
+
+- **A program that ends right after a `worker.run_detached` job finishes no
+  longer exits while that job's thread is still exiting.** The thread was
+  detached at launch, and its job counted as done (`worker.pending()` back
+  to 0) before the thread had freed the job, woken waiters and returned, so
+  `main` could return into process exit with the thread half way out. Wine
+  crashed on that overlap, about once in a thousand runs. Threads std.worker
+  starts outside the pool (`run_detached`, and `run` when the pool cannot
+  start) are now joined once their job is done: at the next launch, and at
+  exit. A job still running at exit is left to end with the process, as
+  before.
+
+- **`string.to_double_raw` is back, as `to_float_raw` under its old name.**
+  0.948.0 made `to_float` the correctly rounded 64-bit parse and kept
+  `to_double`, `try_double` and `get_double` for the code still calling
+  them, but removed `to_double_raw`, so a program calling it failed to
+  link (`_string_to_double_raw` undefined). It fills the same 8-byte
+  `float` slot as `to_float_raw` and returns the same 1 or 0. Like the
+  other old names, it is to be deleted once nothing calls it; new code
+  uses `to_float_raw`.
+
 ## [0.948.0]
 
 ### Added
