@@ -879,6 +879,8 @@ jobs:
         file build/ae
 
     - name: Cross-build (FREEBSD=1)
+      env:
+        WF_SHA: ${{ github.sha }}
       run: |
         make compiler ae stdlib \
           FREEBSD=1 \
@@ -900,6 +902,12 @@ jobs:
         sh scripts/check_regex_engine.sh $X/libaether.a
         # Likewise std.yaml's vendored libfyaml, and none of its symbols unprefixed.
         sh scripts/check_yaml_engine.sh $X/libaether.a
+        # And OpenSSL and zlib, from the base sysroot: every FreeBSD release up
+        # to 0.949.0 shipped both as their stubs. Read from this workflow's
+        # commit, since the tag can predate the script.
+        git cat-file -e "$WF_SHA^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$WF_SHA"
+        git show "$WF_SHA:scripts/check_base_libs.sh" > "$RUNNER_TEMP/check_base_libs.sh"
+        sh "$RUNNER_TEMP/check_base_libs.sh" $X/libaether.a
 
     - name: Strip
       run: strip build/.alien/freebsd-x86_64/aetherc build/.alien/freebsd-x86_64/ae 2>/dev/null || true

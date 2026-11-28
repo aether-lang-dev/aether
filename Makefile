@@ -316,9 +316,15 @@ ifeq ($(FREEBSD),1)
   # cross-built from a Mac (GNU ar on the Linux release runner did).
   AR := $(ZIG) ar
   RANLIB := $(ZIG) ranlib
-  # Host pkg-config is wrong for the target — force the optional libs off.
-  OPENSSL := 0
-  ZLIB := 0
+  # Host pkg-config is wrong for the target — force the optional libs off,
+  # except OpenSSL and zlib, which are part of FreeBSD's base system: libssl,
+  # libcrypto and libz, with their headers, are in the base sysroot, so the
+  # release links the target's own -lssl -lcrypto -lz (OPENSSL := base and
+  # ZLIB := base, below). With both at 0 the FreeBSD release shipped
+  # std.zlib as its stub and std.http's OpenSSL TLS path out (https only
+  # through the pure-Aether TLS 1.3 client, set by hand; no TLS 1.2).
+  OPENSSL := base
+  ZLIB := base
   NGHTTP2 := 0
   BROTLI := 0
   ZSTD := 0
@@ -522,6 +528,11 @@ ifeq ($(OPENSSL),auto)
 else ifeq ($(OPENSSL),1)
   OPENSSL_CFLAGS := $(shell pkg-config --cflags openssl 2>/dev/null)
   OPENSSL_LDFLAGS := $(shell pkg-config --libs openssl 2>/dev/null)
+else ifeq ($(OPENSSL),base)
+  # A cross build whose target sysroot ships OpenSSL (FREEBSD=1): its headers
+  # are already on the -I path, and the libraries resolve beneath --sysroot.
+  OPENSSL_CFLAGS :=
+  OPENSSL_LDFLAGS := -lssl -lcrypto
 else
   OPENSSL_CFLAGS :=
   OPENSSL_LDFLAGS :=
@@ -551,6 +562,11 @@ ZLIB ?= auto
 ifeq ($(ZLIB),0)
   ZLIB_CFLAGS :=
   ZLIB_LDFLAGS :=
+else ifeq ($(ZLIB),base)
+  # A cross build whose target sysroot ships zlib (FREEBSD=1): its headers
+  # are already on the -I path, and -lz resolves beneath --sysroot.
+  ZLIB_CFLAGS :=
+  ZLIB_LDFLAGS := -lz
 else
   ZLIB_CFLAGS := $(shell pkg-config --cflags zlib 2>/dev/null)
   ZLIB_LDFLAGS := $(shell pkg-config --libs zlib 2>/dev/null)
@@ -876,7 +892,7 @@ endif
 ifeq ($(FREEBSD),1)
 # Cross build: the explicit base-libc link tail replaces the native assembly
 # (which would pull the host's -lm / -pthread / globbed host casper libs).
-AETHER_REQUIRED_LDFLAGS = $(FREEBSD_LDFLAGS)
+AETHER_REQUIRED_LDFLAGS = $(FREEBSD_LDFLAGS) $(OPENSSL_LDFLAGS) $(ZLIB_LDFLAGS)
 else
 AETHER_REQUIRED_LDFLAGS = -lm $(OPENSSL_LDFLAGS) $(ZLIB_LDFLAGS) $(NGHTTP2_LDFLAGS) $(PCRE2_LDFLAGS) $(YAML_LDFLAGS) $(CASPER_LDFLAGS) $(AUDIO_LDFLAGS) $(BROTLI_LDFLAGS) $(ZSTD_LDFLAGS)
 endif
