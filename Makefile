@@ -375,15 +375,9 @@ ifeq ($(WINDOWS),1)
   CC := $(ZIG) cc -target $(WINDOWS_CPU)-windows-gnu
   AR := $(ZIG) ar
   RANLIB := $(ZIG) ranlib
-  # Host pkg-config is wrong for the target — force the optional libs off,
-  # except OpenSSL and zlib, which are part of FreeBSD's base system: libssl,
-  # libcrypto and libz, with their headers, are in the base sysroot, so the
-  # release links the target's own -lssl -lcrypto -lz (OPENSSL := base and
-  # ZLIB := base, below). With both at 0 the FreeBSD release shipped
-  # std.zlib as its stub and std.http's OpenSSL TLS path out (https only
-  # through the pure-Aether TLS 1.3 client, set by hand; no TLS 1.2).
-  OPENSSL := base
-  ZLIB := base
+  # Host pkg-config is wrong for the target — force the optional libs off.
+  OPENSSL := 0
+  ZLIB := 0
   NGHTTP2 := 0
   # std.yaml's libfyaml is vendored: no host library involved.
   YAML := vendored
