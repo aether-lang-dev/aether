@@ -521,6 +521,9 @@ jobs:
         sh scripts/check_regex_engine.sh $X/libaether.a
         # Likewise std.yaml's vendored libfyaml, and none of its symbols unprefixed.
         sh scripts/check_yaml_engine.sh $X/libaether.a
+        # And OpenSSL and zlib, linked from the base sysroot (every FreeBSD
+        # release up to 0.949.0 shipped both as their stubs).
+        sh scripts/check_base_libs.sh $X/libaether.a
 
     # The release's FreeBSD leg stages contrib.sqlite's archives for FreeBSD
     # (--contrib-target); this stages them the same way, so a break shows on
